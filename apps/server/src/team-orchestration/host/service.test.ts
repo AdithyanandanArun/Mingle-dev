@@ -71,6 +71,7 @@ function fixture(options: { deviceId?: string; role?: 'leader' | 'admin' | 'memb
   };
   let receive: ((envelope: any) => Promise<void>) | null = null;
   let localDeviceId = options.deviceId ?? DEVICE;
+  let delayedAuthorization: Promise<void> | null = null;
   const transport = {
     snapshot: () => ({ deviceId: localDeviceId, status: 'ready', error: null,
       devices: [
@@ -153,12 +154,14 @@ function fixture(options: { deviceId?: string; role?: 'leader' | 'admin' | 'memb
     async callRemote(_runId: string, _sessionId: string, tool: string) { return { tool, actual: true }; },
   };
   const recovery = { recordFailure() {}, clearFailure() {} };
-  const host = new TeamOrchestrationHost({ store, git: teamGit as any, account: account as any, transport: transport as any, authorizeTeam: async () => undefined,
+  const host = new TeamOrchestrationHost({ store, git: teamGit as any, account: account as any, transport: transport as any,
+    authorizeTeam: async () => { const gate = delayedAuthorization; delayedAuthorization = null; await gate; },
     collaboration: collaboration as any, groups: groupService as any, teamMcp: teamMcp as any, recovery: recovery as any,
     deliveryTimeoutMs: options.deliveryTimeoutMs ?? 60_000, now: options.now });
   const fx = {
     store, project, local, host, outgoing, finished, enqueued, artifactImports, group: () => group, setRole(value: typeof role) { role = value; },
      setDevice(deviceId: string) { localDeviceId = deviceId; },
+     delayAuthorization(gate: Promise<void>) { delayedAuthorization = gate; },
      async incoming(kind: string, payload: unknown, fromDeviceId = OWNER_DEVICE) {
       if (!receive) throw new Error('No team orchestration transport handler');
       return receive({ id: randomUUID(), teamId: TEAM, fromDeviceId, toDeviceId: options.deviceId ?? DEVICE, kind, payload });
@@ -242,6 +245,7 @@ it('dispatches remote proxy deliveries, proxies team MCP calls, rejects mismatch
   expect(fx.outgoing.find((entry) => entry.kind === 'teamgroup.tool.result')?.payload).toMatchObject({ callId: 'call-1', ok: true, result: { actual: true } });
   await expect(fx.incoming('teamgroup.tool.call', { sharedProjectId: SHARED, deliveryId, callId: 'call-bad', agentId: LOCAL_AGENT, tool: 'team_members', args: {} })).rejects.toMatchObject({ status: 403 });
 
+  await fx.incoming('teamgroup.delivery.status', { sharedProjectId: SHARED, deliveryId, agentId: REMOTE_AGENT, status: 'running', runId: 'owner-run-1', at: new Date().toISOString() });
   await fx.incoming('teamgroup.delivery.status', { sharedProjectId: SHARED, deliveryId, agentId: REMOTE_AGENT, status: 'awaiting-approval', runId: 'owner-run-1', at: new Date().toISOString() });
   await fx.incoming('teamgroup.approval.request', { sharedProjectId: SHARED, deliveryId, approvalId: 'owner-approval-1', agentId: REMOTE_AGENT,
     summary: 'Run a scoped command', kind: 'command', expiresAt: new Date(Date.now() + 30_000).toISOString() });
@@ -259,11 +263,21 @@ it('dispatches remote proxy deliveries, proxies team MCP calls, rejects mismatch
   expect(fx.store.getApproval(mirroredApproval.id)?.status).toBe('approved');
   expect(fx.outgoing.find((entry) => entry.kind === 'teamgroup.approval.decision')?.payload).toMatchObject({ approvalId: 'owner-approval-1', decision: 'approved' });
 
-  await fx.incoming('teamgroup.delivery.status', { sharedProjectId: SHARED, deliveryId, agentId: REMOTE_AGENT, status: 'completed', runId: 'owner-run-1',
-    finalText: 'Reviewed and found one issue.', artifacts: [], at: new Date().toISOString() });
+  let releaseDelayedStatus!: () => void;
+  fx.delayAuthorization(new Promise<void>((resolve) => { releaseDelayedStatus = resolve; }));
+  const delayedRunningStatus = fx.incoming('teamgroup.delivery.status', { sharedProjectId: SHARED, deliveryId, agentId: REMOTE_AGENT,
+    status: 'running', runId: 'owner-run-1', at: new Date().toISOString() });
+  const completedStatus = { sharedProjectId: SHARED, deliveryId, agentId: REMOTE_AGENT, status: 'completed', runId: 'owner-run-1' as const,
+    finalText: 'Reviewed and found one issue.', artifacts: [], at: new Date().toISOString() };
+  await fx.incoming('teamgroup.delivery.status', completedStatus);
+  releaseDelayedStatus();
+  await delayedRunningStatus;
+  await fx.incoming('teamgroup.delivery.status', completedStatus);
+  expect(fx.store.db.prepare('SELECT status FROM mingle_team_host_deliveries WHERE delivery_id=?').get(deliveryId)).toMatchObject({ status: 'completed' });
+  expect(fx.finished.filter((entry) => entry.runId === 'host-run-1')).toHaveLength(1);
   expect(fx.finished).toContainEqual({ sessionId, runId: 'host-run-1', outcome: 'completed' });
   expect(fx.store.getRun('host-run-1')?.status).toBe('completed');
-  expect(fx.store.listMessages(sessionId, { limit: 20 }).some((message) => message.role === 'assistant' && message.content === 'Reviewed and found one issue.')).toBe(true);
+  expect(fx.store.listMessages(sessionId, { limit: 20 }).filter((message) => message.role === 'assistant' && message.content === 'Reviewed and found one issue.')).toHaveLength(1);
   await expect(fx.incoming('teamgroup.tool.call', { sharedProjectId: SHARED, deliveryId, callId: 'call-finished', agentId: REMOTE_AGENT, tool: 'team_members', args: {} })).rejects.toMatchObject({ status: 404 });
 });
 

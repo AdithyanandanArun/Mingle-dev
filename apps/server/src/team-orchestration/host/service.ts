@@ -770,18 +770,39 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
   private async receiveStatus(envelope: import('@mingle/contracts').AuthenticatedTransportMessage): Promise<void> {
     const parsed = TeamDeliveryStatusPayloadSchema.safeParse(envelope.payload);
     if (!parsed.success) throw new HttpError(400, 'Team delivery status payload is invalid.');
+    const observed = this.delivery(parsed.data.deliveryId);
+    if (!observed || observed.team_id !== envelope.teamId || observed.shared_project_id !== parsed.data.sharedProjectId) throw new HttpError(404, 'Team delivery is unknown.');
+    if (observed.owner_device_id !== envelope.fromDeviceId || observed.agent_id !== parsed.data.agentId) throw new HttpError(403, 'The delivery status came from a different device or agent.');
+    await this.verifyOwnerDevice(observed.team_id, envelope.fromDeviceId, observed.owner_account_id);
     const delivery = this.delivery(parsed.data.deliveryId);
-    if (!delivery || delivery.team_id !== envelope.teamId || delivery.shared_project_id !== parsed.data.sharedProjectId) throw new HttpError(404, 'Team delivery is unknown.');
-    if (delivery.owner_device_id !== envelope.fromDeviceId || delivery.agent_id !== parsed.data.agentId) throw new HttpError(403, 'The delivery status came from a different device or agent.');
-    await this.verifyOwnerDevice(delivery.team_id, envelope.fromDeviceId, delivery.owner_account_id);
-    if (!liveDelivery(delivery.status)) throw new HttpError(409, 'The team delivery has already finished.');
+    if (!delivery || delivery.team_id !== envelope.teamId || delivery.shared_project_id !== parsed.data.sharedProjectId
+      || delivery.owner_device_id !== envelope.fromDeviceId || delivery.agent_id !== parsed.data.agentId || !liveDelivery(delivery.status)) return;
     if (parsed.data.status === 'accepted' || parsed.data.status === 'running' || parsed.data.status === 'awaiting-approval') {
-      this.hostRows.prepare('UPDATE mingle_team_host_deliveries SET status=?,remote_run_id=?,updated_at=? WHERE delivery_id=?')
-        .run(parsed.data.status, parsed.data.runId, parsed.data.at, delivery.delivery_id);
+      const priorStatuses = parsed.data.status === 'running' ? ['accepted', 'awaiting-approval']
+        : parsed.data.status === 'awaiting-approval' ? ['running'] : [];
+      if (!priorStatuses.length) return;
+      const placeholders = priorStatuses.map(() => '?').join(',');
+      const changed = this.hostRows.prepare(`UPDATE mingle_team_host_deliveries SET status=?,remote_run_id=COALESCE(?,remote_run_id),updated_at=?
+        WHERE delivery_id=? AND status IN (${placeholders})`)
+        .run(parsed.data.status, parsed.data.runId, parsed.data.at, delivery.delivery_id, ...priorStatuses);
+      if (Number(changed.changes) !== 1) return;
       this.options.store.updateSession(delivery.session_id, { status: parsed.data.status === 'awaiting-approval' ? 'waiting' : 'running' });
       this.options.store.touch();
       return;
     }
+    const failure = parsed.data.failure ? ProviderFailureSchema.parse({ ...parsed.data.failure, sessionId: delivery.session_id, runId: delivery.run_id,
+      message: redactSecrets(parsed.data.failure.message).slice(0, 1000),
+      ...(parsed.data.failure.providerCode ? { providerCode: redactSecrets(parsed.data.failure.providerCode).slice(0, 100) } : {}),
+      ...(parsed.data.failure.quotaPool ? { quotaPool: redactSecrets(parsed.data.failure.quotaPool).slice(0, 100) } : {}),
+    }) : undefined;
+    const outcome = parsed.data.status === 'completed' ? 'completed' : parsed.data.status === 'interrupted' ? 'interrupted' : 'failed';
+    const rejection = parsed.data.status === 'rejected' ? `Remote agent rejected delivery: ${parsed.data.rejection ?? 'invalid'}` : undefined;
+    const failureJson = failure ? JSON.stringify(failure) : rejection ? JSON.stringify({ message: redactSecrets(rejection).slice(0, 500) }) : null;
+    const claimed = this.hostRows.prepare(`UPDATE mingle_team_host_deliveries SET status=?,failure_json=?,remote_run_id=COALESCE(?,remote_run_id),updated_at=?
+      WHERE delivery_id=? AND status IN ('queued','accepted','running','awaiting-approval')`)
+      .run(outcome, failureJson, parsed.data.runId, parsed.data.at, delivery.delivery_id);
+    if (Number(claimed.changes) !== 1) return;
+
     if (parsed.data.status === 'completed') {
       // The remote provider has finished. Close the proxy run before taking the project Git lease
       // for ref-only imports, so other host sessions cannot race the repository mutation.
@@ -802,8 +823,8 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
           artifactFailures.push(redactSecrets(error instanceof Error ? error.message : 'Artifact import failed.').slice(0, 500));
         }
       }
-      this.hostRows.prepare('UPDATE mingle_team_host_deliveries SET artifacts_json=?,remote_run_id=?,updated_at=? WHERE delivery_id=?')
-        .run(JSON.stringify(importedArtifacts), parsed.data.runId, parsed.data.at, delivery.delivery_id);
+      this.hostRows.prepare('UPDATE mingle_team_host_deliveries SET artifacts_json=? WHERE delivery_id=? AND status=\'completed\'')
+        .run(JSON.stringify(importedArtifacts), delivery.delivery_id);
       const artifactSummary = importedArtifacts.length
         ? `\n\nImported committed artifacts (isolated refs; not merged):\n${importedArtifacts.map((artifact) =>
           `- ${safeArtifactText(artifact.path ?? 'committed artifact', 120)} @ ${artifact.revision}${artifact.taskId ? ` (task ${safeArtifactText(artifact.taskId, 80)})` : ''}\n  Git ref: ${safeArtifactText(artifact.ref ?? '', 255)}`,
@@ -812,33 +833,34 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
       const finalBudget = Math.max(0, 50_000 - artifactSummary.length - failureSummary.length);
       const finalText = `${parsed.data.finalText ? redactSecrets(parsed.data.finalText).slice(0, finalBudget) : ''}${artifactSummary}${failureSummary}`;
       if (finalText) this.options.store.insertMessage({ sessionId: delivery.session_id, runId: delivery.run_id, role: 'assistant', content: finalText });
-      await this.finishDelivery(delivery.delivery_id, 'completed', undefined, undefined, parsed.data.at, parsed.data.runId);
+      this.finishClaimedDelivery(delivery, 'completed', undefined, undefined, parsed.data.at);
       const project = this.readHost(delivery.team_id, delivery.shared_project_id);
       if (delivery.source_chat_message_id && this.chat && delivery.owner_device_id === this.options.transport.snapshot(delivery.team_id).deviceId && finalText && project) {
         await this.chat.postOrchestratedAgentReply({ projectId: project.local_project_id, sourceMessageId: delivery.source_chat_message_id, agentId: delivery.agent_id, content: finalText });
       }
       return;
     }
-    const failure = parsed.data.failure ? ProviderFailureSchema.parse({ ...parsed.data.failure, sessionId: delivery.session_id, runId: delivery.run_id,
-      message: redactSecrets(parsed.data.failure.message).slice(0, 1000),
-      ...(parsed.data.failure.providerCode ? { providerCode: redactSecrets(parsed.data.failure.providerCode).slice(0, 100) } : {}),
-      ...(parsed.data.failure.quotaPool ? { quotaPool: redactSecrets(parsed.data.failure.quotaPool).slice(0, 100) } : {}),
-    }) : undefined;
     if (failure) this.options.recovery.recordFailure(delivery.session_id, delivery.run_id, failure);
-    const outcome = parsed.data.status === 'interrupted' ? 'interrupted' : 'failed';
-    const rejection = parsed.data.status === 'rejected' ? `Remote agent rejected delivery: ${parsed.data.rejection ?? 'invalid'}` : undefined;
-    await this.finishDelivery(delivery.delivery_id, outcome, failure, rejection, parsed.data.at, parsed.data.runId);
+    this.finishClaimedDelivery(delivery, outcome, failure, rejection, parsed.data.at);
     if (failure?.kind === 'quota_exhausted') await this.promoteFallback(delivery.team_id, delivery.shared_project_id, 'fallback-quota');
   }
 
   private async finishDelivery(deliveryId: string, outcome: 'completed' | 'failed' | 'interrupted', failure?: ProviderFailure, message?: string, at = new Date(this.now()).toISOString(), remoteRunId?: string | null): Promise<void> {
     const delivery = this.delivery(deliveryId);
     if (!delivery || !liveDelivery(delivery.status)) return;
+    const changed = this.hostRows.prepare(`UPDATE mingle_team_host_deliveries SET status=?,failure_json=?,remote_run_id=COALESCE(?,remote_run_id),updated_at=?
+      WHERE delivery_id=? AND status IN ('queued','accepted','running','awaiting-approval')`)
+      .run(outcome, failure ? JSON.stringify(failure) : message ? JSON.stringify({ message: redactSecrets(message).slice(0, 500) }) : null,
+        remoteRunId ?? null, at, deliveryId);
+    if (Number(changed.changes) !== 1) return;
+    this.finishClaimedDelivery(delivery, outcome, failure, message, at);
+  }
+
+  private finishClaimedDelivery(delivery: DeliveryRow, outcome: 'completed' | 'failed' | 'interrupted', failure?: ProviderFailure, message?: string, at = new Date(this.now()).toISOString()): void {
+    const deliveryId = delivery.delivery_id;
     const timer = this.timers.get(deliveryId);
     if (timer) clearTimeout(timer);
     this.timers.delete(deliveryId);
-    this.hostRows.prepare(`UPDATE mingle_team_host_deliveries SET status=?,failure_json=?,remote_run_id=COALESCE(?,remote_run_id),updated_at=? WHERE delivery_id=?`)
-      .run(outcome, failure ? JSON.stringify(failure) : message ? JSON.stringify({ message: redactSecrets(message).slice(0, 500) }) : null, remoteRunId ?? null, at, deliveryId);
     const current = this.active.get(delivery.session_id);
     if (current?.runId === delivery.run_id) {
       current.controller.abort();
@@ -899,7 +921,6 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
     this.timers.delete(deliveryId);
     const delivery = this.delivery(deliveryId);
     if (!delivery || !liveDelivery(delivery.status) || delivery.timeout_at > this.now()) return;
-    this.options.store.updateSession(delivery.session_id, { status: 'error', error: 'The remote agent did not report within the delivery timeout.' });
     const interrupt = TeamInterruptPayloadSchema.parse({ sharedProjectId: delivery.shared_project_id, deliveryId, reason: 'The host delivery timed out.' });
     this.track(this.options.transport.send({ teamId: delivery.team_id, toDeviceId: delivery.owner_device_id, kind: 'teamgroup.interrupt', payload: interrupt,
       idempotencyKey: `teamgroup-interrupt:${deliveryId}:timeout`.slice(0, 200) }).then(() => this.options.transport.sync()).catch(() => undefined));
