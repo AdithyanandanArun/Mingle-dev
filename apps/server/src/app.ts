@@ -38,6 +38,7 @@ import { RecoveryService } from './recovery/service.ts';
 import { DistributedWorkspaceService } from './distributed/service.ts';
 import { ProjectCollaborationService, type ProjectInvitationEmailSender } from './project-collaboration/service.ts';
 import { RequestRemoteDelegationSchema } from '../../../packages/contracts/src/remote-execution.ts';
+import { TeamChatService } from './team-chat/service.ts';
 
 export interface ApplicationOptions extends ConfigOptions {
   /** Provider adapters and detection. Inject a fake in tests; the CLI entry passes ./providers/index.ts. */
@@ -70,6 +71,7 @@ export interface MingleApplication {
   readonly recovery: RecoveryService;
   readonly distributed: DistributedWorkspaceService;
   readonly projectCollaboration: ProjectCollaborationService;
+  readonly teamChat: TeamChatService;
   /** Runs recovery-independent async setup (example workspace). Called by listen(); safe to call repeatedly. */
   initialize(): Promise<void>;
   listen(): Promise<{ host: string; port: number; url: string }>;
@@ -171,6 +173,7 @@ export function createApplication(options: ApplicationOptions): MingleApplicatio
   groups.recover();
   const distributed = new DistributedWorkspaceService({ store, account, runtime, providers, recovery, groups, repository, dataDir: config.dataDir });
   const projectCollaboration = new ProjectCollaborationService({ store, account, distributed, workspace, providers, ...options.projectCollaboration });
+  const teamChat = new TeamChatService({ store, account, distributed, runtime, collaboration: projectCollaboration });
   teamMcp.setDistributedTools({
     recoveryShape: RequestRemoteDelegationSchema.shape,
     members: async (context, sessionId) => {
@@ -197,7 +200,7 @@ export function createApplication(options: ApplicationOptions): MingleApplicatio
     },
   });
   const services: Services = {
-    config, store, hub, runtime, tasks, terminals, providers, browser, intelligence, repository, groups, handoffs, workspace, attachments, account, recovery, distributed, projectCollaboration, setupSignal: setupLifecycle.signal,
+    config, store, hub, runtime, tasks, terminals, providers, browser, intelligence, repository, groups, handoffs, workspace, attachments, account, recovery, distributed, projectCollaboration, teamChat, setupSignal: setupLifecycle.signal,
     imports: new ImportService(store, options.providers, providers, runtime), directories: new DirectoryService(), projectSources: new ProjectSources(workspace), startedAt: Date.now(), getPort: () => boundPort,
   };
   hub.bind({ onMessage: (socket, raw) => terminals.handleMessage(socket, raw), onClose: (socket) => terminals.releaseSocket(socket) });
@@ -268,7 +271,7 @@ export function createApplication(options: ApplicationOptions): MingleApplicatio
   const address = () => ({ host: config.host, port: boundPort, url: `http://${config.host.includes(':') ? `[${config.host}]` : config.host}:${boundPort}` });
 
   const app: MingleApplication = {
-    config, store, server, runtime, groups, terminals, hub, providers, browser, intelligence, repository, attachments, recovery, distributed, projectCollaboration,
+    config, store, server, runtime, groups, terminals, hub, providers, browser, intelligence, repository, attachments, recovery, distributed, projectCollaboration, teamChat,
     initialize() {
       initialized ??= (async () => {
         if (options.exampleWorkspace !== false) await seedExampleWorkspace(store, config.dataDir, log);
@@ -296,6 +299,7 @@ export function createApplication(options: ApplicationOptions): MingleApplicatio
     close() {
       closing ??= (async () => {
         setupLifecycle.abort();
+        await teamChat.close();
         await projectCollaboration.close();
         await distributed.close();
         await account.close();

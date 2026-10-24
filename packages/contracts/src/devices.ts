@@ -1,7 +1,7 @@
 import { z } from 'zod';
 
 export const DistributedMessageKindSchema = z.string().trim().min(1).max(100)
-  .regex(/^(execution|collaboration|git|command)\.[a-z][a-z0-9.-]*$/, 'Unsupported distributed message kind');
+  .regex(/^(execution|collaboration|git|command|teamchat)\.[a-z][a-z0-9.-]*$/, 'Unsupported distributed message kind');
 export type DistributedMessageKind = z.infer<typeof DistributedMessageKindSchema>;
 
 export const RegisterDeviceSchema = z.object({ teamId: z.string().uuid(), name: z.string().trim().min(1).max(100) }).strict();

@@ -38,10 +38,13 @@ import type { DistributedWorkspaceService } from './distributed/service.ts';
 import { registerDistributedRoutes } from './distributed/routes.ts';
 import type { ProjectCollaborationService } from './project-collaboration/service.ts';
 import { registerProjectCollaborationRoutes } from './project-collaboration/routes.ts';
+import type { TeamChatService } from './team-chat/service.ts';
+import { registerTeamChatRoutes } from './team-chat/routes.ts';
 
 export interface Services {
   distributed: DistributedWorkspaceService;
   projectCollaboration: ProjectCollaborationService;
+  teamChat: TeamChatService;
   account: AccountService;
   setupSignal: AbortSignal;
   config: ServerConfig; store: Store; hub: Hub; workspace: WorkspaceService; runtime: SessionRuntime; tasks: TaskService; handoffs: HandoffService;
@@ -108,6 +111,7 @@ export function buildRouter(s: Services) {
   const add = (method: string, pattern: string, handler: Handler) => routes.push({ method, ...compile(pattern), handler });
   registerDistributedRoutes(add, s.distributed);
   registerProjectCollaborationRoutes(add, s.projectCollaboration);
+  registerTeamChatRoutes(add, s.teamChat);
   const touch = () => s.store.touch();
   const param = (ctx: Ctx, key: string) => {
     const value = ctx.params[key]!;

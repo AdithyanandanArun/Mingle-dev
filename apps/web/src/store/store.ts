@@ -74,6 +74,7 @@ interface MingleState {
   nextRetryAt: number | null;
 
   activeProjectId: string | null;
+  teamChatProjectId: string | null;
   sessionByProject: Record<string, string>;
   view: View;
   settingsReturnView: Exclude<View, 'settings'>;
@@ -118,6 +119,8 @@ interface MingleState {
   openDialog(d: Dialog): void;
   closeDialog(): void;
   selectProject(id: string): void;
+  openTeamChat(projectId: string): void;
+  closeTeamChat(): void;
   selectSession(id: string): void;
   createSession(): Promise<void>;
   organizeSession(id: string, changes: Partial<Pick<Session, 'pinned' | 'unread'>>): Promise<void>;
@@ -330,6 +333,7 @@ export const useMingle = create<MingleState>((set, get) => {
           set({ boot: { ...boot, events: [...boot.events, incoming] } });
         }
         scheduleRefresh();
+        window.dispatchEvent(new Event('mingle:state-changed'));
         break;
       }
       case 'session.delta': {
@@ -442,6 +446,7 @@ export const useMingle = create<MingleState>((set, get) => {
     nextRetryAt: null,
 
     activeProjectId: persisted.activeProjectId ?? null,
+    teamChatProjectId: null,
     sessionByProject: persisted.sessionByProject ?? {},
     view: persisted.view ?? 'workspace',
     settingsReturnView: 'workspace',
@@ -520,13 +525,13 @@ export const useMingle = create<MingleState>((set, get) => {
 
     setView: (view) => {
       if (view === 'settings') { get().openSettings(); return; }
-      patch({ view, sidebarOpen: false, dialog: null });
+      patch({ view, sidebarOpen: false, dialog: null, teamChatProjectId: null });
     },
     openSettings(options) {
       const view = get().view;
       patch({ view: 'settings', settingsReturnView: view === 'settings' ? get().settingsReturnView : view,
         settingsSection: options?.section ?? 'general', settingsProjectId: options?.projectId ?? get().activeProjectId,
-        settingsTeamTab: options?.teamTab ?? 'people',
+        settingsTeamTab: options?.teamTab ?? 'people', teamChatProjectId: null,
         dialog: null, sidebarOpen: false });
       window.requestAnimationFrame(() => document.getElementById('settings-title')?.focus());
     },
@@ -551,11 +556,17 @@ export const useMingle = create<MingleState>((set, get) => {
       const remembered = sessionByProject[id];
       const pick = sessions.find((s) => s.id === remembered) ?? sessions[0];
       patch({
-        activeProjectId: id, settingsProjectId: id, centerTab: 'session', sidebarOpen: false,
+        activeProjectId: id, settingsProjectId: id, centerTab: 'session', sidebarOpen: false, teamChatProjectId: null,
         sessionByProject: pick ? { ...sessionByProject, [id]: pick.id } : sessionByProject,
       });
       if (pick?.unread && get().view === 'workspace') void get().organizeSession(pick.id, { unread: false }).catch(() => {});
     },
+    openTeamChat(projectId) {
+      const project = get().boot?.projects.find((item) => item.id === projectId);
+      if (!project) return;
+      patch({ activeProjectId: projectId, settingsProjectId: projectId, view: 'workspace', teamChatProjectId: projectId, sidebarOpen: false, dialog: null });
+    },
+    closeTeamChat() { patch({ teamChatProjectId: null }); },
     selectSession(id) {
       const boot = get().boot;
       // Choosing any member of a group opens the group through its anchor session.
@@ -564,7 +575,7 @@ export const useMingle = create<MingleState>((set, get) => {
       if (!boot || !s) return;
       patch({
         activeProjectId: s.projectId, sessionByProject: { ...get().sessionByProject, [s.projectId]: s.id },
-        view: 'workspace', centerTab: 'session', sidebarOpen: false,
+        view: 'workspace', centerTab: 'session', sidebarOpen: false, teamChatProjectId: null,
       });
       const toRead = group ? activeMembers(group).map((member) => boot.sessions.find((x) => x.id === member.sessionId)).filter((x): x is Session => Boolean(x?.unread)) : s.unread ? [s] : [];
       for (const session of toRead) void get().organizeSession(session.id, { unread: false }).catch(() => {});

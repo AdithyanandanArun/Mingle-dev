@@ -3,6 +3,7 @@ import type {
   RepositoryBranch, RepositoryCommit, RepositoryMutationResult, RepositoryPullRequest, RepositoryPush, RepositoryState, RunChanges, SendGroupMessage, Session, SessionUsage, ToolCall, Task, TaskStatus, WorkspaceEvent, MessageContextRef, EditSessionPlan, SessionPlan, UserInputAnswers, UserQuestion,
 } from '@mingle/contracts';
 import type { AccountState, AccountConnection, AccountPreferences, SavedAccountPreferences, AttachmentRef, NativeActionCatalog } from '@mingle/contracts';
+import type { ProjectCollaborationSnapshot, SendTeamChatMessage, TeamChatSnapshot, TeamChatMessage } from '@mingle/contracts';
 import type {
   ContextCompactionResult as ContractContextCompactionResult,
   ProviderFailure as ContractProviderFailure,
@@ -134,6 +135,11 @@ export const api = {
   cloneProject: (input: { url: string; name: string; parentPath: string }) => json<Project>('/api/projects/clone', 'POST', input),
   renameProject: (id: string, name: string) => json<Project>(`/api/projects/${encodeURIComponent(id)}`, 'PATCH', { name }),
   removeProject: (id: string) => json<{ ok: boolean; notices: string[] }>(`/api/projects/${encodeURIComponent(id)}`, 'DELETE'),
+  projectCollaboration: (id: string, signal?: AbortSignal) => json<ProjectCollaborationSnapshot>(`${projectBase(id)}/collaboration`, 'GET', undefined, signal),
+  projectTeamChat: (id: string, options: { limit?: number; before?: string } = {}, signal?: AbortSignal) =>
+    json<TeamChatSnapshot>(`${projectBase(id)}/team-chat${q(options)}`, 'GET', undefined, signal),
+  sendTeamChatMessage: (id: string, input: SendTeamChatMessage) => json<TeamChatMessage>(`${projectBase(id)}/team-chat/messages`, 'POST', input),
+  importTeamChatHistory: (id: string, sessionId: string) => json<{ imported: number; messages: TeamChatMessage[]; truncated: boolean }>(`${projectBase(id)}/team-chat/import`, 'POST', { sessionId }),
   listFiles: (projectId: string, path: string, sessionId: string | null, signal?: AbortSignal) =>
     json<FileEntry[]>(`/api/projects/${encodeURIComponent(projectId)}/files${q({ path, sessionId })}`, 'GET', undefined, signal),
   searchFiles: (projectId: string, query: string, sessionId: string, signal?: AbortSignal) =>

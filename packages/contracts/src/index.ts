@@ -255,3 +255,4 @@ export * from './remote-git';
 export * from './devices';
 
 export * from './project-collaboration';
+export * from './team-chat';

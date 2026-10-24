@@ -280,6 +280,17 @@ const MIGRATIONS: (string | ((db: DatabaseSync) => void))[] = [
    (db) => { ensureArchiveColumns(db); ensurePlanTables(db); ensureGroupPlanColumns(db); },
    // Migration 18 preserves selected context references on session and group messages.
    ensureMessageContextColumns,
+   // Migration 19 adds durable per-shared-project team chat messages.
+   `CREATE TABLE IF NOT EXISTS team_chat_messages (
+      id TEXT PRIMARY KEY, team_id TEXT NOT NULL, shared_project_id TEXT NOT NULL,
+      author_json TEXT NOT NULL, body TEXT NOT NULL CHECK (length(body) <= 20000), mentions_json TEXT NOT NULL,
+      reply_to TEXT, created_at TEXT NOT NULL, delivery_state TEXT NOT NULL CHECK (delivery_state IN ('sending','sent','failed')),
+      run_state TEXT CHECK (run_state IS NULL OR run_state IN ('queued','running','awaiting-approval','completed','failed','interrupted')),
+      source_session_id TEXT, source_message_id TEXT
+    );
+    CREATE INDEX IF NOT EXISTS team_chat_order ON team_chat_messages(team_id, shared_project_id, created_at, id);
+    CREATE UNIQUE INDEX IF NOT EXISTS team_chat_import_identity ON team_chat_messages(team_id, shared_project_id, source_session_id, source_message_id)
+      WHERE source_session_id IS NOT NULL AND source_message_id IS NOT NULL;`,
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;

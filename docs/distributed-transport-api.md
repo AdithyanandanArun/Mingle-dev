@@ -32,7 +32,7 @@ The account bridge contract is `withAuthenticatedClient(callback: (client: Supab
 
 ## Data and wire protocol
 
-Contracts live in `packages/contracts/src/devices.ts`. Message kinds are limited to the `execution.*`, `collaboration.*`, `git.*` and `command.*` namespaces. Team/device identifiers are UUIDs; idempotency keys are 1–200 ASCII letters, digits, dots, underscores, colons or hyphens. Canonical JSON payloads are limited to 256 KiB.
+Contracts live in `packages/contracts/src/devices.ts`. Message kinds include the `execution.*`, `collaboration.*`, `git.*`, `command.*` and `teamchat.*` namespaces. Team/device identifiers are UUIDs; idempotency keys are 1–200 ASCII letters, digits, dots, underscores, colons or hyphens. Canonical JSON payloads are limited to 256 KiB.
 
 Each runtime has Ed25519 signing and X25519 encryption keypairs. Private PKCS#8 material is stored in a per-account JSON file below `<dataDir>/distributed/keys/`, with a hashed account filename, mode `0600` (directory mode `0700` where supported), and never in SQLite or tracked source. Public SPKI DER keys are registered at `mingle_devices`. The fingerprint hashes both public keys under a versioned domain separator. Device pairing compares that fingerprint out-of-band before recording an own-side pin.
 

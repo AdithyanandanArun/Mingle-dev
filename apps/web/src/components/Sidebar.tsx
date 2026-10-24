@@ -10,6 +10,7 @@ import { DialogMotionContext, IconButton, Menu, MenuItem, MenuLabel, MenuSeparat
 import { activeMembers, findGroupForSession, groupChildSessionIds, groupSessionStatus } from '../lib/groups';
 import { RemoveProjectDialog } from './RemoveProjectDialog';
 import { useRetainedPresence } from '../lib/motion';
+import { TeamChatEntry } from './team-chat/TeamChatEntry';
 
 const VIEWS: { view: View; label: string; icon: typeof Kanban }[] = [
   { view: 'tasks', label: 'Tasks', icon: Kanban }, { view: 'activity', label: 'Activity', icon: Activity }, { view: 'map', label: 'Agent map', icon: Network },
@@ -110,6 +111,7 @@ export function Sidebar() {
         {project ? <><MenuSeparator /><MenuItem icon={<FolderMinus size={14} />} disabled={connection !== 'online'} onSelect={() => setRemovingProject(project)}>Remove project…</MenuItem></> : null}
       </Menu>
     </div>
+    <div className="team-chat-entry-slot"><TeamChatEntry /></div>
     <div className="sidebar__sessions">
       <div className="session-scroll" role="list" aria-label="Sessions">
         {!sessions.length ? <p className="sidebar__empty">No sessions yet.</p> : null}
