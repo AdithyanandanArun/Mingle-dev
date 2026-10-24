@@ -207,6 +207,7 @@ export function App() {
         onClose={() => { setJoinSuspended(false); setActiveInvitation(null); }}
         onOpenAccountSettings={() => { setJoinSuspended(true); useMingle.getState().openSettings({ section: 'account' }); }}
         onOpenProviderSettings={() => { setJoinSuspended(true); useMingle.getState().openSettings({ section: 'providers' }); }}
+        onJoined={(result) => useMingle.getState().openTeamChat(result.projectId)}
       /> : null}
       <Toasts />
     </div>

@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
-import { chmod, copyFile, cp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { chmod, copyFile, cp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -22,7 +22,8 @@ for (const dir of ['DEBIAN', 'opt', 'usr/bin', 'usr/share/applications', 'usr/sh
 }
 await cp(stage, join(tree, 'opt/mingle'), { recursive: true, verbatimSymlinks: true });
 await chmod(join(tree, 'opt/mingle/chrome-sandbox'), 0o4755);
-await symlink('/opt/mingle/mingle', join(tree, 'usr/bin/mingle'));
+await copyFile(join(root, 'packaging/linux-launcher.sh'), join(tree, 'usr/bin/mingle'));
+await chmod(join(tree, 'usr/bin/mingle'), 0o755);
 await copyFile(join(stage, 'mingle.desktop'), join(tree, 'usr/share/applications/mingle.desktop'));
 await copyFile(join(stage, 'mingle.svg'), join(tree, 'usr/share/icons/hicolor/scalable/apps/mingle.svg'));
 await cp(join(stage, 'resources/licenses'), join(tree, 'usr/share/doc/mingle/licenses'), { recursive: true });

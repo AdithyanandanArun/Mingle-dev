@@ -35,7 +35,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y ./release/*.deb
-          test "$(readlink /usr/bin/mingle)" = /opt/mingle/mingle
+          test -x /usr/bin/mingle && grep -q "exec /opt/mingle/mingle" /usr/bin/mingle
           test "$(stat -c '%u:%g:%a' /opt/mingle/chrome-sandbox)" = '0:0:4755'
           node scripts/smoke-packaged-linux.mjs /opt/mingle
           xvfb-run -a node scripts/smoke-desktop.mjs /opt/mingle/mingle

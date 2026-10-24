@@ -59,8 +59,10 @@ package() {
   # Electron's Chromium sandbox requires setuid root; package extraction is root-owned.
   install -o root -g root -m 4755 "${_release}/chrome-sandbox" "${_app}/chrome-sandbox"
 
+  # Keep in sync with packaging/linux-launcher.sh: clear variables that make Electron run as Node.
   install -d "${pkgdir}/usr/bin"
-  ln -s /opt/mingle/mingle "${pkgdir}/usr/bin/mingle"
+  printf '%s\n' '#!/bin/sh' 'unset ELECTRON_RUN_AS_NODE NODE_OPTIONS NODE_PATH' 'exec /opt/mingle/mingle "$@"' > "${pkgdir}/usr/bin/mingle"
+  chmod 755 "${pkgdir}/usr/bin/mingle"
   install -Dm644 "${_release}/mingle.desktop" "${pkgdir}/usr/share/applications/mingle.desktop"
   install -Dm644 "${_release}/mingle.svg" "${pkgdir}/usr/share/icons/hicolor/scalable/apps/mingle.svg"
 
