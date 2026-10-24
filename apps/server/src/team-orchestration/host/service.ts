@@ -692,9 +692,12 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
       const handoff = metadata.get(id)!;
       const source = this.options.store.getSession(handoff.fromSessionId, true);
       if (!source || source.projectId !== projectId) throw new HttpError(409, 'A handoff source is outside the shared project.');
+      const sessionBase = this.hostRows.prepare('SELECT base_revision FROM session_worktree_bases WHERE session_id=?')
+        .get(source.id) as { base_revision: string | null } | undefined;
       artifacts.push(await this.options.git.exportTeamArtifact({
         teamId, sharedProjectId,
         sourceWorktreePath: source.worktreePath, revision: handoff.revision, toDeviceId, deliveryId,
+        ...(sessionBase?.base_revision ? { sessionStartRevision: sessionBase.base_revision } : {}),
         taskId: handoff.taskId ?? taskId, path: handoff.path,
       }));
     }

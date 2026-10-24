@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { EXAMPLE_CLIENT_SESSION_ID, EXAMPLE_CONTRACT_SESSION_ID } from './example.ts';
-import { deferred, makeRepo, startTestApp, waitFor, type TestApp } from './test-utils.ts';
+import { deferred, makeRepo, runGit, startTestApp, waitFor, type TestApp } from './test-utils.ts';
 
 const apps: TestApp[] = [];
 const boot = async (options: Parameters<typeof startTestApp>[0] = {}) => { const t = await startTestApp(options); apps.push(t); return t; };
@@ -21,6 +21,8 @@ describe('session creation', () => {
     expect(a.branch).not.toBe(b.branch);
     expect(a.branch).toMatch(/^mingle\/same-name-/);
     expect(a.worktreePath).not.toBe(project.path);
+    expect(t.app.store.db.prepare('SELECT base_revision FROM session_worktree_bases WHERE session_id=?').get(a.id))
+      .toMatchObject({ base_revision: runGit(a.worktreePath, 'rev-parse', 'HEAD').trim() });
 
     const plain = (await t.api('POST', '/api/projects', { name: 'plain', path: (await import('./test-utils.ts')).tmpDir() })).json;
     const nonRepo = await t.api('POST', '/api/sessions', { ...body, projectId: plain.id });
@@ -29,9 +31,9 @@ describe('session creation', () => {
     const direct = await t.api('POST', '/api/sessions', { ...body, projectId: plain.id, isolated: false });
     expect(direct.json).toMatchObject({ isolated: false, worktreePath: plain.path, branch: null });
 
-    const { tmpDir, runGit } = await import('./test-utils.ts');
+    const { tmpDir, runGit: runGitForUnborn } = await import('./test-utils.ts');
     const unborn = tmpDir();
-    runGit(unborn, 'init', '-q');
+    runGitForUnborn(unborn, 'init', '-q');
     const emptyProject = (await t.api('POST', '/api/projects', { name: 'unborn', path: unborn })).json;
     const res = await t.api('POST', '/api/sessions', { ...body, projectId: emptyProject.id });
     expect(res.status).toBe(422);

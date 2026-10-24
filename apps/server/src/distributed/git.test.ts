@@ -106,6 +106,29 @@ describe('GitSyncService', () => {
       deliveryId: 'delivery-team-artifact', artifact, sourceDeviceId: source.deviceFor(pair.teamId) })).resolves.toMatchObject({ ref: artifact.ref });
   });
 
+  it('uses the session-start merge base when no upstream or default remote-tracking ref is available', async () => {
+    const { source, destination } = prepareClones();
+    writeFileSync(path.join(source.root, 'team-output.txt'), 'session-start based output\n');
+    importRunGit(source.root, ['add', 'team-output.txt']);
+    importRunGit(source.root, ['commit', '-q', '-m', 'team output']);
+    const sourceHead = importRunGit(source.root, ['rev-parse', 'HEAD']).trim();
+    const sessionStart = importRunGit(source.root, ['rev-parse', 'HEAD^']).trim();
+    importRunGit(source.root, ['symbolic-ref', '--delete', 'refs/remotes/origin/HEAD']);
+    importRunGit(source.root, ['update-ref', '-d', 'refs/remotes/origin/main']);
+    const pair = await bindPair(source, destination);
+    const artifact = await pair.sourceService.exportTeamArtifact({ teamId: pair.teamId, sharedProjectId: pair.sharedProjectId,
+      sourceWorktreePath: source.root, revision: sourceHead, sessionStartRevision: sessionStart,
+      toDeviceId: destination.deviceFor(pair.teamId), deliveryId: 'delivery-session-base-artifact' });
+    expect(source.messages.find((message) => message.kind === 'git.team-artifact.offer')?.payload).toMatchObject({ baseRevision: sessionStart });
+    for (const message of source.messages.filter((item) => item.kind.startsWith('git.team-artifact.'))) {
+      await pair.destinationService.onEnvelope(envelope({ teamId: pair.teamId, fromDeviceId: source.deviceFor(pair.teamId),
+        toDeviceId: destination.deviceFor(pair.teamId), kind: message.kind, payload: message.payload }));
+    }
+    await expect(pair.destinationService.importTeamArtifact({ teamId: pair.teamId, sharedProjectId: pair.sharedProjectId,
+      deliveryId: 'delivery-session-base-artifact', artifact, sourceDeviceId: source.deviceFor(pair.teamId) }))
+      .resolves.toMatchObject({ ref: artifact.ref });
+  });
+
   it('retries one thin team artifact with a bounded root-history bundle when the receiver lacks its prerequisite', async () => {
     const { source, destination } = prepareClones();
     writeFileSync(path.join(source.root, 'team-output.txt'), 'committed team output\n');

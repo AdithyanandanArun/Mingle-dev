@@ -108,6 +108,7 @@ export class WorkspaceService {
     let worktreePath = project.path;
     let branch: string | null = null;
     const info = await repoInfo(project.path);
+    let worktreeBaseRevision = info.head;
     if (isolated) {
       if (!info.isRepo) throw unprocessable('This project is not a Git repository. Choose Project folder in Settings → General → Workspace to work directly in this folder, then create the session again.');
       if (!info.hasHead) throw unprocessable('This repository has no commits yet. Make an initial commit, or choose Project folder in Settings → General → Workspace, then create the session again.');
@@ -116,11 +117,14 @@ export class WorkspaceService {
       await addWorktree(project.path, target, branch);
       // A project that lives in a sub-directory of its repository keeps the same relative position in the worktree.
       worktreePath = info.prefix ? path.join(await fsp.realpath(target), ...info.prefix.split('/')) : await fsp.realpath(target);
+      worktreeBaseRevision = (await repoInfo(worktreePath)).head;
     } else if (info.isRepo) {
       branch = info.branch;
     }
     return this.store.tx(() => {
       const session = this.store.insertSession({ id, projectId: project.id, name, provider, model, effort, policy, serviceTier, isolated, worktreePath, branch });
+      this.store.db.prepare(`INSERT INTO session_worktree_bases(session_id,base_revision,created_at) VALUES(?,?,?)`)
+        .run(id, worktreeBaseRevision, new Date().toISOString());
       this.store.recordEvent({ projectId: project.id, sessionId: id, type: 'session.created', summary: `Session created: ${session.name}`, payload: { provider: session.provider, model: session.model, isolated: session.isolated, branch } });
       return session;
     });

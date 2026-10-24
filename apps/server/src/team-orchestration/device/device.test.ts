@@ -495,13 +495,13 @@ describe('owner-device team orchestration', () => {
   });
 });
 
-describe('team device migration 21', () => {
+describe('team device migration 21 and session base migration 22', () => {
   it('creates its owner-device tables when upgraded from schema version 20', () => {
     const root = mkdtempSync(path.join(os.tmpdir(), 'mingle-team-device-migration-'));
     roots.push(root);
     const file = path.join(root, 'state.sqlite');
     const db = openDatabase(file);
-    expect((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(21);
+    expect((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(22);
     db.close();
     for (const legacyVersion of [19, 20]) {
       const older = new DatabaseSync(file);
@@ -509,7 +509,7 @@ describe('team device migration 21', () => {
         DROP TABLE mingle_team_device_structures; DROP TABLE mingle_team_device_consents; PRAGMA user_version=${legacyVersion};`);
       older.close();
       const upgraded = openDatabase(file);
-      expect((upgraded.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(21);
+      expect((upgraded.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(22);
       expect(upgraded.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='mingle_team_device_consents'").get()).toBeTruthy();
       upgraded.close();
     }

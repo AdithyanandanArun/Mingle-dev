@@ -317,7 +317,8 @@ export class GitSyncService {
     }
   }
 
-  private async selectTeamArtifactBase(sourcePath: string, revision: string, requestedBase: string | null): Promise<string | null> {
+  private async selectTeamArtifactBase(sourcePath: string, revision: string, requestedBase: string | null,
+    sessionStartRevision?: string): Promise<string | null> {
     if (requestedBase) {
       const ancestor = await repositoryGit(this.options.repository, sourcePath,
         ['merge-base', '--is-ancestor', requestedBase, revision], { allowFailure: true, maxOutputBytes: 4096 });
@@ -344,6 +345,15 @@ export class GitSyncService {
       if (common.code !== 0) continue;
       const base = normalizeObjectId(line(common.stdout), 'selected bundle prerequisite');
       return base === revision ? null : base;
+    }
+    if (sessionStartRevision) {
+      const start = normalizeObjectId(sessionStartRevision, 'session worktree base');
+      const common = await repositoryGit(this.options.repository, sourcePath,
+        ['merge-base', revision, start], { allowFailure: true, maxOutputBytes: 4096 });
+      if (common.code === 0) {
+        const base = normalizeObjectId(line(common.stdout), 'session worktree merge base');
+        return base === revision ? null : base;
+      }
     }
     return null;
   }
@@ -372,7 +382,7 @@ export class GitSyncService {
    * request one bounded root-history retry.
    */
   async exportTeamArtifact(input: {
-    teamId: string; sharedProjectId: string; sourceWorktreePath: string; revision: string; baseRevision?: string;
+    teamId: string; sharedProjectId: string; sourceWorktreePath: string; revision: string; baseRevision?: string; sessionStartRevision?: string;
     toDeviceId: string; deliveryId: string; taskId?: string; path?: string;
   }): Promise<TeamArtifactRef> {
     const revisionInput = normalizeObjectId(input.revision, 'revision');
@@ -393,7 +403,7 @@ export class GitSyncService {
     const reachable = await repositoryGit(this.options.repository, sourcePath,
       ['merge-base', '--is-ancestor', revision, 'HEAD'], { allowFailure: true, maxOutputBytes: 4096 });
     if (reachable.code !== 0) throw conflict('The team artifact commit is not reachable from the producing worktree HEAD.');
-    const baseRevision = await this.selectTeamArtifactBase(sourcePath, revision, requestedBaseRevision);
+    const baseRevision = await this.selectTeamArtifactBase(sourcePath, revision, requestedBaseRevision, input.sessionStartRevision);
 
     const transferId = createHash('sha256').update(`${input.teamId}\0${input.sharedProjectId}\0${input.deliveryId}\0${input.toDeviceId}\0${revision}\0${input.taskId ?? ''}\0${input.path ?? ''}`).digest('hex');
     const refName = teamArtifactRef(input.sharedProjectId, input.deliveryId, revision);

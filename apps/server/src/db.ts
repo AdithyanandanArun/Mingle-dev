@@ -77,6 +77,14 @@ function ensureTeamDeviceTables(db: DatabaseSync): void {
   `);
 }
 
+function ensureSessionWorktreeBases(db: DatabaseSync): void {
+  db.exec(`CREATE TABLE IF NOT EXISTS session_worktree_bases (
+    session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+    base_revision TEXT CHECK (base_revision IS NULL OR length(base_revision) IN (40,64)),
+    created_at TEXT NOT NULL
+  );`);
+}
+
 const MIGRATIONS: (string | ((db: DatabaseSync) => void))[] = [
   `
   CREATE TABLE projects (
@@ -375,8 +383,10 @@ const MIGRATIONS: (string | ((db: DatabaseSync) => void))[] = [
        expires_at TEXT NOT NULL, UNIQUE(delivery_id,remote_approval_id)
      );`);
    },
-    // Migration 21 keeps owner-device team state local and creates every table/index idempotently.
-    ensureTeamDeviceTables,
+     // Migration 21 keeps owner-device team state local and creates every table/index idempotently.
+     ensureTeamDeviceTables,
+     // Migration 22 records the Git commit each newly-created session worktree started from.
+     ensureSessionWorktreeBases,
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;
