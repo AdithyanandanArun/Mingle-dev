@@ -2,6 +2,7 @@ import type { AuthenticatedTransportMessage, TeamConsent, TeamStructurePayload, 
 import type { ProjectCollaborationSnapshot } from '../../../../packages/contracts/src/project-collaboration.ts';
 import type { SessionRuntime, StartOptions } from '../runtime.ts';
 import type { Store } from '../store.ts';
+import type { DistributedWorkspaceService } from '../distributed/service.ts';
 
 export interface TeamRouteContext {
   req: import('node:http').IncomingMessage;
@@ -25,16 +26,12 @@ export interface TeamOrchestrationDeviceDependencies {
   hub: import('../hub.ts').Hub;
   transport: TeamOrchestrationTransport;
   account: TeamOrchestrationAccount;
-  distributed: DistributedTeamBridge;
+  distributed: DistributedWorkspaceService;
   collaboration: TeamOrchestrationCollaboration;
   teamChat: TeamOrchestrationChat;
   changed(): void;
 }
 export type TeamOrchestrationDeviceSideFactory = (dependencies: TeamOrchestrationDeviceDependencies) => TeamOrchestrationDeviceSide;
-
-export interface DistributedTeamBridge {
-  authorizeTeam(input: { teamId: string; peerDeviceId?: string }): Promise<unknown>;
-}
 
 export interface TeamOrchestrationTransport {
   snapshot(teamId?: string): import('@mingle/contracts').TransportSnapshot;
