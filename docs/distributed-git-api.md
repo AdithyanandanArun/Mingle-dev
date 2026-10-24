@@ -44,6 +44,18 @@ After verifying the bundle and exact advertised source HEAD, Git is fetched from
 
 An interrupted import or Git mutation changes to `unknown` during restart recovery. Incoming chunks still in the `receiving` state are safe to resume because each index is immutable and hash-checked. A dispatched source transfer with uncertain mailbox delivery also becomes `unknown`; it is not automatically resent.
 
+## Team artifact transfer
+
+`GitSyncService.exportTeamArtifact({teamId, sharedProjectId, sourceWorktreePath, revision, baseRevision?, toDeviceId, deliveryId, taskId?, path?})` and `importTeamArtifact({teamId, sharedProjectId, deliveryId, artifact, sourceDeviceId?})` support the team-orchestration delivery lifecycle. These are not public caller-selected Git operations: the device executor and host supply locally resolved repository/worktree paths and delivery identities. `DistributedWorkspaceService` rechecks the team/device authorization and uses the repository mutation lease for imports.
+
+The sender emits a bounded offer and encrypted binary chunks using `git.team-artifact.offer` and `git.team-artifact.chunk`; no raw bundle bytes are written to the source repository. Each bundle is capped at 16 MiB and divided into 128 KiB chunks (maximum 128), matching the normal Git mailbox limits. The receiver validates offer dimensions, sender/delivery ownership, exact chunk sizes, duplicate consistency, whole-bundle SHA-256, `git bundle verify`, and the advertised commit tip before the bundle becomes importable. Duplicate identical chunks and imports are idempotent; changed duplicate data, wrong senders, oversized input, missing delivery authority, or a ref/tip mismatch are rejected. Uncertain transfers are not automatically replayed.
+
+The receiver cannot prove that its object database contains a sender-provided base before the transfer begins. To avoid thin bundles that fail on a receiver with unrelated or incomplete history, team artifact bundles conservatively contain all history reachable from the requested revision. `baseRevision`, when supplied, must be an ancestor and is retained as delivery metadata, but does not reduce the bundle. The 16 MiB limit therefore applies to full reachable history for each artifact revision; a larger bundle fails explicitly.
+
+Import writes only the claimed commit to a collision-resistant isolated ref under `refs/mingle/team/<project-segment>/<delivery-segment>/<revision>`. It does not update HEAD, a branch, the index, or working files. The project and delivery path segments are sanitized and suffixed with hashes; the full object ID is used for the revision segment. The host stores the resulting ref with the delivery and includes it in the orchestrator result, which can use an explicit `git merge` or `git cherry-pick` after review. No artifact is merged or pushed automatically.
+
+Ordinary `git.offer` transfers retain the exact source- and destination-owner approvals described above. Team artifact transfer instead relies on the team's previously accepted agent consent and rechecks active team membership, mutual device links, the integration device recorded on the delivery, the owning agent/device, active roster membership and current consent before sending or importing. This narrower authorization is limited to committed bundle transport and isolated-ref creation. Received commits are still peer-provided source: Git is not asked to check them out, run repository hooks, clean/smudge filters, textconv, or external diff helpers, and an isolated ref is not evidence that the code is safe or correct.
+
 Transport kinds handled by `GitSyncService`:
 
 | Kind | Direction | Purpose |
@@ -52,6 +64,8 @@ Transport kinds handled by `GitSyncService`:
 | `git.import-approved` | destination → source | Destination owner's exact import consent |
 | `git.bundle.chunk` | source → destination | One approved base64 bundle chunk |
 | `git.result` | destination → source | Import result, conflicts or stale state |
+| `git.team-artifact.offer` | producer → integration device | Consent-scoped bounded team artifact metadata |
+| `git.team-artifact.chunk` | producer → integration device | One bounded encrypted team artifact chunk |
 
 ## Remote commands
 

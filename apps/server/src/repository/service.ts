@@ -115,6 +115,27 @@ export class RepositoryService {
     return this.mutate(projectId, undefined, async () => operation());
   }
 
+  /** Serializes isolated-ref/object imports with Git mutations while allowing existing provider runs to continue. */
+  withExternalRefMutation<T>(projectId: string, operation: () => Promise<T>): Promise<T> {
+    return this.guard(async () => {
+      const first = this.workspace.resolveScope(projectId, undefined);
+      const located = await locate(first.root, this.abort.signal);
+      if (located.kind === 'missing') throw conflict('This folder no longer exists on disk.');
+      if (located.kind === 'not-repo') throw unprocessable(located.detail ?? 'This folder is not a Git repository.');
+      const lease: Lease = { top: located.top };
+      this.leases.add(lease);
+      try {
+        return await this.locks.run(located.top, async () => {
+          this.open();
+          const current = this.workspace.resolveScope(projectId, undefined);
+          const currentLocation = await locate(current.root, this.abort.signal);
+          if (currentLocation.kind !== 'ok' || currentLocation.top !== located.top) throw conflict('The repository location changed. Refresh and try again.');
+          return operation();
+        });
+      } finally { this.leases.delete(lease); }
+    });
+  }
+
   commit(projectId: string, input: RepositoryCommit): Promise<RepositoryMutationResult> {
     return this.mutate(projectId, input.sessionId, async ({ scope, snap, top }) => {
       const state = snap.state;

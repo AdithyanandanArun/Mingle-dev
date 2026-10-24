@@ -66,6 +66,7 @@ interface ActiveDelivery {
   timer: NodeJS.Timeout | null;
   controller: AbortController;
   replyPosted: boolean;
+  artifactFailures: string[];
 }
 interface SharedBinding {
   projectId: string;
@@ -592,22 +593,15 @@ export function createDeviceSide(deps: DeviceSideDeps): {
     if (!session || !project) throw new HttpError(409, 'The local agent session or project is no longer available.');
     const projectRoot = await realpath(project.path);
     let baseRevision = payload.baseRevision ?? null;
-    if (baseRevision) {
-      const exists = await git(session.worktreePath, ['cat-file', '-e', `${baseRevision}^{commit}`], { allowFailure: true, maxBuffer: 4096 });
-      if (exists.code !== 0) {
-        const importer = (deps.distributed.git as unknown as { importTeamArtifact?: (input: unknown) => Promise<unknown> }).importTeamArtifact;
-        if (importer) await importer({ teamId: shared.teamId, sharedProjectId: shared.sharedProjectId, deliveryId: payload.deliveryId, revision: baseRevision });
-        const afterImport = await git(session.worktreePath, ['cat-file', '-e', `${baseRevision}^{commit}`], { allowFailure: true, maxBuffer: 4096 });
-        if (afterImport.code !== 0) throw new HttpError(409, 'The input artifact revision has not been imported into this device’s local Git objects.');
-      }
-    }
     for (const artifact of payload.inputArtifacts) {
-      const importer = (deps.distributed.git as unknown as { importTeamArtifact?: (input: unknown) => Promise<unknown> }).importTeamArtifact;
-      if (importer) await importer({ teamId: shared.teamId, sharedProjectId: shared.sharedProjectId, deliveryId: payload.deliveryId, artifact });
+      await deps.distributed.importTeamArtifact({ teamId: shared.teamId, sharedProjectId: shared.sharedProjectId,
+        deliveryId: payload.deliveryId, artifact, sourceDeviceId: payload.integrationDeviceId });
       const object = await git(session.worktreePath, ['cat-file', '-e', `${artifact.revision}^{commit}`], { allowFailure: true, maxBuffer: 4096 });
       if (object.code !== 0) throw new HttpError(409, 'An input artifact revision has not been imported into this device’s local Git objects.');
-      const ref = `refs/mingle/team-device/input/${createHash('sha256').update(payload.deliveryId).digest('hex').slice(0, 20)}/${payload.inputArtifacts.indexOf(artifact)}`;
-      await git(session.worktreePath, ['update-ref', ref, artifact.revision]);
+    }
+    if (baseRevision) {
+      const exists = await git(session.worktreePath, ['cat-file', '-e', `${baseRevision}^{commit}`], { allowFailure: true, maxBuffer: 4096 });
+      if (exists.code !== 0) throw new HttpError(409, 'The delivery base revision is not present in the owner-selected local project repository.');
     }
     if (session.isolated) {
       const worktreePath = await realpath(session.worktreePath);
@@ -627,32 +621,25 @@ export function createDeviceSide(deps: DeviceSideDeps): {
     return { path: worktreePath, branch, baseRevision };
   }
 
-  async function exportCommits(activeDelivery: ActiveDelivery): Promise<Array<{ revision: string; transferId?: string }>> {
+  async function exportCommits(activeDelivery: ActiveDelivery): Promise<Array<{ revision: string; transferId?: string; taskId?: string; ref?: string }>> {
     const head = trimmed(await git(activeDelivery.worktreePath, ['rev-parse', '--verify', 'HEAD']));
     if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(head) || head === activeDelivery.baseRevision) return [];
     const args = activeDelivery.baseRevision
       ? ['rev-list', '--reverse', '--max-count=30', `${activeDelivery.baseRevision}..${head}`]
       : ['rev-list', '--reverse', '--max-count=30', head];
     const revisions = trimmed(await git(activeDelivery.worktreePath, args)).split(/\s+/).filter((id) => /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(id));
-    const artifacts: Array<{ revision: string; transferId?: string }> = [];
+    const artifacts: Array<{ revision: string; transferId?: string; taskId?: string; ref?: string }> = [];
     for (const revision of revisions) {
       try {
-        const exporter = (deps.distributed.git as unknown as { exportTeamArtifact?: (input: unknown) => Promise<{ transferId?: string }> }).exportTeamArtifact;
-        const transfer = exporter
-          ? await exporter({ teamId: activeDelivery.teamId, sharedProjectId: activeDelivery.payload.sharedProjectId,
-            toDeviceId: activeDelivery.payload.integrationDeviceId, deliveryId: activeDelivery.payload.deliveryId, revision,
-            baseRevision: activeDelivery.baseRevision, worktreePath: activeDelivery.worktreePath })
-          : await deps.distributed.git.request({ teamId: activeDelivery.teamId, sharedProjectId: activeDelivery.payload.sharedProjectId,
-            toDeviceId: activeDelivery.payload.integrationDeviceId, expectedHead: revision,
-            ...(activeDelivery.baseRevision ? { baseHead: activeDelivery.baseRevision } : {}),
-            ...(activeDelivery.branch ? { branch: activeDelivery.branch } : {}),
-            idempotencyKey: `team-artifact:${activeDelivery.payload.deliveryId}:${revision}` });
-        const transferId = transfer && typeof transfer === 'object' && 'id' in transfer && typeof transfer.id === 'string'
-          ? transfer.id : transfer && typeof transfer === 'object' && 'transferId' in transfer && typeof transfer.transferId === 'string' ? transfer.transferId : undefined;
-        artifacts.push({ revision, ...(transferId ? { transferId } : {}) });
+        const artifact = await deps.distributed.git.exportTeamArtifact({ teamId: activeDelivery.teamId,
+          sharedProjectId: activeDelivery.payload.sharedProjectId, toDeviceId: activeDelivery.payload.integrationDeviceId,
+          deliveryId: activeDelivery.payload.deliveryId, revision, baseRevision: activeDelivery.baseRevision ?? undefined,
+          sourceWorktreePath: activeDelivery.worktreePath, taskId: activeDelivery.payload.taskId });
+        artifacts.push(artifact);
         activeDelivery.entries.push(TeamAgentActivityEntrySchema.parse({ id: randomUUID(), runId: activeDelivery.runId,
-          at: ISO(), kind: 'artifact', text: `Committed artifact ${revision.slice(0, 12)} was sent to the integration device.` }));
+          at: ISO(), kind: 'artifact', text: `Committed artifact ${revision.slice(0, 12)} was sent to the integration device as ${artifact.ref}.` }));
       } catch (error) {
+        activeDelivery.artifactFailures.push(safeText(`Commit ${revision.slice(0, 12)}: ${errorMessage(error)}`, 500));
         activeDelivery.entries.push(TeamAgentActivityEntrySchema.parse({ id: randomUUID(), runId: activeDelivery.runId,
           at: ISO(), kind: 'error', text: safeText(`Artifact transfer could not be prepared: ${errorMessage(error)}`, 8_000) }));
       }
@@ -691,7 +678,7 @@ export function createDeviceSide(deps: DeviceSideDeps): {
       live = { payload, teamId: shared.teamId, projectId: shared.projectId, sessionId, runId,
         baseRevision: isolated.baseRevision, worktreePath: isolated.path, branch: isolated.branch,
         entries: [requestEntry], text: '', activityState: 'working', activityWaiters: [],
-        timer: null, controller, replyPosted: false };
+        timer: null, controller, replyPosted: false, artifactFailures: [] };
       active.set(payload.deliveryId, live);
       db.prepare(`UPDATE mingle_team_device_deliveries SET status='running',run_id=?,worktree_path=?,branch=?,base_revision=?,updated_at=? WHERE delivery_id=?`)
         .run(runId, isolated.path, isolated.branch, isolated.baseRevision, ISO(), payload.deliveryId);
@@ -701,10 +688,13 @@ export function createDeviceSide(deps: DeviceSideDeps): {
       const run = await waitForRun(sessionId, runId);
       if (!run) throw new Error('The team delivery did not reach a terminal provider state before its execution deadline.');
       if (run.status === 'completed') {
-        const finalText = safeText(deps.store.listMessages(sessionId, { limit: 2000 })
+        const initialFinalText = safeText(deps.store.listMessages(sessionId, { limit: 2000 })
           .filter((message) => message.runId === runId && message.role === 'assistant' && message.kind !== 'streaming')
           .map((message) => message.content).join('\n\n').trim(), 50_000);
         const artifacts = await exportCommits(live);
+        const transferFailures = live.artifactFailures.length
+          ? `\n\nArtifact transfer failures:\n${live.artifactFailures.map((failure) => `- ${failure}`).join('\n')}` : '';
+        const finalText = safeText(`${initialFinalText}${transferFailures}`, 50_000);
         await sendActivity(live, 'idle');
         db.prepare(`UPDATE mingle_team_device_deliveries SET status='completed',updated_at=? WHERE delivery_id=?`).run(ISO(), payload.deliveryId);
         await sendStatus(shared.teamId, (await hostDeviceId(shared))!, { sharedProjectId: shared.sharedProjectId,

@@ -25,7 +25,7 @@ interface Sent { teamId: string; toDeviceId: string; kind: string; payload: any;
 interface Fixture {
   store: Store; side: ReturnType<typeof createDeviceSide>; routes: Array<{ method: string; path: string; handler: (ctx: any) => unknown }>;
   projectId: string; root: string; repo: string; worktree: string; sent: Sent[]; roster: any[]; handler: ((envelope: any) => Promise<void>) | null;
-  runtime: FakeRuntime; exportCalls: any[]; chatReplies: any[]; members: any[]; setConsent(permission?: 'supervised' | 'full-access', settingsVersion?: number): Promise<any>;
+  runtime: FakeRuntime; exportCalls: any[]; importCalls: any[]; executionOrder: string[]; chatReplies: any[]; members: any[]; setConsent(permission?: 'supervised' | 'full-access', settingsVersion?: number): Promise<any>;
   deliver(overrides?: Record<string, unknown>, sender?: string): Promise<void>; close(): Promise<void>;
 }
 
@@ -34,10 +34,12 @@ class FakeRuntime {
   mode: 'complete' | 'approval' | 'manual' | 'failed' = 'complete';
   active = new Map<string, string>();
   optionsByRun = new Map<string, any>();
+  executionOrder: string[] = [];
   store!: Store;
   onStart?: (options: any, sessionId: string, runId: string) => void;
 
   start(sessionId: string, content: string, options: any): string {
+    this.executionOrder.push('start');
     const runId = `team_run_${++this.startCount}_${randomUUID().slice(0, 8)}`;
     const userMessage = this.store.insertMessage({ sessionId, role: 'user', content, kind: 'team-delivery', runId });
     const session = this.store.getSession(sessionId)!;
@@ -162,6 +164,8 @@ async function fixture(): Promise<Fixture> {
     }),
   };
   const exportCalls: any[] = [];
+  const importCalls: any[] = [];
+  const executionOrder: string[] = [];
   const distributed: any = {
     transport,
     execution: {
@@ -176,11 +180,14 @@ async function fixture(): Promise<Fixture> {
     },
     git: {
       request: async (input: unknown) => { exportCalls.push(input); return { id: `transfer-${exportCalls.length}` }; },
-      exportTeamArtifact: async (input: unknown) => { exportCalls.push(input); return { transferId: `transfer-${exportCalls.length}` }; },
+      exportTeamArtifact: async (input: any) => { exportCalls.push(input); return { revision: input.revision, transferId: `transfer-${exportCalls.length}`,
+        ...(input.taskId ? { taskId: input.taskId } : {}), ...(input.path ? { path: input.path } : {}), ref: `refs/mingle/team/${input.revision}` }; },
     },
+    importTeamArtifact: async (input: any) => { importCalls.push(input); executionOrder.push('import'); return input.artifact; },
   };
   const runtime = new FakeRuntime();
   runtime.store = store;
+  runtime.executionOrder = executionOrder;
   const chatReplies: any[] = [];
   const teamChat = { postAgentReply: async (...args: any[]) => { chatReplies.push(args); return { id: `chat-${chatReplies.length}` }; } };
   const side = createDeviceSide({ store, runtime: runtime as any, transport, account, distributed, collaboration, teamChat: teamChat as any,
@@ -188,7 +195,7 @@ async function fixture(): Promise<Fixture> {
   const routes: Fixture['routes'] = [];
   side.routes((method, route, routeHandler) => routes.push({ method, path: route, handler: routeHandler }));
   const result: Fixture = {
-    store, side, routes, projectId: project.id, root, repo, worktree, sent, roster, get handler() { return handler; }, runtime, exportCalls, chatReplies, members,
+    store, side, routes, projectId: project.id, root, repo, worktree, sent, roster, get handler() { return handler; }, runtime, exportCalls, importCalls, executionOrder, chatReplies, members,
     async setConsent(permission = 'supervised', settingsVersion = 1) {
       const body = { sessionIds: [session.id], permissionLevel: permission, settingsVersion, disclaimerVersion: TEAM_CONSENT_DISCLAIMER_VERSION };
       return callRoute(result, 'POST', '/api/projects/:projectId/team-consent', { projectId: project.id }, body);
@@ -323,8 +330,24 @@ describe('owner-device team orchestration', () => {
     const completed = f.sent.find((message) => message.payload?.status === 'completed' && message.payload.deliveryId === payload.deliveryId)?.payload;
     expect(completed).toMatchObject({ finalText: 'Final result: safe output', artifacts: [{ transferId: 'transfer-1' }] });
     expect(f.exportCalls).toHaveLength(1);
+    expect(f.exportCalls[0]).toMatchObject({ toDeviceId: HOST_DEVICE, deliveryId: payload.deliveryId, sourceWorktreePath: f.worktree });
     expect(f.chatReplies).toHaveLength(1);
     expect(f.chatReplies[0]).toEqual([f.projectId, AGENT_ID, 'Final result: safe output', payload.requestId, payload.deliveryId]);
+  });
+
+  it('imports delivery input artifacts into the owner repository before starting the provider run', async () => {
+    const f = await fixture();
+    await sendStructure(f);
+    await f.setConsent();
+    const revision = runGit(f.worktree, 'rev-parse', 'HEAD').trim();
+    const artifact = { revision, transferId: 'incoming-transfer', path: 'README.md', ref: 'refs/mingle/team/input' };
+    const payload = deliveryPayload({ deliveryId: `delivery-${randomUUID()}`, inputArtifacts: [artifact] });
+    await f.deliver(payload);
+    await waitFor(() => f.sent.some((message) => message.kind === 'teamgroup.delivery.status'
+      && message.payload.deliveryId === payload.deliveryId && message.payload.status === 'completed'));
+    expect(f.importCalls).toHaveLength(1);
+    expect(f.importCalls[0]).toMatchObject({ deliveryId: payload.deliveryId, sourceDeviceId: HOST_DEVICE, artifact });
+    expect(f.executionOrder.slice(0, 2)).toEqual(['import', 'start']);
   });
 
   it('interrupts active owner-device runs as soon as local consent is paused', async () => {

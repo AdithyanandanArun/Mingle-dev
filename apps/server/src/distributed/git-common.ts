@@ -28,6 +28,9 @@ export interface DeviceTransport {
 export interface WorkspaceProject { id: string; path: string }
 export interface WorkspaceResolver { getProject(id: string): WorkspaceProject | undefined | Promise<WorkspaceProject | undefined> }
 export interface GitRepositoryExecutor { runGit(cwd: string, args: string[], options?: GitRunOptions): Promise<GitProcessResult> }
+export interface TeamArtifactAuthorization {
+  teamId: string; sharedProjectId: string; deliveryId: string; peerDeviceId: string; direction: 'export' | 'import';
+}
 export interface DistributedServiceOptions {
   store: { db: DatabaseSync } | DatabaseSync;
   account: AccountBridge;
@@ -37,6 +40,8 @@ export interface DistributedServiceOptions {
   repository?: GitRepositoryExecutor;
   /** Must revalidate live team membership, local device ownership and (when supplied) mutual peer links/pins. */
   authorizeTeam: (input: { teamId: string; peerDeviceId?: string }) => Promise<void>;
+  /** Team-artifact authority additionally verifies the delivery owner and integration-device relationship. */
+  authorizeTeamArtifact?: (input: TeamArtifactAuthorization) => Promise<void>;
   changed?: () => void;
   /** Optional resolver for embedding hosts which do not expose Store.getProject. Returned paths are canonicalized here. */
   resolveBinding?: (input: { localProjectId: string }) => WorkspaceProject | undefined | Promise<WorkspaceProject | undefined>;

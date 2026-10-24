@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 import { rmSync } from 'node:fs';
 import { afterEach, expect, it, vi } from 'vitest';
 import type { SupabaseClient, User } from '@supabase/supabase-js';
@@ -60,6 +61,14 @@ function fixture(options: { deviceId?: string; role?: 'leader' | 'admin' | 'memb
     },
   };
   const outgoing: Array<{ teamId: string; toDeviceId: string; kind: string; payload: unknown; idempotencyKey: string }> = [];
+  const artifactImports: unknown[] = [];
+  const teamGit = {
+    async exportTeamArtifact(input: any) { return { revision: input.revision, transferId: 'host-input-transfer', ref: `refs/mingle/team/input/${input.revision}`, ...(input.path ? { path: input.path } : {}), ...(input.taskId ? { taskId: input.taskId } : {}) }; },
+    async importTeamArtifact(input: any) {
+      artifactImports.push(input);
+      return { ...input.artifact, ref: `refs/mingle/team/${input.sharedProjectId}/${input.deliveryId}/${input.artifact.revision}` };
+    },
+  };
   let receive: ((envelope: any) => Promise<void>) | null = null;
   const transport = {
     snapshot: () => ({ deviceId: options.deviceId ?? DEVICE, status: 'ready', error: null,
@@ -143,11 +152,11 @@ function fixture(options: { deviceId?: string; role?: 'leader' | 'admin' | 'memb
     async callRemote(_runId: string, _sessionId: string, tool: string) { return { tool, actual: true }; },
   };
   const recovery = { recordFailure() {}, clearFailure() {} };
-  const host = new TeamOrchestrationHost({ store, account: account as any, transport: transport as any, authorizeTeam: async () => undefined,
+  const host = new TeamOrchestrationHost({ store, git: teamGit as any, account: account as any, transport: transport as any, authorizeTeam: async () => undefined,
     collaboration: collaboration as any, groups: groupService as any, teamMcp: teamMcp as any, recovery: recovery as any,
     deliveryTimeoutMs: options.deliveryTimeoutMs ?? 60_000, now: options.now });
   const fx = {
-    store, project, local, host, outgoing, finished, enqueued, group: () => group, setRole(value: typeof role) { role = value; },
+    store, project, local, host, outgoing, finished, enqueued, artifactImports, group: () => group, setRole(value: typeof role) { role = value; },
     async incoming(kind: string, payload: unknown, fromDeviceId = OWNER_DEVICE) {
       if (!receive) throw new Error('No team orchestration transport handler');
       return receive({ id: randomUUID(), teamId: TEAM, fromDeviceId, toDeviceId: options.deviceId ?? DEVICE, kind, payload });
@@ -208,14 +217,20 @@ it('dispatches remote proxy deliveries, proxies team MCP calls, rejects mismatch
     status: 'running', runId: 'host-run-1', hop: 0, error: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), kind: 'assignment' });
   const userMessage = fx.store.insertMessage({ sessionId, role: 'user', content: 'Review the diff', runId: 'host-run-1', kind: 'group-delivery' });
   fx.store.insertRun({ id: 'host-run-1', sessionId, userMessageId: userMessage.id, provider: 'codex', model: 'gpt-6-codex', startedAt: new Date().toISOString() });
+  const inputRevision = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: fx.project.path, encoding: 'utf8' }).trim();
+  fx.store.recordEvent({ projectId: PROJECT, sessionId, type: 'handoff.created', summary: 'Committed input handoff', payload: {
+    messageId: 'handoff-input-1', fromSessionId: LOCAL_AGENT, toSessionId: sessionId, taskId: 'task-input-1', path: 'README.md', revision: inputRevision,
+  } });
   fx.host.start({
     session: fx.store.getSession(sessionId)!, runId: 'host-run-1', content: 'TEAM INSTRUCTIONS\n\nReview the diff', options: { groupDeliveryId: deliveryId },
-    context: { groupId: group.group.id, memberId: member.id, requestId, deliveryId, hop: 0, instructions: 'TEAM INSTRUCTIONS' },
+    context: { groupId: group.group.id, memberId: member.id, requestId, deliveryId, hop: 0, instructions: 'TEAM INSTRUCTIONS' }, consumedHandoffs: ['handoff-input-1'],
   });
   await new Promise((resolve) => setTimeout(resolve, 0));
   const dispatched = fx.outgoing.find((entry) => entry.kind === 'teamgroup.delivery');
   expect(TeamDeliveryPayloadSchema.safeParse(dispatched?.payload)).toMatchObject({ success: true });
-  expect(dispatched?.payload).toMatchObject({ content: 'TEAM INSTRUCTIONS\n\nReview the diff', integrationDeviceId: DEVICE, permissionLevel: 'supervised', settingsVersion: 1, kind: 'assignment' });
+  expect(dispatched?.payload).toMatchObject({ content: expect.stringContaining('Git ref: refs/mingle/team/input/'),
+    inputArtifacts: [expect.objectContaining({ revision: inputRevision, taskId: 'task-input-1', path: 'README.md', transferId: 'host-input-transfer' })],
+    integrationDeviceId: DEVICE, permissionLevel: 'supervised', settingsVersion: 1, kind: 'assignment' });
   await expect(fx.incoming('teamgroup.delivery.status', { sharedProjectId: SHARED, deliveryId, agentId: REMOTE_AGENT, status: 'running', runId: 'owner-run-1', at: new Date().toISOString() }, DEVICE))
     .rejects.toMatchObject({ status: 403 });
   await expect(fx.incoming('teamgroup.delivery.status', { sharedProjectId: SHARED, deliveryId: 'unknown-delivery', agentId: REMOTE_AGENT, status: 'running', runId: 'owner-run-1', at: new Date().toISOString() }))
@@ -240,6 +255,35 @@ it('dispatches remote proxy deliveries, proxies team MCP calls, rejects mismatch
   expect(fx.store.getRun('host-run-1')?.status).toBe('completed');
   expect(fx.store.listMessages(sessionId, { limit: 20 }).some((message) => message.role === 'assistant' && message.content === 'Reviewed and found one issue.')).toBe(true);
   await expect(fx.incoming('teamgroup.tool.call', { sharedProjectId: SHARED, deliveryId, callId: 'call-finished', agentId: REMOTE_AGENT, tool: 'team_members', args: {} })).rejects.toMatchObject({ status: 404 });
+});
+
+it('imports remote artifacts into isolated refs and includes those ref names in the orchestrator result', async () => {
+  const fx = fixture();
+  await fx.host.enable(PROJECT, enableInput(REMOTE_AGENT));
+  await grantRemote(fx);
+  const sessionId = String((fx.store.db.prepare('SELECT session_id FROM mingle_team_proxy_sessions WHERE agent_id=?').get(REMOTE_AGENT) as { session_id: string }).session_id);
+  const group = fx.group()!;
+  const member = group.members.find((candidate) => candidate.sessionId === sessionId)!;
+  const deliveryId = 'team-artifact-delivery';
+  const requestId = 'team-artifact-request';
+  group.deliveries.push({ id: deliveryId, groupId: group.group.id, requestId, messageId: 'team-artifact-message', memberId: member.id,
+    status: 'running', runId: 'team-artifact-run', hop: 0, error: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), kind: 'assignment' });
+  const userMessage = fx.store.insertMessage({ sessionId, role: 'user', content: 'Implement this task', runId: 'team-artifact-run' });
+  fx.store.insertRun({ id: 'team-artifact-run', sessionId, userMessageId: userMessage.id, provider: 'codex', model: 'gpt-6-codex', startedAt: new Date().toISOString() });
+  fx.host.start({ session: fx.store.getSession(sessionId)!, runId: 'team-artifact-run', content: 'Implement this task', options: { groupDeliveryId: deliveryId },
+    context: { groupId: group.group.id, memberId: member.id, requestId, deliveryId, hop: 0, instructions: 'Instructions' } });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const revision = 'a'.repeat(40);
+  const artifact = { revision, transferId: 'owner-transfer', path: 'src/output.ts', taskId: 'task-42' };
+  await fx.incoming('teamgroup.delivery.status', { sharedProjectId: SHARED, deliveryId, agentId: REMOTE_AGENT, status: 'completed',
+    runId: 'owner-run-artifact', finalText: 'The implementation is committed.', artifacts: [artifact], at: new Date().toISOString() });
+  expect(fx.artifactImports).toEqual([expect.objectContaining({ teamId: TEAM, sharedProjectId: SHARED, deliveryId,
+    sourceDeviceId: OWNER_DEVICE, artifact })]);
+  const refs = fx.store.db.prepare('SELECT artifacts_json FROM mingle_team_host_deliveries WHERE delivery_id=?').get(deliveryId) as { artifacts_json: string };
+  const stored = JSON.parse(refs.artifacts_json) as Array<{ ref: string; revision: string }>;
+  expect(stored[0]).toMatchObject({ revision, ref: `refs/mingle/team/${SHARED}/${deliveryId}/${revision}` });
+  const assistant = fx.store.listMessages(sessionId, { limit: 20 }).find((message) => message.role === 'assistant');
+  expect(assistant?.content).toContain(`Git ref: refs/mingle/team/${SHARED}/${deliveryId}/${revision}`);
 });
 
 it('supports idle, fallback, promote/swap and remove changes with leader history', async () => {

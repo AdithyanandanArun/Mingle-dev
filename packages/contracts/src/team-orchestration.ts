@@ -220,7 +220,10 @@ export const TeamArtifactRefSchema = z.object({
   /** Commit on the producing device, transferred with the existing distributed Git API into an isolated ref. */
   revision: z.string().regex(/^[0-9a-f]{40}([0-9a-f]{24})?$/), path: z.string().min(1).max(4096).optional(),
   taskId: Id.optional(), transferId: Id.optional(),
+  /** Destination-local isolated ref; present after the integration device verifies and imports the bundle. */
+  ref: z.string().min(1).max(255).optional(),
 }).strict();
+export type TeamArtifactRef = z.infer<typeof TeamArtifactRefSchema>;
 
 export const TeamDeliveryPayloadSchema = z.object({
   sharedProjectId: Uuid, deliveryId: Id, groupId: Id, requestId: Id, agentId: Id,

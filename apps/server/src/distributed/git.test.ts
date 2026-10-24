@@ -32,6 +32,8 @@ function prepareClones() {
 }
 
 async function bindPair(source: OwnerFixture, destination: OwnerFixture, teamId = 'team-alpha', sharedProjectId = 'shared-project') {
+  source.trustedDevices.add(destination.deviceFor(teamId));
+  destination.trustedDevices.add(source.deviceFor(teamId));
   const sourceService = new GitSyncService(source.options);
   const destinationService = new GitSyncService(destination.options);
   await sourceService.bindProject({ teamId, sharedProjectId, localProjectId: source.projectId });
@@ -71,6 +73,81 @@ async function transferAndApprove(source: OwnerFixture, destination: OwnerFixtur
 }
 
 describe('GitSyncService', () => {
+  it('exports and imports a team artifact into an isolated ref, idempotently, when the receiver does not know the base', async () => {
+    const { source, destination } = prepareClones();
+    writeFileSync(path.join(source.root, 'team-output.txt'), 'committed team output\n');
+    importRunGit(source.root, ['add', 'team-output.txt']);
+    importRunGit(source.root, ['commit', '-q', '-m', 'team output']);
+    const sourceHead = importRunGit(source.root, ['rev-parse', 'HEAD']).trim();
+    const baseHead = importRunGit(source.root, ['rev-parse', 'HEAD^']).trim();
+
+    // Deliberately give the receiver an unrelated history. The transfer must remain self-contained.
+    rmSync(destination.root, { recursive: true, force: true });
+    execFileSync('git', ['init', '-q', '--initial-branch=other', destination.root]);
+    setGitIdentity(destination.root);
+    writeFileSync(path.join(destination.root, 'independent.txt'), 'receiver history\n');
+    importRunGit(destination.root, ['add', 'independent.txt']);
+    importRunGit(destination.root, ['commit', '-q', '-m', 'receiver history']);
+    const originalDestinationHead = importRunGit(destination.root, ['rev-parse', 'HEAD']).trim();
+
+    const pair = await bindPair(source, destination);
+    const artifact = await pair.sourceService.exportTeamArtifact({ teamId: pair.teamId, sharedProjectId: pair.sharedProjectId,
+      sourceWorktreePath: source.root, revision: sourceHead, baseRevision: baseHead, toDeviceId: destination.deviceFor(pair.teamId),
+      deliveryId: 'delivery-team-artifact', taskId: 'task-team-artifact', path: 'team-output.txt' });
+    expect(artifact).toMatchObject({ revision: sourceHead, taskId: 'task-team-artifact', path: 'team-output.txt', transferId: expect.any(String), ref: expect.any(String) });
+
+    for (const message of source.messages.filter((item) => item.kind.startsWith('git.team-artifact.'))) {
+      await pair.destinationService.onEnvelope(envelope({ teamId: pair.teamId, fromDeviceId: source.deviceFor(pair.teamId),
+        toDeviceId: destination.deviceFor(pair.teamId), kind: message.kind, payload: message.payload }));
+    }
+    const imported = await pair.destinationService.importTeamArtifact({ teamId: pair.teamId, sharedProjectId: pair.sharedProjectId,
+      deliveryId: 'delivery-team-artifact', artifact, sourceDeviceId: source.deviceFor(pair.teamId) });
+    expect(imported.ref).toBe(artifact.ref);
+    expect(importRunGit(destination.root, ['rev-parse', imported.ref!]).trim()).toBe(sourceHead);
+    expect(importRunGit(destination.root, ['rev-parse', 'HEAD']).trim()).toBe(originalDestinationHead);
+    expect(() => readFileSync(path.join(destination.root, 'team-output.txt'))).toThrow();
+    await expect(pair.destinationService.importTeamArtifact({ teamId: pair.teamId, sharedProjectId: pair.sharedProjectId,
+      deliveryId: 'different-delivery', artifact, sourceDeviceId: source.deviceFor(pair.teamId) })).rejects.toThrow(/does not match this project, delivery/i);
+    await expect(pair.destinationService.importTeamArtifact({ teamId: pair.teamId, sharedProjectId: pair.sharedProjectId,
+      deliveryId: 'delivery-team-artifact', artifact, sourceDeviceId: source.deviceFor(pair.teamId) })).resolves.toMatchObject({ ref: artifact.ref });
+  });
+
+  it('rejects tampered or oversized team artifact bundles and peers that do not own a team delivery', async () => {
+    const { source, destination } = prepareClones();
+    writeFileSync(path.join(source.root, 'team-output.txt'), randomBytes(256 * 1024));
+    importRunGit(source.root, ['add', 'team-output.txt']);
+    importRunGit(source.root, ['commit', '-q', '-m', 'team output']);
+    const pair = await bindPair(source, destination);
+    const head = importRunGit(source.root, ['rev-parse', 'HEAD']).trim();
+    const artifact = await pair.sourceService.exportTeamArtifact({ teamId: pair.teamId, sharedProjectId: pair.sharedProjectId,
+      sourceWorktreePath: source.root, revision: head, toDeviceId: destination.deviceFor(pair.teamId), deliveryId: 'delivery-tamper' });
+    const messages = source.messages.filter((item) => item.kind.startsWith('git.team-artifact.'));
+    const offer = messages.find((item) => item.kind === 'git.team-artifact.offer')!;
+    const tooLarge = { ...offer.payload, transferId: 'e'.repeat(64), bundleSizeBytes: 16 * 1024 * 1024 + 1, chunkCount: 129 };
+    await expect(pair.destinationService.onEnvelope(envelope({ teamId: pair.teamId, fromDeviceId: source.deviceFor(pair.teamId),
+      toDeviceId: destination.deviceFor(pair.teamId), kind: offer.kind, payload: tooLarge }))).rejects.toThrow(/Malformed team artifact offer/i);
+    await expect(pair.destinationService.onEnvelope(envelope({ teamId: pair.teamId, fromDeviceId: 'untrusted-device',
+      toDeviceId: destination.deviceFor(pair.teamId), kind: offer.kind, payload: offer.payload }))).rejects.toThrow(/active owner/i);
+
+    await pair.destinationService.onEnvelope(envelope({ teamId: pair.teamId, fromDeviceId: source.deviceFor(pair.teamId),
+      toDeviceId: destination.deviceFor(pair.teamId), kind: offer.kind, payload: offer.payload }));
+    const firstChunk = messages.find((item) => item.kind === 'git.team-artifact.chunk')!;
+    const altered = Buffer.from((firstChunk.payload as { data: string }).data, 'base64');
+    altered[0] = altered[0]! ^ 0xff;
+    await pair.destinationService.onEnvelope(envelope({ teamId: pair.teamId, fromDeviceId: source.deviceFor(pair.teamId),
+      toDeviceId: destination.deviceFor(pair.teamId), kind: firstChunk.kind,
+      payload: { ...(firstChunk.payload as object), data: altered.toString('base64') } }));
+    const rest = messages.filter((message) => message.kind === 'git.team-artifact.chunk'
+      && (message.payload as { index: number }).index !== (firstChunk.payload as { index: number }).index);
+    for (const message of rest.slice(0, -1)) await pair.destinationService.onEnvelope(envelope({ teamId: pair.teamId,
+      fromDeviceId: source.deviceFor(pair.teamId), toDeviceId: destination.deviceFor(pair.teamId), kind: message.kind, payload: message.payload }));
+    const last = rest.at(-1)!;
+    await expect(pair.destinationService.onEnvelope(envelope({ teamId: pair.teamId, fromDeviceId: source.deviceFor(pair.teamId),
+      toDeviceId: destination.deviceFor(pair.teamId), kind: last.kind, payload: last.payload }))).rejects.toThrow(/SHA-256/i);
+    await expect(pair.destinationService.importTeamArtifact({ teamId: pair.teamId, sharedProjectId: pair.sharedProjectId,
+      deliveryId: 'delivery-tamper', artifact, sourceDeviceId: source.deviceFor(pair.teamId) })).rejects.toThrow(/complete verified/i);
+  });
+
   it('requires both owners, transfers a bounded bundle to an isolated ref, and separately approves fast-forward merge', async () => {
     const { source, destination } = prepareClones();
     writeFileSync(path.join(source.root, 'feature.txt'), 'committed only\n');

@@ -13,7 +13,8 @@ import { RemoteExecutionService, type RemoteExecutionAccount, type Authenticated
 import { GitSyncService } from './git-sync.ts';
 import { RemoteCommandService } from './commands.ts';
 import { runGit, fingerprintRepository } from './git-common.ts';
-import { SendDistributedMessageSchema } from '../../../../packages/contracts/src/devices.ts';
+import { SendDistributedMessageSchema, TeamDeliveryPayloadSchema, TeamStructurePayloadSchema } from '../../../../packages/contracts/src/index.ts';
+import type { TeamArtifactAuthorization } from './git-common.ts';
 
 export interface DistributedWorkspaceOptions {
   store: Store;
@@ -112,6 +113,7 @@ export class DistributedWorkspaceService {
     const common = {
       store, account, transport: { snapshot: (teamId?: string) => this.transport.snapshot(teamId), send: transport.send }, workspace: { getProject: (id: string) => store.getProject(id) }, changed,
       authorizeTeam: (input: { teamId: string; peerDeviceId?: string }) => this.authorizeTeam(input),
+      authorizeTeamArtifact: (input: TeamArtifactAuthorization) => this.authorizeTeamArtifact(input),
     };
     this.git = new GitSyncService(common);
     this.commands = new RemoteCommandService(common);
@@ -156,6 +158,84 @@ export class DistributedWorkspaceService {
         throw new HttpError(403, 'Both device owners must retain verified links and active membership.');
       }
     });
+  }
+
+  /** Recheck the authenticated peer against the durable team delivery, not just the team-wide link. */
+  private async authorizeTeamArtifact(input: TeamArtifactAuthorization): Promise<void> {
+    await this.authorizeTeam({ teamId: input.teamId, peerDeviceId: input.peerDeviceId });
+    const localDeviceId = this.transport.snapshot(input.teamId).deviceId;
+    if (!localDeviceId) throw new HttpError(403, 'Register this device before transferring team artifacts.');
+
+    const hostDelivery = this.options.store.db.prepare(`SELECT d.owner_device_id,d.owner_account_id,d.agent_id,d.shared_project_id,d.team_id,
+        p.host_device_id,r.agent_id AS roster_agent_id,r.removed_at,c.state AS consent_state,
+        c.owner_account_id AS consent_owner_account_id,c.owner_device_id AS consent_owner_device_id
+      FROM mingle_team_host_deliveries d
+      JOIN mingle_team_host_projects p ON p.team_id=d.team_id AND p.shared_project_id=d.shared_project_id
+      LEFT JOIN mingle_team_host_roster r ON r.team_id=d.team_id AND r.shared_project_id=d.shared_project_id AND r.agent_id=d.agent_id
+      LEFT JOIN mingle_team_host_consents c ON c.team_id=d.team_id AND c.shared_project_id=d.shared_project_id AND c.agent_id=d.agent_id
+      WHERE d.delivery_id=? AND d.team_id=? AND d.shared_project_id=? LIMIT 1`)
+      .get(input.deliveryId, input.teamId, input.sharedProjectId) as Record<string, unknown> | undefined;
+    if (hostDelivery) {
+      if (hostDelivery.host_device_id !== localDeviceId || hostDelivery.owner_device_id !== input.peerDeviceId
+        || hostDelivery.roster_agent_id !== hostDelivery.agent_id || hostDelivery.removed_at !== null
+        || hostDelivery.consent_state !== 'granted' || hostDelivery.consent_owner_account_id !== hostDelivery.owner_account_id
+        || hostDelivery.consent_owner_device_id !== input.peerDeviceId) {
+        throw new HttpError(403, 'The artifact sender is not the active owner device for this team delivery.');
+      }
+      return;
+    }
+
+    const deviceDelivery = this.options.store.db.prepare(`SELECT shared_project_id,agent_id,request_json FROM mingle_team_device_deliveries
+      WHERE delivery_id=? AND shared_project_id=? LIMIT 1`).get(input.deliveryId, input.sharedProjectId) as
+      { shared_project_id: string; agent_id: string; request_json: string } | undefined;
+    if (!deviceDelivery && input.direction === 'import') {
+      // Artifact envelopes are queued immediately before their teamgroup.delivery. At this point the
+      // durable owner-side delivery row does not exist yet, so accept only from the current host and
+      // only for a local, currently consented roster. importTeamArtifact rechecks the exact delivery
+      // and integrationDeviceId after the delivery row has been persisted, before exposing the commit.
+      const earlyStructure = await this.deviceStructureForArtifact(input.teamId, input.sharedProjectId);
+      const localAgents = earlyStructure?.members.filter((member) => member.deviceId === localDeviceId && member.consent === 'granted') ?? [];
+      const consent = this.options.store.db.prepare(`SELECT consent_json FROM mingle_team_device_consents WHERE shared_project_id=? AND device_id=? ORDER BY updated_at DESC LIMIT 1`)
+        .get(input.sharedProjectId, localDeviceId) as { consent_json: string } | undefined;
+      let currentlyConsented = false;
+      try {
+        const parsed = consent ? JSON.parse(consent.consent_json) as { state?: unknown; agentIds?: unknown } : null;
+        const agentIds = parsed && Array.isArray(parsed.agentIds) ? parsed.agentIds : [];
+        currentlyConsented = parsed?.state === 'granted' && localAgents.some((agent) => agentIds.includes(agent.agentId));
+      } catch { currentlyConsented = false; }
+      if (earlyStructure?.host?.deviceId !== input.peerDeviceId || !localAgents.length || !currentlyConsented) {
+        throw new HttpError(403, 'The artifact sender is not the active integration device for a consented local team agent.');
+      }
+      return;
+    }
+    if (!deviceDelivery) throw new HttpError(403, 'No active team delivery authorizes this artifact transfer.');
+    let rawRequest: unknown;
+    try { rawRequest = JSON.parse(deviceDelivery.request_json) as unknown; } catch { throw new HttpError(403, 'The saved team delivery authorization is invalid.'); }
+    const delivery = TeamDeliveryPayloadSchema.safeParse(rawRequest);
+    if (!delivery.success || delivery.data.sharedProjectId !== input.sharedProjectId || delivery.data.deliveryId !== input.deliveryId
+      || delivery.data.agentId !== deviceDelivery.agent_id || delivery.data.integrationDeviceId !== input.peerDeviceId) {
+      throw new HttpError(403, 'The artifact peer is not the integration device recorded for this delivery.');
+    }
+    const structure = await this.deviceStructureForArtifact(input.teamId, input.sharedProjectId);
+    if (!structure || structure.host?.deviceId !== input.peerDeviceId
+      || !structure.members.some((member) => member.agentId === deviceDelivery.agent_id && member.deviceId === localDeviceId && member.consent === 'granted')) {
+      throw new HttpError(403, 'The team delivery owner or integration device is no longer active.');
+    }
+    const consentRows = this.options.store.db.prepare(`SELECT consent_json FROM mingle_team_device_consents WHERE shared_project_id=? ORDER BY updated_at DESC`)
+      .all(input.sharedProjectId) as Array<{ consent_json: string }>;
+    const hasConsent = consentRows.some((row) => {
+      try {
+        const consent = JSON.parse(row.consent_json) as { deviceId?: unknown; state?: unknown; agentIds?: unknown };
+        return consent.deviceId === localDeviceId && consent.state === 'granted' && Array.isArray(consent.agentIds) && consent.agentIds.includes(deviceDelivery.agent_id);
+      } catch { return false; }
+    });
+    if (!hasConsent) throw new HttpError(403, 'The owner has not granted current consent for this team artifact delivery.');
+  }
+
+  private async deviceStructureForArtifact(teamId: string, sharedProjectId: string): Promise<ReturnType<typeof TeamStructurePayloadSchema.parse> | null> {
+    const row = this.options.store.db.prepare(`SELECT structure_json FROM mingle_team_device_structures WHERE shared_project_id=? AND team_id=?`)
+      .get(sharedProjectId, teamId) as { structure_json: string } | undefined;
+    try { return row ? TeamStructurePayloadSchema.parse(JSON.parse(row.structure_json)) : null; } catch { return null; }
   }
 
   private async quota(session: Session): Promise<QuotaObservation> {
@@ -229,6 +309,14 @@ export class DistributedWorkspaceService {
     const binding = request && snapshot.bindings.find((binding) => binding.teamId === request.teamId && binding.sharedProjectId === request.sharedProjectId);
     if (!binding || input.decision === 'denied') return this.git.decide(input);
     return this.options.repository.withExternalMutation(binding.localProjectId, () => this.git.decide(input));
+  }
+
+  /** Team bundle imports mutate only isolated refs but still share the project's repository-operation lease. */
+  async importTeamArtifact(input: Parameters<GitSyncService['importTeamArtifact']>[0]) {
+    const snapshot = await this.git.snapshot(input.teamId);
+    const binding = snapshot.bindings.find((candidate) => candidate.teamId === input.teamId && candidate.sharedProjectId === input.sharedProjectId);
+    if (!binding) throw new HttpError(409, 'Bind this shared project before importing a team artifact.');
+    return this.options.repository.withExternalRefMutation(binding.localProjectId, () => this.git.importTeamArtifact(input));
   }
 
   /** A provider tool approval for remote work belongs to the same destination owner as the run. */

@@ -9,7 +9,7 @@ import type { DistributedServiceOptions, DeviceTransport } from './git-common.ts
 export interface SentEnvelope { teamId: string; toDeviceId: string; kind: string; payload: any; idempotencyKey: string }
 export interface OwnerFixture {
   root: string; store: Store; db: DatabaseSync; projectId: string; userId: string; deviceFor: (teamId: string) => string;
-  messages: SentEnvelope[]; options: DistributedServiceOptions; revokedTeams: Set<string>; revokedPeers: Set<string>;
+  messages: SentEnvelope[]; options: DistributedServiceOptions; revokedTeams: Set<string>; revokedPeers: Set<string>; trustedDevices: Set<string>;
   close(): void;
 }
 
@@ -20,6 +20,7 @@ export function makeOwner(root: string, userId: string, devicePrefix: string): O
   const messages: SentEnvelope[] = [];
   const revokedTeams = new Set<string>();
   const revokedPeers = new Set<string>();
+  const trustedDevices = new Set<string>();
   const deviceFor = (teamId: string) => `${devicePrefix}-${teamId}`;
   const transport: DeviceTransport = {
     snapshot(teamId) { return { deviceId: teamId ? deviceFor(teamId) : `${devicePrefix}-unscoped` }; },
@@ -34,8 +35,14 @@ export function makeOwner(root: string, userId: string, devicePrefix: string): O
       if (revokedTeams.has(teamId)) throw new Error('team membership revoked');
       if (peerDeviceId && revokedPeers.has(`${teamId}:${peerDeviceId}`)) throw new Error('mutual device link revoked');
     },
+    authorizeTeamArtifact: async ({ teamId, peerDeviceId }) => {
+      if (revokedTeams.has(teamId)) throw new Error('team membership revoked');
+      if (revokedPeers.has(`${teamId}:${peerDeviceId}`)) throw new Error('mutual device link revoked');
+      if (!trustedDevices.has(peerDeviceId)) throw new Error('peer is not the active owner of this team delivery');
+    },
   };
   return { root, store, db, projectId: project.id, userId, deviceFor, messages, options, revokedTeams, revokedPeers,
+    trustedDevices,
     close() { try { store.close(); } catch { /* test cleanup */ } rmSync(root, { recursive: true, force: true }); } };
 }
 

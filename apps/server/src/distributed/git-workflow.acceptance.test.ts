@@ -390,6 +390,21 @@ describe('distributed Git workflow acceptance (disposable local repositories)', 
     await repository.close();
   });
 
+  it('serializes isolated-ref imports without stopping existing runs and blocks new runs during the ref mutation', async () => {
+    const { parent, destination } = makePair();
+    const runtime = { isActive: () => true };
+    destination.store.insertSession({ projectId: destination.projectId, name: 'Active provider run', provider: 'codex', model: 'codex-test-model',
+      effort: 'high', policy: 'supervised', isolated: false, worktreePath: destination.root, branch: 'main' });
+    const workspace = new WorkspaceService(destination.store, parent, runtime as never);
+    const repository = new RepositoryService({ store: destination.store, workspace, runtime, log: () => undefined });
+    await expect(repository.withExternalMutation(destination.projectId, async () => undefined)).rejects.toThrow(/running/i);
+    await repository.withExternalRefMutation(destination.projectId, async () => {
+      const session = destination.store.listSessions(destination.projectId)[0]!;
+      expect(() => repository.assertSessionAvailable(session)).toThrow(/repository change/i);
+    });
+    await repository.close();
+  });
+
   it('executes only typed read-only Git in a hostile-but-valid directory and rejects argv, Windows paths, symlinks, and revoked peers', async () => {
     const hostileDirectory = '--help;touch remote-command-pwned\n\t';
     const { source, destination } = makePair({

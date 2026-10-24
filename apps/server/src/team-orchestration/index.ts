@@ -45,7 +45,10 @@ export function createTeamOrchestration(options: TeamOrchestrationOptions): {
     });
   }
   const host = new TeamOrchestrationHost({
-    store: options.store, account: options.account, transport: options.transport,
+    store: options.store, git: {
+      exportTeamArtifact: (input) => options.distributed.git.exportTeamArtifact(input),
+      importTeamArtifact: (input) => options.distributed.importTeamArtifact(input),
+    }, account: options.account, transport: options.transport,
     authorizeTeam: (input) => options.distributed.authorizeTeam(input), collaboration: options.collaboration,
     groups: options.groups, teamMcp: options.teamMcp, recovery: options.recovery,
     deviceSide, changed: options.changed, now: options.now, deliveryTimeoutMs: options.deliveryTimeoutMs,
