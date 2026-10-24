@@ -5,6 +5,7 @@ import type { TeamChatAgent, TeamChatMessage, TeamChatSnapshot } from '@mingle/c
 import { useMingle } from '../../store/store';
 import { api, errorMessage } from '../../lib/api';
 import { ProviderMark } from '../ui';
+import { TeamConsentBanner } from '../team-orchestration/settings/TeamConsentBanner';
 import { TeamPresenceBubble } from '../team-orchestration/activity/TeamPresenceBubble';
 import './team-chat.css';
 
@@ -188,6 +189,7 @@ export function TeamChatPanel({ projectId, onClose }: { projectId: string; onClo
 
   const dialog = <div className="team-chat__veil">
     <section className="team-chat" role="dialog" aria-modal="true" aria-labelledby="team-chat-title">
+      <TeamConsentBanner projectId={projectId} />
       <TeamPresenceBubble projectId={projectId} />
       <header className="team-chat__topbar">
         <div className="team-chat__title-icon"><MessageCircle size={18} /></div>

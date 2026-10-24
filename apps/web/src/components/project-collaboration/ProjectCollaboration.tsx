@@ -7,6 +7,9 @@ import { copyText } from '../../lib/clipboard';
 import { createIdempotencyKey, distributedApi } from '../distributed/api';
 import { Badge, Button, InlineError, Modal, ProviderMark, StatusDot } from '../ui';
 import { projectCollaborationApi, CollaborationApiError, recordText, type CollaborationRecord, type InvitationPreview, type ProjectCollaborationSnapshot } from './api';
+import { teamOrchestrationApi } from '../team-orchestration/settings/api';
+import { TeamConsentSheet } from '../team-orchestration/settings/TeamConsentSheet';
+import { TeamOrchestrationSettings } from '../team-orchestration/settings/TeamOrchestrationSettings';
 import '../../styles/project-collaboration.css';
 
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -203,6 +206,7 @@ export function ProjectTeammatesDialog({ project, onClose }: { project: Project;
       {loading && !snapshot ? <p className="pc-loading" role="status">Loading project roster…</p> : null}
       {snapshot?.project ? <p className="pc-project-ref"><Users size={13} /> {snapshot.project.name} <span>· shared project connected</span></p> : null}
       {!loading && snapshot && !snapshot.project ? <p className="pc-inline-note" role="status">This project’s collaboration workspace is being prepared. Refresh in a moment to see its roster.</p> : null}
+      {snapshot?.project ? <TeamOrchestrationSettings projectId={project.id} /> : null}
       <div className="pc-agent-list" role="list" aria-label="Local and teammate agents">
         {localAgents.map((session) => <div className="pc-agent-row" role="listitem" key={`local-${session.id}`}>
           <input type="checkbox" aria-label={`Share ${session.name} with this project`} checked={selectedLocalIds.includes(session.id)} disabled={!snapshot?.project || !canManageRoster || session.policy !== 'supervised'} title={session.policy !== 'supervised' ? 'Only Supervised local agents can be shared.' : undefined} onChange={(event) => setLocalSelection((current) => {
@@ -279,7 +283,7 @@ function classifyPreviewError(cause: unknown, account: AccountState | null): Inv
   return 'error';
 }
 
-type JoinStep = 'invite' | 'workspace' | 'agents' | 'success';
+type JoinStep = 'invite' | 'workspace' | 'agents' | 'consent' | 'success';
 type JoinSource = 'clone' | 'project' | 'folder';
 type JoinAgentDraft = { id: number; provider: Provider | ''; model: string; effort: string };
 
@@ -320,6 +324,7 @@ export function ProjectInviteJoinDialog({ token, onClose, onOpenAccountSettings,
   const [workspaceBusy, setWorkspaceBusy] = useState(false);
   const [agentDrafts, setAgentDrafts] = useState<JoinAgentDraft[]>([]);
   const [joining, setJoining] = useState(false);
+  const [consentSkipped, setConsentSkipped] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [joinResult, setJoinResult] = useState<ProjectInvitationJoinResult | null>(null);
   const [previewRetry, setPreviewRetry] = useState(0);
@@ -521,6 +526,7 @@ export function ProjectInviteJoinDialog({ token, onClose, onOpenAccountSettings,
     if (!canJoin || !preview || !selectedProject || joining) return;
     setJoining(true);
     setError(null);
+    setConsentSkipped(false);
     try {
       const result = await projectCollaborationApi.join({
         token,
@@ -531,8 +537,20 @@ export function ProjectInviteJoinDialog({ token, onClose, onOpenAccountSettings,
       if (result.projectId) useMingle.getState().selectProject(result.projectId);
       const firstSessionId = result.sessionIds?.[0] ?? result.sessionId;
       if (firstSessionId) useMingle.getState().selectSession(firstSessionId);
-      setJoinResult({ ...result, sessionIds: result.sessionIds?.length ? result.sessionIds : [result.sessionId] });
-      setStep('success');
+      const normalizedResult = { ...result, sessionIds: result.sessionIds?.length ? result.sessionIds : [result.sessionId] };
+      setJoinResult(normalizedResult);
+      let teamEnabled = false;
+      const projectId = result.projectId || selectedProject.id;
+      const deadline = Date.now() + 20_000;
+      do {
+        try {
+          const structure = await teamOrchestrationApi.structure(projectId);
+          if (structure.enabled && structure.settings) { teamEnabled = true; break; }
+        } catch { /* team structure is broadcast asynchronously; a normal join remains successful if it is not ready */ }
+        if (Date.now() >= deadline) break;
+        await new Promise((resolve) => window.setTimeout(resolve, 1500));
+      } while (Date.now() < deadline);
+      setStep(teamEnabled ? 'consent' : 'success');
     } catch (cause) {
       const state = classifyPreviewError(cause, account);
       if (state === 'unavailable' || state === 'expired' || state === 'revoked' || state === 'wrong-account') {
@@ -547,19 +565,19 @@ export function ProjectInviteJoinDialog({ token, onClose, onOpenAccountSettings,
 
   const steps: { id: JoinStep; label: string }[] = [
     { id: 'invite', label: 'Invitation' }, { id: 'workspace', label: 'Code location' },
-    { id: 'agents', label: 'Your agents' }, { id: 'success', label: 'Ready' },
+    { id: 'agents', label: 'Your agents' }, { id: 'consent', label: 'Team consent' }, { id: 'success', label: 'Ready' },
   ];
   const activeStepIndex = Math.max(0, steps.findIndex((item) => item.id === step));
   const canContinueInvite = inviteState === 'ready' && Boolean(preview && signedIn && emailMatches);
   const canContinueWorkspace = Boolean(selectedProject && inviteState === 'ready' && emailMatches && !workspaceBusy);
   const title = step === 'invite' && preview && inviteState === 'ready' ? `Join ${preview.projectName}?`
     : step === 'workspace' ? 'Where should we put the code?'
-      : step === 'agents' ? 'Add your agents' : step === 'success' ? 'Project joined' : 'Join project';
+      : step === 'agents' ? 'Add your agents' : step === 'consent' ? 'Share your agents with the team' : step === 'success' ? 'Project joined' : 'Join project';
 
-  return <Modal title={title} description={step === 'success' ? 'Your agents are ready in this project.' : 'Review the invitation, choose a checkout, then configure your local agents.'} onClose={onClose} width={700}>
+  return <Modal title={title} description={step === 'success' ? 'Your agents are ready in this project.' : step === 'consent' ? 'Choose which agents teammates may send work to, and review the consent terms.' : 'Review the invitation, choose a checkout, then configure your local agents.'} onClose={onClose} width={700}>
     <div className="pc-join" aria-busy={inviteState === 'loading' || joining || workspaceBusy}>
       <ol className="pc-join-steps" aria-label="Join project steps">
-        {steps.slice(0, 3).map((item, index) => <li key={item.id} className={`${index === activeStepIndex ? 'is-current' : ''}${index < activeStepIndex ? ' is-complete' : ''}`} aria-current={index === activeStepIndex ? 'step' : undefined}>
+        {steps.slice(0, step === 'consent' ? 4 : 3).map((item, index) => <li key={item.id} className={`${index === activeStepIndex ? 'is-current' : ''}${index < activeStepIndex ? ' is-complete' : ''}`} aria-current={index === activeStepIndex ? 'step' : undefined}>
           <span>{index < activeStepIndex ? <Check size={13} /> : index + 1}</span>{item.label}
         </li>)}
       </ol>
@@ -678,13 +696,22 @@ export function ProjectInviteJoinDialog({ token, onClose, onOpenAccountSettings,
           setAgentDrafts((current) => [...current, { id: nextAgentId.current++, provider: provider.id as Provider, model: model.id, effort: preferredEffort(provider, model) }]);
         }}><Plus size={14} />Add another agent</Button> : null}
         {error ? <InlineError>{error}</InlineError> : null}
+        {joinResult && joining ? <p className="pc-loading" role="status">Project joined. Waiting briefly for the team settings to arrive…</p> : null}
         <div className="pc-join-actions"><Button type="button" variant="ghost" disabled={joining} onClick={() => { setError(null); setStep('workspace'); }}><ArrowLeft size={14} />Back</Button>
           <Button type="button" variant="primary" disabled={!canJoin} busy={joining} onClick={() => void joinProject()}>Join project</Button>
         </div>
         <p className="pc-no-run-note">The leader can see these Supervised agents in the shared project roster. Provider credentials stay on this device.</p>
       </section> : null}
 
-      {step === 'success' && joinResult ? <div className="pc-state-card pc-state-card--success"><Check size={19} /><div><h3>You’re in</h3><p>{joinResult.sessionIds.length} idle agent{joinResult.sessionIds.length === 1 ? '' : 's'} are ready. No model run has started. Your project and first session are selected in the workspace.</p><Button variant="primary" size="sm" onClick={() => { onJoined?.(joinResult); onClose(); }}>Open team chat</Button></div></div> : null}
+      {step === 'consent' && joinResult ? <TeamConsentSheet
+        projectId={joinResult.projectId || selectedProjectId}
+        initialSelectedSessionIds={joinResult.sessionIds}
+        presentation="inline"
+        onClose={() => { setConsentSkipped(true); setStep('success'); }}
+        onAccepted={() => { setConsentSkipped(false); setStep('success'); }}
+      /> : null}
+
+      {step === 'success' && joinResult ? <div className="pc-state-card pc-state-card--success"><Check size={19} /><div><h3>You’re in</h3><p>{consentSkipped ? 'Your agents remain private until you choose to share them later.' : `${joinResult.sessionIds.length} idle agent${joinResult.sessionIds.length === 1 ? '' : 's'} are ready.`} No model run has started. Your project and first session are selected in the workspace.</p><Button variant="primary" size="sm" onClick={() => { onJoined?.(joinResult); onClose(); }}>Open team chat</Button></div></div> : null}
     </div>
   </Modal>;
 }
