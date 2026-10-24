@@ -79,6 +79,22 @@ export class TeamMcpBridge {
     for (const [key, binding] of this.bindings) if (binding.runId === runId) { binding.revoked = true; this.bindings.delete(key); }
   }
 
+  /** Executes an owner-device MCP request against the same live host binding and group guards. */
+  async callRemote(runId: string, sessionId: string, tool: string, args: Record<string, unknown>): Promise<unknown> {
+    const binding = [...this.bindings.values()].find((candidate) => candidate.runId === runId && candidate.sessionId === sessionId);
+    if (!binding || !this.active(binding)) throw new Error('This team tool delivery is no longer active.');
+    const ctx = binding.context;
+    switch (tool) {
+      case 'team_members': this.ensure(binding, binding.signal); return this.groups.members(ctx);
+      case 'team_inbox': this.ensure(binding, binding.signal); return this.groups.inbox(ctx);
+      case 'team_assign': this.ensure(binding, binding.signal); return this.groups.assign(ctx, TeamAssignSchema.parse(args));
+      case 'team_message': this.ensure(binding, binding.signal); return this.groups.message(ctx, TeamMessageSchema.parse(args));
+      case 'team_artifact': this.ensure(binding, binding.signal); return this.groups.artifact(ctx, TeamArtifactSchema.parse(args));
+      case 'team_status': this.ensure(binding, binding.signal); return this.groups.status(ctx, TeamStatusSchema.parse(args));
+      default: throw new Error('Unsupported team tool.');
+    }
+  }
+
   close(): void {
     for (const binding of this.bindings.values()) binding.revoked = true;
     this.bindings.clear();

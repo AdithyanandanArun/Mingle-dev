@@ -40,11 +40,13 @@ import type { ProjectCollaborationService } from './project-collaboration/servic
 import { registerProjectCollaborationRoutes } from './project-collaboration/routes.ts';
 import type { TeamChatService } from './team-chat/service.ts';
 import { registerTeamChatRoutes } from './team-chat/routes.ts';
+import type { TeamOrchestrationSubsystem } from './team-orchestration/index.ts';
 
 export interface Services {
   distributed: DistributedWorkspaceService;
   projectCollaboration: ProjectCollaborationService;
   teamChat: TeamChatService;
+  teamOrchestration: TeamOrchestrationSubsystem;
   account: AccountService;
   setupSignal: AbortSignal;
   config: ServerConfig; store: Store; hub: Hub; workspace: WorkspaceService; runtime: SessionRuntime; tasks: TaskService; handoffs: HandoffService;
@@ -112,6 +114,7 @@ export function buildRouter(s: Services) {
   registerDistributedRoutes(add, s.distributed);
   registerProjectCollaborationRoutes(add, s.projectCollaboration);
   registerTeamChatRoutes(add, s.teamChat);
+  s.teamOrchestration.routes(add);
   const touch = () => s.store.touch();
   const param = (ctx: Ctx, key: string) => {
     const value = ctx.params[key]!;

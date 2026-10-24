@@ -14,6 +14,7 @@ import type { BrowserMcpBridge } from './browser-mcp.ts';
 import type { AttachmentService } from './attachments/service.ts';
 import type { NativeInvocation, RunAttachment } from '@mingle/contracts';
 import type { RecoveryService } from './recovery/service.ts';
+import type { TeamProxyRuntimeService } from './team-orchestration/types.ts';
 import { providerFailure } from './providers/failure.ts';
 import type { DispatchAwareOptions, DispatchState } from './providers/common.ts';
 import { buildMessageContext } from './message-context.ts';
@@ -117,6 +118,7 @@ export class SessionRuntime {
   private readonly questionTimers = new Map<string, NodeJS.Timeout>();
   private groups?: GroupService;
   private teamMcp?: TeamMcpBridge;
+  private teamProxy?: TeamProxyRuntimeService;
   private attachmentService?: AttachmentService;
   private readonly abortGraceMs: number;
   private readonly flushIntervalMs: number;
@@ -137,13 +139,14 @@ export class SessionRuntime {
     this.groups = groups;
     this.teamMcp = teamMcp;
   }
+  setTeamProxyService(service: TeamProxyRuntimeService): void { this.teamProxy = service; }
   setAttachments(service: AttachmentService): void { this.attachmentService = service; }
 
   activeCount(): number {
-    return this.active.size + this.compactions.size;
+    return this.active.size + this.compactions.size + (this.teamProxy?.activeCount() ?? 0);
   }
   isActive(sessionId: string): boolean {
-    return this.active.has(sessionId) || this.compactions.has(sessionId);
+    return this.active.has(sessionId) || this.compactions.has(sessionId) || Boolean(this.teamProxy?.isActive(sessionId));
   }
   /** A cleanup lock can outlive provider execution; it must not keep tool authority alive. */
   isRunLive(sessionId: string, runId: string): boolean {
@@ -169,10 +172,39 @@ export class SessionRuntime {
     if (this.groups?.forSession(sessionId) && !options.groupDeliveryId) throw conflict('Start grouped work through its recorded group delivery.');
     if (this.isActive(sessionId) || session.status === 'running' || session.status === 'waiting') throw conflict('Session already has active work or provider cleanup is still in progress');
     if (!existsSync(session.worktreePath) || !statSync(session.worktreePath).isDirectory()) throw conflict('The session worktree no longer exists on disk');
-    this.validateSession?.(session);
+    const proxy = Boolean(this.teamProxy?.isProxySession(sessionId));
+    if (proxy && options.intent === 'plan') throw badRequest('Remote team agents cannot generate a native read-only plan until the owner runtime advertises that capability.');
+    if (proxy && (options.invocation || options.skills?.length || options.attachmentIds?.length)) {
+      throw badRequest('Remote team deliveries do not currently carry native commands, skills or host-local attachment IDs.');
+    }
+    if (!proxy) this.validateSession?.(session);
 
     const handoffs = this.store.unconsumedHandoffs(sessionId);
     const runId = newId('run');
+    if (proxy) {
+      const prompt = this.composePrompt(handoffs, content);
+      const groupContext = this.groups?.contextForRun(sessionId, runId);
+      const proxyContent = [groupContext?.instructions, options.context, prompt].filter(Boolean).join('\n\n');
+      this.store.tx(() => {
+        const userMessage = this.store.insertMessage({ sessionId, role: 'user', content: options.userMessage?.content ?? content, kind: options.userMessage?.kind ?? null, runId, contextRefs: options.contextRefs });
+        if (options.attachmentIds?.length) throw conflict('Proxy sessions do not accept host-local attachment IDs.');
+        this.store.insertRun({ id: runId, sessionId, userMessageId: userMessage.id, provider: session.provider, model: session.model, startedAt: nowIso() });
+        this.store.updateSession(sessionId, { status: 'running', error: null });
+        if (options.taskId) {
+          const task = this.store.getTask(options.taskId);
+          if (task) this.tasks.markRunning(task);
+        }
+        this.store.recordEvent({ projectId: session.projectId, sessionId, type: 'session.run.started', summary: `Remote team delivery started: ${session.name}`, payload: { runId, provider: session.provider, model: session.model, taskId: options.taskId ?? null, proxy: true } });
+      });
+      try {
+        this.teamProxy!.start({ session, runId, content: proxyContent, options, context: groupContext, consumedHandoffs: handoffs.map((handoff) => handoff.id) });
+      } catch (error) {
+        this.store.finishRun(runId, 'failed', 0);
+        this.store.updateSession(sessionId, { status: 'error', error: error instanceof Error ? error.message.slice(0, 1000) : 'Remote team delivery could not start.' });
+        throw error;
+      }
+      return runId;
+    }
     const invocation = options.invocation;
     const prompt = invocation ? content : this.composePrompt(handoffs, content);
     const run: ActiveRun = {
@@ -763,6 +795,8 @@ export class SessionRuntime {
     const approval = this.store.getApproval(approvalId);
     if (!approval) throw notFound('Approval not found');
     if (approval.status !== 'pending') throw conflict(`Approval was already ${approval.status}`);
+    const proxyApproval = this.teamProxy?.decideApproval(approvalId, decision);
+    if (proxyApproval) return proxyApproval;
     const run = this.active.get(approval.sessionId);
     const resolver = run?.approvals.get(approvalId);
     const session = this.store.getSession(approval.sessionId, true);
@@ -801,6 +835,7 @@ export class SessionRuntime {
 
   /** Cancels active provider work, including manual native compaction. Idempotent. */
   interrupt(sessionId: string): boolean {
+    if (this.teamProxy?.interrupt(sessionId)) return true;
     const run = this.active.get(sessionId);
     if (run && !run.closed) {
       this.cancelRunQuestions(run, 'The provider run was interrupted.');

@@ -12,6 +12,7 @@ import type { DistributedWorkspaceService } from '../distributed/service.ts';
 import type { SessionRuntime } from '../runtime.ts';
 import type { Store } from '../store.ts';
 import type { ProjectCollaborationService } from '../project-collaboration/service.ts';
+import type { TeamChatOrchestrationMessage } from '../team-orchestration/types.ts';
 import { HttpError, notFound, nowIso, redactSecrets } from '../util.ts';
 import { canonicalJson, fingerprintForPublicKeys, verifyDevicePayload } from '../distributed/crypto.ts';
 
@@ -80,6 +81,7 @@ export class TeamChatService {
   private readonly pendingSyncRequests = new Map<string, PendingSyncRequest>();
   private readonly syncRequestRates = new Map<string, number>();
   private readonly syncResponseRates = new Map<string, number[]>();
+  private orchestration?: { routeTeamChatMessage(projectId: string, message: TeamChatOrchestrationMessage): Promise<'routed' | 'handled' | false> };
 
   constructor(private readonly options: {
     store: Store; account: AccountService; distributed: DistributedWorkspaceService; runtime: SessionRuntime;
@@ -90,6 +92,10 @@ export class TeamChatService {
   }
 
   private readonly now: () => number;
+
+  setOrchestration(service: { routeTeamChatMessage(projectId: string, message: TeamChatOrchestrationMessage): Promise<'routed' | 'handled' | false> }): void {
+    this.orchestration = service;
+  }
 
   private track<T>(work: Promise<T>): Promise<T> {
     this.pending.add(work);
@@ -388,7 +394,13 @@ export class TeamChatService {
     this.options.store.touch();
     const stored = this.options.store.db.prepare('SELECT * FROM team_chat_messages WHERE id=?').get(message.id) as DbRow;
     const finalMessage = { ...this.rowMessage(stored), deliveryState };
-    if (input.mentions.length) {
+    const orchestrationResult = this.orchestration && author.kind === 'human'
+      ? await this.orchestration.routeTeamChatMessage(projectId, {
+        id: finalMessage.id, teamId: finalMessage.teamId, sharedProjectId: finalMessage.sharedProjectId,
+        body: finalMessage.body, mentions: finalMessage.mentions, author,
+      }) : false;
+    if (orchestrationResult === 'routed') await this.updateAndFanOut({ ...finalMessage, runState: 'running' });
+    else if (!orchestrationResult && input.mentions.length) {
       const mentioned = input.mentions.map((mention) => byId.get(mention)!);
       const task = this.track(this.runMentions(finalMessage, mentioned, shared.members));
       void task.catch(() => undefined);
@@ -403,6 +415,43 @@ export class TeamChatService {
       await this.sendToPeers(message.teamId, message.sharedProjectId, 'teamchat.message',
         TeamChatMessageSchema.parse({ ...persisted, deliveryState: 'sent' }), `chat:${message.id}:state:${message.runState ?? 'none'}`);
     } catch { /* Durable local state stays visible; a later history sync repairs remote state. */ }
+  }
+
+  async setOrchestratedRunState(input: { messageId: string; state: 'running' | 'completed' | 'failed' }): Promise<void> {
+    const row = this.options.store.db.prepare('SELECT * FROM team_chat_messages WHERE id=?').get(input.messageId) as DbRow | undefined;
+    if (!row) return;
+    await this.updateAndFanOut({ ...this.rowMessage(row), runState: input.state });
+  }
+
+  async postOrchestratedAgentReply(input: { projectId: string; sourceMessageId: string; agentId: string; content: string }): Promise<void> {
+    const { shared } = await this.binding(input.projectId);
+    const project = shared.project!;
+    const [accountId, deviceId] = await Promise.all([
+      this.options.account.withAuthenticatedClient(async (_client, user) => user.id),
+      Promise.resolve(this.options.distributed.transport.snapshot(project.teamId).deviceId),
+    ]);
+    const agent = this.teamAgents(shared.agents, accountId, deviceId).find((candidate) => candidate.id === input.agentId && candidate.local);
+    if (!agent) throw new HttpError(403, 'The local agent is no longer published by this team device.');
+    const unsigned = TeamChatMessageSchema.parse({
+      id: randomUUID(), teamId: project.teamId, sharedProjectId: project.sharedProjectId,
+      author: { kind: 'agent', agentId: agent.id, agentName: agent.name, ownerAccountId: accountId, provider: agent.provider, model: agent.model },
+      body: redactSecrets(input.content).slice(0, 20_000), mentions: [], replyTo: input.sourceMessageId,
+      createdAt: nowIso(), deliveryState: 'sending', runState: 'completed',
+    });
+    const signed = await this.signMessage(unsigned);
+    this.persist(signed, 'sending');
+    await this.deliverAgentMessage(signed);
+  }
+
+  async postOrchestrationStatus(input: { projectId: string; content: string }): Promise<void> {
+    const { shared } = await this.binding(input.projectId);
+    const project = shared.project!;
+    const author = await this.localAuthor(shared.members);
+    const unsigned = TeamChatMessageSchema.parse({ id: randomUUID(), teamId: project.teamId, sharedProjectId: project.sharedProjectId,
+      author, body: redactSecrets(input.content).slice(0, 20_000), mentions: [], createdAt: nowIso(), deliveryState: 'sending', runState: null });
+    const signed = await this.signMessage(unsigned);
+    this.persist(signed, 'sending');
+    await this.deliverAgentMessage(signed);
   }
 
   private localContext(teamId: string, sharedProjectId: string, excludeId: string): string {
@@ -668,6 +717,13 @@ export class TeamChatService {
       if (shared.project?.teamId !== envelope.teamId || shared.project.sharedProjectId !== message.sharedProjectId) throw new HttpError(403, 'The message is outside this shared project binding.');
       const [verified] = await this.verifyMessageProvenance([message], shared, envelope, senderOwnerId, true);
       this.persist({ ...verified!, deliveryState: 'sent' }, 'sent');
+      if (verified && this.orchestration) {
+        const routing = await this.orchestration.routeTeamChatMessage(localProjectId, {
+          id: verified.id, teamId: verified.teamId, sharedProjectId: verified.sharedProjectId,
+          body: verified.body, mentions: verified.mentions, author: verified.author,
+        });
+        if (routing === 'routed') await this.setOrchestratedRunState({ messageId: verified.id, state: 'running' });
+      }
       return;
     }
     if (envelope.kind === 'teamchat.sync.request') {

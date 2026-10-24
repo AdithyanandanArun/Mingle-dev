@@ -157,10 +157,11 @@ export class GroupRepo {
     return row ? mapMember(row) : undefined;
   }
   handleTaken(groupId: string, handle: string): boolean { return Boolean(this.get('SELECT 1 AS x FROM group_members WHERE group_id = ? AND handle = ?', groupId, handle)); }
-  updateMember(id: string, patch: { role?: GroupMember['role']; held?: boolean; lastReadSeq?: number; removedAt?: string }): void {
+  updateMember(id: string, patch: { role?: GroupMember['role']; handle?: string; held?: boolean; lastReadSeq?: number; removedAt?: string | null }): void {
     const sets: string[] = [];
     const params: SQLInputValue[] = [];
     if (patch.role !== undefined) { sets.push('role = ?'); params.push(patch.role); }
+    if (patch.handle !== undefined) { sets.push('handle = ?'); params.push(patch.handle); }
     if (patch.held !== undefined) { sets.push('held = ?'); params.push(patch.held ? 1 : 0); }
     if (patch.lastReadSeq !== undefined) { sets.push('last_read_seq = ?'); params.push(patch.lastReadSeq); }
     if (patch.removedAt !== undefined) { sets.push('removed_at = ?'); params.push(patch.removedAt); }
@@ -246,6 +247,13 @@ export class GroupRepo {
   updateRequest(id: string, patch: { status?: GroupRequest['status']; turnsDelta?: number }): void {
     this.run('UPDATE group_requests SET status = COALESCE(?, status), turns_used = MAX(0, turns_used + ?), updated_at = ? WHERE id = ?', patch.status ?? null, patch.turnsDelta ?? 0, nowIso(), id);
   }
+  updateActiveRequestPlanners(groupId: string, memberId: string): void {
+    this.run("UPDATE group_requests SET planner_member_id = ?, updated_at = ? WHERE group_id = ? AND status = 'active'", memberId, nowIso(), groupId);
+  }
+  retargetQueuedRequests(groupId: string, fromMemberId: string, toMemberId: string): void {
+    this.run(`UPDATE group_deliveries SET member_id = ?, updated_at = ? WHERE group_id = ? AND member_id = ? AND status = 'queued'
+      AND kind = 'request' AND assignment_id IS NULL AND task_id IS NULL`, toMemberId, nowIso(), groupId, fromMemberId);
+  }
   requestsWithStatus(groupId: string, status: GroupRequest['status']): GroupRequest[] {
     return this.all('SELECT * FROM group_requests WHERE group_id = ? AND status = ?', groupId, status).map(mapRequest);
   }
@@ -268,6 +276,9 @@ export class GroupRepo {
   deliveries(groupId: string, statuses?: DeliveryStatus[]): DeliveryRow[] {
     if (!statuses) return this.all('SELECT * FROM group_deliveries WHERE group_id = ? ORDER BY rowid ASC', groupId).map(mapDelivery);
     return this.all(`SELECT * FROM group_deliveries WHERE group_id = ? AND status IN (${placeholders(statuses.length)}) ORDER BY rowid ASC`, groupId, ...statuses).map(mapDelivery);
+  }
+  deliveriesForMessage(groupId: string, messageId: string): DeliveryRow[] {
+    return this.all('SELECT * FROM group_deliveries WHERE group_id = ? AND message_id = ? ORDER BY rowid ASC', groupId, messageId).map(mapDelivery);
   }
   recentDeliveries(groupId: string, limit: number): DeliveryRow[] {
     return this.all(`SELECT * FROM (SELECT rowid AS rid, * FROM group_deliveries WHERE group_id = ? ORDER BY rowid DESC LIMIT ?) ORDER BY rid ASC`, groupId, limit).map(mapDelivery);

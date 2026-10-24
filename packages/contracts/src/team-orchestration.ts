@@ -192,9 +192,13 @@ export const TEAM_GROUP_KINDS = {
 
 export const TeamStructurePayloadSchema = z.object({
   sharedProjectId: Uuid, settings: TeamOrchestrationSettingsSchema,
+  /** Host identity is carried to member devices so their read-only snapshot can identify its owner. */
+  host: z.object({ deviceId: Uuid, accountId: Uuid, displayName: z.string().max(200) }).strict().optional(),
   members: z.array(z.object({
     agentId: Id, handle: z.string().min(2).max(32), role: TeamAgentRoleSchema, fallbackRank: z.number().int().min(1).max(4).nullable(),
     ownerAccountId: Uuid, deviceId: Uuid, state: TeamAgentStateSchema, currentTask: z.string().max(300).nullable(),
+    /** Added in the host implementation so non-host devices can show the host's validated consent view. */
+    consent: TeamConsentStateSchema.optional(),
   }).strict()).max(64),
   leaderHistory: z.array(z.object({
     id: Id, at: IsoTime, fromAgentId: Id.nullable(), toAgentId: Id.nullable(),
@@ -202,6 +206,7 @@ export const TeamStructurePayloadSchema = z.object({
   }).strict()).max(50),
   needsLeader: z.boolean(),
 }).strict();
+export type TeamStructurePayload = z.infer<typeof TeamStructurePayloadSchema>;
 
 export const TeamConsentPayloadSchema = z.object({
   sharedProjectId: Uuid, agentIds: z.array(Id).max(8), permissionLevel: TeamPermissionLevelSchema,
