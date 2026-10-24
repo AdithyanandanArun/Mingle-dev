@@ -66,6 +66,7 @@ interface ActiveRun {
   teamMcpConnection?: import('@mingle/contracts').TeamMcpConnection;
   onActivity?: (event: AdapterEvent) => void;
   onApproval?: (approval: Approval) => void;
+  onApprovalDecision?: (approval: Approval, decision: 'approved' | 'denied') => void;
   promise: Promise<void>;
 }
 
@@ -92,6 +93,7 @@ export interface StartOptions {
   /** Bounded observers used by device-side team orchestration. */
   onActivity?: (event: AdapterEvent) => void;
   onApproval?: (approval: Approval) => void;
+  onApprovalDecision?: (approval: Approval, decision: 'approved' | 'denied') => void;
 }
 
 const MAX_TOOL_CHARS = 20_000;
@@ -235,7 +237,8 @@ export class SessionRuntime {
       baseInput: session.inputTokens, baseOutput: session.outputTokens, baseCost: session.costUsd, taskId: options.taskId ?? null, skills: options.skills ?? [], invocation, intent: options.intent ?? 'normal', executionPlanId: options.executionPlanId,
       context: [options.context, invocation && handoffs.length ? this.composePrompt(handoffs, '') : undefined].filter(Boolean).join('\n\n') || undefined,
       attachmentOwnerKind: options.attachmentOwnerKind ?? 'message', attachmentOwnerId: options.attachmentOwnerId, changeBaseline: null, dispatchState: 'unknown',
-      teamRun: options.teamRun === true, teamMcpConnection: options.teamMcp, onActivity: options.onActivity, onApproval: options.onApproval,
+      teamRun: options.teamRun === true, teamMcpConnection: options.teamMcp, onActivity: options.onActivity,
+      onApproval: options.onApproval, onApprovalDecision: options.onApprovalDecision,
       promise: Promise.resolve(),
     };
     this.store.tx(() => {
@@ -846,6 +849,7 @@ export class SessionRuntime {
       this.store.recordEvent({ projectId: session?.projectId ?? null, sessionId: approval.sessionId, type: 'approval.resolved', summary: `Approval ${decision}: ${approval.tool}`, payload: { approvalId, decision } });
       return result;
     });
+    try { run.onApprovalDecision?.(resolved, decision); } catch { /* Approval observation cannot block the owner or provider. */ }
     resolver(decision === 'approved');
     return resolved;
   }

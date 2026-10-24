@@ -266,6 +266,29 @@ it('uses the published agent roster for agent metadata and enforces per-project 
   } finally { await f.close(); }
 });
 
+it('posts completed team-device agent replies once with this device’s signature and idempotent source identity', async () => {
+  const f = fixture(true);
+  try {
+    const [first, concurrent] = await Promise.all([
+      f.service.postAgentReply(PROJECT, f.session!.id, 'The isolated task is complete.', null, 'delivery-chat-reply-1'),
+      f.service.postAgentReply(PROJECT, f.session!.id, 'The isolated task is complete.', null, 'delivery-chat-reply-1'),
+    ]);
+    expect(concurrent.id).toBe(first.id);
+    const retry = await f.service.postAgentReply(PROJECT, f.session!.id, 'The isolated task is complete.', null, 'delivery-chat-reply-1');
+    expect(first).toMatchObject({
+      author: { kind: 'agent', agentId: f.session!.id, ownerAccountId: ACCOUNT },
+      body: 'The isolated task is complete.', deliveryState: 'sent', runState: 'completed',
+      authorDeviceId: DEVICE,
+    });
+    expect(first.authorSignature).toMatch(/^[A-Za-z0-9+/]{86}==$/);
+    expect(retry.id).toBe(first.id);
+    expect(f.store.db.prepare(`SELECT COUNT(*) AS count FROM team_chat_messages WHERE source_session_id=? AND source_message_id LIKE 'team-delivery:%'`)
+      .get(f.session!.id)).toEqual({ count: 1 });
+    expect(f.outgoing.filter((message) => message.kind === 'teamchat.message')).toHaveLength(2);
+    expect(f.outgoing[0]?.idempotencyKey).toContain(first.id);
+  } finally { await f.close(); }
+});
+
 it('rate-limits repeated sync requests from the same peer device', async () => {
   const f = fixture();
   try {

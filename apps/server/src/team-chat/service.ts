@@ -76,6 +76,7 @@ export class TeamChatService {
   private readonly unsubscribe: () => void;
   private closed = false;
   private readonly pending = new Set<Promise<unknown>>();
+  private readonly agentReplyFlights = new Map<string, { fingerprint: string; promise: Promise<TeamChatMessage> }>();
   private readonly pollers = new Set<() => void>();
   private readonly syncRequestedAt = new Map<string, number>();
   private readonly pendingSyncRequests = new Map<string, PendingSyncRequest>();
@@ -599,6 +600,58 @@ export class TeamChatService {
       return this.rowMessage(row);
     });
     return { imported: importedCount, messages: finalMessages, truncated };
+  }
+
+  /** Publish one completed local team-agent turn as a message signed by this device. */
+  postAgentReply(projectId: string, agentId: string, body: string, replyTo: string | null, idempotencyKey: string): Promise<TeamChatMessage> {
+    if (typeof idempotencyKey !== 'string' || !idempotencyKey.trim() || idempotencyKey.length > 200) {
+      return Promise.reject(new HttpError(400, 'A bounded team delivery identity is required for an agent reply.'));
+    }
+    const key = `${projectId}\0${agentId}\0${idempotencyKey}`;
+    const fingerprint = createHash('sha256').update(canonicalJson({ body, replyTo })).digest('hex');
+    const existingFlight = this.agentReplyFlights.get(key);
+    if (existingFlight) return existingFlight.fingerprint === fingerprint
+      ? existingFlight.promise : Promise.reject(new HttpError(409, 'This team delivery identity already names a different agent reply.'));
+    const flight = this.track(this.createAgentReply(projectId, agentId, body, replyTo, idempotencyKey));
+    this.agentReplyFlights.set(key, { fingerprint, promise: flight });
+    void flight.finally(() => { if (this.agentReplyFlights.get(key)?.promise === flight) this.agentReplyFlights.delete(key); }).catch(() => undefined);
+    return flight;
+  }
+
+  private async createAgentReply(projectId: string, agentId: string, body: string, replyTo: string | null, idempotencyKey: string): Promise<TeamChatMessage> {
+    const { shared } = await this.binding(projectId);
+    const project = shared.project!;
+    const [accountId, transport] = await Promise.all([
+      this.options.account.withAuthenticatedClient(async (_client, user) => user.id),
+      Promise.resolve(this.options.distributed.transport.snapshot(project.teamId)),
+    ]);
+    const agent = this.teamAgents(shared.agents, accountId, transport.deviceId).find((candidate) => candidate.id === agentId && candidate.local);
+    if (!agent) throw new HttpError(403, 'Only a currently published local agent may author a team-chat reply.');
+    const sourceMessageId = `team-delivery:${createHash('sha256').update(idempotencyKey).digest('hex').slice(0, 40)}`;
+    const content = redactSecrets(body).trim().slice(0, 20_000);
+    if (!content) throw new HttpError(400, 'An agent reply must contain text.');
+    const safeReplyTo = replyTo && this.options.store.db.prepare(`SELECT id FROM team_chat_messages WHERE id=? AND team_id=? AND shared_project_id=?`)
+      .get(replyTo, project.teamId, project.sharedProjectId) ? replyTo : undefined;
+    const existing = this.options.store.db.prepare(`SELECT * FROM team_chat_messages WHERE team_id=? AND shared_project_id=?
+      AND source_session_id=? AND source_message_id=?`).get(project.teamId, project.sharedProjectId, agent.sessionId, sourceMessageId) as DbRow | undefined;
+    if (existing) {
+      const saved = this.rowMessage(existing);
+      if (saved.body !== content || (saved.replyTo ?? null) !== (safeReplyTo ?? null)) throw new HttpError(409, 'This team delivery already produced a different chat reply.');
+      await this.deliverAgentMessage(saved);
+      const refreshed = this.options.store.db.prepare('SELECT * FROM team_chat_messages WHERE id=?').get(saved.id) as DbRow;
+      return this.rowMessage(refreshed);
+    }
+    const unsigned = TeamChatMessageSchema.parse({
+      id: randomUUID(), teamId: project.teamId, sharedProjectId: project.sharedProjectId,
+      author: { kind: 'agent', agentId: agent.id, agentName: agent.name, ownerAccountId: accountId, provider: agent.provider, model: agent.model },
+      body: content, mentions: [], ...(safeReplyTo ? { replyTo: safeReplyTo } : {}), createdAt: nowIso(),
+      deliveryState: 'sending', runState: 'completed', source: { sessionId: agent.sessionId, messageId: sourceMessageId },
+    });
+    const signed = await this.signMessage(unsigned);
+    const saved = this.persist(signed, 'sending');
+    await this.deliverAgentMessage(saved);
+    const refreshed = this.options.store.db.prepare('SELECT * FROM team_chat_messages WHERE id=?').get(saved.id) as DbRow;
+    return this.rowMessage(refreshed);
   }
 
   private async validateRemote(envelope: { teamId: string; fromDeviceId: string; toDeviceId: string }, sharedProjectId: string, authors: string[]): Promise<{ localProjectId: string; senderOwnerId: string }> {
