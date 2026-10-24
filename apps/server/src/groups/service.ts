@@ -169,49 +169,51 @@ export class GroupService {
 
   /** Reconcile host-owned local and proxy sessions with the existing orchestrated scheduler group. */
   syncTeamMembers(groupId: string, wanted: Array<{ sessionId: string; handle: string; role: 'orchestrator' | 'worker' | 'idle'; held: boolean }>): void {
-    this.assertOpen();
-    const group = this.requireGroup(groupId);
-    const active = this.repo.members(groupId, false);
-    const history = this.repo.members(groupId, true);
-    const bySession = new Map(active.map((member) => [member.sessionId, member]));
-    const historyBySession = new Map(history.map((member) => [member.sessionId, member]));
-    const wantedSessions = new Set(wanted.map((member) => member.sessionId));
-    const orchestrator = wanted.find((member) => member.role === 'orchestrator');
-    if (wanted.length > 64 || new Set(wanted.map((member) => member.handle)).size !== wanted.length) throw conflict('The team roster is invalid or exceeds 64 agents.');
-    const structural = active.length !== wanted.length || wanted.some((member) => {
-      const current = bySession.get(member.sessionId);
-      return !current || current.handle !== member.handle || current.role !== (member.role === 'orchestrator' ? 'orchestrator' : 'worker')
-        || current.held !== (member.held || member.role === 'idle');
+    this.store.tx(() => {
+      this.assertOpen();
+      const group = this.requireGroup(groupId);
+      const active = this.repo.members(groupId, false);
+      const history = this.repo.members(groupId, true);
+      const bySession = new Map(active.map((member) => [member.sessionId, member]));
+      const historyBySession = new Map(history.map((member) => [member.sessionId, member]));
+      const wantedSessions = new Set(wanted.map((member) => member.sessionId));
+      const orchestrator = wanted.find((member) => member.role === 'orchestrator');
+      if (wanted.length > 64 || new Set(wanted.map((member) => member.handle)).size !== wanted.length) throw conflict('The team roster is invalid or exceeds 64 agents.');
+      const structural = active.length !== wanted.length || wanted.some((member) => {
+        const current = bySession.get(member.sessionId);
+        return !current || current.handle !== member.handle || current.role !== (member.role === 'orchestrator' ? 'orchestrator' : 'worker')
+          || current.held !== (member.held || member.role === 'idle');
+      });
+      if (structural && this.repo.deliveries(groupId, ['running']).length) throw conflict('Wait for team deliveries to finish before changing team membership.');
+      for (const member of wanted) {
+        const session = this.store.getSession(member.sessionId);
+        if (!session || session.projectId !== group.projectId) throw conflict('A team agent session is unavailable in this project.');
+        const current = bySession.get(member.sessionId);
+        if (!current) {
+          const otherGroup = this.repo.activeMemberOfSession(member.sessionId);
+          if (otherGroup && otherGroup.groupId !== groupId) throw conflict('A published team agent already belongs to another active conversation group.');
+        }
+        const role = member.role === 'orchestrator' ? 'orchestrator' : 'worker';
+        if (current) {
+          if (current.handle !== member.handle && this.repo.handleTaken(groupId, member.handle)) throw conflict(`@${member.handle} is already in use.`);
+          this.repo.updateMember(current.id, { role, handle: member.handle, held: member.held || member.role === 'idle' });
+        } else if (historyBySession.has(member.sessionId)) {
+          const previous = historyBySession.get(member.sessionId)!;
+          if (previous.handle !== member.handle && this.repo.handleTaken(groupId, member.handle)) throw conflict(`@${member.handle} is already in use.`);
+          this.repo.updateMember(previous.id, { role, handle: member.handle, held: member.held || member.role === 'idle', removedAt: null });
+        } else {
+          const id = newMemberId();
+          this.repo.insertMember({ id, groupId, sessionId: member.sessionId, handle: member.handle, role });
+          if (member.held || member.role === 'idle') this.repo.updateMember(id, { held: true });
+        }
+      }
+      for (const member of active) if (!wantedSessions.has(member.sessionId)) this.repo.updateMember(member.id, { removedAt: nowIso(), held: true });
+      const currentLeader = orchestrator ? this.repo.members(groupId, false).find((member) => member.sessionId === orchestrator.sessionId) : undefined;
+      this.repo.updateGroup(groupId, { orchestratorMemberId: currentLeader?.id ?? null });
+      if (!orchestrator) this.repo.updateGroup(groupId, { paused: true, pauseReason: 'No team orchestrator is currently available.' });
+      this.repo.touchGroup(groupId);
+      this.store.touch();
     });
-    if (structural && this.repo.deliveries(groupId, ['running']).length) throw conflict('Wait for team deliveries to finish before changing team membership.');
-    for (const member of wanted) {
-      const session = this.store.getSession(member.sessionId);
-      if (!session || session.projectId !== group.projectId) throw conflict('A team agent session is unavailable in this project.');
-      const current = bySession.get(member.sessionId);
-      if (!current) {
-        const otherGroup = this.repo.activeMemberOfSession(member.sessionId);
-        if (otherGroup && otherGroup.groupId !== groupId) throw conflict('A published team agent already belongs to another active conversation group.');
-      }
-      const role = member.role === 'orchestrator' ? 'orchestrator' : 'worker';
-      if (current) {
-        if (current.handle !== member.handle && this.repo.handleTaken(groupId, member.handle)) throw conflict(`@${member.handle} is already in use.`);
-        this.repo.updateMember(current.id, { role, handle: member.handle, held: member.held || member.role === 'idle' });
-      } else if (historyBySession.has(member.sessionId)) {
-        const previous = historyBySession.get(member.sessionId)!;
-        if (previous.handle !== member.handle && this.repo.handleTaken(groupId, member.handle)) throw conflict(`@${member.handle} is already in use.`);
-        this.repo.updateMember(previous.id, { role, handle: member.handle, held: member.held || member.role === 'idle', removedAt: null });
-      } else {
-        const id = newMemberId();
-        this.repo.insertMember({ id, groupId, sessionId: member.sessionId, handle: member.handle, role });
-        if (member.held || member.role === 'idle') this.repo.updateMember(id, { held: true });
-      }
-    }
-    for (const member of active) if (!wantedSessions.has(member.sessionId)) this.repo.updateMember(member.id, { removedAt: nowIso(), held: true });
-    const currentLeader = orchestrator ? this.repo.members(groupId, false).find((member) => member.sessionId === orchestrator.sessionId) : undefined;
-    this.repo.updateGroup(groupId, { orchestratorMemberId: currentLeader?.id ?? null });
-    if (!orchestrator) this.repo.updateGroup(groupId, { paused: true, pauseReason: 'No team orchestrator is currently available.' });
-    this.repo.touchGroup(groupId);
-    this.store.touch();
   }
 
   /** Manual and automatic host handover share one scheduler update path. */

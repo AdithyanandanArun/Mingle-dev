@@ -22,6 +22,7 @@ import type {
 import { HttpError } from '../../util.ts';
 import { redactSecrets } from '../../providers/common.ts';
 import type { ProjectCollaborationSnapshot } from '../../../../../packages/contracts/src/project-collaboration.ts';
+import { KeyedLock } from '../../repository/lock.ts';
 
 type Row = Record<string, unknown>;
 type HostRow = {
@@ -58,6 +59,7 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
   private readonly pending = new Set<Promise<unknown>>();
   private readonly chatByDelivery = new Map<string, string>();
   private readonly chatDeliveryCounts = new Map<string, number>();
+  private readonly mutations = new KeyedLock();
   private closed = false;
   private readonly now: () => number;
   private readonly deliveryTimeoutMs: number;
@@ -155,6 +157,10 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
       hostDisplayName: shared.members.find((candidate) => candidate.accountId === (hostDevice?.ownerId ?? leader.accountId))?.displayName ?? 'Team lead',
       isHost,
     };
+  }
+
+  private mutationKey(context: ProjectContext): string {
+    return `${context.project.teamId}\0${context.project.sharedProjectId}`;
   }
 
   private async requireEditor(projectId: string): Promise<ProjectContext> {
@@ -274,6 +280,11 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
   }
 
   async enable(projectId: string, rawInput: unknown): Promise<TeamStructureSnapshot> {
+    const context = await this.context(projectId);
+    return this.mutations.run(this.mutationKey(context), () => this.enableLocked(projectId, rawInput));
+  }
+
+  private async enableLocked(projectId: string, rawInput: unknown): Promise<TeamStructureSnapshot> {
     const input = EnableTeamOrchestrationSchema.parse(rawInput);
     const context = await this.requireEditor(projectId);
     const { teamId, sharedProjectId } = context.project;
@@ -287,25 +298,31 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
       throw new HttpError(409, 'A remote orchestrator needs current owner consent at the selected permission level.');
     }
     const settings = TeamOrchestrationSettingsSchema.parse({ ...input, version: 1, updatedAt: new Date(this.now()).toISOString(), updatedByAccountId: context.accountId });
-    const provisional = { ...context, isHost: true };
-    const members = this.syncSessions(provisional, settings);
-    const orchestrator = context.agents.find((agent) => agent.id === settings.orchestratorAgentId)!;
-    const orchestratorMember = members.find((member) => member.handle === this.handleFor(teamId, sharedProjectId, orchestrator.id));
-    if (!orchestratorMember) throw new HttpError(409, 'The selected orchestrator has no usable local or proxy session.');
-    if (orchestrator.deviceId !== context.localDeviceId && !this.isOnline(teamId, orchestrator.deviceId)) {
-      throw new HttpError(409, 'The selected remote orchestrator device is offline.');
-    }
     const groupId = `teamgrp_${randomUUID().replaceAll('-', '')}`;
-    const group = this.options.groups.createTeamGroup({ id: groupId, projectId, title: `${context.project.name} team`, orchestratorSessionId: orchestratorMember.sessionId, members });
     const at = new Date(this.now()).toISOString();
-    this.hostRows.prepare(`INSERT INTO mingle_team_host_projects(team_id,shared_project_id,local_project_id,owner_account_id,host_device_id,group_id,settings_json,leader_history_json,needs_leader,updated_at)
-      VALUES(?,?,?,?,?,?,?,'[]',0,?)`).run(teamId, sharedProjectId, projectId, context.accountId, context.localDeviceId, groupId, JSON.stringify(settings), at);
+    this.options.store.tx(() => {
+      const members = this.syncSessions({ ...context, isHost: true }, settings);
+      const orchestrator = context.agents.find((agent) => agent.id === settings.orchestratorAgentId)!;
+      const orchestratorMember = members.find((member) => member.handle === this.handleFor(teamId, sharedProjectId, orchestrator.id));
+      if (!orchestratorMember) throw new HttpError(409, 'The selected orchestrator has no usable local or proxy session.');
+      if (orchestrator.deviceId !== context.localDeviceId && !this.isOnline(teamId, orchestrator.deviceId)) {
+        throw new HttpError(409, 'The selected remote orchestrator device is offline.');
+      }
+      this.options.groups.createTeamGroup({ id: groupId, projectId, title: `${context.project.name} team`, orchestratorSessionId: orchestratorMember.sessionId, members });
+      this.hostRows.prepare(`INSERT INTO mingle_team_host_projects(team_id,shared_project_id,local_project_id,owner_account_id,host_device_id,group_id,settings_json,leader_history_json,needs_leader,updated_at)
+        VALUES(?,?,?,?,?,?,?,'[]',0,?)`).run(teamId, sharedProjectId, projectId, context.accountId, context.localDeviceId, groupId, JSON.stringify(settings), at);
+    });
     this.options.store.touch();
     await this.broadcastStructure(context, this.readHost(teamId, sharedProjectId)!);
-    return this.structure(projectId);
+    return this.structureSnapshot(projectId);
   }
 
   async update(projectId: string, rawInput: unknown): Promise<TeamStructureSnapshot> {
+    const context = await this.context(projectId);
+    return this.mutations.run(this.mutationKey(context), () => this.updateLocked(projectId, rawInput));
+  }
+
+  private async updateLocked(projectId: string, rawInput: unknown): Promise<TeamStructureSnapshot> {
     const input = TeamOrchestrationSettingsSchema.pick({ leaderOrchestration: true, permissionLevel: true }).partial()
       .extend({ fallbackAgentIds: TeamOrchestrationSettingsSchema.shape.fallbackAgentIds.optional(), expectedVersion: TeamOrchestrationSettingsSchema.shape.version }).strict().parse(rawInput);
     const { context, row } = await this.loadContextForHost(projectId);
@@ -327,18 +344,25 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
     }
     const next = TeamOrchestrationSettingsSchema.parse({ ...prior, ...patch, fallbackAgentIds: fallbackIds, version: prior.version + 1,
       updatedAt: new Date(this.now()).toISOString(), updatedByAccountId: context.accountId });
-    this.persistSettings(row, next);
-    if (rankPermission(next.permissionLevel) > rankPermission(prior.permissionLevel)) {
-      this.hostRows.prepare(`UPDATE mingle_team_host_consents SET state='needs-reconsent',updated_at=? WHERE team_id=? AND shared_project_id=? AND state='granted'`)
-        .run(next.updatedAt, context.project.teamId, context.project.sharedProjectId);
-    }
-    const synced = this.syncSessions(context, next);
-    this.options.groups.syncTeamMembers(row.group_id, synced);
+    this.options.store.tx(() => {
+      this.persistSettings(row, next);
+      if (rankPermission(next.permissionLevel) > rankPermission(prior.permissionLevel)) {
+        this.hostRows.prepare(`UPDATE mingle_team_host_consents SET state='needs-reconsent',updated_at=? WHERE team_id=? AND shared_project_id=? AND state='granted'`)
+          .run(next.updatedAt, context.project.teamId, context.project.sharedProjectId);
+      }
+      const synced = this.syncSessions(context, next);
+      this.options.groups.syncTeamMembers(row.group_id, synced);
+    });
     await this.broadcastStructure(context, this.readHost(context.project.teamId, context.project.sharedProjectId)!);
-    return this.structure(projectId);
+    return this.structureSnapshot(projectId);
   }
 
   async change(projectId: string, rawInput: unknown): Promise<TeamStructureSnapshot> {
+    const context = await this.context(projectId);
+    return this.mutations.run(this.mutationKey(context), () => this.changeLocked(projectId, rawInput));
+  }
+
+  private async changeLocked(projectId: string, rawInput: unknown): Promise<TeamStructureSnapshot> {
     const change = TeamStructureChangeSchema.parse(rawInput);
     const context = await this.requireEditor(projectId);
     const { teamId, sharedProjectId } = context.project;
@@ -358,15 +382,14 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
     let next = prior;
     let needsLeader = row.needs_leader === 1;
     let leaderReason: TeamLeaderChange['reason'] | null = null;
+    const rosterChanges: Array<{ agentId: string; role?: TeamAgentRole; removed?: boolean }> = [];
     if (change.action === 'set-orchestrator') {
       const agent = agentById.get(change.agentId);
       if (!agent || !agent.sessionId || !current.has(change.agentId)) throw new HttpError(400, 'Choose an active team roster agent.');
       if (agent.deviceId !== context.localDeviceId && this.consentFor(context, agent.id) !== 'granted') throw new HttpError(409, 'This agent has not granted current team consent.');
       const from = prior.orchestratorAgentId;
-      if (from && from !== agent.id) this.hostRows.prepare(`UPDATE mingle_team_host_roster SET role=?,updated_at=? WHERE team_id=? AND shared_project_id=? AND agent_id=?`)
-        .run(change.previousRole, at, teamId, sharedProjectId, from);
-      this.hostRows.prepare(`UPDATE mingle_team_host_roster SET role='orchestrator',removed_at=NULL,updated_at=? WHERE team_id=? AND shared_project_id=? AND agent_id=?`)
-        .run(at, teamId, sharedProjectId, agent.id);
+      if (from && from !== agent.id) rosterChanges.push({ agentId: from, role: change.previousRole });
+      rosterChanges.push({ agentId: agent.id, role: 'orchestrator' });
       next = { ...prior, orchestratorAgentId: agent.id, fallbackAgentIds: prior.fallbackAgentIds.filter((id) => id !== agent.id),
         version: prior.version + 1, updatedAt: at, updatedByAccountId: context.accountId };
       needsLeader = false;
@@ -375,8 +398,7 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
       const entry = current.get(change.agentId);
       if (!entry) throw new HttpError(404, 'Agent is not in the active team structure.');
       if (change.agentId === prior.orchestratorAgentId) throw new HttpError(409, 'Choose a new orchestrator before changing the current leader role.');
-      this.hostRows.prepare(`UPDATE mingle_team_host_roster SET role=?,updated_at=? WHERE team_id=? AND shared_project_id=? AND agent_id=?`)
-        .run(change.role, at, teamId, sharedProjectId, change.agentId);
+      rosterChanges.push({ agentId: change.agentId, role: change.role });
       next = { ...prior, fallbackAgentIds: change.role === 'idle' ? prior.fallbackAgentIds.filter((id) => id !== change.agentId) : prior.fallbackAgentIds,
         version: prior.version + 1, updatedAt: at, updatedByAccountId: context.accountId };
     } else if (change.action === 'set-fallbacks') {
@@ -392,8 +414,7 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
         needsLeader = true;
         leaderReason = 'removed';
       } else next = { ...prior, version: prior.version + 1, updatedAt: at, updatedByAccountId: context.accountId };
-      this.hostRows.prepare(`UPDATE mingle_team_host_roster SET removed_at=?,updated_at=? WHERE team_id=? AND shared_project_id=? AND agent_id=?`)
-        .run(at, at, teamId, sharedProjectId, change.agentId);
+      rosterChanges.push({ agentId: change.agentId, removed: true });
       next = { ...next, fallbackAgentIds: next.fallbackAgentIds.filter((id) => id !== change.agentId) };
     }
     if (leaderReason) {
@@ -401,17 +422,32 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
         reason: leaderReason, byAccountId: context.accountId });
       if (history.length > 50) history.splice(0, history.length - 50);
     }
-    this.hostRows.prepare('UPDATE mingle_team_host_projects SET settings_json=?,leader_history_json=?,needs_leader=?,updated_at=? WHERE team_id=? AND shared_project_id=?')
-      .run(JSON.stringify(next), JSON.stringify(history), Number(needsLeader), at, teamId, sharedProjectId);
-    const members = this.syncSessions(context, next);
-    this.options.groups.syncTeamMembers(row.group_id, members);
     const selected = next.orchestratorAgentId ? context.agents.find((agent) => agent.id === next.orchestratorAgentId) : undefined;
-    const selectedSession = selected ? members.find((entry) => entry.handle === this.handleFor(teamId, sharedProjectId, selected.id))?.sessionId ?? null : null;
-    if (change.action === 'set-orchestrator') this.options.groups.setTeamLeader(row.group_id, selectedSession, { paused: false, pauseReason: null });
-    else if (leaderReason) this.options.groups.setTeamLeader(row.group_id, null, { paused: true, pauseReason: 'The team orchestrator was removed. Choose a new leader.' });
-    else if (needsLeader) this.options.groups.pauseTeamGroup(row.group_id, 'No team leader is available. Choose a new orchestrator in Team structure.');
+    this.options.store.tx(() => {
+      const latest = this.readHost(teamId, sharedProjectId);
+      if (!latest || this.settings(latest).version !== prior.version) throw new HttpError(409, 'Team structure changed. Refresh and try again.');
+      for (const change of rosterChanges) {
+        if (change.removed) {
+          this.hostRows.prepare(`UPDATE mingle_team_host_roster SET removed_at=?,updated_at=? WHERE team_id=? AND shared_project_id=? AND agent_id=?`)
+            .run(at, at, teamId, sharedProjectId, change.agentId);
+        } else if (change.role) {
+          this.hostRows.prepare(`UPDATE mingle_team_host_roster SET role=?,removed_at=NULL,updated_at=? WHERE team_id=? AND shared_project_id=? AND agent_id=?`)
+            .run(change.role, at, teamId, sharedProjectId, change.agentId);
+        }
+      }
+      const changed = this.hostRows.prepare(`UPDATE mingle_team_host_projects SET settings_json=?,leader_history_json=?,needs_leader=?,updated_at=?
+        WHERE team_id=? AND shared_project_id=? AND settings_json=?`)
+        .run(JSON.stringify(next), JSON.stringify(history), Number(needsLeader), at, teamId, sharedProjectId, row.settings_json);
+      if (Number(changed.changes) !== 1) throw new HttpError(409, 'Team structure changed. Refresh and try again.');
+      const members = this.syncSessions(context, next);
+      this.options.groups.syncTeamMembers(row.group_id, members);
+      const selectedSession = selected ? members.find((entry) => entry.handle === this.handleFor(teamId, sharedProjectId, selected.id))?.sessionId ?? null : null;
+      if (change.action === 'set-orchestrator') this.options.groups.setTeamLeader(row.group_id, selectedSession, { paused: false, pauseReason: null });
+      else if (leaderReason) this.options.groups.setTeamLeader(row.group_id, null, { paused: true, pauseReason: 'The team orchestrator was removed. Choose a new leader.' });
+      else if (needsLeader) this.options.groups.pauseTeamGroup(row.group_id, 'No team leader is available. Choose a new orchestrator in Team structure.');
+    });
     await this.broadcastStructure(context, this.readHost(teamId, sharedProjectId)!);
-    return this.structure(projectId);
+    return this.structureSnapshot(projectId);
   }
 
   private handleFor(teamId: string, sharedProjectId: string, agentId: string): string | undefined {
@@ -421,11 +457,20 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
   }
 
   private persistSettings(row: HostRow, settings: TeamOrchestrationSettings, needsLeader = row.needs_leader === 1): void {
-    this.hostRows.prepare(`UPDATE mingle_team_host_projects SET settings_json=?,needs_leader=?,updated_at=? WHERE team_id=? AND shared_project_id=?`)
-      .run(JSON.stringify(settings), Number(needsLeader), settings.updatedAt, row.team_id, row.shared_project_id);
+    const latest = this.readHost(row.team_id, row.shared_project_id);
+    if (!latest || this.settings(latest).version !== this.settings(row).version) throw new HttpError(409, 'Team orchestration settings changed. Refresh and try again.');
+    const changed = this.hostRows.prepare(`UPDATE mingle_team_host_projects SET settings_json=?,needs_leader=?,updated_at=?
+      WHERE team_id=? AND shared_project_id=? AND settings_json=?`)
+      .run(JSON.stringify(settings), Number(needsLeader), settings.updatedAt, row.team_id, row.shared_project_id, row.settings_json);
+    if (Number(changed.changes) !== 1) throw new HttpError(409, 'Team orchestration settings changed. Refresh and try again.');
   }
 
   async structure(projectId: string): Promise<TeamStructureSnapshot> {
+    const context = await this.context(projectId);
+    return this.mutations.run(this.mutationKey(context), () => this.structureSnapshot(projectId));
+  }
+
+  private async structureSnapshot(projectId: string): Promise<TeamStructureSnapshot> {
     const context = await this.context(projectId);
     const isHost = context.isHost;
     const ownRow = isHost ? this.readHost(context.project.teamId, context.project.sharedProjectId) : undefined;
@@ -434,7 +479,7 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
     const settings = ownRow ? this.settings(ownRow) : payload?.settings ?? null;
     const row = ownRow;
     if (row && settings && !this.options.groups.get(row.group_id).deliveries.some((delivery) => delivery.status === 'running')) {
-      this.options.groups.syncTeamMembers(row.group_id, this.syncSessions(context, settings));
+      this.options.store.tx(() => this.options.groups.syncTeamMembers(row.group_id, this.syncSessions(context, settings)));
     }
     const hostId = ownRow?.host_device_id ?? payload?.host?.deviceId ?? context.hostDeviceId;
     const hostAccountId = ownRow?.owner_account_id ?? payload?.host?.accountId ?? context.hostAccountId;
@@ -513,7 +558,7 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
   }
 
   private async broadcastStructure(context: ProjectContext, row: HostRow): Promise<void> {
-    const structure = await this.structure(context.localProjectId);
+    const structure = await this.structureSnapshot(context.localProjectId);
     const payload = StructureSchema.parse({
       sharedProjectId: context.project.sharedProjectId, settings: this.settings(row),
       host: { deviceId: row.host_device_id, accountId: row.owner_account_id, displayName: context.hostDisplayName },
@@ -732,6 +777,15 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
     const project = this.hostRows.prepare('SELECT * FROM mingle_team_host_projects WHERE team_id=? AND shared_project_id=?')
       .get(envelope.teamId, parsed.data.sharedProjectId) as HostRow | undefined;
     if (!project || project.host_device_id !== envelope.toDeviceId) throw new HttpError(403, 'Consent is outside this host project.');
+    return this.mutations.run(`${envelope.teamId}\0${parsed.data.sharedProjectId}`,
+      () => this.receiveConsentLocked(envelope, parsed.data.sharedProjectId));
+  }
+
+  private async receiveConsentLocked(envelope: import('@mingle/contracts').AuthenticatedTransportMessage, sharedProjectId: string): Promise<void> {
+    const parsed = TeamConsentPayloadSchema.safeParse(envelope.payload);
+    if (!parsed.success || parsed.data.sharedProjectId !== sharedProjectId) throw new HttpError(400, 'Team consent payload is invalid.');
+    const project = this.readHost(envelope.teamId, sharedProjectId);
+    if (!project || project.host_device_id !== envelope.toDeviceId) throw new HttpError(403, 'Consent is outside this host project.');
     const collaboration = await this.options.collaboration.snapshot(project.local_project_id);
     const senderDevice = this.options.transport.snapshot(envelope.teamId).devices.find((device) => device.id === envelope.fromDeviceId);
     const owner = senderDevice?.ownerId;
@@ -739,26 +793,28 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
     await this.verifyOwnerDevice(envelope.teamId, envelope.fromDeviceId, owner);
     const settings = this.settings(project);
     const at = parsed.data.at;
-    for (const agentId of parsed.data.agentIds) {
-      const agent = collaboration.agents.find((candidate) => candidate.id === agentId && candidate.accountId === owner && candidate.deviceId === envelope.fromDeviceId);
-      if (!agent) throw new HttpError(403, 'Consent includes an agent that is not published by the sender device.');
-      const accepted = parsed.data.state === 'granted' && parsed.data.disclaimerVersion === TEAM_CONSENT_DISCLAIMER_VERSION
-        && rankPermission(parsed.data.permissionLevel) >= rankPermission(settings.permissionLevel);
-      const state: TeamConsentState = parsed.data.state === 'granted' && !accepted ? 'needs-reconsent' : parsed.data.state;
-      this.hostRows.prepare(`INSERT INTO mingle_team_host_consents(team_id,shared_project_id,agent_id,owner_account_id,owner_device_id,state,
-        permission_level,settings_version,disclaimer_version,accepted_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)
-        ON CONFLICT(team_id,shared_project_id,agent_id) DO UPDATE SET owner_account_id=excluded.owner_account_id,owner_device_id=excluded.owner_device_id,
-        state=excluded.state,permission_level=excluded.permission_level,settings_version=excluded.settings_version,disclaimer_version=excluded.disclaimer_version,
-        accepted_at=excluded.accepted_at,updated_at=excluded.updated_at`)
-        .run(envelope.teamId, parsed.data.sharedProjectId, agentId, owner, envelope.fromDeviceId, state, parsed.data.permissionLevel,
-          parsed.data.settingsVersion, parsed.data.disclaimerVersion, at, at);
-    }
-    if (!this.options.groups.get(project.group_id).deliveries.some((delivery) => delivery.status === 'running')) {
-      const members = this.syncSessions({ ...collaboration, project: collaboration.project!, localProjectId: project.local_project_id,
-        accountId: project.owner_account_id, localDeviceId: project.host_device_id, hostDeviceId: project.host_device_id, hostAccountId: project.owner_account_id,
-        hostDisplayName: 'Team lead', isHost: true }, settings);
-      this.options.groups.syncTeamMembers(project.group_id, members);
-    }
+    this.options.store.tx(() => {
+      for (const agentId of parsed.data.agentIds) {
+        const agent = collaboration.agents.find((candidate) => candidate.id === agentId && candidate.accountId === owner && candidate.deviceId === envelope.fromDeviceId);
+        if (!agent) throw new HttpError(403, 'Consent includes an agent that is not published by the sender device.');
+        const accepted = parsed.data.state === 'granted' && parsed.data.disclaimerVersion === TEAM_CONSENT_DISCLAIMER_VERSION
+          && rankPermission(parsed.data.permissionLevel) >= rankPermission(settings.permissionLevel);
+        const state: TeamConsentState = parsed.data.state === 'granted' && !accepted ? 'needs-reconsent' : parsed.data.state;
+        this.hostRows.prepare(`INSERT INTO mingle_team_host_consents(team_id,shared_project_id,agent_id,owner_account_id,owner_device_id,state,
+          permission_level,settings_version,disclaimer_version,accepted_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)
+          ON CONFLICT(team_id,shared_project_id,agent_id) DO UPDATE SET owner_account_id=excluded.owner_account_id,owner_device_id=excluded.owner_device_id,
+          state=excluded.state,permission_level=excluded.permission_level,settings_version=excluded.settings_version,disclaimer_version=excluded.disclaimer_version,
+          accepted_at=excluded.accepted_at,updated_at=excluded.updated_at`)
+          .run(envelope.teamId, parsed.data.sharedProjectId, agentId, owner, envelope.fromDeviceId, state, parsed.data.permissionLevel,
+            parsed.data.settingsVersion, parsed.data.disclaimerVersion, at, at);
+      }
+      if (!this.options.groups.get(project.group_id).deliveries.some((delivery) => delivery.status === 'running')) {
+        const members = this.syncSessions({ ...collaboration, project: collaboration.project!, localProjectId: project.local_project_id,
+          accountId: project.owner_account_id, localDeviceId: project.host_device_id, hostDeviceId: project.host_device_id, hostAccountId: project.owner_account_id,
+          hostDisplayName: 'Team lead', isHost: true }, settings);
+        this.options.groups.syncTeamMembers(project.group_id, members);
+      }
+    });
     const context = await this.context(project.local_project_id);
     await this.broadcastStructure(context, project);
   }
@@ -997,6 +1053,10 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
   }
 
   private async promoteFallback(teamId: string, sharedProjectId: string, reason: 'fallback-quota' | 'fallback-offline'): Promise<boolean> {
+    return this.mutations.run(`${teamId}\0${sharedProjectId}`, () => this.promoteFallbackLocked(teamId, sharedProjectId, reason));
+  }
+
+  private async promoteFallbackLocked(teamId: string, sharedProjectId: string, reason: 'fallback-quota' | 'fallback-offline'): Promise<boolean> {
     const row = this.readHost(teamId, sharedProjectId);
     if (!row) return false;
     const context = await this.context(row.local_project_id);
@@ -1016,20 +1076,33 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
       if (history.length > 50) history.splice(0, history.length - 50);
       const next = TeamOrchestrationSettingsSchema.parse({ ...settings, orchestratorAgentId: id, version: settings.version + 1,
         updatedAt: at, updatedByAccountId: settings.updatedByAccountId });
-      this.hostRows.prepare(`UPDATE mingle_team_host_roster SET role='worker',updated_at=? WHERE team_id=? AND shared_project_id=? AND agent_id=?`)
-        .run(at, teamId, sharedProjectId, settings.orchestratorAgentId);
-      this.hostRows.prepare(`UPDATE mingle_team_host_roster SET role='orchestrator',updated_at=? WHERE team_id=? AND shared_project_id=? AND agent_id=?`)
-        .run(at, teamId, sharedProjectId, id);
-      this.hostRows.prepare('UPDATE mingle_team_host_projects SET settings_json=?,leader_history_json=?,needs_leader=0,updated_at=? WHERE team_id=? AND shared_project_id=?')
-        .run(JSON.stringify(next), JSON.stringify(history), at, teamId, sharedProjectId);
-      this.options.groups.syncTeamMembers(row.group_id, this.syncSessions(context, next));
-      this.options.groups.setTeamLeader(row.group_id, sessionId, { paused: false, pauseReason: null });
+      try {
+        this.options.store.tx(() => {
+          const latest = this.readHost(teamId, sharedProjectId);
+          if (!latest || this.settings(latest).version !== settings.version) throw new HttpError(409, 'Team orchestration settings changed during automatic handover.');
+          this.hostRows.prepare(`UPDATE mingle_team_host_roster SET role='worker',updated_at=? WHERE team_id=? AND shared_project_id=? AND agent_id=?`)
+            .run(at, teamId, sharedProjectId, settings.orchestratorAgentId);
+          this.hostRows.prepare(`UPDATE mingle_team_host_roster SET role='orchestrator',removed_at=NULL,updated_at=? WHERE team_id=? AND shared_project_id=? AND agent_id=?`)
+            .run(at, teamId, sharedProjectId, id);
+          const changed = this.hostRows.prepare(`UPDATE mingle_team_host_projects SET settings_json=?,leader_history_json=?,needs_leader=0,updated_at=?
+            WHERE team_id=? AND shared_project_id=? AND settings_json=?`)
+            .run(JSON.stringify(next), JSON.stringify(history), at, teamId, sharedProjectId, row.settings_json);
+          if (Number(changed.changes) !== 1) throw new HttpError(409, 'Team orchestration settings changed during automatic handover.');
+          this.options.groups.syncTeamMembers(row.group_id, this.syncSessions(context, next));
+          this.options.groups.setTeamLeader(row.group_id, sessionId, { paused: false, pauseReason: null });
+        });
+      } catch { continue; }
       await this.broadcastStructure(context, this.readHost(teamId, sharedProjectId)!);
       return true;
     }
     const at = new Date(this.now()).toISOString();
-    this.hostRows.prepare('UPDATE mingle_team_host_projects SET needs_leader=1,updated_at=? WHERE team_id=? AND shared_project_id=?').run(at, teamId, sharedProjectId);
-    this.options.groups.pauseTeamGroup(row.group_id, 'No consented, online fallback leader is available. Choose a new orchestrator in Team structure.');
+    this.options.store.tx(() => {
+      const latest = this.readHost(teamId, sharedProjectId);
+      if (!latest || this.settings(latest).version !== settings.version) return;
+      this.hostRows.prepare('UPDATE mingle_team_host_projects SET needs_leader=1,updated_at=? WHERE team_id=? AND shared_project_id=? AND settings_json=?')
+        .run(at, teamId, sharedProjectId, row.settings_json);
+      this.options.groups.pauseTeamGroup(row.group_id, 'No consented, online fallback leader is available. Choose a new orchestrator in Team structure.');
+    });
     await this.chat?.postOrchestrationStatus({ projectId: row.local_project_id, content: 'Team orchestration is paused because the current leader is unavailable and no configured fallback is consented, online, and available.' });
     await this.broadcastStructure(context, this.readHost(teamId, sharedProjectId)!);
     return false;

@@ -114,6 +114,7 @@ function fixture(options: { deviceId?: string; role?: 'leader' | 'admin' | 'memb
     },
   };
   let group: GroupSnapshot | null = null;
+  let failNextSync = false;
   const finished: Array<{ sessionId: string; runId: string; outcome: string }> = [];
   const enqueued: Array<{ content: string; recipients?: string[]; clientMessageId: string }> = [];
   const groupService = {
@@ -126,6 +127,7 @@ function fixture(options: { deviceId?: string; role?: 'leader' | 'admin' | 'memb
       return group;
     },
     syncTeamMembers(_groupId: string, members: Array<{ sessionId: string; handle: string; role: 'orchestrator' | 'worker' | 'idle'; held: boolean }>) {
+      if (failNextSync) { failNextSync = false; throw new Error('Scheduler rejected this team structure.'); }
       if (!group) return;
       group.members = members.map((member) => ({ id: `member-${member.sessionId}`, groupId: group!.group.id, sessionId: member.sessionId,
         handle: member.handle, role: member.role === 'orchestrator' ? 'orchestrator' as const : 'worker' as const, held: member.held, joinedAt: new Date().toISOString(), removedAt: null }));
@@ -161,6 +163,7 @@ function fixture(options: { deviceId?: string; role?: 'leader' | 'admin' | 'memb
   const fx = {
     store, project, local, host, outgoing, finished, enqueued, artifactImports, group: () => group, setRole(value: typeof role) { role = value; },
      setDevice(deviceId: string) { localDeviceId = deviceId; },
+     failNextSync() { failNextSync = true; },
      delayAuthorization(gate: Promise<void>) { delayedAuthorization = gate; },
      async incoming(kind: string, payload: unknown, fromDeviceId = OWNER_DEVICE) {
       if (!receive) throw new Error('No team orchestration transport handler');
@@ -308,6 +311,52 @@ it('imports remote artifacts into isolated refs and includes those ref names in 
   expect(stored[0]).toMatchObject({ revision, ref: `refs/mingle/team/${SHARED}/${deliveryId}/${revision}` });
   const assistant = fx.store.listMessages(sessionId, { limit: 20 }).find((message) => message.role === 'assistant');
   expect(assistant?.content).toContain(`Git ref: refs/mingle/team/${SHARED}/${deliveryId}/${revision}`);
+});
+
+it('rolls back a manual roster change when the group scheduler rejects the transition', async () => {
+  const fx = fixture();
+  await fx.host.enable(PROJECT, enableInput());
+  await grantRemote(fx);
+  fx.failNextSync();
+
+  await expect(fx.host.change(PROJECT, { action: 'set-role', agentId: REMOTE_AGENT, role: 'idle', expectedVersion: 1 }))
+    .rejects.toThrow(/scheduler rejected/i);
+
+  const structure = await fx.host.structure(PROJECT);
+  expect(structure.settings?.version).toBe(1);
+  expect(structure.members.find((member) => member.agentId === REMOTE_AGENT)?.role).toBe('worker');
+  expect(fx.store.db.prepare('SELECT role FROM mingle_team_host_roster WHERE agent_id=?').get(REMOTE_AGENT)).toMatchObject({ role: 'worker' });
+});
+
+it('leaves host leader settings unchanged when an automatic scheduler handover fails', async () => {
+  const fx = fixture();
+  await fx.host.enable(PROJECT, enableInput(REMOTE_AGENT));
+  await grantRemote(fx);
+  const proxyId = String((fx.store.db.prepare('SELECT session_id FROM mingle_team_proxy_sessions WHERE agent_id=?').get(REMOTE_AGENT) as { session_id: string }).session_id);
+  const group = fx.group()!;
+  const member = group.members.find((candidate) => candidate.sessionId === proxyId)!;
+  const deliveryId = 'quota-handover-scheduler-failure';
+  const requestId = 'quota-handover-scheduler-failure-request';
+  group.deliveries.push({ id: deliveryId, groupId: group.group.id, requestId, messageId: deliveryId, memberId: member.id,
+    status: 'running', runId: 'quota-handover-host-run', hop: 0, error: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), kind: 'request' });
+  const userMessage = fx.store.insertMessage({ sessionId: proxyId, role: 'user', content: 'Try work', runId: 'quota-handover-host-run' });
+  fx.store.insertRun({ id: 'quota-handover-host-run', sessionId: proxyId, userMessageId: userMessage.id, provider: 'codex', model: 'gpt-6-codex', startedAt: new Date().toISOString() });
+  fx.host.start({ session: fx.store.getSession(proxyId)!, runId: 'quota-handover-host-run', content: 'Try work', options: { groupDeliveryId: deliveryId },
+    context: { groupId: group.group.id, memberId: member.id, requestId, deliveryId, hop: 0, instructions: 'Instructions' } });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  fx.failNextSync();
+
+  await fx.incoming('teamgroup.delivery.status', { sharedProjectId: SHARED, deliveryId, agentId: REMOTE_AGENT, status: 'failed', runId: 'owner-run-quota-failed',
+    failure: { id: 'quota-handover-failure', sessionId: 'owner-session-remote', kind: 'quota_exhausted', actor: 'lead', provider: 'codex', retryable: false,
+      dispatchState: 'dispatched', continuationSafety: 'unknown', message: 'Quota exhausted', occurredAt: new Date().toISOString() }, at: new Date().toISOString() });
+
+  const hostRow = fx.store.db.prepare('SELECT settings_json,needs_leader,leader_history_json FROM mingle_team_host_projects WHERE team_id=? AND shared_project_id=?')
+    .get(TEAM, SHARED) as { settings_json: string; needs_leader: number; leader_history_json: string };
+  expect(JSON.parse(hostRow.settings_json)).toMatchObject({ version: 1, orchestratorAgentId: REMOTE_AGENT });
+  expect(hostRow.needs_leader).toBe(1);
+  expect(JSON.parse(hostRow.leader_history_json)).toEqual([]);
+  expect(group.group.orchestratorMemberId).toBe(member.id);
+  expect(group.group.paused).toBe(true);
 });
 
 it('supports idle, fallback, promote/swap and remove changes with leader history', async () => {
