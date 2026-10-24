@@ -1081,7 +1081,7 @@ export class RemoteExecutionService {
     if (envelope.kind === 'collaboration.task') return this.receiveTask(envelope);
     // This listener shares the authenticated transport dispatcher with the independently owned Git,
     // command and team-chat services. Ignore their namespaces so a valid message reaches its handler.
-    if (envelope.kind.startsWith('git.') || envelope.kind.startsWith('command.') || envelope.kind.startsWith('teamchat.')) return;
+    if (envelope.kind.startsWith('git.') || envelope.kind.startsWith('command.') || envelope.kind.startsWith('teamchat.') || envelope.kind.startsWith('teamgroup.')) return;
     throw new HttpError(400, 'Unsupported remote execution envelope kind.');
   }
 
