@@ -9,7 +9,7 @@ import {
 } from '@mingle/contracts';
 import { openDatabase } from '../../db.ts';
 import { Store } from '../../store.ts';
-import { makeRepo } from '../../test-utils.ts';
+import { makeRepo, waitFor } from '../../test-utils.ts';
 import { TeamOrchestrationHost } from './service.ts';
 
 const ACCOUNT = '10000000-0000-4000-8000-000000000001';
@@ -248,12 +248,12 @@ it('dispatches remote proxy deliveries, proxies team MCP calls, rejects mismatch
     session: fx.store.getSession(sessionId)!, runId: 'host-run-1', content: 'TEAM INSTRUCTIONS\n\nReview the diff', options: { groupDeliveryId: deliveryId },
     context: { groupId: group.group.id, memberId: member.id, requestId, deliveryId, hop: 0, instructions: 'TEAM INSTRUCTIONS' }, consumedHandoffs: ['handoff-input-1'],
   });
-  await new Promise((resolve) => setTimeout(resolve, 0));
+  await waitFor(() => fx.outgoing.find((entry) => entry.kind === 'teamgroup.delivery' && (entry.payload as { deliveryId?: string }).deliveryId === deliveryId));
   const dispatched = fx.outgoing.find((entry) => entry.kind === 'teamgroup.delivery');
   expect(TeamDeliveryPayloadSchema.safeParse(dispatched?.payload)).toMatchObject({ success: true });
   expect(dispatched?.payload).toMatchObject({ content: expect.stringContaining('Git ref: refs/mingle/team/input/'),
     inputArtifacts: [expect.objectContaining({ revision: inputRevision, taskId: 'task-input-1', path: 'README.md', transferId: 'host-input-transfer' })],
-    integrationDeviceId: DEVICE, permissionLevel: 'supervised', settingsVersion: 1, kind: 'assignment' });
+    baseRevision: inputRevision, integrationDeviceId: DEVICE, permissionLevel: 'supervised', settingsVersion: 1, kind: 'assignment' });
   await expect(fx.incoming('teamgroup.delivery.status', { sharedProjectId: SHARED, deliveryId, agentId: REMOTE_AGENT, status: 'running', runId: 'owner-run-1', at: new Date().toISOString() }, DEVICE))
     .rejects.toMatchObject({ status: 403 });
   await expect(fx.incoming('teamgroup.delivery.status', { sharedProjectId: SHARED, deliveryId: 'unknown-delivery', agentId: REMOTE_AGENT, status: 'running', runId: 'owner-run-1', at: new Date().toISOString() }))
@@ -314,7 +314,7 @@ it('imports remote artifacts into isolated refs and includes those ref names in 
   fx.store.insertRun({ id: 'team-artifact-run', sessionId, userMessageId: userMessage.id, provider: 'codex', model: 'gpt-6-codex', startedAt: new Date().toISOString() });
   fx.host.start({ session: fx.store.getSession(sessionId)!, runId: 'team-artifact-run', content: 'Implement this task', options: { groupDeliveryId: deliveryId },
     context: { groupId: group.group.id, memberId: member.id, requestId, deliveryId, hop: 0, instructions: 'Instructions' } });
-  await new Promise((resolve) => setTimeout(resolve, 0));
+  await waitFor(() => fx.outgoing.find((entry) => entry.kind === 'teamgroup.delivery' && (entry.payload as { deliveryId?: string }).deliveryId === deliveryId));
   const revision = 'a'.repeat(40);
   const artifact = { revision, transferId: 'owner-transfer', path: 'src/output.ts', taskId: 'task-42' };
   await fx.incoming('teamgroup.delivery.status', { sharedProjectId: SHARED, deliveryId, agentId: REMOTE_AGENT, status: 'completed',
@@ -358,7 +358,7 @@ it('leaves host leader settings unchanged when an automatic scheduler handover f
   fx.store.insertRun({ id: 'quota-handover-host-run', sessionId: proxyId, userMessageId: userMessage.id, provider: 'codex', model: 'gpt-6-codex', startedAt: new Date().toISOString() });
   fx.host.start({ session: fx.store.getSession(proxyId)!, runId: 'quota-handover-host-run', content: 'Try work', options: { groupDeliveryId: deliveryId },
     context: { groupId: group.group.id, memberId: member.id, requestId, deliveryId, hop: 0, instructions: 'Instructions' } });
-  await new Promise((resolve) => setTimeout(resolve, 0));
+  await waitFor(() => fx.outgoing.find((entry) => entry.kind === 'teamgroup.delivery' && (entry.payload as { deliveryId?: string }).deliveryId === deliveryId));
   fx.failNextSync();
 
   await fx.incoming('teamgroup.delivery.status', { sharedProjectId: SHARED, deliveryId, agentId: REMOTE_AGENT, status: 'failed', runId: 'owner-run-quota-failed',
@@ -414,7 +414,7 @@ it('promotes a consented online fallback after quota exhaustion and never infers
   fx.store.insertRun({ id: 'quota-host-run', sessionId: proxyId, userMessageId: userMessage.id, provider: 'codex', model: 'gpt-6-codex', startedAt: new Date().toISOString() });
   fx.host.start({ session: fx.store.getSession(proxyId)!, runId: 'quota-host-run', content: 'Try work', options: { groupDeliveryId: deliveryId },
     context: { groupId: group.group.id, memberId: member.id, requestId, deliveryId, hop: 0, instructions: 'Instructions' } });
-  await new Promise((resolve) => setTimeout(resolve, 0));
+  await waitFor(() => fx.outgoing.find((entry) => entry.kind === 'teamgroup.delivery' && (entry.payload as { deliveryId?: string }).deliveryId === deliveryId));
   await fx.incoming('teamgroup.delivery.status', { sharedProjectId: SHARED, deliveryId, agentId: REMOTE_AGENT, status: 'failed', runId: 'owner-run-quota',
     failure: { id: 'failure-1', sessionId: 'owner-session-remote', kind: 'quota_exhausted', actor: 'lead', provider: 'codex', retryable: false,
       dispatchState: 'dispatched', continuationSafety: 'unknown', message: 'Quota exhausted', occurredAt: new Date().toISOString() }, at: new Date().toISOString() });
@@ -437,7 +437,7 @@ it('promotes a consented online fallback after quota exhaustion and never infers
   fx.store.insertRun({ id: 'quota-host-run-2', sessionId: proxyId, userMessageId: secondMessage.id, provider: 'codex', model: 'gpt-6-codex', startedAt: new Date().toISOString() });
   fx.host.start({ session: fx.store.getSession(proxyId)!, runId: 'quota-host-run-2', content: 'Try another task', options: { groupDeliveryId: nextDeliveryId },
     context: { groupId: group.group.id, memberId: remoteMember.id, requestId: nextRequestId, deliveryId: nextDeliveryId, hop: 0, instructions: 'Instructions' } });
-  await new Promise((resolve) => setTimeout(resolve, 0));
+  await waitFor(() => fx.outgoing.find((entry) => entry.kind === 'teamgroup.delivery' && (entry.payload as { deliveryId?: string }).deliveryId === nextDeliveryId));
   await fx.incoming('teamgroup.delivery.status', { sharedProjectId: SHARED, deliveryId: nextDeliveryId, agentId: REMOTE_AGENT, status: 'failed', runId: 'owner-run-quota-2',
     failure: { id: 'failure-2', sessionId: 'owner-session-remote', kind: 'quota_exhausted', actor: 'lead', provider: 'codex', retryable: false,
       dispatchState: 'dispatched', continuationSafety: 'unknown', message: 'Quota exhausted again', occurredAt: new Date().toISOString() }, at: new Date().toISOString() });

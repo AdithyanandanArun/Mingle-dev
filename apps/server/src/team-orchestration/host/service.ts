@@ -20,6 +20,7 @@ import type {
   TeamOrchestrationTransport, TeamProxyRuntimeService, TeamProxyStartInput,
 } from '../types.ts';
 import { HttpError } from '../../util.ts';
+import { git } from '../../repository/git-run.ts';
 import { redactSecrets } from '../../providers/common.ts';
 import type { ProjectCollaborationSnapshot } from '../../../../../packages/contracts/src/project-collaboration.ts';
 import { KeyedLock } from '../../repository/lock.ts';
@@ -637,6 +638,11 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
     this.track((async () => {
       try {
         await this.options.authorizeTeam({ teamId: proxy.team_id, peerDeviceId: proxy.owner_device_id });
+        let baseRevision: string | undefined;
+        try {
+          const head = (await git(input.session.worktreePath, ['rev-parse', '--verify', 'HEAD'])).stdout.trim();
+          if (/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(head)) baseRevision = head;
+        } catch { /* A delivery can proceed without a transfer base when Git state is unavailable. */ }
         const inputArtifacts = await this.exportHandoffArtifacts(input.consumedHandoffs ?? [], input.session.projectId,
           proxy.team_id, proxy.shared_project_id, context.deliveryId, proxy.owner_device_id, input.options.taskId);
         const artifactContext = inputArtifacts.length
@@ -647,7 +653,7 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
         const content = artifactContext
           ? `${basePayload.content.slice(0, Math.max(0, 100_000 - artifactContext.length))}${artifactContext}`
           : basePayload.content;
-        const payload = DeliverySchema.parse({ ...basePayload, inputArtifacts, content });
+        const payload = DeliverySchema.parse({ ...basePayload, ...(baseRevision ? { baseRevision } : {}), inputArtifacts, content });
         this.hostRows.prepare('UPDATE mingle_team_host_deliveries SET content=?,updated_at=? WHERE delivery_id=?')
           .run(payload.content, new Date(this.now()).toISOString(), context.deliveryId);
         await this.options.transport.send({ teamId: proxy.team_id, toDeviceId: proxy.owner_device_id, kind: 'teamgroup.delivery', payload,
