@@ -1,13 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import {
-  Background, BackgroundVariant, Controls, Handle, Position, ReactFlow,
+  applyNodeChanges, Background, BackgroundVariant, Controls, Handle, Position, ReactFlow,
+  type NodeChange,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import {
   Armchair, ArrowDown, ArrowUp, Check, CircleAlert, Crown, GitFork, MoreHorizontal, Network, RefreshCw, ShieldCheck, Trash2, Wifi, WifiOff, X,
 } from 'lucide-react';
 import type { TeamStructureChange, TeamStructureMember, TeamStructureSnapshot } from '@mingle/contracts';
-import { useProject } from '../store/store';
+import { useMingle, useProject } from '../store/store';
 import { Button, EmptyState, InlineError, Modal, ProviderMark, Spinner } from '../components/ui';
 import { cx } from '../lib/format';
 import { TeamStructureApiError, teamStructureApi } from './team-structure/api';
@@ -46,9 +47,17 @@ function MemberCard({ data, selected = false }: { data: TeamNodeData; selected?:
   const [menuOpen, setMenuOpen] = useState(false);
   if (!member) return null;
   const fallbackRank = member.fallbackRank;
-  const currentRoleLabel = member.role === 'orchestrator' ? 'Previous leader · unavailable' : member.role === 'worker' ? 'Worker' : 'Idle';
+  const currentRoleLabel = member.role === 'orchestrator'
+    ? data.needsLeader ? 'Previous leader · unavailable' : 'Orchestrator'
+    : member.role === 'worker' ? 'Worker' : 'Idle';
 
   const menuKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (event.key === 'Escape' && menuOpen) {
+      event.preventDefault();
+      event.stopPropagation();
+      setMenuOpen(false);
+      return;
+    }
     if (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')) {
       event.preventDefault();
       event.stopPropagation();
@@ -60,7 +69,7 @@ function MemberCard({ data, selected = false }: { data: TeamNodeData; selected?:
     <div
       className={cx('team-card', selected && 'is-selected', `team-card--${member.state}`, member.role === 'orchestrator' && (data.needsLeader ? 'team-card--former-leader' : 'team-card--leader'))}
       role="group" tabIndex={0} aria-label={`${member.handle}, ${currentRoleLabel}, ${STATE_LABEL[member.state]}`}
-      onContextMenu={(event) => { event.preventDefault(); setMenuOpen((open) => !open); }} onKeyDown={menuKeyDown}
+      onContextMenu={data.canEdit ? (event) => { event.preventDefault(); setMenuOpen((open) => !open); } : undefined} onKeyDown={data.canEdit ? menuKeyDown : undefined}
     >
       <Handle type="target" position={Position.Top} id="in" />
       <div className="team-card__top">
@@ -84,8 +93,8 @@ function MemberCard({ data, selected = false }: { data: TeamNodeData; selected?:
       {member.consent !== 'granted' ? <span className={cx('team-consent', `team-consent--${member.consent}`)}><ShieldCheck size={11} />{CONSENT_LABEL[member.consent]}</span> : null}
       {menuOpen && data.canEdit ? <div className="nodrag team-card__menu" role="group" aria-label={`Actions for @${member.handle}`}>
         {member.role !== 'orchestrator' ? <button type="button" onClick={() => { setMenuOpen(false); data.onPromote?.(member); }}><Crown size={13} /> Promote to leader</button> : null}
-        {member.role !== 'worker' ? <button type="button" onClick={() => { setMenuOpen(false); data.onRoleChange?.(member, 'worker'); }}><GitFork size={13} /> Move to workers</button> : null}
-        {member.role !== 'idle' ? <button type="button" onClick={() => { setMenuOpen(false); data.onRoleChange?.(member, 'idle'); }}><Armchair size={13} /> Move to idle</button> : null}
+        {member.role !== 'worker' && (member.role !== 'orchestrator' || data.needsLeader) ? <button type="button" onClick={() => { setMenuOpen(false); data.onRoleChange?.(member, 'worker'); }}><GitFork size={13} /> Move to workers</button> : null}
+        {member.role !== 'idle' && (member.role !== 'orchestrator' || data.needsLeader) ? <button type="button" onClick={() => { setMenuOpen(false); data.onRoleChange?.(member, 'idle'); }}><Armchair size={13} /> Move to idle</button> : null}
         <div className="team-card__menu-label">Set fallback rank</div>
         {[1, 2, 3, 4].map((rank) => <button key={rank} type="button" disabled={member.role === 'orchestrator' || (fallbackRank === rank && data.fallbackIds?.[rank - 1] === member.agentId)} onClick={() => { setMenuOpen(false); data.onFallback?.(member, rank); }}><span className="team-card__menu-rank">#{rank}</span> Set as fallback #{rank}</button>)}
         <button type="button" className="is-danger" onClick={() => { setMenuOpen(false); data.onRemove?.(member); }}><Trash2 size={13} /> Remove from team…</button>
@@ -116,8 +125,14 @@ function applyOptimisticChange(snapshot: TeamStructureSnapshot, change: TeamStru
   let settings = snapshot.settings;
   if (change.action === 'set-orchestrator') {
     const target = members.find((member) => member.agentId === change.agentId);
-    members = members.map((member) => member.agentId === change.agentId ? { ...member, role: 'orchestrator' } : member.role === 'orchestrator' ? { ...member, role: change.previousRole } : member);
-    settings = settings ? { ...settings, orchestratorAgentId: change.agentId } : settings;
+    const fallbackIds = settings?.fallbackAgentIds.filter((agentId) => agentId !== change.agentId) ?? [];
+    const ranks = new Map(fallbackIds.map((agentId, index) => [agentId, index + 1]));
+    members = members.map((member) => ({
+      ...member,
+      role: member.agentId === change.agentId ? 'orchestrator' : member.role === 'orchestrator' ? change.previousRole : member.role,
+      fallbackRank: ranks.get(member.agentId) ?? null,
+    }));
+    settings = settings ? { ...settings, orchestratorAgentId: change.agentId, fallbackAgentIds: fallbackIds } : settings;
     if (!target) return snapshot;
     return { ...snapshot, needsLeader: false, members, settings };
   } else if (change.action === 'set-role') {
@@ -154,7 +169,9 @@ export default function TeamStructure() {
   const [busy, setBusy] = useState(false);
   const [pendingPromotion, setPendingPromotion] = useState<PendingPromotion | null>(null);
   const [pendingRemoval, setPendingRemoval] = useState<TeamStructureMember | null>(null);
+  const [flowNodes, setFlowNodes] = useState<TeamFlowNode[]>([]);
   const fallbackStrip = useRef<HTMLDivElement>(null);
+  const flowLayoutKey = useRef('');
   const busyRef = useRef(false);
   busyRef.current = busy;
 
@@ -237,6 +254,22 @@ export default function TeamStructure() {
   }), [requestPromotion, snapshot?.settings, performChange]);
 
   const graph = useMemo(() => snapshot ? buildTeamStructureGraph(snapshot, callbacks) : { nodes: [], edges: [] }, [snapshot, callbacks]);
+  const graphLayoutKey = `${snapshot?.projectId ?? ''}|${graph.nodes.map((node) => `${node.id}:${node.position.x},${node.position.y}`).join('|')}`;
+  useEffect(() => {
+    const layoutChanged = flowLayoutKey.current !== graphLayoutKey;
+    flowLayoutKey.current = graphLayoutKey;
+    setFlowNodes((current) => {
+      if (layoutChanged) return graph.nodes;
+      const currentById = new Map(current.map((node) => [node.id, node]));
+      return graph.nodes.map((node) => {
+        const existing = currentById.get(node.id);
+        return existing ? { ...node, position: existing.position } : node;
+      });
+    });
+  }, [graph.nodes, graphLayoutKey]);
+  const onNodesChange = useCallback((changes: NodeChange<TeamFlowNode>[]) => {
+    setFlowNodes((nodes) => applyNodeChanges(changes, nodes));
+  }, []);
   const fallbacks = useMemo(() => (snapshot?.settings?.fallbackAgentIds ?? []).map((agentId) => snapshot?.members.find((member) => member.agentId === agentId)).filter((member): member is TeamStructureMember => Boolean(member)), [snapshot]);
 
   const updateFallbacks = (agentIds: string[]) => {
@@ -274,11 +307,11 @@ export default function TeamStructure() {
     const workersLane = nodes.find((node) => node.id === 'lane:workers') as TeamFlowNode | undefined;
     const benchLane = nodes.find((node) => node.id === 'lane:bench') as TeamFlowNode | undefined;
     if (dragged.id.startsWith('member:') && member.role !== 'orchestrator' && contains(leaderSlot)) { requestPromotion(member); return; }
-    if (contains(benchLane) && member.role !== 'idle') {
+    if (contains(benchLane) && member.role !== 'idle' && (member.role !== 'orchestrator' || snapshot.needsLeader)) {
       void performChange({ action: 'set-role', agentId: member.agentId, role: 'idle', expectedVersion: snapshot.settings.version });
       return;
     }
-    if (contains(workersLane) && member.role !== 'worker') {
+    if (contains(workersLane) && member.role !== 'worker' && (member.role !== 'orchestrator' || snapshot.needsLeader)) {
       void performChange({ action: 'set-role', agentId: member.agentId, role: 'worker', expectedVersion: snapshot.settings.version });
       return;
     }
@@ -288,13 +321,31 @@ export default function TeamStructure() {
   if (loading) return <div className="team-structure__loading"><Spinner label="Loading team structure" /><span>Loading team structure…</span></div>;
   if (loadError && !snapshot) {
     const noSharedTeam = loadError instanceof TeamStructureApiError && loadError.status === 404;
-    return <div className="team-structure__empty"><EmptyState icon={<Network size={20} />} title={noSharedTeam ? 'This project is not a shared team yet' : 'Team structure unavailable'}>
-      {noSharedTeam ? 'Team structure is available for projects with a shared-team binding. Share this project with your team, then refresh.' : (loadError instanceof Error ? loadError.message : String(loadError))}
-      {!noSharedTeam ? <Button size="sm" onClick={() => void refresh()}><RefreshCw size={13} /> Retry</Button> : null}
+    const action = noSharedTeam
+      ? <Button size="sm" variant="primary" onClick={() => useMingle.getState().openDialog({ kind: 'project-collaboration', projectId: project.id })}><Network size={13} /> Open Teammates</Button>
+      : <Button size="sm" onClick={() => void refresh()}><RefreshCw size={13} /> Retry</Button>;
+    return <div className="team-structure__empty"><EmptyState icon={<Network size={20} />} title={noSharedTeam ? 'This project is not a team project yet' : 'Team structure unavailable'} action={action}>
+      {noSharedTeam ? 'Open Teammates and choose “Make this a team project” to enable shared orchestration.' : (loadError instanceof Error ? loadError.message : String(loadError))}
     </EmptyState></div>;
   }
   if (!snapshot) return <div className="team-structure__empty"><EmptyState icon={<Network size={20} />} title="Team structure unavailable">The server did not return a team structure for this project.</EmptyState></div>;
   const canEdit = snapshot.canEdit && Boolean(snapshot.settings);
+
+  if (!snapshot.enabled) return <div className="team-structure">
+    <header className="team-structure__header">
+      <div className="team-structure__title"><span className="team-structure__glyph"><Network size={16} /></span><div><h1>Team structure</h1><p>Shared orchestration is not enabled for this project.</p></div></div>
+      <div className="team-structure__settings" aria-label="Team orchestration settings">
+        <span className="team-setting"><i /> Leader orchestration <strong>Off</strong></span>
+        {snapshot.settings ? <span className="team-setting"><ShieldCheck size={13} /> Permission <strong>{snapshot.settings.permissionLevel === 'full-access' ? 'Full access' : 'Supervised'}</strong></span> : null}
+        <span className={cx('team-setting', snapshot.host.online ? 'is-online' : 'is-offline')}>
+          {snapshot.host.online ? <Wifi size={13} /> : <WifiOff size={13} />} Host device <strong>{snapshot.host.displayName} · {snapshot.host.online ? 'Online' : 'Offline'}</strong>
+        </span>
+      </div>
+    </header>
+    <div className="team-structure__empty"><EmptyState icon={<Network size={20} />} title="Make this a team project" action={<Button size="sm" variant="primary" onClick={() => useMingle.getState().openDialog({ kind: 'project-collaboration', projectId: project.id })}><Network size={13} /> Open Teammates</Button>}>
+      Open Teammates to invite collaborators and enable shared agents for this project.
+    </EmptyState></div>
+  </div>;
 
   const fallbackChange = (from: number, to: number) => {
     if (to < 0 || to >= fallbacks.length) return;
@@ -348,9 +399,9 @@ export default function TeamStructure() {
       <div className="team-structure__canvas-wrap" aria-busy={busy}>
         <ReactFlow
           key={snapshot.projectId}
-          nodes={graph.nodes} edges={graph.edges} nodeTypes={nodeTypes} colorMode={theme === 'light' ? 'light' : 'dark'}
+          nodes={flowNodes} edges={graph.edges} nodeTypes={nodeTypes} colorMode={theme === 'light' ? 'light' : 'dark'}
           fitView fitViewOptions={{ padding: 0.1, maxZoom: 1 }} minZoom={0.3} maxZoom={1.5}
-          nodesDraggable={canEdit} nodesConnectable={false} elementsSelectable={false}
+          onNodesChange={onNodesChange} nodesDraggable={canEdit} nodesConnectable={false} elementsSelectable={false}
           onNodeDragStop={handleNodeDragStop}
           aria-label="Interactive team structure"
         >
