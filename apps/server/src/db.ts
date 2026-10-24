@@ -286,8 +286,8 @@ const MIGRATIONS: (string | ((db: DatabaseSync) => void))[] = [
    // Migration 18 preserves selected context references on session and group messages.
    ensureMessageContextColumns,
    // Migration 19 adds durable per-shared-project team chat and, while unreleased, its provenance fields.
-   (db) => {
-     db.exec(`CREATE TABLE IF NOT EXISTS team_chat_messages (
+    (db) => {
+      db.exec(`CREATE TABLE IF NOT EXISTS team_chat_messages (
        id TEXT PRIMARY KEY, team_id TEXT NOT NULL, shared_project_id TEXT NOT NULL,
        author_json TEXT NOT NULL, body TEXT NOT NULL CHECK (length(body) <= 20000), mentions_json TEXT NOT NULL,
        reply_to TEXT, created_at TEXT NOT NULL, delivery_state TEXT NOT NULL CHECK (delivery_state IN ('sending','sent','failed')),
@@ -297,7 +297,52 @@ const MIGRATIONS: (string | ((db: DatabaseSync) => void))[] = [
      CREATE INDEX IF NOT EXISTS team_chat_order ON team_chat_messages(team_id, shared_project_id, created_at, id);
      CREATE UNIQUE INDEX IF NOT EXISTS team_chat_import_identity ON team_chat_messages(team_id, shared_project_id, source_session_id, source_message_id)
        WHERE source_session_id IS NOT NULL AND source_message_id IS NOT NULL;`);
-     ensureTeamChatProvenanceColumns(db);
+      ensureTeamChatProvenanceColumns(db);
+    },
+   // Migration 20: durable host settings, consent/roster mirrors and remote proxy runs.
+   (db) => {
+     db.exec(`CREATE TABLE IF NOT EXISTS mingle_team_host_projects (
+       team_id TEXT NOT NULL, shared_project_id TEXT NOT NULL, local_project_id TEXT NOT NULL REFERENCES projects(id),
+       owner_account_id TEXT NOT NULL, host_device_id TEXT NOT NULL, group_id TEXT NOT NULL,
+       settings_json TEXT NOT NULL, leader_history_json TEXT NOT NULL DEFAULT '[]', needs_leader INTEGER NOT NULL DEFAULT 0,
+       updated_at TEXT NOT NULL, PRIMARY KEY(team_id, shared_project_id)
+     );
+     CREATE INDEX IF NOT EXISTS mingle_team_host_project_local ON mingle_team_host_projects(local_project_id);
+     CREATE TABLE IF NOT EXISTS mingle_team_host_roster (
+       team_id TEXT NOT NULL, shared_project_id TEXT NOT NULL, agent_id TEXT NOT NULL, handle TEXT NOT NULL,
+       role TEXT NOT NULL CHECK (role IN ('orchestrator','worker','idle')), fallback_rank INTEGER,
+       removed_at TEXT, updated_at TEXT NOT NULL, PRIMARY KEY(team_id, shared_project_id, agent_id),
+       UNIQUE(team_id, shared_project_id, handle)
+     );
+     CREATE TABLE IF NOT EXISTS mingle_team_host_consents (
+       team_id TEXT NOT NULL, shared_project_id TEXT NOT NULL, agent_id TEXT NOT NULL, owner_account_id TEXT NOT NULL,
+       owner_device_id TEXT NOT NULL, state TEXT NOT NULL CHECK (state IN ('granted','needs-reconsent','paused','revoked')),
+       permission_level TEXT NOT NULL CHECK (permission_level IN ('supervised','full-access')),
+       settings_version INTEGER NOT NULL, disclaimer_version TEXT NOT NULL, accepted_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+       PRIMARY KEY(team_id, shared_project_id, agent_id)
+     );
+     CREATE INDEX IF NOT EXISTS mingle_team_host_consent_owner ON mingle_team_host_consents(team_id,shared_project_id,owner_account_id,owner_device_id);
+     CREATE TABLE IF NOT EXISTS mingle_team_proxy_sessions (
+       session_id TEXT PRIMARY KEY REFERENCES sessions(id), team_id TEXT NOT NULL, shared_project_id TEXT NOT NULL,
+       agent_id TEXT NOT NULL, owner_account_id TEXT NOT NULL, owner_device_id TEXT NOT NULL, handle TEXT NOT NULL,
+       UNIQUE(team_id, shared_project_id, agent_id), UNIQUE(team_id, shared_project_id, handle)
+     );
+     CREATE INDEX IF NOT EXISTS mingle_team_proxy_owner ON mingle_team_proxy_sessions(team_id,shared_project_id,owner_device_id);
+     CREATE TABLE IF NOT EXISTS mingle_team_host_deliveries (
+       delivery_id TEXT PRIMARY KEY, team_id TEXT NOT NULL, shared_project_id TEXT NOT NULL, group_id TEXT NOT NULL,
+       request_id TEXT NOT NULL, agent_id TEXT NOT NULL, session_id TEXT NOT NULL REFERENCES sessions(id),
+       owner_account_id TEXT NOT NULL, owner_device_id TEXT NOT NULL, run_id TEXT NOT NULL UNIQUE,
+       remote_run_id TEXT, status TEXT NOT NULL, content TEXT NOT NULL, source_chat_message_id TEXT,
+       artifacts_json TEXT NOT NULL DEFAULT '[]', failure_json TEXT, issued_at TEXT NOT NULL, timeout_at INTEGER NOT NULL,
+       updated_at TEXT NOT NULL
+     );
+     CREATE INDEX IF NOT EXISTS mingle_team_host_delivery_live ON mingle_team_host_deliveries(team_id,shared_project_id,status,timeout_at);
+     CREATE TABLE IF NOT EXISTS mingle_team_host_approvals (
+       approval_id TEXT PRIMARY KEY REFERENCES approvals(id), team_id TEXT NOT NULL, shared_project_id TEXT NOT NULL,
+       delivery_id TEXT NOT NULL REFERENCES mingle_team_host_deliveries(delivery_id), remote_approval_id TEXT NOT NULL,
+       owner_device_id TEXT NOT NULL, state TEXT NOT NULL CHECK (state IN ('pending','approved','denied','expired')),
+       expires_at TEXT NOT NULL, UNIQUE(delivery_id,remote_approval_id)
+     );`);
    },
 ];
 
