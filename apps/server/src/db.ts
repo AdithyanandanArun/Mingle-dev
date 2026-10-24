@@ -41,6 +41,11 @@ function ensureMessageContextColumns(db: DatabaseSync): void {
   addColumn(db, 'group_messages', 'context_refs_json', 'ALTER TABLE group_messages ADD COLUMN context_refs_json TEXT;');
 }
 
+function ensureTeamChatProvenanceColumns(db: DatabaseSync): void {
+  addColumn(db, 'team_chat_messages', 'author_device_id', 'ALTER TABLE team_chat_messages ADD COLUMN author_device_id TEXT;');
+  addColumn(db, 'team_chat_messages', 'author_signature', 'ALTER TABLE team_chat_messages ADD COLUMN author_signature TEXT;');
+}
+
 const MIGRATIONS: (string | ((db: DatabaseSync) => void))[] = [
   `
   CREATE TABLE projects (
@@ -280,17 +285,20 @@ const MIGRATIONS: (string | ((db: DatabaseSync) => void))[] = [
    (db) => { ensureArchiveColumns(db); ensurePlanTables(db); ensureGroupPlanColumns(db); },
    // Migration 18 preserves selected context references on session and group messages.
    ensureMessageContextColumns,
-   // Migration 19 adds durable per-shared-project team chat messages.
-   `CREATE TABLE IF NOT EXISTS team_chat_messages (
-      id TEXT PRIMARY KEY, team_id TEXT NOT NULL, shared_project_id TEXT NOT NULL,
-      author_json TEXT NOT NULL, body TEXT NOT NULL CHECK (length(body) <= 20000), mentions_json TEXT NOT NULL,
-      reply_to TEXT, created_at TEXT NOT NULL, delivery_state TEXT NOT NULL CHECK (delivery_state IN ('sending','sent','failed')),
-      run_state TEXT CHECK (run_state IS NULL OR run_state IN ('queued','running','awaiting-approval','completed','failed','interrupted')),
-      source_session_id TEXT, source_message_id TEXT
-    );
-    CREATE INDEX IF NOT EXISTS team_chat_order ON team_chat_messages(team_id, shared_project_id, created_at, id);
-    CREATE UNIQUE INDEX IF NOT EXISTS team_chat_import_identity ON team_chat_messages(team_id, shared_project_id, source_session_id, source_message_id)
-      WHERE source_session_id IS NOT NULL AND source_message_id IS NOT NULL;`,
+   // Migration 19 adds durable per-shared-project team chat and, while unreleased, its provenance fields.
+   (db) => {
+     db.exec(`CREATE TABLE IF NOT EXISTS team_chat_messages (
+       id TEXT PRIMARY KEY, team_id TEXT NOT NULL, shared_project_id TEXT NOT NULL,
+       author_json TEXT NOT NULL, body TEXT NOT NULL CHECK (length(body) <= 20000), mentions_json TEXT NOT NULL,
+       reply_to TEXT, created_at TEXT NOT NULL, delivery_state TEXT NOT NULL CHECK (delivery_state IN ('sending','sent','failed')),
+       run_state TEXT CHECK (run_state IS NULL OR run_state IN ('queued','running','awaiting-approval','completed','failed','interrupted')),
+       source_session_id TEXT, source_message_id TEXT
+     );
+     CREATE INDEX IF NOT EXISTS team_chat_order ON team_chat_messages(team_id, shared_project_id, created_at, id);
+     CREATE UNIQUE INDEX IF NOT EXISTS team_chat_import_identity ON team_chat_messages(team_id, shared_project_id, source_session_id, source_message_id)
+       WHERE source_session_id IS NOT NULL AND source_message_id IS NOT NULL;`);
+     ensureTeamChatProvenanceColumns(db);
+   },
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;
@@ -314,6 +322,9 @@ export function openDatabase(file: string): DatabaseSync {
       throw error;
     }
   }
+  // Reconcile databases which applied the unreleased first version of migration 19 before
+  // its provenance columns were added. The operation is deliberately idempotent.
+  ensureTeamChatProvenanceColumns(db);
   if (!existed && file !== ':memory:') {
     try { chmodSync(file, 0o600); } catch { /* best effort on platforms without POSIX modes */ }
   }

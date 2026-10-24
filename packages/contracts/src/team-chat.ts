@@ -17,6 +17,8 @@ export const TeamChatMessageSchema = z.object({
   id: z.string().trim().min(1).max(100), teamId: z.string().uuid(), sharedProjectId: z.string().uuid(),
   author: TeamChatAuthorSchema, body: z.string().max(20_000), mentions: z.array(z.string().trim().min(1).max(100)).max(20),
   replyTo: z.string().trim().min(1).max(100).nullable().optional(), createdAt: z.string().datetime({ offset: true }),
+  // Optional only so pre-provenance local history remains readable. Incoming messages must provide both.
+  authorDeviceId: z.string().uuid().optional(), authorSignature: z.string().min(80).max(100).optional(),
   deliveryState: z.enum(['sending', 'sent', 'failed']), runState: TeamChatRunStateSchema.nullable(),
   source: z.object({ sessionId: z.string().trim().min(1).max(100), messageId: z.string().trim().min(1).max(100) }).strict().optional(),
 }).strict();
@@ -33,8 +35,14 @@ export const TeamChatSyncRequestSchema = z.object({
 }).strict();
 
 export const TeamChatSyncResponseSchema = z.object({
-  sharedProjectId: z.string().uuid(), requestId: z.string().uuid(), messages: z.array(TeamChatMessageSchema).max(200),
-}).strict();
+  sharedProjectId: z.string().uuid(), requestId: z.string().uuid(),
+  batchIndex: z.number().int().min(0).max(199), batchCount: z.number().int().min(1).max(200),
+  messages: z.array(TeamChatMessageSchema).max(200),
+}).strict().superRefine((value, ctx) => {
+  if (value.batchIndex >= value.batchCount) ctx.addIssue({ code: 'custom', path: ['batchIndex'], message: 'Batch index must be below batch count.' });
+  if (value.batchCount === 1 && value.batchIndex === 0 && value.messages.length === 0) return;
+  if (!value.messages.length) ctx.addIssue({ code: 'custom', path: ['messages'], message: 'Only a single empty completion batch is valid.' });
+});
 
 export const TeamChatPageQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(200).default(100), before: z.string().trim().min(1).max(100).optional(),

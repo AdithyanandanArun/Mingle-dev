@@ -68,7 +68,8 @@ it('shares imported session history and team messages over HTTP and the encrypte
     const imported = await leader.api('POST', `/api/projects/${projects[0]}/team-chat/import`, { sessionId });
     expect(imported.status, JSON.stringify(imported.json)).toBe(200);
     expect(imported.json).toMatchObject({ imported: 2, truncated: false });
-    expect(imported.json.messages.map((message: { author: { kind: string } }) => message.author.kind)).toEqual(['human', 'agent']);
+    // Historical assistant text is attributed to the importing account unless its session is a published roster agent.
+    expect(imported.json.messages.map((message: { author: { kind: string } }) => message.author.kind)).toEqual(['human', 'human']);
     await teammate.app.distributed.transport.sync();
     const joinedHistory = await teammate.api('GET', `/api/projects/${projects[1]}/team-chat?limit=20`);
     expect(joinedHistory.status, JSON.stringify(joinedHistory.json)).toBe(200);

@@ -107,6 +107,21 @@ export function fingerprintForPublicKeys(signingPublicKeyDer: string, encryption
   return `SHA-256:${digest}`;
 }
 
+/** Signs a caller-canonicalized public payload with the registered device's Ed25519 identity key. */
+export function signDevicePayload(payload: string, keys: DeviceKeyMaterial): string {
+  return sign(null, Buffer.from(payload, 'utf8'), keys.signingPrivateKey).toString('base64');
+}
+
+/** Verifies an Ed25519 payload with a registered SPKI public key; malformed peer input is a simple rejection. */
+export function verifyDevicePayload(payload: string, signature: string, signingPublicKeyDer: string): boolean {
+  try {
+    const bytes = Buffer.from(signature, 'base64');
+    if (bytes.length !== 64 || bytes.toString('base64') !== signature) return false;
+    const publicKey = createPublicKey({ key: Buffer.from(signingPublicKeyDer, 'base64'), format: 'der', type: 'spki' });
+    return verify(null, Buffer.from(payload, 'utf8'), publicKey, bytes);
+  } catch { return false; }
+}
+
 function routingHeader(header: EnvelopeHeader): Record<string, string> {
   return {
     id: header.id, teamId: header.teamId, fromDeviceId: header.fromDeviceId, toDeviceId: header.toDeviceId,

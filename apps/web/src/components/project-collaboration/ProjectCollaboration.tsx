@@ -406,15 +406,15 @@ export function ProjectInviteJoinDialog({ token, onClose, onOpenAccountSettings,
   }, [preview]);
 
   useEffect(() => {
-    let active = true;
+    const sequence = ++directorySequence.current;
     void api.directories('', '', false).then((listing) => {
-      if (!active) return;
+      if (sequence !== directorySequence.current) return;
       setDirectoryListing(listing);
       setDirectoryPath(listing.displayPath);
     }).catch((cause) => {
-      if (active) setDirectoryError(errorMessage(cause));
+      if (sequence === directorySequence.current) setDirectoryError(errorMessage(cause));
     });
-    return () => { active = false; };
+    return () => { directorySequence.current++; };
   }, []);
 
   useEffect(() => {

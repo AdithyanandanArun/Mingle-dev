@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { rmSync } from 'node:fs';
 import { expect, it } from 'vitest';
 import type { SupabaseClient, User } from '@supabase/supabase-js';
+import { canonicalJson, generateDeviceKeyMaterial, signDevicePayload } from '../distributed/crypto.ts';
 import { openDatabase } from '../db.ts';
 import { Store } from '../store.ts';
 import { SessionRuntime } from '../runtime.ts';
@@ -10,15 +11,21 @@ import { FakeProviders, makeRepo } from '../test-utils.ts';
 import type { AccountService } from '../account/service.ts';
 import type { DistributedWorkspaceService } from '../distributed/service.ts';
 import type { ProjectCollaborationService } from '../project-collaboration/service.ts';
-import { TeamChatMessageSchema } from '../../../../packages/contracts/src/team-chat.ts';
 import { TeamChatService } from './service.ts';
 
 const ACCOUNT = '10000000-0000-4000-8000-000000000001';
+const OTHER_ACCOUNT = '10000000-0000-4000-8000-000000000002';
 const TEAM = '20000000-0000-4000-8000-000000000001';
 const SHARED = '30000000-0000-4000-8000-000000000001';
 const DEVICE = '40000000-0000-4000-8000-000000000001';
 const PEER = '40000000-0000-4000-8000-000000000002';
+const OTHER_DEVICE = '40000000-0000-4000-8000-000000000003';
+const UNKNOWN_AGENT = '50000000-0000-4000-8000-000000000003';
 const PROJECT = 'project-chat-test';
+
+const DEVICE_KEYS = generateDeviceKeyMaterial();
+const PEER_KEYS = generateDeviceKeyMaterial();
+const OTHER_DEVICE_KEYS = generateDeviceKeyMaterial();
 
 function cloudClient(): SupabaseClient {
   return {
@@ -36,10 +43,18 @@ function cloudClient(): SupabaseClient {
       const rows = () => {
         const id = filters.get('id');
         const userId = filters.get('user_id');
-        if (table === 'mingle_devices') return id === PEER ? [{ id: PEER, owner_id: ACCOUNT }] : id === DEVICE ? [{ id: DEVICE, owner_id: ACCOUNT }] : [];
+        if (table === 'mingle_devices') {
+          const devices = [
+            { id: DEVICE, owner_id: ACCOUNT, signing_public_key: DEVICE_KEYS.signingPublicKeyDer, encryption_public_key: DEVICE_KEYS.encryptionPublicKeyDer, fingerprint: DEVICE_KEYS.fingerprint, revoked_at: null },
+            { id: PEER, owner_id: ACCOUNT, signing_public_key: PEER_KEYS.signingPublicKeyDer, encryption_public_key: PEER_KEYS.encryptionPublicKeyDer, fingerprint: PEER_KEYS.fingerprint, revoked_at: null },
+            { id: OTHER_DEVICE, owner_id: OTHER_ACCOUNT, signing_public_key: OTHER_DEVICE_KEYS.signingPublicKeyDer, encryption_public_key: OTHER_DEVICE_KEYS.encryptionPublicKeyDer, fingerprint: OTHER_DEVICE_KEYS.fingerprint, revoked_at: null },
+          ];
+          if (Array.isArray(id)) return devices.filter((device) => id.includes(device.id));
+          return devices.filter((device) => device.id === id);
+        }
         if (table === 'mingle_projects') return filters.get('id') === SHARED && filters.get('team_id') === TEAM ? [{ id: SHARED }] : [];
         if (table === 'mingle_members') {
-          const allowed = [ACCOUNT];
+          const allowed = [ACCOUNT, OTHER_ACCOUNT];
           if (Array.isArray(userId)) return (userId as string[]).filter((value) => allowed.includes(value)).map((value) => ({ user_id: value }));
           return typeof userId === 'string' && allowed.includes(userId) ? [{ user_id: userId }] : [];
         }
@@ -73,6 +88,10 @@ function fixture(withAgent = false) {
     snapshot: () => transportSnapshot(),
     sync: async () => undefined,
     send: async (entry: typeof outgoing[number]) => { outgoing.push(entry); return `envelope-${outgoing.length}`; },
+    signPayload: async (teamId: string, expectedDeviceId: string, payload: string) => {
+      if (teamId !== TEAM || expectedDeviceId !== DEVICE) throw new Error('unexpected signing device');
+      return signDevicePayload(payload, DEVICE_KEYS);
+    },
     onMessage: (handler: (envelope: any) => Promise<void>) => { receive = handler; return () => { receive = null; }; },
   };
   const fake = new FakeProviders();
@@ -82,7 +101,10 @@ function fixture(withAgent = false) {
     async snapshot() {
       return {
         project: { teamId: TEAM, sharedProjectId: SHARED, name: 'Shared', repositoryUrl: 'https://example.test/team.git' },
-        members: [{ accountId: ACCOUNT, displayName: 'Ada', email: null, role: 'leader', status: 'active' }],
+        members: [
+          { accountId: ACCOUNT, displayName: 'Ada', email: null, role: 'leader', status: 'active' },
+          { accountId: OTHER_ACCOUNT, displayName: 'Sam', email: null, role: 'member', status: 'active' },
+        ],
         agents: session ? [{ id: session.id, name: session.name, accountId: ACCOUNT, deviceId: DEVICE,
           projectId: PROJECT, sessionId: session.id, provider: session.provider, model: session.model, state: 'idle' }] : [],
         invitations: [], email: { configured: false },
@@ -110,6 +132,18 @@ function fixture(withAgent = false) {
       return receive(envelope);
     },
     setPeerAllowed(value: boolean) { allowPeer = value; },
+    remoteMessage(message: Record<string, any>, deviceId = PEER, keys = PEER_KEYS): Record<string, any> {
+      const author = message.author.kind === 'human'
+        ? { kind: 'human', accountId: message.author.accountId }
+        : { kind: 'agent', agentId: message.author.agentId, ownerAccountId: message.author.ownerAccountId };
+      const payload = canonicalJson({
+        domain: 'mingle-team-chat-message-v1', id: message.id, teamId: message.teamId,
+        sharedProjectId: message.sharedProjectId, author, body: message.body, mentions: message.mentions,
+        replyTo: message.replyTo ?? null, createdAt: message.createdAt, source: message.source ?? null,
+        authorDeviceId: deviceId,
+      });
+      return { ...message, authorDeviceId: deviceId, authorSignature: signDevicePayload(payload, keys) };
+    },
     async close() { await service.close(); await runtime.shutdown(); store.db.close(); rmSync(projectPath, { recursive: true, force: true }); },
   };
 }
@@ -127,19 +161,119 @@ it('fans out authenticated human messages, deduplicates by message ID, and rejec
   try {
     const message = await f.service.send(PROJECT, { body: 'Shared note', mentions: [] });
     expect(message).toMatchObject({ author: { kind: 'human', accountId: ACCOUNT, displayName: 'Ada' }, deliveryState: 'sent' });
+    expect(message.authorDeviceId).toBe(DEVICE);
+    expect(message.authorSignature).toMatch(/^[A-Za-z0-9+/]{86}==$/);
     expect(f.outgoing).toHaveLength(1);
     expect(f.outgoing[0]).toMatchObject({ kind: 'teamchat.message', toDeviceId: PEER });
 
-    const received = { ...message, deliveryState: 'sent' as const };
+    const received = f.remoteMessage({ ...message, id: randomUUID(), author: { kind: 'human', accountId: ACCOUNT, displayName: 'Forged display name' }, body: 'Peer authored note' });
     const envelope = { id: randomUUID(), teamId: TEAM, fromDeviceId: PEER, toDeviceId: DEVICE, kind: 'teamchat.message', payload: received };
     await f.receive(envelope);
     await f.receive({ ...envelope, id: randomUUID() });
-    expect(f.store.db.prepare('SELECT COUNT(*) AS n FROM team_chat_messages WHERE id=?').get(message.id)).toEqual({ n: 1 });
+    expect(f.store.db.prepare('SELECT COUNT(*) AS n FROM team_chat_messages WHERE id=?').get(received.id)).toEqual({ n: 1 });
+    expect(f.store.db.prepare('SELECT author_json FROM team_chat_messages WHERE id=?').get(received.id)).toEqual({
+      author_json: JSON.stringify({ kind: 'human', accountId: ACCOUNT, displayName: 'Ada' }),
+    });
 
     f.setPeerAllowed(false);
-    const forged = TeamChatMessageSchema.parse({ ...received, id: randomUUID(), body: 'revoked sender message' });
+    const forged = f.remoteMessage({ ...received, id: randomUUID(), body: 'revoked sender message' });
     await expect(f.receive({ ...envelope, id: randomUUID(), payload: forged })).rejects.toThrow(/inactive peer/);
     expect(f.store.db.prepare('SELECT COUNT(*) AS n FROM team_chat_messages WHERE body=?').get('revoked sender message')).toEqual({ n: 0 });
+  } finally { await f.close(); }
+});
+
+it('rejects forged backfill authors, unsolicited responses, and unrostered agent identities before persistence', async () => {
+  const f = fixture();
+  try {
+    await f.service.snapshot(PROJECT, { limit: 100 });
+    await until(() => f.outgoing.some((entry) => entry.kind === 'teamchat.sync.request'));
+    const request = f.outgoing.find((entry) => entry.kind === 'teamchat.sync.request')!.payload as { requestId: string };
+    const forgedBackfill = f.remoteMessage({
+      id: randomUUID(), teamId: TEAM, sharedProjectId: SHARED,
+      author: { kind: 'human', accountId: OTHER_ACCOUNT, displayName: 'Sam' }, body: 'Forged as another member',
+      mentions: [], createdAt: new Date().toISOString(), deliveryState: 'sent', runState: null,
+    }, OTHER_DEVICE, PEER_KEYS);
+    const response = { sharedProjectId: SHARED, requestId: request.requestId, batchIndex: 0, batchCount: 1, messages: [forgedBackfill] };
+    await expect(f.receive({ id: randomUUID(), teamId: TEAM, fromDeviceId: PEER, toDeviceId: DEVICE,
+      kind: 'teamchat.sync.response', payload: response })).rejects.toThrow(/signature is invalid/);
+    expect(f.store.db.prepare('SELECT COUNT(*) AS n FROM team_chat_messages WHERE body=?').get('Forged as another member')).toEqual({ n: 0 });
+
+    const validBackfill = f.remoteMessage({
+      id: randomUUID(), teamId: TEAM, sharedProjectId: SHARED,
+      author: { kind: 'human', accountId: ACCOUNT, displayName: 'Ignored peer value' }, body: 'Verified relayed history',
+      mentions: [], createdAt: new Date().toISOString(), deliveryState: 'sent', runState: null,
+    });
+    await f.receive({ id: randomUUID(), teamId: TEAM, fromDeviceId: PEER, toDeviceId: DEVICE,
+      kind: 'teamchat.sync.response', payload: { ...response, messages: [validBackfill] } });
+    expect(f.store.db.prepare('SELECT author_json FROM team_chat_messages WHERE id=?').get(validBackfill.id)).toEqual({
+      author_json: JSON.stringify({ kind: 'human', accountId: ACCOUNT, displayName: 'Ada' }),
+    });
+
+    const validPeerMessage = f.remoteMessage({
+      id: randomUUID(), teamId: TEAM, sharedProjectId: SHARED,
+      author: { kind: 'human', accountId: ACCOUNT, displayName: 'Peer supplied name' }, body: 'Unsolicited history',
+      mentions: [], createdAt: new Date().toISOString(), deliveryState: 'sent', runState: null,
+    });
+    await expect(f.receive({ id: randomUUID(), teamId: TEAM, fromDeviceId: PEER, toDeviceId: DEVICE,
+      kind: 'teamchat.sync.response', payload: { ...response, requestId: randomUUID(), messages: [validPeerMessage] } }))
+      .rejects.toThrow(/not requested/);
+
+    const fakeAgent = f.remoteMessage({
+      id: randomUUID(), teamId: TEAM, sharedProjectId: SHARED,
+      author: { kind: 'agent', agentId: UNKNOWN_AGENT, agentName: 'Pretend agent', ownerAccountId: ACCOUNT, provider: 'claude', model: 'claude-sonnet-5-5' },
+      body: 'Agent impersonation', mentions: [], createdAt: new Date().toISOString(), deliveryState: 'sent', runState: null,
+    });
+    await expect(f.receive({ id: randomUUID(), teamId: TEAM, fromDeviceId: PEER, toDeviceId: DEVICE,
+      kind: 'teamchat.message', payload: fakeAgent })).rejects.toThrow(/not published/);
+    expect(f.store.db.prepare('SELECT COUNT(*) AS n FROM team_chat_messages WHERE body IN (?,?)')
+      .get('Unsolicited history', 'Agent impersonation')).toEqual({ n: 0 });
+  } finally { await f.close(); }
+});
+
+it('uses the published agent roster for agent metadata and enforces per-project history retention', async () => {
+  const f = fixture(true);
+  try {
+    await f.service.snapshot(PROJECT, { limit: 100 });
+    await until(() => f.outgoing.some((entry) => entry.kind === 'teamchat.sync.request'));
+    const request = f.outgoing.find((entry) => entry.kind === 'teamchat.sync.request')!.payload as { requestId: string };
+    const agent = f.session!;
+    const signedFromRosterDevice = f.remoteMessage({
+      id: randomUUID(), teamId: TEAM, sharedProjectId: SHARED,
+      author: { kind: 'agent', agentId: agent.id, agentName: 'Forged agent name', ownerAccountId: ACCOUNT, provider: 'codex', model: 'forged-model' },
+      body: 'Roster metadata wins', mentions: [], createdAt: new Date().toISOString(), deliveryState: 'sent', runState: 'completed',
+    }, DEVICE, DEVICE_KEYS);
+    await f.receive({ id: randomUUID(), teamId: TEAM, fromDeviceId: PEER, toDeviceId: DEVICE, kind: 'teamchat.sync.response',
+      payload: { sharedProjectId: SHARED, requestId: request.requestId, batchIndex: 0, batchCount: 1, messages: [signedFromRosterDevice] } });
+    expect(f.store.db.prepare('SELECT author_json FROM team_chat_messages WHERE id=?').get(signedFromRosterDevice.id)).toEqual({
+      author_json: JSON.stringify({ kind: 'agent', agentId: agent.id, agentName: 'Local agent', ownerAccountId: ACCOUNT, provider: 'claude', model: 'claude-sonnet-5-5' }),
+    });
+
+    const seed = f.store.db.prepare(`INSERT INTO team_chat_messages
+      (id,team_id,shared_project_id,author_json,body,mentions_json,created_at,delivery_state,run_state)
+      VALUES (?,?,?,?,?,?,?,'sent',NULL)`);
+    for (let index = 0; index < 10_000; index++) {
+      seed.run(`quota-${String(index).padStart(5, '0')}`, TEAM, SHARED, JSON.stringify({ kind: 'human', accountId: ACCOUNT, displayName: 'Ada' }),
+        'old retained record', '[]', new Date(Date.UTC(2020, 0, 1, 0, 0, index)).toISOString());
+    }
+    const newMessage = f.remoteMessage({
+      id: randomUUID(), teamId: TEAM, sharedProjectId: SHARED,
+      author: { kind: 'human', accountId: ACCOUNT, displayName: 'Ada' }, body: 'Within history quota', mentions: [],
+      createdAt: new Date().toISOString(), deliveryState: 'sent', runState: null,
+    });
+    await f.receive({ id: randomUUID(), teamId: TEAM, fromDeviceId: PEER, toDeviceId: DEVICE, kind: 'teamchat.message', payload: newMessage });
+    expect(f.store.db.prepare('SELECT COUNT(*) AS n FROM team_chat_messages WHERE team_id=? AND shared_project_id=?').get(TEAM, SHARED)).toEqual({ n: 10_000 });
+    expect(f.store.db.prepare('SELECT id FROM team_chat_messages WHERE id=?').get('quota-00000')).toBeUndefined();
+  } finally { await f.close(); }
+});
+
+it('rate-limits repeated sync requests from the same peer device', async () => {
+  const f = fixture();
+  try {
+    const makeRequest = () => ({ id: randomUUID(), teamId: TEAM, fromDeviceId: PEER, toDeviceId: DEVICE,
+      kind: 'teamchat.sync.request', payload: { sharedProjectId: SHARED, requestId: randomUUID(), since: null } });
+    await f.receive(makeRequest());
+    await expect(f.receive(makeRequest())).rejects.toThrow(/too frequently/);
+    expect(f.outgoing.filter((entry) => entry.kind === 'teamchat.sync.response')).toHaveLength(1);
   } finally { await f.close(); }
 });
 
@@ -148,11 +282,14 @@ it('backfills bounded message batches and runs local agent mentions through the 
   try {
     const author = JSON.stringify({ kind: 'human', accountId: ACCOUNT, displayName: 'Ada' });
     const insert = f.store.db.prepare(`INSERT INTO team_chat_messages
-      (id,team_id,shared_project_id,author_json,body,mentions_json,created_at,delivery_state,run_state)
-      VALUES (?,?,?,?,?,?,?,'sent',NULL)`);
+      (id,team_id,shared_project_id,author_json,body,mentions_json,created_at,delivery_state,run_state,author_device_id,author_signature)
+      VALUES (?,?,?,?,?,?,?,'sent',NULL,?,?)`);
     for (let index = 0; index < 205; index++) {
       const id = `backfill-${String(index).padStart(3, '0')}`;
-      insert.run(id, TEAM, SHARED, author, `History ${index}`, '[]', new Date(Date.UTC(2026, 0, 1, 0, 0, index)).toISOString());
+      const createdAt = new Date(Date.UTC(2026, 0, 1, 0, 0, index)).toISOString();
+      const signed = f.remoteMessage({ id, teamId: TEAM, sharedProjectId: SHARED, author: JSON.parse(author), body: `History ${index}`,
+        mentions: [], createdAt, deliveryState: 'sent', runState: null }, DEVICE, DEVICE_KEYS);
+      insert.run(id, TEAM, SHARED, author, `History ${index}`, '[]', createdAt, DEVICE, signed.authorSignature);
     }
     await f.receive({ id: randomUUID(), teamId: TEAM, fromDeviceId: PEER, toDeviceId: DEVICE, kind: 'teamchat.sync.request',
       payload: { sharedProjectId: SHARED, requestId: randomUUID(), since: null } });
@@ -174,6 +311,8 @@ it('backfills bounded message batches and runs local agent mentions through the 
     expect(f.runtimeCalls[0]).toMatchObject({ session: { id: agentId } });
     expect(f.runtimeCalls[0]!.prompt).toContain('Please check this for the team.');
     expect(f.runtimeCalls[0]!.prompt).toContain('untrusted conversation context');
+    expect(f.store.db.prepare('SELECT author_device_id,author_signature FROM team_chat_messages WHERE author_json LIKE ?')
+      .get('%"kind":"agent"%')).toMatchObject({ author_device_id: DEVICE, author_signature: expect.stringMatching(/^[A-Za-z0-9+/]{86}==$/) });
     const messages = f.store.db.prepare('SELECT author_json,body,run_state FROM team_chat_messages ORDER BY created_at,id').all() as Array<{ author_json: string; body: string; run_state: string | null }>;
     expect(messages.some((row) => JSON.parse(row.author_json).kind === 'agent' && row.body === 'ok')).toBe(true);
     expect(messages.find((row) => JSON.parse(row.author_json).kind === 'human' && row.body === 'Please check this for the team.')?.run_state).toBe('completed');

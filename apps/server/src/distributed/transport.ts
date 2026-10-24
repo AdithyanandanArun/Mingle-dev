@@ -14,7 +14,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import { HttpError } from '../util.ts';
 import {
   canonicalJson, fingerprintForPublicKeys, generateDeviceKeyMaterial, MAX_DISTRIBUTED_PAYLOAD_BYTES,
-  openEnvelope, restoreDeviceKeyMaterial, sealEnvelope,
+  openEnvelope, restoreDeviceKeyMaterial, sealEnvelope, signDevicePayload,
   type DeviceKeyMaterial, type SignedEnvelope,
 } from './crypto.ts';
 
@@ -287,6 +287,20 @@ export class TransportService {
       await this.flushOutbox(client, user.id, request.teamId, own.device_id);
       this.options.changed?.();
       return envelope.id;
+    });
+  }
+
+  /** Signs a bounded service-level statement with this account's registered team-device identity key. */
+  signPayload(teamId: string, expectedDeviceId: string, payload: string): Promise<string> {
+    if (typeof payload !== 'string' || Buffer.byteLength(payload, 'utf8') > MAX_DISTRIBUTED_PAYLOAD_BYTES) {
+      throw new HttpError(413, 'The device-signed payload exceeds the distributed payload limit.');
+    }
+    return this.withAccount(async (_client, user, keys) => {
+      const own = this.requireLocalDevice(user.id, teamId);
+      if (own.registered !== 1 || own.device_id !== expectedDeviceId) {
+        throw new HttpError(409, 'The registered team device changed before signing.');
+      }
+      return signDevicePayload(payload, keys);
     });
   }
 
