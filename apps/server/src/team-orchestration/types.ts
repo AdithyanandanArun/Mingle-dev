@@ -80,6 +80,7 @@ export interface TeamProxyRuntimeService {
   activeCount(): number;
   start(input: TeamProxyStartInput): void;
   interrupt(sessionId: string): boolean;
+  authorizeApprovalDecision(approvalId: string): Promise<void>;
   decideApproval(approvalId: string, decision: 'approved' | 'denied'): import('@mingle/contracts').Approval | null;
 }
 

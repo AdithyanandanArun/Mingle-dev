@@ -482,6 +482,7 @@ export function buildRouter(s: Services) {
     const id = param(ctx, 'id');
     const body = await ctx.body(ApprovalDecisionSchema);
     await s.distributed.authorizeNativeApproval(id);
+    await s.runtime.authorizeApprovalDecision(id);
     return s.runtime.decide(id, body.decision);
   });
 

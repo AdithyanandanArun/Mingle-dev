@@ -159,6 +159,10 @@ export class SessionRuntime {
     this.teamMcp = teamMcp;
   }
   setTeamProxyService(service: TeamProxyRuntimeService): void { this.teamProxy = service; }
+
+  async authorizeApprovalDecision(approvalId: string): Promise<void> {
+    await this.teamProxy?.authorizeApprovalDecision(approvalId);
+  }
   setAttachments(service: AttachmentService): void { this.attachmentService = service; }
 
   activeCount(): number {

@@ -665,6 +665,27 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
     return true;
   }
 
+  async authorizeApprovalDecision(approvalId: string): Promise<void> {
+    const approval = this.hostRows.prepare(`SELECT delivery_id FROM mingle_team_host_approvals WHERE approval_id=? AND state='pending'`)
+      .get(approvalId) as { delivery_id: string } | undefined;
+    if (!approval) return;
+    const delivery = this.delivery(approval.delivery_id);
+    if (!delivery || !liveDelivery(delivery.status)) throw new HttpError(409, 'Approval is stale because its remote delivery is no longer active.');
+    const session = this.options.store.getSession(delivery.session_id, true);
+    if (!session) throw new HttpError(409, 'The mirrored approval session is no longer available.');
+    const context = await this.context(session.projectId);
+    const member = context.members.find((candidate) => candidate.accountId === context.accountId);
+    if (!context.isHost || !member || !['leader', 'admin'].includes(member.role)) {
+      throw new HttpError(403, 'Only a team lead or admin on the host device can resolve a mirrored team approval.');
+    }
+    const currentApproval = this.hostRows.prepare(`SELECT delivery_id FROM mingle_team_host_approvals WHERE approval_id=? AND state='pending'`)
+      .get(approvalId) as { delivery_id: string } | undefined;
+    const currentDelivery = currentApproval ? this.delivery(currentApproval.delivery_id) : undefined;
+    if (!currentApproval || currentApproval.delivery_id !== approval.delivery_id || !currentDelivery || !liveDelivery(currentDelivery.status)) {
+      throw new HttpError(409, 'Approval is stale because its remote delivery is no longer active.');
+    }
+  }
+
   decideApproval(approvalId: string, decision: 'approved' | 'denied'): import('@mingle/contracts').Approval | null {
     const row = this.hostRows.prepare(`SELECT * FROM mingle_team_host_approvals WHERE approval_id=? AND state='pending'`).get(approvalId) as Row | undefined;
     if (!row) return null;

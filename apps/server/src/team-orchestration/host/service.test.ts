@@ -70,8 +70,9 @@ function fixture(options: { deviceId?: string; role?: 'leader' | 'admin' | 'memb
     },
   };
   let receive: ((envelope: any) => Promise<void>) | null = null;
+  let localDeviceId = options.deviceId ?? DEVICE;
   const transport = {
-    snapshot: () => ({ deviceId: options.deviceId ?? DEVICE, status: 'ready', error: null,
+    snapshot: () => ({ deviceId: localDeviceId, status: 'ready', error: null,
       devices: [
         { id: DEVICE, teamId: TEAM, ownerId: ACCOUNT, name: 'Host device', fingerprint: 'host-fingerprint', signingPublicKey: '', encryptionPublicKey: '', lastSeenAt: new Date().toISOString(), revokedAt: null, createdAt: new Date().toISOString(), status: 'online' },
         { id: OWNER_DEVICE, teamId: TEAM, ownerId: OWNER, name: 'Owner device', fingerprint: 'owner-fingerprint', signingPublicKey: '', encryptionPublicKey: '', lastSeenAt: new Date().toISOString(), revokedAt: null, createdAt: new Date().toISOString(), status: 'online' },
@@ -157,7 +158,8 @@ function fixture(options: { deviceId?: string; role?: 'leader' | 'admin' | 'memb
     deliveryTimeoutMs: options.deliveryTimeoutMs ?? 60_000, now: options.now });
   const fx = {
     store, project, local, host, outgoing, finished, enqueued, artifactImports, group: () => group, setRole(value: typeof role) { role = value; },
-    async incoming(kind: string, payload: unknown, fromDeviceId = OWNER_DEVICE) {
+     setDevice(deviceId: string) { localDeviceId = deviceId; },
+     async incoming(kind: string, payload: unknown, fromDeviceId = OWNER_DEVICE) {
       if (!receive) throw new Error('No team orchestration transport handler');
       return receive({ id: randomUUID(), teamId: TEAM, fromDeviceId, toDeviceId: options.deviceId ?? DEVICE, kind, payload });
     },
@@ -245,6 +247,14 @@ it('dispatches remote proxy deliveries, proxies team MCP calls, rejects mismatch
     summary: 'Run a scoped command', kind: 'command', expiresAt: new Date(Date.now() + 30_000).toISOString() });
   const mirroredApproval = fx.store.pendingApprovals(sessionId)[0]!;
   expect(mirroredApproval.description).toBe('Run a scoped command');
+  await expect(fx.host.authorizeApprovalDecision(mirroredApproval.id)).resolves.toBeUndefined();
+  fx.setRole('member');
+  await expect(fx.host.authorizeApprovalDecision(mirroredApproval.id)).rejects.toMatchObject({ status: 403 });
+  fx.setRole('leader');
+  fx.setDevice(OWNER_DEVICE);
+  await expect(fx.host.authorizeApprovalDecision(mirroredApproval.id)).rejects.toMatchObject({ status: 403 });
+  fx.setDevice(DEVICE);
+  await expect(fx.host.authorizeApprovalDecision(mirroredApproval.id)).resolves.toBeUndefined();
   fx.host.decideApproval(mirroredApproval.id, 'approved');
   expect(fx.store.getApproval(mirroredApproval.id)?.status).toBe('approved');
   expect(fx.outgoing.find((entry) => entry.kind === 'teamgroup.approval.decision')?.payload).toMatchObject({ approvalId: 'owner-approval-1', decision: 'approved' });
