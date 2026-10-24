@@ -793,6 +793,8 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
     await this.verifyOwnerDevice(envelope.teamId, envelope.fromDeviceId, owner);
     const settings = this.settings(project);
     const at = parsed.data.at;
+    const eligible = parsed.data.state === 'granted' && parsed.data.disclaimerVersion === TEAM_CONSENT_DISCLAIMER_VERSION
+      && rankPermission(parsed.data.permissionLevel) >= rankPermission(settings.permissionLevel) && parsed.data.agentIds.length > 0;
     this.options.store.tx(() => {
       for (const agentId of parsed.data.agentIds) {
         const agent = collaboration.agents.find((candidate) => candidate.id === agentId && candidate.accountId === owner && candidate.deviceId === envelope.fromDeviceId);
@@ -817,6 +819,7 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
     });
     const context = await this.context(project.local_project_id);
     await this.broadcastStructure(context, project);
+    if (eligible) this.options.groups.pumpTeamGroup(project.group_id);
   }
 
   private delivery(deliveryId: string): DeliveryRow | undefined {

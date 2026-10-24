@@ -216,6 +216,12 @@ export class GroupService {
     });
   }
 
+  /** Wake the durable scheduler after an external team state change makes queued members eligible. */
+  pumpTeamGroup(groupId: string): void {
+    this.requireGroup(groupId);
+    this.schedule(groupId);
+  }
+
   /** Manual and automatic host handover share one scheduler update path. */
   setTeamLeader(groupId: string, sessionId: string | null, options: { paused?: boolean; pauseReason?: string | null } = {}): void {
     const group = this.requireGroup(groupId);

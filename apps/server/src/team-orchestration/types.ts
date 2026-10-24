@@ -47,6 +47,7 @@ export interface TeamOrchestrationGroups {
     members: Array<{ sessionId: string; handle: string; role: 'orchestrator' | 'worker' | 'idle'; held: boolean }>;
   }): import('@mingle/contracts').GroupSnapshot;
   syncTeamMembers(groupId: string, members: Array<{ sessionId: string; handle: string; role: 'orchestrator' | 'worker' | 'idle'; held: boolean }>): void;
+  pumpTeamGroup(groupId: string): void;
   setTeamLeader(groupId: string, sessionId: string | null, options?: { paused?: boolean; pauseReason?: string | null }): void;
   pauseTeamGroup(groupId: string, reason: string): void;
   sendTeamMessage(groupId: string, input: { content: string; recipients?: string[]; clientMessageId: string }): string[];

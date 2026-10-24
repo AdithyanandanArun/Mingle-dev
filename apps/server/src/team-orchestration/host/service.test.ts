@@ -115,6 +115,7 @@ function fixture(options: { deviceId?: string; role?: 'leader' | 'admin' | 'memb
   };
   let group: GroupSnapshot | null = null;
   let failNextSync = false;
+  let pumpCount = 0;
   const finished: Array<{ sessionId: string; runId: string; outcome: string }> = [];
   const enqueued: Array<{ content: string; recipients?: string[]; clientMessageId: string }> = [];
   const groupService = {
@@ -141,6 +142,7 @@ function fixture(options: { deviceId?: string; role?: 'leader' | 'admin' | 'memb
       for (const member of group.members) member.role = member.sessionId === sessionId ? 'orchestrator' : 'worker';
     },
     pauseTeamGroup() { if (group) group.group.paused = true; },
+    pumpTeamGroup() { pumpCount++; },
     sendTeamMessage(_groupId: string, input: typeof enqueued[number]) { enqueued.push(input); return [`host-chat-delivery-${enqueued.length}`]; },
     onRunFinished(sessionId: string, runId: string, outcome: string) {
       finished.push({ sessionId, runId, outcome });
@@ -164,6 +166,7 @@ function fixture(options: { deviceId?: string; role?: 'leader' | 'admin' | 'memb
     store, project, local, host, outgoing, finished, enqueued, artifactImports, group: () => group, setRole(value: typeof role) { role = value; },
      setDevice(deviceId: string) { localDeviceId = deviceId; },
      failNextSync() { failNextSync = true; },
+     pumpCount() { return pumpCount; },
      delayAuthorization(gate: Promise<void>) { delayedAuthorization = gate; },
      async incoming(kind: string, payload: unknown, fromDeviceId = OWNER_DEVICE) {
       if (!receive) throw new Error('No team orchestration transport handler');
@@ -210,6 +213,18 @@ it('authorizes host changes, enforces optimistic versions, validates broadcasts,
   });
   expect(fx.enqueued.at(-1)?.recipients).toEqual(['codex1']);
   expect(fx.outgoing.every((entry) => entry.kind !== 'teamgroup.delivery')).toBe(true);
+});
+
+it('pumps queued team work when renewed owner consent makes a remote member eligible', async () => {
+  const fx = fixture();
+  await fx.host.enable(PROJECT, enableInput(REMOTE_AGENT));
+  const group = fx.group()!;
+  expect(group.members.find((member) => member.id === group.group.orchestratorMemberId)?.held).toBe(true);
+
+  await grantRemote(fx);
+
+  expect(group.members.find((member) => member.id === group.group.orchestratorMemberId)?.held).toBe(false);
+  expect(fx.pumpCount()).toBe(1);
 });
 
 it('dispatches remote proxy deliveries, proxies team MCP calls, rejects mismatched owners, and records completion', async () => {
