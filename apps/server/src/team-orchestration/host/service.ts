@@ -306,6 +306,9 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
     const input = TeamOrchestrationSettingsSchema.pick({ leaderOrchestration: true, permissionLevel: true }).partial()
       .extend({ fallbackAgentIds: TeamOrchestrationSettingsSchema.shape.fallbackAgentIds.optional(), expectedVersion: TeamOrchestrationSettingsSchema.shape.version }).strict().parse(rawInput);
     const { context, row } = await this.loadContextForHost(projectId);
+    if (this.options.groups.get(row.group_id).deliveries.some((delivery) => delivery.status === 'running')) {
+      throw new HttpError(409, 'Wait for active team deliveries before changing orchestration settings.');
+    }
     const member = context.members.find((candidate) => candidate.accountId === context.accountId);
     if (!member || !['leader', 'admin'].includes(member.role)) throw new HttpError(403, 'Only a team lead or admin can change team orchestration.');
     const prior = this.settings(row);
@@ -340,6 +343,9 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
     if (!row) throw new HttpError(404, 'Team orchestration is not enabled for this project.');
     const prior = this.settings(row);
     if (change.expectedVersion !== prior.version) throw new HttpError(409, 'Team structure changed. Refresh and try again.');
+    if (this.options.groups.get(row.group_id).deliveries.some((delivery) => delivery.status === 'running')) {
+      throw new HttpError(409, 'Wait for active team deliveries before changing agent roles or membership.');
+    }
     const agentById = new Map(context.agents.map((agent) => [agent.id, agent]));
     const currentRows = this.hostRows.prepare(`SELECT agent_id,handle,role FROM mingle_team_host_roster WHERE team_id=? AND shared_project_id=? AND removed_at IS NULL`)
       .all(teamId, sharedProjectId) as Array<{ agent_id: string; handle: string; role: TeamAgentRole }>;
@@ -424,7 +430,9 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
     const payload = peerPayload ? StructureSchema.parse(peerPayload) : null;
     const settings = ownRow ? this.settings(ownRow) : payload?.settings ?? null;
     const row = ownRow;
-    if (row && settings) this.options.groups.syncTeamMembers(row.group_id, this.syncSessions(context, settings));
+    if (row && settings && !this.options.groups.get(row.group_id).deliveries.some((delivery) => delivery.status === 'running')) {
+      this.options.groups.syncTeamMembers(row.group_id, this.syncSessions(context, settings));
+    }
     const hostId = ownRow?.host_device_id ?? payload?.host?.deviceId ?? context.hostDeviceId;
     const hostAccountId = ownRow?.owner_account_id ?? payload?.host?.accountId ?? context.hostAccountId;
     const hostDevice = this.options.transport.snapshot(context.project.teamId).devices.find((device) => device.id === hostId);
@@ -671,10 +679,12 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
         .run(envelope.teamId, parsed.data.sharedProjectId, agentId, owner, envelope.fromDeviceId, state, parsed.data.permissionLevel,
           parsed.data.settingsVersion, parsed.data.disclaimerVersion, at, at);
     }
-    const members = this.syncSessions({ ...collaboration, project: collaboration.project!, localProjectId: project.local_project_id,
-      accountId: project.owner_account_id, localDeviceId: project.host_device_id, hostDeviceId: project.host_device_id, hostAccountId: project.owner_account_id,
-      hostDisplayName: 'Team lead', isHost: true }, settings);
-    this.options.groups.syncTeamMembers(project.group_id, members);
+    if (!this.options.groups.get(project.group_id).deliveries.some((delivery) => delivery.status === 'running')) {
+      const members = this.syncSessions({ ...collaboration, project: collaboration.project!, localProjectId: project.local_project_id,
+        accountId: project.owner_account_id, localDeviceId: project.host_device_id, hostDeviceId: project.host_device_id, hostAccountId: project.owner_account_id,
+        hostDisplayName: 'Team lead', isHost: true }, settings);
+      this.options.groups.syncTeamMembers(project.group_id, members);
+    }
     const context = await this.context(project.local_project_id);
     await this.broadcastStructure(context, project);
   }

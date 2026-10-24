@@ -129,7 +129,11 @@ function fixture(options: { deviceId?: string; role?: 'leader' | 'admin' | 'memb
     },
     pauseTeamGroup() { if (group) group.group.paused = true; },
     sendTeamMessage(_groupId: string, input: typeof enqueued[number]) { enqueued.push(input); return [`host-chat-delivery-${enqueued.length}`]; },
-    onRunFinished(sessionId: string, runId: string, outcome: string) { finished.push({ sessionId, runId, outcome }); },
+    onRunFinished(sessionId: string, runId: string, outcome: string) {
+      finished.push({ sessionId, runId, outcome });
+      const delivery = group?.deliveries.find((entry) => entry.runId === runId);
+      if (delivery && (outcome === 'completed' || outcome === 'failed' || outcome === 'interrupted')) delivery.status = outcome;
+    },
     setTeamDispatchGuard() {}, setTeamRunFinishedHook() {}, holdTeamMember() {},
     contextForRun() { return undefined; },
   };
