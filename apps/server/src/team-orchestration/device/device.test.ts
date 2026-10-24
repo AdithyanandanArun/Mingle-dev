@@ -4,7 +4,8 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
-import type { AdapterEvent, TeamStructurePayload } from '@mingle/contracts';
+import { TeamDeliveryPayloadSchema } from '@mingle/contracts';
+import type { AdapterEvent, TeamDeliveryPayload, TeamStructurePayload } from '@mingle/contracts';
 import { TEAM_CONSENT_DISCLAIMER_VERSION } from '@mingle/contracts';
 import { openDatabase } from '../../db.ts';
 import { Store } from '../../store.ts';
@@ -27,6 +28,7 @@ interface Fixture {
   projectId: string; root: string; repo: string; worktree: string; sent: Sent[]; roster: any[]; handler: ((envelope: any) => Promise<void>) | null;
   runtime: FakeRuntime; exportCalls: any[]; importCalls: any[]; executionOrder: string[]; chatReplies: any[]; members: any[]; setConsent(permission?: 'supervised' | 'full-access', settingsVersion?: number): Promise<any>;
   holdImports(gate: Promise<void>): void;
+  restartSide(): Promise<void>;
   deliver(overrides?: Record<string, unknown>, sender?: string): Promise<void>; close(): Promise<void>;
 }
 
@@ -192,13 +194,18 @@ async function fixture(): Promise<Fixture> {
   runtime.executionOrder = executionOrder;
   const chatReplies: any[] = [];
   const teamChat = { postAgentReply: async (...args: any[]) => { chatReplies.push(args); return { id: `chat-${chatReplies.length}` }; } };
-  const side = createDeviceSide({ store, runtime: runtime as any, transport, account, distributed, collaboration, teamChat: teamChat as any,
-    activityThrottleMs: 15, toolTimeoutMs: 30 });
   const routes: Fixture['routes'] = [];
-  side.routes((method, route, routeHandler) => routes.push({ method, path: route, handler: routeHandler }));
+  let side!: ReturnType<typeof createDeviceSide>;
+  const startSide = () => {
+    side = createDeviceSide({ store, runtime: runtime as any, transport, account, distributed, collaboration, teamChat: teamChat as any,
+      activityThrottleMs: 15, toolTimeoutMs: 30 });
+    side.routes((method, route, routeHandler) => routes.push({ method, path: route, handler: routeHandler }));
+  };
+  startSide();
   const result: Fixture = {
-    store, side, routes, projectId: project.id, root, repo, worktree, sent, roster, get handler() { return handler; }, runtime, exportCalls, importCalls, executionOrder, chatReplies, members,
+    store, get side() { return side; }, routes, projectId: project.id, root, repo, worktree, sent, roster, get handler() { return handler; }, runtime, exportCalls, importCalls, executionOrder, chatReplies, members,
     holdImports(gate) { importGate = gate; },
+    async restartSide() { await side.close(); routes.length = 0; startSide(); },
     async setConsent(permission = 'supervised', settingsVersion = 1) {
       const body = { sessionIds: [session.id], permissionLevel: permission, settingsVersion, disclaimerVersion: TEAM_CONSENT_DISCLAIMER_VERSION };
       return callRoute(result, 'POST', '/api/projects/:projectId/team-consent', { projectId: project.id }, body);
@@ -386,6 +393,27 @@ describe('owner-device team orchestration', () => {
     expect(f.runtime.startCount).toBe(0);
 
     await f.handler?.({ id: randomUUID(), teamId: TEAM, fromDeviceId: HOST_DEVICE, toDeviceId: OWN_DEVICE, kind: 'teamgroup.delivery', payload });
+    expect(f.sent.at(-1)?.payload).toMatchObject({ deliveryId: payload.deliveryId, status: 'interrupted' });
+  });
+
+  it('reconciles persisted active deliveries as interrupted on owner-device restart and deduplicates retries', async () => {
+    const f = await fixture();
+    await sendStructure(f);
+    await f.setConsent();
+    const payload: TeamDeliveryPayload = TeamDeliveryPayloadSchema.parse(deliveryPayload({ deliveryId: `delivery-${randomUUID()}` }));
+    const at = new Date().toISOString();
+    f.store.db.prepare(`INSERT INTO mingle_team_device_deliveries(delivery_id,shared_project_id,agent_id,session_id,request_json,status,
+      base_revision,created_at,updated_at) VALUES(?,?,?,?,?,'accepted',NULL,?,?)`)
+      .run(payload.deliveryId, SHARED, AGENT_ID, f.store.listSessions(f.projectId)[0]!.id, JSON.stringify(payload), at, at);
+
+    await f.restartSide();
+    await waitFor(() => f.sent.some((message) => message.kind === 'teamgroup.delivery.status'
+      && message.payload.deliveryId === payload.deliveryId && message.payload.status === 'interrupted'));
+    expect(f.store.db.prepare('SELECT status FROM mingle_team_device_deliveries WHERE delivery_id=?').get(payload.deliveryId))
+      .toMatchObject({ status: 'interrupted' });
+
+    await f.handler?.({ id: randomUUID(), teamId: TEAM, fromDeviceId: HOST_DEVICE, toDeviceId: OWN_DEVICE, kind: 'teamgroup.delivery', payload });
+    expect(f.runtime.startCount).toBe(0);
     expect(f.sent.at(-1)?.payload).toMatchObject({ deliveryId: payload.deliveryId, status: 'interrupted' });
   });
 

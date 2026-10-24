@@ -114,6 +114,30 @@ export function createDeviceSide(deps: DeviceSideDeps): {
     return promise;
   }
 
+  function reconcilePersistedDeliveries(): Promise<void> {
+    const rows = db.prepare(`SELECT d.delivery_id,d.shared_project_id,d.agent_id,d.request_json,d.status,s.team_id,s.host_device_id
+      FROM mingle_team_device_deliveries d LEFT JOIN mingle_team_device_structures s ON s.shared_project_id=d.shared_project_id
+      WHERE d.status IN ('accepted','running','awaiting-approval')`)
+      .all() as Array<{ delivery_id: string; shared_project_id: string; agent_id: string; request_json: string;
+        status: string; team_id: string | null; host_device_id: string | null }>;
+    const pending: Array<{ teamId: string; hostDeviceId: string; sharedProjectId: string; deliveryId: string; agentId: string }> = [];
+    for (const row of rows) {
+      const changed = db.prepare(`UPDATE mingle_team_device_deliveries SET status='interrupted',error=?,updated_at=?
+        WHERE delivery_id=? AND status IN ('accepted','running','awaiting-approval')`)
+        .run('Owner device restarted before this team delivery reached a terminal state.', ISO(), row.delivery_id);
+      if (Number(changed.changes) !== 1) continue;
+      try {
+        const payload = TeamDeliveryPayloadSchema.parse(JSON.parse(row.request_json));
+        const hostDeviceId = row.host_device_id ?? payload.integrationDeviceId;
+        if (row.team_id && hostDeviceId) pending.push({ teamId: row.team_id, hostDeviceId,
+          sharedProjectId: row.shared_project_id, deliveryId: row.delivery_id, agentId: row.agent_id });
+      } catch { /* Invalid persisted requests are terminalized locally without trusting their transport fields. */ }
+    }
+    return Promise.allSettled(pending.map((item) => sendStatus(item.teamId, item.hostDeviceId, {
+      sharedProjectId: item.sharedProjectId, deliveryId: item.deliveryId, agentId: item.agentId, status: 'interrupted',
+    }))).then(() => undefined);
+  }
+
   function latestStructure(sharedProjectId: string): TeamStructurePayload | null {
     const row = db.prepare('SELECT structure_json FROM mingle_team_device_structures WHERE shared_project_id=?').get(sharedProjectId) as { structure_json: string } | undefined;
     if (!row) return null;
@@ -937,6 +961,7 @@ export function createDeviceSide(deps: DeviceSideDeps): {
     await proxy.close();
   }
 
+  track(reconcilePersistedDeliveries());
   return { routes, close, latestStructure, localConsent };
 }
 
