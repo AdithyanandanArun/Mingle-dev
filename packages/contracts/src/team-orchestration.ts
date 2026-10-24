@@ -194,6 +194,8 @@ export const TeamStructurePayloadSchema = z.object({
   sharedProjectId: Uuid, settings: TeamOrchestrationSettingsSchema,
   /** Host identity is carried to member devices so their read-only snapshot can identify its owner. */
   host: z.object({ deviceId: Uuid, accountId: Uuid, displayName: z.string().max(200) }).strict().optional(),
+  /** Optional for compatibility with structures published before disclaimer versioning was added. */
+  disclaimerVersion: z.string().max(40).optional(),
   members: z.array(z.object({
     agentId: Id, handle: z.string().min(2).max(32), role: TeamAgentRoleSchema, fallbackRank: z.number().int().min(1).max(4).nullable(),
     ownerAccountId: Uuid, deviceId: Uuid, state: TeamAgentStateSchema, currentTask: z.string().max(300).nullable(),

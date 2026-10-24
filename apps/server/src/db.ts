@@ -46,6 +46,37 @@ function ensureTeamChatProvenanceColumns(db: DatabaseSync): void {
   addColumn(db, 'team_chat_messages', 'author_signature', 'ALTER TABLE team_chat_messages ADD COLUMN author_signature TEXT;');
 }
 
+function ensureTeamDeviceTables(db: DatabaseSync): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS mingle_team_device_consents (
+      shared_project_id TEXT NOT NULL, account_id TEXT NOT NULL, device_id TEXT NOT NULL,
+      consent_json TEXT NOT NULL, updated_at TEXT NOT NULL,
+      PRIMARY KEY(shared_project_id,account_id,device_id)
+    );
+    CREATE TABLE IF NOT EXISTS mingle_team_device_structures (
+      shared_project_id TEXT PRIMARY KEY, team_id TEXT NOT NULL, host_device_id TEXT NOT NULL,
+      structure_json TEXT NOT NULL, version INTEGER NOT NULL, received_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS mingle_team_device_deliveries (
+      delivery_id TEXT PRIMARY KEY, shared_project_id TEXT NOT NULL, agent_id TEXT NOT NULL,
+      session_id TEXT NOT NULL, request_json TEXT NOT NULL, status TEXT NOT NULL,
+      run_id TEXT, worktree_path TEXT, branch TEXT, base_revision TEXT, chat_message_id TEXT,
+      error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS mingle_team_device_deliveries_agent ON mingle_team_device_deliveries(shared_project_id,agent_id,created_at DESC);
+    CREATE TABLE IF NOT EXISTS mingle_team_device_activity (
+      seq INTEGER PRIMARY KEY AUTOINCREMENT, shared_project_id TEXT NOT NULL, agent_id TEXT NOT NULL,
+      sender_device_id TEXT NOT NULL, entry_id TEXT NOT NULL, run_id TEXT, at TEXT NOT NULL,
+      entry_json TEXT NOT NULL, UNIQUE(shared_project_id,agent_id,entry_id)
+    );
+    CREATE INDEX IF NOT EXISTS mingle_team_device_activity_agent ON mingle_team_device_activity(shared_project_id,agent_id,seq DESC);
+    CREATE TABLE IF NOT EXISTS mingle_team_device_approvals (
+      delivery_id TEXT NOT NULL, approval_id TEXT NOT NULL, decision TEXT NOT NULL CHECK(decision IN ('approved','denied')),
+      decided_at TEXT NOT NULL, PRIMARY KEY(delivery_id,approval_id)
+    );
+  `);
+}
+
 const MIGRATIONS: (string | ((db: DatabaseSync) => void))[] = [
   `
   CREATE TABLE projects (
@@ -344,6 +375,8 @@ const MIGRATIONS: (string | ((db: DatabaseSync) => void))[] = [
        expires_at TEXT NOT NULL, UNIQUE(delivery_id,remote_approval_id)
      );`);
    },
+    // Migration 21 keeps owner-device team state local and creates every table/index idempotently.
+    ensureTeamDeviceTables,
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;

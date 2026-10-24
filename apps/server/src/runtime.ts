@@ -62,6 +62,10 @@ interface ActiveRun {
   changeBaseline: RunTreeSnapshot | null;
   dispatchState: DispatchState;
   failureCause?: unknown;
+  teamRun: boolean;
+  teamMcpConnection?: import('@mingle/contracts').TeamMcpConnection;
+  onActivity?: (event: AdapterEvent) => void;
+  onApproval?: (approval: Approval) => void;
   promise: Promise<void>;
 }
 
@@ -75,7 +79,20 @@ interface ActiveCompaction {
   promise: Promise<ContextCompactionResult>;
 }
 
-export interface StartOptions { groupDeliveryId?: string; taskId?: string; userMessage?: { content: string; kind?: string }; skills?: ProviderSkill[]; attachmentIds?: string[]; attachmentOwnerKind?: 'message' | 'group_message'; attachmentOwnerId?: string; invocation?: NativeInvocation; context?: string; contextRefs?: Message['contextRefs']; intent?: 'normal' | 'plan'; executionPlanId?: string }
+export interface StartOptions {
+  groupDeliveryId?: string; taskId?: string; userMessage?: { content: string; kind?: string }; skills?: ProviderSkill[];
+  attachmentIds?: string[]; attachmentOwnerKind?: 'message' | 'group_message'; attachmentOwnerId?: string;
+  invocation?: NativeInvocation; context?: string; contextRefs?: Message['contextRefs']; intent?: 'normal' | 'plan'; executionPlanId?: string;
+  /** Device-owned team delivery: bypass local group context and use its encrypted Team MCP proxy. */
+  teamRun?: boolean; teamMcp?: import('@mingle/contracts').TeamMcpConnection;
+  /** Group-level permission applied only to this provider invocation; the saved session is unchanged. */
+  runPolicy?: Session['policy'];
+  /** Runtime-validated isolated worktree to use for this invocation without changing saved session metadata. */
+  worktree?: { path: string; branch: string };
+  /** Bounded observers used by device-side team orchestration. */
+  onActivity?: (event: AdapterEvent) => void;
+  onApproval?: (approval: Approval) => void;
+}
 
 const MAX_TOOL_CHARS = 20_000;
 const MAX_APPROVAL_INPUT_CHARS = 20_000;
@@ -169,15 +186,20 @@ export class SessionRuntime {
         || (executionPlan.status === 'executing' && executionPlan.executionRunId === null)))) {
       throw conflict('This approved plan is no longer ready to execute. Review it again before starting work.');
     }
-    if (this.groups?.forSession(sessionId) && !options.groupDeliveryId) throw conflict('Start grouped work through its recorded group delivery.');
+    if (this.groups?.forSession(sessionId) && !options.groupDeliveryId && !options.teamRun) throw conflict('Start grouped work through its recorded group delivery.');
     if (this.isActive(sessionId) || session.status === 'running' || session.status === 'waiting') throw conflict('Session already has active work or provider cleanup is still in progress');
-    if (!existsSync(session.worktreePath) || !statSync(session.worktreePath).isDirectory()) throw conflict('The session worktree no longer exists on disk');
+    const runSession: Session = {
+      ...session,
+      ...(options.worktree ? { isolated: true, worktreePath: options.worktree.path, branch: options.worktree.branch } : {}),
+      ...(options.runPolicy ? { policy: options.runPolicy } : {}),
+    };
+    if (!existsSync(runSession.worktreePath) || !statSync(runSession.worktreePath).isDirectory()) throw conflict('The session worktree no longer exists on disk');
     const proxy = Boolean(this.teamProxy?.isProxySession(sessionId));
     if (proxy && options.intent === 'plan') throw badRequest('Remote team agents cannot generate a native read-only plan until the owner runtime advertises that capability.');
     if (proxy && (options.invocation || options.skills?.length || options.attachmentIds?.length)) {
       throw badRequest('Remote team deliveries do not currently carry native commands, skills or host-local attachment IDs.');
     }
-    if (!proxy) this.validateSession?.(session);
+    if (!proxy) this.validateSession?.(runSession);
 
     const handoffs = this.store.unconsumedHandoffs(sessionId);
     const runId = newId('run');
@@ -212,7 +234,9 @@ export class SessionRuntime {
       sessionId, controller: new AbortController(), closed: false, cleanupPending: false, acceptingTools: false, approvals: new Map(), questions: new Map(), stream: null, flushTimer: null, consumedHandoffs: handoffs.map((h) => h.id), firstEvent: false, capabilityTokens: [],
       baseInput: session.inputTokens, baseOutput: session.outputTokens, baseCost: session.costUsd, taskId: options.taskId ?? null, skills: options.skills ?? [], invocation, intent: options.intent ?? 'normal', executionPlanId: options.executionPlanId,
       context: [options.context, invocation && handoffs.length ? this.composePrompt(handoffs, '') : undefined].filter(Boolean).join('\n\n') || undefined,
-      attachmentOwnerKind: options.attachmentOwnerKind ?? 'message', attachmentOwnerId: options.attachmentOwnerId, changeBaseline: null, dispatchState: 'unknown', promise: Promise.resolve(),
+      attachmentOwnerKind: options.attachmentOwnerKind ?? 'message', attachmentOwnerId: options.attachmentOwnerId, changeBaseline: null, dispatchState: 'unknown',
+      teamRun: options.teamRun === true, teamMcpConnection: options.teamMcp, onActivity: options.onActivity, onApproval: options.onApproval,
+      promise: Promise.resolve(),
     };
     this.store.tx(() => {
       const userMessage = this.store.insertMessage({ sessionId, role: 'user', content: options.userMessage?.content ?? content, kind: options.userMessage?.kind ?? null, runId: run.id, contextRefs: options.contextRefs });
@@ -242,7 +266,7 @@ export class SessionRuntime {
       this.store.recordEvent({ projectId: session.projectId, sessionId, type: 'session.run.started', summary: `Run started: ${session.name}`, payload: { runId: run.id, provider: session.provider, model: session.model, taskId: options.taskId ?? null, handoffsIncluded: handoffs.length } });
     });
     this.active.set(sessionId, run);
-    run.promise = this.execute(run, session, prompt);
+    run.promise = this.execute(run, runSession, prompt);
     return run.id;
   }
 
@@ -381,7 +405,11 @@ export class SessionRuntime {
         return;
       }
       const adapter = this.providers.createAdapter(startSession.provider);
-      const session = this.store.getSession(run.sessionId) ?? startSession;
+      const savedSession = this.store.getSession(run.sessionId) ?? startSession;
+      const session: Session = {
+        ...savedSession, worktreePath: startSession.worktreePath, branch: startSession.branch,
+        isolated: startSession.isolated, policy: startSession.policy,
+      };
       const settings = this.store.getSettings();
       // A queue pause can arrive while the initial Git snapshot is being captured. Do not start inference after that pause.
       if (this.groups?.forSession(session.id)?.group.paused) {
@@ -393,9 +421,11 @@ export class SessionRuntime {
       // Browser actions and team tools can have external side effects and are deliberately absent from read-only planning.
       const browserMcp = run.intent !== 'plan' && settings.browserAgentEnabled !== false ? this.browserMcp?.create(run.id, session, run.controller.signal, (request) => this.requestApproval(run, request)) : undefined;
       if (browserMcp) capabilityTokens.push(browserMcp.token);
-      const groupContext = this.groups?.contextForRun(session.id, run.id);
-      if (this.groups?.forSession(session.id) && !groupContext) throw conflict('Group runs must start through a recorded group delivery. Refresh and send through the group conversation.');
-      const teamMcp = run.intent !== 'plan' && groupContext ? this.teamMcp?.create(run.id, session, run.controller.signal, groupContext) : undefined;
+      const groupContext = run.teamRun ? undefined : this.groups?.contextForRun(session.id, run.id);
+      if (!run.teamRun && this.groups?.forSession(session.id) && !groupContext) throw conflict('Group runs must start through a recorded group delivery. Refresh and send through the group conversation.');
+      const teamMcp = run.intent !== 'plan' && run.teamRun
+        ? run.teamMcpConnection
+        : run.intent !== 'plan' && groupContext ? this.teamMcp?.create(run.id, session, run.controller.signal, groupContext) : undefined;
       if (teamMcp) capabilityTokens.push(teamMcp.token);
       const explicit = run.invocation;
       const effectivePrompt = explicit ? prompt : [run.intent !== 'plan' ? groupContext?.instructions : undefined, run.context, prompt].filter(Boolean).join('\n\n');
@@ -522,6 +552,7 @@ export class SessionRuntime {
 
   private handleEvent(run: ActiveRun, event: AdapterEvent): void {
     if (run.closed) return;
+    try { run.onActivity?.(event); } catch { /* Monitoring must not interfere with provider execution. */ }
     try {
       switch (event.type) {
         case 'session.plan': {
@@ -787,6 +818,7 @@ export class SessionRuntime {
       return created;
     });
     void this.captureCheckpoint(run.sessionId, 'Provider requested host approval', run.id);
+    try { run.onApproval?.(approval); } catch { /* Approval mirroring must not block the local owner prompt. */ }
     return new Promise<boolean>((resolve) => run.approvals.set(approval.id, resolve));
   }
 
@@ -1128,7 +1160,7 @@ export class SessionRuntime {
       this.active.delete(run.sessionId);
       run.capabilityTokens.length = 0;
     }
-    try { this.groups?.onRunFinished(run.sessionId, run.id, outcome); }
+    try { if (!run.teamRun) this.groups?.onRunFinished(run.sessionId, run.id, outcome); }
     catch (error) { this.log('error', `Failed to record group delivery outcome for ${run.sessionId}`, error); }
   }
 
