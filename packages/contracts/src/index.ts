@@ -256,3 +256,4 @@ export * from './devices';
 
 export * from './project-collaboration';
 export * from './team-chat';
+export * from './team-orchestration';
