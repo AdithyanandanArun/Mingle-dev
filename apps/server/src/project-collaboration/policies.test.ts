@@ -149,6 +149,10 @@ it('enforces project invitation authority, exact email, hash rotation, expiry an
         'SELECT accept_mingle_project_invitation($1)', [rotatedTokenHash]);
       assert.equal(accepted.rows[0]!.accept_mingle_project_invitation.team_id, ids.team);
       assert.equal(accepted.rows[0]!.accept_mingle_project_invitation.already_accepted, false);
+      const acceptedAgain = await pg.query<{ accept_mingle_project_invitation: { team_id: string; already_accepted: boolean } }>(
+        'SELECT accept_mingle_project_invitation($1)', [rotatedTokenHash]);
+      assert.equal(acceptedAgain.rows[0]!.accept_mingle_project_invitation.already_accepted, true,
+        'one invitation acceptance can safely anchor every selected local agent on a retry');
       const membership = await pg.query<{ role: string }>('SELECT role FROM mingle_members WHERE team_id=$1 AND user_id=$2 AND revoked_at IS NULL', [ids.team, ids.invitee]);
       assert.equal(membership.rows[0]!.role, 'member');
       const profile = await pg.query<{ email: string }>('SELECT email FROM mingle_project_member_profiles WHERE team_id=$1 AND user_id=$2', [ids.team, ids.invitee]);

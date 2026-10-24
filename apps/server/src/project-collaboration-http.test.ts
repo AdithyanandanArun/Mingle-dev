@@ -1,5 +1,6 @@
 import { rmSync } from 'node:fs';
 import { afterEach, expect, it } from 'vitest';
+import { JoinProjectInvitationSchema } from '@mingle/contracts';
 import { makeRepo, runGit, startTestApp, type TestApp } from './test-utils.ts';
 
 const apps: TestApp[] = [];
@@ -55,6 +56,18 @@ it('rejects foreign origins and malformed invitation payloads at the real HTTP b
     token, localProjectId: projectId, agent: { provider: 'claude', model: 'claude-sonnet-5-5', effort: 'high', policy: 'full-access' },
   });
   expect(unsupported.status).toBe(400);
+  const validAgent = { provider: 'claude', model: 'claude-sonnet-5-5', effort: 'high', policy: 'supervised' };
+  expect(JoinProjectInvitationSchema.safeParse({ token, localProjectId: projectId, agent: validAgent }).success).toBe(true);
+  expect(JoinProjectInvitationSchema.safeParse({ token, localProjectId: projectId, agents: [validAgent, validAgent] }).success).toBe(true);
+  for (const body of [
+    { token, localProjectId: projectId },
+    { token, localProjectId: projectId, agent: validAgent, agents: [validAgent] },
+    { token, localProjectId: projectId, agents: [] },
+    { token, localProjectId: projectId, agents: [validAgent, validAgent, validAgent, validAgent, validAgent] },
+    { token, localProjectId: projectId, agents: [{ ...validAgent, policy: 'full-access' }] },
+  ]) {
+    expect((await t.api('POST', '/api/project-invitations/join', body)).status).toBe(400);
+  }
   expect(t.fake.runs).toEqual([]);
   expect(t.app.store.listSessions()).toEqual([]);
 });

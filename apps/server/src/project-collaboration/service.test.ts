@@ -134,30 +134,37 @@ it('serializes matching joins, resumes after roster failure without duplicate se
   });
   try {
     const firstInput = { token: TOKENS.first, localProjectId: project.id,
-      agent: { provider: 'claude' as const, model: 'claude-sonnet-5-5', effort: 'high', policy: 'supervised' as const } };
+      agents: [
+        { provider: 'claude' as const, model: 'claude-sonnet-5-5', effort: 'medium', policy: 'supervised' as const },
+        { provider: 'claude' as const, model: 'claude-sonnet-5-5', effort: 'high', policy: 'supervised' as const },
+      ] };
     const [first, duplicate] = await Promise.allSettled([
       service.joinInvitation(firstInput), service.joinInvitation(firstInput),
     ]);
     assert.equal(first.status, 'rejected');
     assert.equal(duplicate.status, 'rejected');
-    assert.equal(store.listSessions(project.id).length, 3, 'concurrent matching join attempts create one initial session alongside existing local sessions');
+    assert.equal(store.listSessions(project.id).length, 4, 'concurrent matching join attempts create the requested agents once alongside existing local sessions');
     assert.equal(fakeProviders.runs.length, 0, 'onboarding never invokes a provider model');
 
     const recovered = await service.joinInvitation(firstInput);
     assert.equal(recovered.alreadyJoined, true, 'retry after the failed roster write resumes the existing join');
-    assert.equal(store.listSessions(project.id).length, 3, 'retry after a partial failure reuses the deterministic initial session');
+    assert.equal(store.listSessions(project.id).length, 4, 'retry after a partial failure reuses each deterministic agent session');
     const firstSessionId = recovered.sessionId;
+    assert.equal(recovered.sessionIds.length, 2);
+    assert.equal(store.getSession(recovered.sessionIds[0]!)?.effort, 'medium');
+    assert.equal(store.getSession(recovered.sessionIds[1]!)?.effort, 'high');
 
     const secondInput = { ...firstInput, token: TOKENS.second };
     const second = await service.joinInvitation(secondInput);
     assert.equal(second.sessionId, firstSessionId, 'a reissued invitation reuses the account/device/project initial agent');
-    assert.equal(store.listSessions(project.id).length, 3, 'a new invitation does not duplicate the initial agent');
-    assert.deepEqual([...published.values()].map((agent) => agent.sessionId).sort(), [preexistingSession.id, firstSessionId].sort(),
+    assert.deepEqual(second.sessionIds, recovered.sessionIds, 'a reissued invitation returns the same ordered session IDs');
+    assert.equal(store.listSessions(project.id).length, 4, 'a new invitation does not duplicate the project agents');
+    assert.deepEqual([...published.values()].map((agent) => agent.sessionId).sort(), [preexistingSession.id, ...recovered.sessionIds].sort(),
       'publication preserves the device’s other explicitly published sessions');
     assert.equal(createCount, 2, 'the partial publication and its retry each wrote the preserved local roster');
     const snapshot = await service.snapshot(project.id);
     assert.equal(snapshot.project?.teamId, TEAM, 'a teammate resolves the invitation-bound local project snapshot');
-    assert.deepEqual(snapshot.agents.map((agent) => agent.sessionId).sort(), [preexistingSession.id, firstSessionId].sort());
+    assert.deepEqual(snapshot.agents.map((agent) => agent.sessionId).sort(), [preexistingSession.id, ...recovered.sessionIds].sort());
     assert.equal(snapshot.agents.some((agent) => agent.sessionId === privateSession.id), false,
       'private local sessions do not appear as shared agents until explicitly published');
     await assert.rejects(service.createInvitation(project.id, { email: 'new@example.test', role: 'member' }),

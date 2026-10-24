@@ -64,26 +64,31 @@ The public HTTPS landing page is hosted separately at the operator-configured Su
 `POST /api/project-invitations/preview` accepts `{ token: string }` and requires an authenticated, verified account whose current verified email exactly matches the invitation email after canonical normalization. It returns:
 
 ```ts
-{ invitationId: string; projectName: string; repositoryUrl: string; email: string; expiresAt: string; role: 'member' | 'admin' }
+{ invitationId: string; projectName: string; repositoryUrl: string; email: string; expiresAt: string; role: 'member' | 'admin'; inviterDisplayName?: string; inviterEmail?: string }
 ```
 
-Preview is non-consuming. Expired, revoked, accepted-by-another-identity, malformed, or mismatched-email tokens return a generic not-found/invalid-invitation response without revealing project metadata.
+Preview is non-consuming. The current preview RPC does not return public inviter display/email data, so those optional fields are omitted unless a deployment explicitly provides them. Expired, revoked, accepted-by-another-identity, malformed, or mismatched-email tokens return a generic not-found/invalid-invitation response without revealing project metadata.
 
-After the user selects an existing local project or clones the advertised repository through the existing project APIs, `POST /api/project-invitations/join` accepts:
+The desktop first displays a confirmation and does not accept the invitation until the user completes the join flow. It defaults to cloning the advertised repository via `POST /api/projects/clone` into the selected parent/name; the user may instead select a registered project or open a local folder. `POST /api/project-invitations/join` accepts either the legacy single-agent shape or the new multi-agent shape, but exactly one of `agent` and `agents` must be present:
 
 ```ts
 {
   token: string;
   localProjectId: string;
-  agent: { provider: 'claude' | 'codex' | 'opencode'; model: string; effort: Effort; policy: 'supervised' };
+  // Legacy compatibility: exactly one agent.
+  agent?: { provider: 'claude' | 'codex' | 'opencode'; model: string; effort: Effort; policy: 'supervised' };
+  // New join wizard: one through four agents, in display/order-preserving sequence.
+  agents?: Array<{ provider: 'claude' | 'codex' | 'opencode'; model: string; effort: Effort; policy: 'supervised' }>;
 }
 ```
 
-The chosen local repository must match the invitation's verified canonical repository identity. GitHub `git@github.com:owner/repo.git` and `ssh://git@github.com/owner/repo.git` origins are safely represented as their credential-free HTTPS repository URL; other credentialed/unsupported SSH forms are rejected with guidance to configure a safe origin. Provider choices follow the existing distributed execution roster's publishable Claude, Codex, and OpenCode agents. Acceptance activates team membership, consumes the invitation and creates an invitation-bound enrollment authorization restricted to the invited account, inviting leader device fingerprint, newly registered invitee device fingerprint, team, and the invitation's original seven-day expiry. The authorization is not extended on accepted retries; after expiry the leader issues a new invitation. It creates reciprocal device links only for those exact two devices, then creates/binds the selected local project to the existing shared project and creates exactly one idle Supervised initial session/roster entry. No provider inference, command dispatch, or background model task is run. Retries from the same account, device, and local project return the original accepted membership, bindings, and session; retries from a different account/device/local project reject. The result is:
+The chosen local repository must match the invitation's verified canonical repository identity. GitHub `git@github.com:owner/repo.git` and `ssh://git@github.com/owner/repo.git` origins are safely represented as their credential-free HTTPS repository URL; other credentialed/unsupported SSH forms are rejected with guidance to configure a safe origin. Provider choices follow the existing distributed execution roster's publishable Claude, Codex, and OpenCode agents, and are checked against the local provider/model/effort catalog. Acceptance activates team membership, consumes the invitation and creates an invitation-bound enrollment authorization restricted to the invited account, inviting leader device fingerprint, newly registered invitee device fingerprint, team, and the invitation's original seven-day expiry. The authorization is not extended on accepted retries; after expiry the leader issues a new invitation. It creates reciprocal device links only for those exact two devices, then creates/binds the selected local project to the existing shared project and creates each requested idle Supervised session before publishing the full session list. No provider inference, command dispatch, or background model task is run. Retries from the same account, device, and local project return the original ordered session set; retries with changed agent settings or from a different account/device/local project reject. Existing one-agent local join records are migrated into the expanded local idempotency table.
 
 ```ts
-{ projectId: string; sessionId: string; teamId: string; sharedProjectId: string; alreadyJoined: boolean }
+{ projectId: string; sessionId: string; sessionIds: string[]; teamId: string; sharedProjectId: string; alreadyJoined: boolean }
 ```
+
+`sessionId` remains the first session for older consumers; `sessionIds` is the complete ordered set and is always returned, including for legacy one-agent requests.
 
 The initial session remains local to that device. Remote execution is available only through existing exceptional recovery and execution approvals, and each run still requires the destination device owner's approval. Device enrollment never grants blanket trust to the team.
 

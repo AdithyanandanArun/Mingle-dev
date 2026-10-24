@@ -56,11 +56,16 @@ it('invites and joins through two real HTTP applications, actual PostgreSQL poli
     const preview = await teammate.api('POST', '/api/project-invitations/preview', { token: invitationToken });
     expect(preview.status, JSON.stringify(preview.json)).toBe(200);
     expect(preview.json.repositoryUrl).toContain('collaboration-acceptance');
-    const join = { token: invitationToken, localProjectId: projectIds[1], agent: { provider: 'claude', model: 'claude-sonnet-5-5', effort: 'medium', policy: 'supervised' } };
+    const join = { token: invitationToken, localProjectId: projectIds[1], agents: [
+      { provider: 'claude', model: 'claude-sonnet-5-5', effort: 'medium', policy: 'supervised' },
+      { provider: 'claude', model: 'claude-sonnet-5-5', effort: 'high', policy: 'supervised' },
+    ] };
     const joined = await Promise.all([teammate.api('POST', '/api/project-invitations/join', join), teammate.api('POST', '/api/project-invitations/join', join)]);
     for (const result of joined) expect(result.status, JSON.stringify(result.json)).toBe(200);
     expect(joined[0]!.json.sessionId).toBe(joined[1]!.json.sessionId);
-    expect(teammate.app.store.listSessions(projectIds[1])).toHaveLength(1);
+    expect(joined[0]!.json.sessionIds).toHaveLength(2);
+    expect(joined[0]!.json.sessionIds).toEqual(joined[1]!.json.sessionIds);
+    expect(teammate.app.store.listSessions(projectIds[1])).toHaveLength(2);
     // Model a lost acknowledgement after PostgreSQL accepted the envelope.
     teammate.app.store.db.prepare("UPDATE mingle_transport_outbox SET status='queued',next_attempt_at=0 WHERE kind='execution.agents'").run();
     await teammate.app.distributed.transport.sync();
@@ -85,9 +90,9 @@ it('invites and joins through two real HTTP applications, actual PostgreSQL poli
     const links = await cloud.pg.query('SELECT * FROM public.mingle_device_links');
     expect(links.rows).toHaveLength(2);
     expect(apps.every(app => app.fake.runs.length === 0)).toBe(true);
-    const retryWithDifferentAgent = await teammate.api('POST', '/api/project-invitations/join', { ...join, agent: { ...join.agent, effort: 'high' } });
+    const retryWithDifferentAgent = await teammate.api('POST', '/api/project-invitations/join', { ...join, agents: [{ ...join.agents[0]!, effort: 'low' }, join.agents[1]] });
     expect(retryWithDifferentAgent.status).toBe(409);
-    expect(teammate.app.store.listSessions(projectIds[1])).toHaveLength(1);
+    expect(teammate.app.store.listSessions(projectIds[1])).toHaveLength(2);
   } finally {
     while (apps.length) await apps.pop()!.cleanup();
     vi.restoreAllMocks();

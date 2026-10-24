@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
-import { ArrowUpRight, Check, CircleAlert, FolderOpen, Mail, RefreshCw, Users } from 'lucide-react';
-import type { AccountState, Project, Provider, ProviderInfo, ProviderModel, Session } from '@mingle/contracts';
+import { ArrowLeft, ArrowUpRight, Check, ChevronRight, CircleAlert, FolderOpen, GitBranch, Mail, Plus, RefreshCw, Users, X } from 'lucide-react';
+import type { AccountState, DirectoryListing, Project, ProjectInvitationJoinResult, Provider, ProviderInfo, ProviderModel, Session } from '@mingle/contracts';
 import { api, errorMessage } from '../../lib/api';
 import { useMingle } from '../../store/store';
 import { copyText } from '../../lib/clipboard';
@@ -279,43 +279,64 @@ function classifyPreviewError(cause: unknown, account: AccountState | null): Inv
   return 'error';
 }
 
-export function ProjectInviteJoinDialog({ token, onClose, onOpenAccountSettings, onOpenProviderSettings }: {
+type JoinStep = 'invite' | 'workspace' | 'agents' | 'success';
+type JoinSource = 'clone' | 'project' | 'folder';
+type JoinAgentDraft = { id: number; provider: Provider | ''; model: string; effort: string };
+
+function preferredEffort(info: ProviderInfo, model: ProviderModel): string {
+  const choices = reasoningChoices(info, model);
+  return choices.find((item) => item.id === model.defaultReasoningEffort)?.id ?? choices[0]?.id ?? '';
+}
+
+function nativePathJoin(parent: string, name: string, separator: string): string {
+  const trimmedParent = parent.replace(/[\\/]+$/, '');
+  return `${trimmedParent}${separator || '/'}${name}`;
+}
+
+export function ProjectInviteJoinDialog({ token, onClose, onOpenAccountSettings, onOpenProviderSettings, onJoined }: {
   token: string; onClose: () => void; onOpenAccountSettings: () => void; onOpenProviderSettings: () => void;
+  onJoined?: (result: ProjectInvitationJoinResult) => void;
 }) {
   const boot = useMingle((state) => state.boot);
   const projects = boot?.projects ?? [];
+  const providers = boot?.providers ?? [];
   const eligibleProviders = useMemo(() => JOIN_PROVIDERS.flatMap((id) => {
-    const info = selectedProviderInfo(boot?.providers ?? [], id);
+    const info = selectedProviderInfo(providers, id);
     return info && supervisedModels(info).length ? [info] : [];
-  }), [boot?.providers]);
+  }), [providers]);
   const [inviteState, setInviteState] = useState<InviteState>('loading');
   const [preview, setPreview] = useState<InvitationPreview | null>(null);
   const [previewError, setPreviewError] = useState('');
   const [account, setAccount] = useState<AccountState | null>(null);
+  const [step, setStep] = useState<JoinStep>('invite');
   const [selectedProjectId, setSelectedProjectId] = useState('');
-  const [providerId, setProviderId] = useState<Provider | ''>('');
-  const [modelId, setModelId] = useState('');
-  const [effortId, setEffortId] = useState('');
-  const [source, setSource] = useState<'existing' | 'folder' | 'clone'>('existing');
+  const [source, setSource] = useState<JoinSource>('clone');
   const [folderPath, setFolderPath] = useState('');
-  const [parentPath, setParentPath] = useState('');
+  const [folderName, setFolderName] = useState('');
+  const [directoryPath, setDirectoryPath] = useState('');
+  const [directoryListing, setDirectoryListing] = useState<DirectoryListing | null>(null);
+  const [directoryLoading, setDirectoryLoading] = useState(false);
+  const [directoryError, setDirectoryError] = useState<string | null>(null);
   const [workspaceBusy, setWorkspaceBusy] = useState(false);
+  const [agentDrafts, setAgentDrafts] = useState<JoinAgentDraft[]>([]);
   const [joining, setJoining] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [joined, setJoined] = useState(false);
+  const [joinResult, setJoinResult] = useState<ProjectInvitationJoinResult | null>(null);
   const [previewRetry, setPreviewRetry] = useState(0);
   const previewSequence = useRef(0);
+  const directorySequence = useRef(0);
+  const nextAgentId = useRef(1);
 
-  const currentProvider = eligibleProviders.find((item) => item.id === providerId);
-  const models = supervisedModels(currentProvider);
-  const selectedModel = models.find((item) => item.id === modelId) ?? models[0];
-  const efforts = selectedModel && currentProvider ? reasoningChoices(currentProvider, selectedModel) : [];
   const selectedProject = projects.find((project) => project.id === selectedProjectId && !project.isExample);
   const accountEmail = account?.user?.email?.trim().toLowerCase() ?? '';
   const inviteEmail = preview?.email.trim().toLowerCase() ?? '';
   const emailMatches = Boolean(accountEmail && inviteEmail && accountEmail === inviteEmail);
   const signedIn = account?.status === 'signed-in';
-  const canJoin = inviteState === 'ready' && Boolean(preview && signedIn && emailMatches && selectedProject && currentProvider && selectedModel && effortId && !joining && !workspaceBusy);
+  const parentPath = directoryListing?.path ?? '';
+  const cloneName = folderName.trim();
+  const resultingPath = parentPath && cloneName ? nativePathJoin(parentPath, cloneName, directoryListing?.separator ?? '/') : '';
+  const listedDirectories = directoryListing?.directories ?? [];
+  const validParent = Boolean(directoryListing && (directoryListing.canCreateWithin ?? directoryListing.canSelect));
 
   useEffect(() => {
     const controller = new AbortController();
@@ -324,6 +345,7 @@ export function ProjectInviteJoinDialog({ token, onClose, onOpenAccountSettings,
     setPreview(null);
     setPreviewError('');
     setError(null);
+    setStep('invite');
     if (!INVITATION_TOKEN_PATTERN.test(token)) {
       setPreviewError('This invitation link is incomplete or invalid. Ask the project leader to send a new invitation.');
       setInviteState('error');
@@ -372,29 +394,82 @@ export function ProjectInviteJoinDialog({ token, onClose, onOpenAccountSettings,
 
   useEffect(() => {
     if (!preview || ['loading', 'expired', 'revoked', 'error'].includes(inviteState)) return;
-    if (account?.status !== 'signed-in') { setInviteState('sign-in'); return; }
-    setInviteState(account.user?.email?.trim().toLowerCase() === preview.email.trim().toLowerCase() ? 'ready' : 'wrong-account');
+    if (account?.status !== 'signed-in') { setInviteState('sign-in'); setStep('invite'); return; }
+    const matches = account.user?.email?.trim().toLowerCase() === preview.email.trim().toLowerCase();
+    setInviteState(matches ? 'ready' : 'wrong-account');
+    if (!matches) setStep('invite');
   }, [account, inviteState, preview]);
 
   useEffect(() => {
-    if (!eligibleProviders.length) { setProviderId(''); setModelId(''); setEffortId(''); return; }
-    const provider = eligibleProviders.find((item) => item.id === providerId) ?? eligibleProviders[0]!;
-    const providerModels = supervisedModels(provider);
-    const model = providerModels.find((item) => item.id === modelId) ?? providerModels[0]!;
-    const effortOptions = reasoningChoices(provider, model);
-    const nextEffort = effortOptions.find((item) => item.id === effortId)?.id
-      ?? effortOptions.find((item) => item.id === model.defaultReasoningEffort)?.id
-      ?? effortOptions[0]?.id ?? '';
-    if (provider.id !== providerId) setProviderId(provider.id as Provider);
-    if (model.id !== modelId) setModelId(model.id);
-    if (nextEffort !== effortId) setEffortId(nextEffort);
-  }, [eligibleProviders, providerId, modelId, effortId]);
+    if (!preview) return;
+    setFolderName((value) => value || repoName(preview.repositoryUrl));
+  }, [preview]);
 
-  const chooseExistingProject = (projectId: string) => {
-    setSelectedProjectId(projectId);
-    setSource('existing');
-    setError(null);
+  useEffect(() => {
+    let active = true;
+    void api.directories('', '', false).then((listing) => {
+      if (!active) return;
+      setDirectoryListing(listing);
+      setDirectoryPath(listing.displayPath);
+    }).catch((cause) => {
+      if (active) setDirectoryError(errorMessage(cause));
+    });
+    return () => { active = false; };
+  }, []);
+
+  useEffect(() => {
+    if (!eligibleProviders.length) {
+      setAgentDrafts([]);
+      return;
+    }
+    setAgentDrafts((current) => {
+      if (!current.length) {
+        const first = eligibleProviders[0]!;
+        const model = supervisedModels(first)[0]!;
+        return [{ id: nextAgentId.current++, provider: first.id as Provider, model: model.id, effort: preferredEffort(first, model) }];
+      }
+      return current.map((draft) => {
+        const provider = eligibleProviders.find((item) => item.id === draft.provider) ?? eligibleProviders[0]!;
+        const models = supervisedModels(provider);
+        const model = models.find((item) => item.id === draft.model) ?? models[0]!;
+        const efforts = reasoningChoices(provider, model);
+        const effort = efforts.find((item) => item.id === draft.effort)?.id ?? preferredEffort(provider, model);
+        return { ...draft, provider: provider.id as Provider, model: model.id, effort };
+      });
+    });
+  }, [eligibleProviders]);
+
+  const loadDirectory = async (path: string) => {
+    const sequence = ++directorySequence.current;
+    setDirectoryLoading(true);
+    setDirectoryError(null);
+    try {
+      const listing = await api.directories(path, '', false);
+      if (sequence !== directorySequence.current) return;
+      setDirectoryListing(listing);
+      setDirectoryPath(listing.displayPath);
+    } catch (cause) {
+      if (sequence === directorySequence.current) setDirectoryError(errorMessage(cause));
+    } finally {
+      if (sequence === directorySequence.current) setDirectoryLoading(false);
+    }
   };
+
+  const setAgentProvider = (index: number, providerId: string) => {
+    const provider = eligibleProviders.find((item) => item.id === providerId);
+    const model = provider && supervisedModels(provider)[0];
+    if (!provider || !model) return;
+    setAgentDrafts((current) => current.map((draft, draftIndex) => draftIndex === index
+      ? { ...draft, provider: provider.id as Provider, model: model.id, effort: preferredEffort(provider, model) }
+      : draft));
+  };
+
+  const agentRowsValid = agentDrafts.length > 0 && agentDrafts.length <= 4 && agentDrafts.every((draft) => {
+    const provider = eligibleProviders.find((item) => item.id === draft.provider);
+    const model = supervisedModels(provider).find((item) => item.id === draft.model);
+    return Boolean(provider && model && reasoningChoices(provider, model).some((choice) => choice.id === draft.effort));
+  });
+  const canJoin = inviteState === 'ready' && Boolean(preview && signedIn && emailMatches && selectedProject && agentRowsValid && !joining && !workspaceBusy);
 
   const addExistingFolder = async (event: FormEvent) => {
     event.preventDefault();
@@ -407,25 +482,27 @@ export function ProjectInviteJoinDialog({ token, onClose, onOpenAccountSettings,
       const project = await api.createProject({ name: listing.displayPath.split(/[\\/]/).filter(Boolean).at(-1) || 'Project', path: listing.path });
       await useMingle.getState().refreshNow();
       setSelectedProjectId(project.id);
-      setSource('existing');
+      setStep('agents');
     } catch (cause) { setError(errorMessage(cause)); }
     finally { setWorkspaceBusy(false); }
   };
 
-  const cloneRepository = async (event: FormEvent) => {
-    event.preventDefault();
-    if (!preview?.repositoryUrl || !parentPath.trim() || workspaceBusy) return;
+  const cloneRepository = async () => {
+    if (!preview?.repositoryUrl || !validParent || !cloneName || workspaceBusy) return;
     setWorkspaceBusy(true);
     setError(null);
     try {
-      const listing = await api.directories(parentPath.trim(), '', false);
-      if (!(listing.canCreateWithin ?? listing.canSelect)) throw new Error('Choose a folder where Mingle can create the repository checkout.');
-      const project = await api.cloneProject({ url: preview.repositoryUrl, name: repoName(preview.repositoryUrl), parentPath: listing.path });
+      const project = await api.cloneProject({ url: preview.repositoryUrl, name: cloneName, parentPath });
       await useMingle.getState().refreshNow();
       setSelectedProjectId(project.id);
-      setSource('existing');
-    } catch (cause) { setError(errorMessage(cause)); }
-    finally { setWorkspaceBusy(false); }
+      setStep('agents');
+    } catch (cause) {
+      const message = errorMessage(cause);
+      const authFailure = /auth|permission denied|repository not found|could not read from remote/i.test(message);
+      setError(`${message} ${authFailure
+        ? 'For a private repository, confirm Git is installed and your local Git credentials have access; Mingle does not receive repository credentials.'
+        : 'Choose a different destination folder name. If Git created a partial checkout before failing, it is left at that path for inspection.'}`);
+    } finally { setWorkspaceBusy(false); }
   };
 
   const signIn = async () => {
@@ -436,79 +513,178 @@ export function ProjectInviteJoinDialog({ token, onClose, onOpenAccountSettings,
 
   const switchAccount = async () => {
     setError(null);
-    try { setAccount(await api.accountSignOut()); setInviteState('sign-in'); }
+    try { setAccount(await api.accountSignOut()); setInviteState('sign-in'); setStep('invite'); }
     catch (cause) { setError(errorMessage(cause)); }
   };
 
   const joinProject = async () => {
-    if (!canJoin || !preview || !selectedProject || !currentProvider || !selectedModel || joining) return;
+    if (!canJoin || !preview || !selectedProject || joining) return;
     setJoining(true);
     setError(null);
     try {
       const result = await projectCollaborationApi.join({
         token,
         localProjectId: selectedProject.id,
-        agent: { provider: currentProvider.id as 'codex' | 'claude' | 'opencode', model: selectedModel.id, effort: effortId, policy: 'supervised' },
+        agents: agentDrafts.map((draft) => ({ provider: draft.provider as 'codex' | 'claude' | 'opencode', model: draft.model, effort: draft.effort, policy: 'supervised' as const })),
       });
       await useMingle.getState().refreshNow();
       if (result.projectId) useMingle.getState().selectProject(result.projectId);
-      if (result.sessionId) useMingle.getState().selectSession(result.sessionId);
-      setJoined(true);
+      const firstSessionId = result.sessionIds?.[0] ?? result.sessionId;
+      if (firstSessionId) useMingle.getState().selectSession(firstSessionId);
+      setJoinResult({ ...result, sessionIds: result.sessionIds?.length ? result.sessionIds : [result.sessionId] });
+      setStep('success');
     } catch (cause) {
       const state = classifyPreviewError(cause, account);
       if (state === 'unavailable' || state === 'expired' || state === 'revoked' || state === 'wrong-account') {
         setPreviewError(errorMessage(cause));
         setInviteState(state);
+      } else if (/invited repository checkout|different repository|repository.*match/i.test(errorMessage(cause))) {
+        setError('This checkout’s Git origin does not match the invited repository. Choose a project with the same repository origin or clone the repository URL shown in the invitation.');
       } else setError(errorMessage(cause));
     }
     finally { setJoining(false); }
   };
 
-  return <Modal title={joined ? 'Project joined' : 'Join project'} description={joined ? 'Your local agent is ready.' : 'Choose where the project lives on this device, then create your first supervised agent.'} onClose={onClose} width={700}>
+  const steps: { id: JoinStep; label: string }[] = [
+    { id: 'invite', label: 'Invitation' }, { id: 'workspace', label: 'Code location' },
+    { id: 'agents', label: 'Your agents' }, { id: 'success', label: 'Ready' },
+  ];
+  const activeStepIndex = Math.max(0, steps.findIndex((item) => item.id === step));
+  const canContinueInvite = inviteState === 'ready' && Boolean(preview && signedIn && emailMatches);
+  const canContinueWorkspace = Boolean(selectedProject && inviteState === 'ready' && emailMatches && !workspaceBusy);
+  const title = step === 'invite' && preview && inviteState === 'ready' ? `Join ${preview.projectName}?`
+    : step === 'workspace' ? 'Where should we put the code?'
+      : step === 'agents' ? 'Add your agents' : step === 'success' ? 'Project joined' : 'Join project';
+
+  return <Modal title={title} description={step === 'success' ? 'Your agents are ready in this project.' : 'Review the invitation, choose a checkout, then configure your local agents.'} onClose={onClose} width={700}>
     <div className="pc-join" aria-busy={inviteState === 'loading' || joining || workspaceBusy}>
+      <ol className="pc-join-steps" aria-label="Join project steps">
+        {steps.slice(0, 3).map((item, index) => <li key={item.id} className={`${index === activeStepIndex ? 'is-current' : ''}${index < activeStepIndex ? ' is-complete' : ''}`} aria-current={index === activeStepIndex ? 'step' : undefined}>
+          <span>{index < activeStepIndex ? <Check size={13} /> : index + 1}</span>{item.label}
+        </li>)}
+      </ol>
       {inviteState === 'loading' ? <p className="pc-loading" role="status">Checking invitation and Mingle account…</p> : null}
       {inviteState === 'unavailable' ? <div className="pc-state-card pc-state-card--error"><CircleAlert size={19} /><div><h3>Invitation unavailable</h3><p>This link can’t be verified for the current account. Check which Google account received it, switch accounts, or ask the project owner to send a new invitation.</p>{accountEmail ? <small>Signed in as {accountEmail}</small> : null}<Button size="sm" onClick={() => void switchAccount()}>Switch account</Button><Button size="sm" variant="ghost" onClick={() => setPreviewRetry((value) => value + 1)}>Try again</Button></div></div> : null}
       {inviteState === 'expired' || inviteState === 'revoked' ? <div className="pc-state-card pc-state-card--error"><CircleAlert size={19} /><div><h3>{inviteState === 'revoked' ? 'This invitation was revoked' : 'This invitation has expired'}</h3><p>{previewError || 'Ask the project owner to send a new invitation.'}</p></div></div> : null}
       {inviteState === 'error' ? <div className="pc-state-card pc-state-card--error"><CircleAlert size={19} /><div><h3>We couldn’t verify this invitation</h3><p>{previewError ? `${previewError} It may be expired, revoked, already used or issued to another account. Sign in to the invited account or ask a project leader to send a new invitation.` : 'It may be expired, revoked, already used or issued to another account. Sign in to the invited account or ask a project leader to send a new invitation.'}</p>{accountEmail ? <small>Signed in as {accountEmail}</small> : null}<Button size="sm" onClick={() => setPreviewRetry((value) => value + 1)}>Try again</Button></div></div> : null}
-      {inviteState === 'sign-in' ? <div className="pc-state-card"><span className="pc-icon"><Users size={18} /></span><div><h3>Sign in to join this project</h3><p>{preview ? `This invitation is for ${preview.email}. Sign in to that Mingle account to continue.` : 'Sign in with the Mingle account that received this invitation.'} Your invitation stays in this window while sign-in finishes.</p>
+      {inviteState === 'sign-in' && !preview ? <div className="pc-state-card"><span className="pc-icon"><Users size={18} /></span><div><h3>Sign in to join this project</h3><p>Sign in with the Mingle account that received this invitation. Your invitation stays in this window while sign-in finishes.</p>
         {account?.status === 'signing-in' ? <p className="pc-loading" role="status">Finish signing in in your browser. This window will resume automatically.</p> : account?.configured
           ? <Button variant="primary" size="sm" disabled={account.status === 'restoring'} onClick={() => void signIn()}>Continue with Google</Button>
           : <Button size="sm" onClick={onOpenAccountSettings}>Set up Mingle account</Button>}
         {account?.browserError ? <p className="pc-help">{account.browserError}</p> : null}
       </div></div> : null}
-      {inviteState === 'wrong-account' ? <div className="pc-state-card pc-state-card--error"><CircleAlert size={19} /><div><h3>Use the invited account</h3><p>{preview ? `This invitation is for ${preview.email}.` : previewError} {accountEmail ? `You’re signed in as ${accountEmail}.` : ''}</p><Button size="sm" onClick={() => void switchAccount()}>Switch account</Button></div></div> : null}
-      {inviteState === 'ready' && preview ? <>
-        <div className="pc-join-summary"><div className="pc-join-mark"><Users size={18} /></div><div><span>PROJECT INVITATION</span><strong>{preview.projectName}</strong><small>Invited as {preview.email}{preview.expiresAt ? ` · expires ${new Date(preview.expiresAt).toLocaleDateString()}` : ''}</small></div><Badge tone="ok">Verified</Badge></div>
-        {accountEmail && !emailMatches ? <div className="pc-inline-note pc-inline-note--warning" role="alert">This account does not match the invitation email. Switch to {preview.email} before continuing.</div> : null}
-        {eligibleProviders.length === 0 ? <div className="pc-state-card pc-state-card--setup"><CircleAlert size={19} /><div><h3>Provider setup needed</h3><p>Set up Codex, Claude Code or OpenCode on this device. Mingle only offers a provider, model and Supervised policy actually reported by its local catalog.</p><Button size="sm" onClick={onOpenProviderSettings}>Open provider settings</Button></div></div> : <div className="pc-join-form">
-          <fieldset className="pc-section"><legend>1. Choose a local checkout</legend><p>This link won’t clone or open files automatically. Pick a local project or explicitly create a checkout below.</p>
-            {projects.filter((project) => !project.isExample).length ? <div className="pc-project-choices" role="radiogroup" aria-label="Local project">
-              {projects.filter((project) => !project.isExample).map((project) => <button type="button" role="radio" aria-checked={selectedProjectId === project.id} className={`pc-project-choice${selectedProjectId === project.id ? ' is-selected' : ''}`} key={project.id} onClick={() => chooseExistingProject(project.id)}><FolderOpen size={15} /><span><strong>{project.name}</strong><small>{project.path}</small></span>{selectedProjectId === project.id ? <Check size={15} /> : null}</button>)}
-            </div> : <p className="pc-empty">No local projects are registered on this device yet.</p>}
-            <div className="pc-source-tabs" role="group" aria-label="Add a local checkout">
-              <button type="button" aria-pressed={source === 'folder'} onClick={() => { setSource('folder'); setError(null); }}>Use existing folder</button>
-              {preview.repositoryUrl ? <button type="button" aria-pressed={source === 'clone'} onClick={() => { setSource('clone'); setError(null); }}>Clone repository</button> : null}
-            </div>
-            {source === 'folder' ? <form className="pc-workspace-form" onSubmit={(event) => void addExistingFolder(event)}><label className="pc-field"><span>Existing folder path</span><input value={folderPath} onChange={(event) => setFolderPath(event.target.value)} placeholder="/path/to/project" autoComplete="off" spellCheck={false} /></label><Button type="submit" size="sm" disabled={!folderPath.trim() || workspaceBusy} busy={workspaceBusy}>Choose folder</Button></form> : null}
-            {source === 'clone' && preview.repositoryUrl ? <form className="pc-workspace-form" onSubmit={(event) => void cloneRepository(event)}><label className="pc-field"><span>Clone into parent folder</span><input value={parentPath} onChange={(event) => setParentPath(event.target.value)} placeholder="/path/to/projects" autoComplete="off" spellCheck={false} /></label><Button type="submit" size="sm" disabled={!parentPath.trim() || workspaceBusy} busy={workspaceBusy}>Clone checkout</Button><small className="pc-workspace-note">{preview.repositoryUrl} · cloning happens only after you choose a destination and confirm.</small></form> : null}
-          </fieldset>
-          <fieldset className="pc-section"><legend>2. Choose your first agent</legend><p>This creates one session after you join. It uses your local provider login and starts no model run.</p>
-            <div className="pc-agent-config">
-              <label className="pc-field"><span>Provider</span><select value={providerId} onChange={(event) => { const next = event.target.value as Provider; const nextInfo = selectedProviderInfo(eligibleProviders, next); const nextModel = supervisedModels(nextInfo)[0]; const nextEfforts = nextInfo && nextModel ? reasoningChoices(nextInfo, nextModel) : []; setProviderId(next); setModelId(nextModel?.id ?? ''); setEffortId(nextEfforts.find((item) => item.id === nextModel?.defaultReasoningEffort)?.id ?? nextEfforts[0]?.id ?? ''); }}>
-                {eligibleProviders.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
-              </select></label>
-              <label className="pc-field"><span>Model</span><select value={selectedModel?.id ?? ''} onChange={(event) => { const next = models.find((item) => item.id === event.target.value); const nextEfforts = currentProvider && next ? reasoningChoices(currentProvider, next) : []; setModelId(next?.id ?? ''); setEffortId(nextEfforts.find((item) => item.id === next?.defaultReasoningEffort)?.id ?? nextEfforts[0]?.id ?? ''); }}>{models.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
-              <label className="pc-field"><span>Reasoning effort</span><select value={effortId} onChange={(event) => setEffortId(event.target.value)}>{efforts.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}</select></label>
-            </div>
-            {selectedModel && !selectedModel.reasoningEfforts ? <small className="pc-workspace-note">This model did not report effort choices; these are Mingle’s documented local runtime defaults.</small> : null}
-            <div className="pc-policy-note"><Check size={13} /> Supervised · asks before actions that change files or run commands</div>
-          </fieldset>
+      {inviteState === 'wrong-account' && !preview ? <div className="pc-state-card pc-state-card--error"><CircleAlert size={19} /><div><h3>Use the invited account</h3><p>{previewError || 'Sign in with the verified Mingle email address that received this invitation.'} {accountEmail ? `You’re signed in as ${accountEmail}.` : ''}</p><Button size="sm" onClick={() => void switchAccount()}>Switch account</Button></div></div> : null}
+
+      {preview && step === 'invite' && !['loading', 'unavailable', 'expired', 'revoked', 'error'].includes(inviteState) ? <>
+        <section className="pc-join-confirm" aria-labelledby="pc-join-confirm-title">
+          <div className="pc-join-summary"><div className="pc-join-mark"><Users size={18} /></div><div><span>PROJECT INVITATION</span><strong id="pc-join-confirm-title">{preview.projectName}</strong><small>Invited as {preview.email}</small></div><Badge tone="ok">Verified</Badge></div>
+          <dl className="pc-invitation-details">
+            {preview.inviterDisplayName || preview.inviterEmail ? <div><dt>Invited by</dt><dd>{preview.inviterDisplayName || preview.inviterEmail}{preview.inviterDisplayName && preview.inviterEmail ? ` · ${preview.inviterEmail}` : ''}</dd></div> : null}
+            <div><dt>Your role</dt><dd>{preview.role === 'admin' ? 'Project admin' : 'Project member'}</dd></div>
+            <div><dt>Repository</dt><dd><code>{preview.repositoryUrl}</code></dd></div>
+            {preview.expiresAt ? <div><dt>Invitation expires</dt><dd>{new Date(preview.expiresAt).toLocaleString()}</dd></div> : null}
+          </dl>
+          {inviteState === 'sign-in' ? <div className="pc-state-card"><span className="pc-icon"><Users size={18} /></span><div><h3>Sign in to join this project</h3><p>This invitation is for {preview.email}. Sign in to that Mingle account to continue. Your invitation stays in this window while sign-in finishes.</p>
+            {account?.status === 'signing-in' ? <p className="pc-loading" role="status">Finish signing in in your browser. This window will resume automatically.</p> : account?.configured
+              ? <Button variant="primary" size="sm" disabled={account.status === 'restoring'} onClick={() => void signIn()}>Continue with Google</Button>
+              : <Button size="sm" onClick={onOpenAccountSettings}>Set up Mingle account</Button>}
+            {account?.browserError ? <p className="pc-help">{account.browserError}</p> : null}
+          </div></div> : null}
+          {inviteState === 'wrong-account' ? <div className="pc-state-card pc-state-card--error"><CircleAlert size={19} /><div><h3>Use the invited account</h3><p>This invitation is for {preview.email}. {accountEmail ? `You’re signed in as ${accountEmail}.` : ''}</p><Button size="sm" onClick={() => void switchAccount()}>Switch account</Button></div></div> : null}
+          {accountEmail && !emailMatches ? <div className="pc-inline-note pc-inline-note--warning" role="alert">Switch to {preview.email} before continuing.</div> : null}
           {error ? <InlineError>{error}</InlineError> : null}
-          <div className="pc-join-actions"><span>{!emailMatches ? `Sign in as ${preview.email} to continue.` : !selectedProject ? 'Choose a local checkout to continue.' : 'No provider work starts until you send a message.'}</span><Button type="button" variant="primary" disabled={!canJoin} busy={joining} onClick={() => void joinProject()}>Join project</Button></div>
-        </div>}
+          <div className="pc-join-actions"><Button type="button" variant="ghost" onClick={onClose}>Not now</Button><Button type="button" variant="primary" disabled={!canContinueInvite} onClick={() => { setError(null); setStep('workspace'); }}>Join project <ChevronRight size={15} /></Button></div>
+        </section>
       </> : null}
-      {joined ? <div className="pc-state-card pc-state-card--success"><Check size={19} /><div><h3>You’re in</h3><p>Your first local session is ready. Nothing has been sent to the agent yet.</p><Button variant="primary" size="sm" onClick={onClose}>Open project</Button></div></div> : null}
-      {error && inviteState !== 'ready' ? <InlineError>{error}</InlineError> : null}
+
+      {preview && step === 'workspace' && inviteState === 'ready' ? <>
+        <section className="pc-workspace-step" aria-labelledby="pc-workspace-heading">
+          <h3 id="pc-workspace-heading">Clone the invited repository</h3>
+          <p className="pc-step-copy">Choose a parent folder. Mingle will create the checkout there and register it as a project.</p>
+          <div className="pc-repository-url"><GitBranch size={14} /> <code>{preview.repositoryUrl}</code></div>
+          <div className="pc-directory-picker">
+            <form className="pc-directory-path" onSubmit={(event) => { event.preventDefault(); void loadDirectory(directoryPath); }}>
+              <label className="pc-field"><span>Parent folder</span><input value={directoryPath} onChange={(event) => setDirectoryPath(event.target.value)} autoComplete="off" spellCheck={false} aria-label="Repository destination parent folder" /></label>
+              <Button type="submit" size="sm" disabled={directoryLoading || !directoryPath.trim()} busy={directoryLoading}>Browse</Button>
+            </form>
+            {directoryError ? <InlineError onRetry={() => void loadDirectory(directoryPath)}>{directoryError}</InlineError> : null}
+            {directoryListing?.truncated ? <p className="pc-directory-notice" role="status">Folder results are limited. Browse into a folder or type a more specific path.</p> : null}
+            {directoryListing ? <div className="pc-directory-tools"><Button size="sm" variant="ghost" disabled={!directoryListing.parentPath || directoryLoading} onClick={() => void loadDirectory(directoryListing.parentPath!)}><ArrowLeft size={13} />Parent</Button><Button size="sm" variant="ghost" disabled={directoryLoading} onClick={() => void loadDirectory(directoryListing.homePath)}>Home</Button></div> : null}
+            {directoryListing ? <div className="pc-directory-list" role="group" aria-label="Folders in destination parent" aria-busy={directoryLoading}>
+              {listedDirectories.map((directory) => <button key={directory.path} type="button" disabled={directoryLoading} onClick={() => void loadDirectory(directory.path)}><FolderOpen size={14} /><span>{directory.name}</span><ChevronRight size={13} /></button>)}
+              {!listedDirectories.length ? <p>{directoryLoading ? 'Loading folders…' : 'No folders here.'}</p> : null}
+            </div> : null}
+            {directoryListing?.roots.length ? <div className="pc-directory-roots" aria-label="Available locations">{directoryListing.roots.map((root) => <Button key={root.path} size="sm" variant="ghost" disabled={directoryLoading} onClick={() => void loadDirectory(root.path)}>{root.name}</Button>)}</div> : null}
+          </div>
+          <label className="pc-field"><span>Folder name</span><input value={folderName} onChange={(event) => setFolderName(event.target.value)} maxLength={100} autoComplete="off" /></label>
+          <p className="pc-resulting-path"><span>Checkout path</span><code>{resultingPath || 'Choose a parent folder and checkout name'}</code></p>
+          <div className="pc-source-tabs" role="group" aria-label="Choose repository checkout source">
+            <button type="button" aria-pressed={source === 'clone'} onClick={() => { setSource('clone'); setSelectedProjectId(''); setError(null); }}>Clone repository</button>
+            <button type="button" aria-pressed={source !== 'clone'} onClick={() => { setSource('project'); setError(null); }}>I already have a checkout</button>
+          </div>
+          {source !== 'clone' ? <div className="pc-existing-checkout">
+            {projects.filter((project) => !project.isExample).length ? <div className="pc-project-choices" role="radiogroup" aria-label="Registered local projects">
+              {projects.filter((project) => !project.isExample).map((project) => <button type="button" role="radio" aria-checked={selectedProjectId === project.id} className={`pc-project-choice${selectedProjectId === project.id ? ' is-selected' : ''}`} key={project.id} onClick={() => { setSelectedProjectId(project.id); setSource('project'); setError(null); }}><FolderOpen size={15} /><span><strong>{project.name}</strong><small>{project.path}</small></span>{selectedProjectId === project.id ? <Check size={15} /> : null}</button>)}
+            </div> : <p className="pc-empty">No local projects are registered on this device yet.</p>}
+            <form className="pc-local-folder-form" onSubmit={(event) => void addExistingFolder(event)}><label className="pc-field"><span>Or open a local folder</span><input value={folderPath} onChange={(event) => { setFolderPath(event.target.value); setSource('folder'); setSelectedProjectId(''); }} placeholder="/path/to/project" autoComplete="off" spellCheck={false} /></label><Button type="submit" size="sm" disabled={!folderPath.trim() || workspaceBusy} busy={workspaceBusy}>Use this folder</Button></form>
+          </div> : null}
+          {error ? <InlineError>{error}</InlineError> : null}
+          <div className="pc-join-actions"><Button type="button" variant="ghost" disabled={workspaceBusy} onClick={() => { setError(null); setStep('invite'); }}><ArrowLeft size={14} />Back</Button>
+            {source === 'clone' ? <Button type="button" variant="primary" disabled={!preview.repositoryUrl || !validParent || !cloneName || workspaceBusy || !emailMatches} busy={workspaceBusy} onClick={() => void cloneRepository()}>Clone and continue</Button>
+              : <Button type="button" variant="primary" disabled={!canContinueWorkspace} onClick={() => { setError(null); setStep('agents'); }}>Use this checkout <ChevronRight size={15} /></Button>}
+          </div>
+          {source === 'clone' && workspaceBusy ? <p className="pc-loading" role="status">Cloning repository… This may take a little while.</p> : null}
+        </section>
+      </> : null}
+
+      {preview && step === 'agents' && inviteState === 'ready' ? <section className="pc-agent-step" aria-labelledby="pc-agent-heading">
+        <h3 id="pc-agent-heading">Choose one or more local agents</h3>
+        <p className="pc-step-copy">Agents are created idle and use your existing provider sign-ins. No model run starts during joining.</p>
+        {selectedProject ? <p className="pc-project-ref"><FolderOpen size={13} /> {selectedProject.name}<span>· {selectedProject.path}</span></p> : null}
+        {!eligibleProviders.length ? <div className="pc-state-card pc-state-card--setup"><CircleAlert size={19} /><div><h3>No eligible provider is ready</h3><p>Choose an available Claude, Codex, or OpenCode provider with a Supervised model. Provider authentication and setup remain on this device.</p><Button size="sm" onClick={onOpenProviderSettings}>Open provider settings</Button></div></div> : null}
+        <div className="pc-provider-availability" aria-label="Provider availability">
+          {JOIN_PROVIDERS.map((id) => {
+            const info = providers.find((candidate) => candidate.id === id);
+            const choices = info ? supervisedModels(info) : [];
+            const status = !info ? 'Not reported by this device' : !info.available ? `Unavailable${info.reason ? ` · ${info.reason}` : ''}`
+              : !choices.length ? `Available, but no Supervised model is reported${info.reason ? ` · ${info.reason}` : ''}`
+                : `${choices.length} Supervised model${choices.length === 1 ? '' : 's'} available${info.reason ? ` · ${info.reason}` : ''}`;
+            return <p key={id} className={info?.available && choices.length ? 'is-available' : ''}><ProviderMark provider={id} size={15} /><strong>{info?.name ?? id}</strong><span>{status}</span></p>;
+          })}
+          <Button size="sm" variant="ghost" onClick={onOpenProviderSettings}>Provider settings</Button>
+        </div>
+        {agentDrafts.map((draft, index) => {
+          const info = eligibleProviders.find((candidate) => candidate.id === draft.provider);
+          const models = supervisedModels(info);
+          const model = models.find((candidate) => candidate.id === draft.model);
+          const efforts = info && model ? reasoningChoices(info, model) : [];
+          return <fieldset className="pc-agent-card" key={draft.id}><legend>Agent {index + 1}</legend>
+            <div className="pc-agent-config">
+              <label className="pc-field"><span>Provider</span><select value={draft.provider} onChange={(event) => setAgentProvider(index, event.target.value)}>{eligibleProviders.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
+              <label className="pc-field"><span>Model</span><select value={model?.id ?? ''} onChange={(event) => {
+                const next = models.find((item) => item.id === event.target.value);
+                if (!next) return;
+                setAgentDrafts((current) => current.map((entry, rowIndex) => rowIndex === index ? { ...entry, model: next.id, effort: preferredEffort(info!, next) } : entry));
+              }}>{models.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
+              <label className="pc-field"><span>Reasoning effort</span><select value={draft.effort} onChange={(event) => setAgentDrafts((current) => current.map((entry, rowIndex) => rowIndex === index ? { ...entry, effort: event.target.value } : entry))}>{efforts.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}</select></label>
+            </div>
+            {model && !model.reasoningEfforts ? <small className="pc-workspace-note">This model did not report effort choices; these are Mingle’s documented local runtime defaults.</small> : null}
+            <div className="pc-agent-card-footer"><span><Check size={13} /> Supervised · asks before file or command actions</span>{agentDrafts.length > 1 ? <Button type="button" size="sm" variant="ghost" onClick={() => setAgentDrafts((current) => current.filter((item) => item.id !== draft.id))}><X size={13} />Remove</Button> : null}</div>
+          </fieldset>;
+        })}
+        {eligibleProviders.length && agentDrafts.length < 4 ? <Button type="button" size="sm" variant="ghost" className="pc-add-agent" onClick={() => {
+          const provider = eligibleProviders[0]!;
+          const model = supervisedModels(provider)[0]!;
+          setAgentDrafts((current) => [...current, { id: nextAgentId.current++, provider: provider.id as Provider, model: model.id, effort: preferredEffort(provider, model) }]);
+        }}><Plus size={14} />Add another agent</Button> : null}
+        {error ? <InlineError>{error}</InlineError> : null}
+        <div className="pc-join-actions"><Button type="button" variant="ghost" disabled={joining} onClick={() => { setError(null); setStep('workspace'); }}><ArrowLeft size={14} />Back</Button>
+          <Button type="button" variant="primary" disabled={!canJoin} busy={joining} onClick={() => void joinProject()}>Join project</Button>
+        </div>
+        <p className="pc-no-run-note">The leader can see these Supervised agents in the shared project roster. Provider credentials stay on this device.</p>
+      </section> : null}
+
+      {step === 'success' && joinResult ? <div className="pc-state-card pc-state-card--success"><Check size={19} /><div><h3>You’re in</h3><p>{joinResult.sessionIds.length} idle agent{joinResult.sessionIds.length === 1 ? '' : 's'} are ready. No model run has started. Your project and first session are selected in the workspace.</p><Button variant="primary" size="sm" onClick={() => { onJoined?.(joinResult); onClose(); }}>Open team chat</Button></div></div> : null}
     </div>
   </Modal>;
 }

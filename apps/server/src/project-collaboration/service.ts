@@ -21,6 +21,7 @@ const INVITATION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const REMOTE_ROSTER_PROVIDERS = new Set(['claude', 'codex', 'opencode']);
 type Row = Record<string, unknown>;
 type CloudError = { code?: string | null; message?: string | null } | null;
+type InvitationAgent = NonNullable<JoinProjectInvitationInput['agent']>;
 
 export interface ProjectInvitationEmailSender {
   status(client: SupabaseClient): Promise<{ configured: boolean; message?: string; joinUrlBase?: string }>;
@@ -218,6 +219,18 @@ export class ProjectCollaborationService {
         created_at TEXT NOT NULL,
         UNIQUE(account_id,device_id,local_project_id,team_id,shared_project_id)
       );
+      CREATE TABLE IF NOT EXISTS mingle_project_collaboration_join_agents (
+        account_id TEXT NOT NULL, device_id TEXT NOT NULL, local_project_id TEXT NOT NULL,
+        team_id TEXT NOT NULL, shared_project_id TEXT NOT NULL, ordinal INTEGER NOT NULL,
+        session_id TEXT NOT NULL, provider TEXT NOT NULL, model TEXT NOT NULL, effort TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY(account_id,device_id,local_project_id,team_id,shared_project_id,ordinal),
+        UNIQUE(account_id,device_id,local_project_id,team_id,shared_project_id,session_id)
+      );
+      INSERT OR IGNORE INTO mingle_project_collaboration_join_agents
+        (account_id,device_id,local_project_id,team_id,shared_project_id,ordinal,session_id,provider,model,effort,created_at)
+        SELECT account_id,device_id,local_project_id,team_id,shared_project_id,0,session_id,provider,model,effort,created_at
+        FROM mingle_project_collaboration_joins;
     `);
   }
 
@@ -565,11 +578,16 @@ export class ProjectCollaborationService {
     });
   }
 
-  private validateAgent(input: JoinProjectInvitationInput['agent']) {
-    if (!REMOTE_ROSTER_PROVIDERS.has(input.provider)) {
-      throw new HttpError(400, 'Choose Claude, Codex, or OpenCode so the project leader can see this agent in the existing team roster.');
-    }
-    return this.options.providers.list().then((providers) => {
+  private requestedAgents(input: JoinProjectInvitationInput): InvitationAgent[] {
+    return input.agents ?? (input.agent ? [input.agent] : []);
+  }
+
+  private async validateAgents(inputs: InvitationAgent[]): Promise<InvitationAgent[]> {
+    const providers = await this.options.providers.list();
+    return inputs.map((input) => {
+      if (!REMOTE_ROSTER_PROVIDERS.has(input.provider)) {
+        throw new HttpError(400, 'Choose Claude, Codex, or OpenCode so the project leader can see this agent in the existing team roster.');
+      }
       const info = providers.find((candidate) => candidate.id === input.provider);
       if (!info?.available) throw new HttpError(409, `${input.provider} is not currently available on this device. Refresh Providers and choose an available model.`);
       const model = info.models.find((candidate) => candidate.id === input.model || candidate.aliases?.includes(input.model));
@@ -583,7 +601,7 @@ export class ProjectCollaborationService {
   joinInvitation(input: JoinProjectInvitationInput): Promise<ProjectInvitationJoinResult> {
     const parsed = JoinProjectInvitationSchema.parse(input);
     const key = this.tokenHash(parsed.token);
-    const intent = JSON.stringify({ localProjectId: parsed.localProjectId, agent: parsed.agent });
+    const intent = JSON.stringify({ localProjectId: parsed.localProjectId, agents: this.requestedAgents(parsed) });
     const existingFlight = this.joinFlights.get(key);
     if (existingFlight) {
       if (existingFlight.intent !== intent) return Promise.reject(conflict('A join for this invitation is already in progress with different project or agent settings.'));
@@ -601,7 +619,7 @@ export class ProjectCollaborationService {
 
   private async performJoin(parsed: JoinProjectInvitationInput): Promise<ProjectInvitationJoinResult> {
       const { project: localProject, repository: localRepository } = await this.repository(parsed.localProjectId);
-      const [preview, agent] = await Promise.all([this.previewInvitation({ token: parsed.token }), this.validateAgent(parsed.agent)]);
+      const [preview, agents] = await Promise.all([this.previewInvitation({ token: parsed.token }), this.validateAgents(this.requestedAgents(parsed))]);
       const invitedRepository = normalizeRepositoryUrl(preview.repositoryUrl);
       if (localRepository.identity !== invitedRepository.identity) {
         throw new HttpError(409, 'Select the invited repository checkout or clone the repository URL shown in the invitation before joining.');
@@ -621,64 +639,78 @@ export class ProjectCollaborationService {
       const invitationId = text(accepted.row, 'invitation_id');
       const device = await this.options.distributed.transport.register({ teamId, name: 'Mingle desktop' });
 
-      const existing = this.options.store.db.prepare(`SELECT invitation_id,account_id,device_id,local_project_id,team_id,shared_project_id,
-        session_id,provider,model,effort FROM mingle_project_collaboration_joins WHERE invitation_id = ?`).get(invitationId) as Row | undefined;
-      if (existing) {
-        if (existing.account_id !== accepted.userId || existing.device_id !== device.id || existing.local_project_id !== localProject.id
-          || existing.provider !== agent.provider || existing.model !== agent.model || existing.effort !== agent.effort) {
-          throw conflict('This invitation was already joined from a different account, device, local project, or agent configuration.');
+      const joinIdentity = [accepted.userId, device.id, localProject.id, teamId, sharedProjectId] as const;
+      const existingSessions = () => this.options.store.db.prepare(`SELECT ordinal,session_id,provider,model,effort
+        FROM mingle_project_collaboration_join_agents WHERE account_id=? AND device_id=? AND local_project_id=? AND team_id=? AND shared_project_id=? ORDER BY ordinal`)
+        .all(...joinIdentity) as Row[];
+      const checkedExistingSessions = () => {
+        const saved = existingSessions();
+        if (saved.length !== agents.length || saved.some((row, index) => Number(row.ordinal) !== index
+          || row.provider !== agents[index]!.provider || row.model !== agents[index]!.model || row.effort !== agents[index]!.effort)) {
+          throw conflict('This project was already joined on this device with different agent settings. Continue with the existing agents or use the same configuration.');
         }
-        return { projectId: localProject.id, sessionId: text(existing, 'session_id'), teamId, sharedProjectId, alreadyJoined: true };
+        return saved.map((row) => text(row, 'session_id'));
+      };
+      const existingInvitation = this.options.store.db.prepare('SELECT invitation_id FROM mingle_project_collaboration_joins WHERE invitation_id=?').get(invitationId);
+      const priorSessionIds = existingSessions();
+      if (existingInvitation) {
+        const sessionIds = checkedExistingSessions();
+        return { projectId: localProject.id, sessionId: sessionIds[0]!, sessionIds, teamId, sharedProjectId, alreadyJoined: true };
       }
-
-      const existingProjectAgent = this.options.store.db.prepare(`SELECT account_id,device_id,local_project_id,team_id,shared_project_id,
-        session_id,provider,model,effort FROM mingle_project_collaboration_joins
-        WHERE account_id=? AND device_id=? AND local_project_id=? AND team_id=? AND shared_project_id=?`)
-        .get(accepted.userId, device.id, localProject.id, teamId, sharedProjectId) as Row | undefined;
-      if (existingProjectAgent) {
-        if (existingProjectAgent.provider !== agent.provider || existingProjectAgent.model !== agent.model || existingProjectAgent.effort !== agent.effort) {
-          throw conflict('This project already has its initial agent on this device with different settings. Continue with that agent or update it explicitly.');
-        }
+      if (priorSessionIds.length) {
+        const sessionIds = checkedExistingSessions();
         await this.completeAndBindEnrollment({ invitationId, teamId, sharedProjectId, localProjectId: localProject.id, ownerId: accepted.userId, device });
-        return { projectId: localProject.id, sessionId: text(existingProjectAgent, 'session_id'), teamId, sharedProjectId, alreadyJoined: true };
+        return { projectId: localProject.id, sessionId: sessionIds[0]!, sessionIds, teamId, sharedProjectId, alreadyJoined: true };
       }
       await this.completeAndBindEnrollment({ invitationId, teamId, sharedProjectId, localProjectId: localProject.id, ownerId: accepted.userId, device });
 
       const stableAgentKey = createHash('sha256').update([accepted.userId, device.id, localProject.id, teamId, sharedProjectId].join(':')).digest('hex').slice(0, 12);
       const stableSessionName = `Teammate agent ${stableAgentKey}`;
-      let session = this.options.store.listSessions(localProject.id).find((candidate) => candidate.name === stableSessionName);
-      if (session) {
-        if (session.provider !== agent.provider || session.model !== agent.model || session.effort !== agent.effort || session.policy !== 'supervised') {
-          throw conflict('An initial agent already exists for this invitation with different settings.');
+      const sessions: Awaited<ReturnType<WorkspaceService['createSession']>>[] = [];
+      for (const [index, agent] of agents.entries()) {
+        const stableName = index === 0 ? stableSessionName : `${stableSessionName} ${index + 1}`;
+        let session = this.options.store.listSessions(localProject.id).find((candidate) => candidate.name === stableName);
+        if (session) {
+          if (session.provider !== agent.provider || session.model !== agent.model || session.effort !== agent.effort || session.policy !== 'supervised') {
+            throw conflict('An initial agent already exists for this invitation with different settings.');
+          }
+        } else {
+          session = await this.options.workspace.createSession({
+            projectId: localProject.id, name: stableName, provider: agent.provider, model: agent.model,
+            effort: agent.effort, policy: 'supervised',
+          });
         }
-      } else {
-        session = await this.options.workspace.createSession({
-          projectId: localProject.id, name: stableSessionName, provider: agent.provider, model: agent.model,
-          effort: agent.effort, policy: 'supervised',
-        });
+        sessions.push(session);
       }
       const currentRoster = await this.options.distributed.execution.snapshot(teamId);
       const publishedSessionIds = currentRoster.agents
         .filter((candidate) => candidate.sharedProjectId === sharedProjectId && candidate.deviceId === device.id
-          && candidate.ownerId === accepted.userId && candidate.sessionId !== session.id)
+          && candidate.ownerId === accepted.userId && !sessions.some((session) => candidate.sessionId === session.id))
         .map((candidate) => candidate.sessionId);
-      const sessionIds = [...new Set([...publishedSessionIds, session.id])];
+      const sessionIds = [...new Set([...publishedSessionIds, ...sessions.map((session) => session.id)])];
       await this.options.distributed.execution.publishAgents({ teamId, sharedProjectId, sessionIds });
       const at = this.now().toISOString();
       try {
-        this.options.store.tx(() => this.options.store.db.prepare(`INSERT INTO mingle_project_collaboration_joins
+        this.options.store.tx(() => {
+          this.options.store.db.prepare(`INSERT INTO mingle_project_collaboration_joins
           (invitation_id,account_id,device_id,local_project_id,team_id,shared_project_id,session_id,provider,model,effort,created_at)
           VALUES (?,?,?,?,?,?,?,?,?,?,?)`).run(invitationId, accepted.userId, device.id, localProject.id, teamId,
-          sharedProjectId, session!.id, agent.provider, agent.model, agent.effort, at));
+          sharedProjectId, sessions[0]!.id, agents[0]!.provider, agents[0]!.model, agents[0]!.effort, at);
+          const insertAgent = this.options.store.db.prepare(`INSERT INTO mingle_project_collaboration_join_agents
+            (account_id,device_id,local_project_id,team_id,shared_project_id,ordinal,session_id,provider,model,effort,created_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?)`);
+          sessions.forEach((session, ordinal) => insertAgent.run(...joinIdentity, ordinal, session.id,
+            agents[ordinal]!.provider, agents[ordinal]!.model, agents[ordinal]!.effort, at));
+        });
       } catch (error) {
-        const saved = this.options.store.db.prepare(`SELECT account_id,device_id,local_project_id,team_id,shared_project_id,session_id,provider,model,effort
-          FROM mingle_project_collaboration_joins WHERE account_id=? AND device_id=? AND local_project_id=? AND team_id=? AND shared_project_id=?`)
-          .get(accepted.userId, device.id, localProject.id, teamId, sharedProjectId) as Row | undefined;
-        if (!saved || saved.provider !== agent.provider || saved.model !== agent.model || saved.effort !== agent.effort) throw error;
-        return { projectId: localProject.id, sessionId: text(saved, 'session_id'), teamId, sharedProjectId, alreadyJoined: true };
+        const saved = existingSessions();
+        if (!saved.length) throw error;
+        const savedSessionIds = checkedExistingSessions();
+        return { projectId: localProject.id, sessionId: savedSessionIds[0]!, sessionIds: savedSessionIds, teamId, sharedProjectId, alreadyJoined: true };
       }
       this.options.store.touch();
-      return { projectId: localProject.id, sessionId: session.id, teamId, sharedProjectId, alreadyJoined: accepted.row.already_accepted === true };
+      const sessionIdsCreated = sessions.map((session) => session.id);
+      return { projectId: localProject.id, sessionId: sessionIdsCreated[0]!, sessionIds: sessionIdsCreated, teamId, sharedProjectId, alreadyJoined: accepted.row.already_accepted === true };
   }
 
   private async completeAndBindEnrollment(input: {

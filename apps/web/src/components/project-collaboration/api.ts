@@ -1,4 +1,5 @@
-/** Project-first collaboration API client, kept independent until the shared contracts land. */
+/** Project-first collaboration API client plus its display-oriented roster helpers. */
+import type { JoinProjectInvitationInput, ProjectInvitationJoinResult } from '@mingle/contracts';
 export interface CollaborationProject {
   teamId: string;
   sharedProjectId: string;
@@ -22,17 +23,13 @@ export interface InvitationPreview {
   repositoryUrl: string;
   email: string;
   expiresAt: string;
+  role: 'member' | 'admin';
+  inviterDisplayName?: string;
+  inviterEmail?: string;
   [key: string]: unknown;
 }
 
-export interface InvitationJoinResult {
-  projectId: string;
-  sessionId: string;
-  teamId: string;
-  sharedProjectId: string;
-  alreadyJoined: boolean;
-  [key: string]: unknown;
-}
+export type InvitationJoinResult = ProjectInvitationJoinResult;
 
 export interface InvitationCreateResult {
   invitation: CollaborationRecord & { id: string; email: string; expiresAt: string; joinUrl?: string };
@@ -79,7 +76,7 @@ export const projectCollaborationApi = {
   snapshot: (projectId: string, signal?: AbortSignal) => call<ProjectCollaborationSnapshot>(`/api/projects/${encodeURIComponent(projectId)}/collaboration`, 'GET', undefined, signal),
   invite: (projectId: string, input: { email: string; role: 'member' | 'admin' }) => call<InvitationCreateResult>(`/api/projects/${encodeURIComponent(projectId)}/collaboration/invitations`, 'POST', input),
   preview: (token: string, signal?: AbortSignal) => call<InvitationPreview>('/api/project-invitations/preview', 'POST', { token }, signal),
-  join: (input: { token: string; localProjectId: string; agent: { provider: 'codex' | 'claude' | 'opencode'; model: string; effort: string; policy: 'supervised' } }) => call<InvitationJoinResult>('/api/project-invitations/join', 'POST', input),
+  join: (input: JoinProjectInvitationInput) => call<InvitationJoinResult>('/api/project-invitations/join', 'POST', input),
 };
 
 export function recordText(record: CollaborationRecord | null | undefined, keys: string[], fallback = ''): string {

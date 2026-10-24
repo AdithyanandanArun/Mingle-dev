@@ -21,16 +21,21 @@ export type CreateProjectInvitationInput = z.infer<typeof CreateProjectInvitatio
 export const PreviewProjectInvitationSchema = z.object({ token: ProjectInvitationTokenSchema }).strict();
 export type PreviewProjectInvitationInput = z.infer<typeof PreviewProjectInvitationSchema>;
 
+const ProjectInvitationJoinAgentSchema = z.object({
+  provider: ProjectInvitationAgentProviderSchema,
+  model: z.string().trim().min(1).max(150),
+  effort: EffortSchema,
+  policy: z.literal('supervised'),
+}).strict();
+
 export const JoinProjectInvitationSchema = z.object({
   token: ProjectInvitationTokenSchema,
   localProjectId: z.string().trim().min(1).max(100),
-  agent: z.object({
-    provider: ProjectInvitationAgentProviderSchema,
-    model: z.string().trim().min(1).max(150),
-    effort: EffortSchema,
-    policy: z.literal('supervised'),
-  }).strict(),
-}).strict();
+  agent: ProjectInvitationJoinAgentSchema.optional(),
+  agents: z.array(ProjectInvitationJoinAgentSchema).min(1).max(4).optional(),
+}).strict().refine((value) => (value.agent !== undefined) !== (value.agents !== undefined), {
+  message: 'Choose either one legacy agent or an agents list, but not both.',
+});
 export type JoinProjectInvitationInput = z.infer<typeof JoinProjectInvitationSchema>;
 
 export interface ProjectCollaborationProject {
@@ -85,6 +90,9 @@ export interface ProjectInvitationPreview {
   email: string;
   expiresAt: string;
   role: ProjectCollaborationRole;
+  /** Optional public inviter details, when provided by the preview service. */
+  inviterDisplayName?: string;
+  inviterEmail?: string;
 }
 
 export interface ProjectInvitationCreateResult {
@@ -97,6 +105,7 @@ export interface ProjectInvitationCreateResult {
 export interface ProjectInvitationJoinResult {
   projectId: string;
   sessionId: string;
+  sessionIds: string[];
   teamId: string;
   sharedProjectId: string;
   alreadyJoined: boolean;
