@@ -3,7 +3,14 @@ import type { Approval, GroupMember, GroupSnapshot, ProviderInfo, Session, Sessi
 import { configSummary, ROLE_LABEL } from '../../lib/groups';
 import { memberPresence } from '../../lib/groupPresence';
 import { formatElapsed } from '../../lib/activity';
+import { useMingle } from '../../store/store';
 import { AgentIdentity } from './AgentIdentity';
+import { AgentActivityDrawer, type ActivityAgent } from '../team-orchestration/activity/AgentActivityDrawer';
+
+const ACTIVITY_STATE = {
+  working: 'working', approval: 'awaiting-approval', queued: 'queued', paused: 'paused', error: 'failed',
+  interrupted: 'paused', idle: 'idle', unavailable: 'offline', offline: 'offline',
+} as const;
 
 function useElapsed(startedAt: string | null, active: boolean): string | null {
   const [now, setNow] = useState(() => Date.now());
@@ -20,25 +27,41 @@ function useElapsed(startedAt: string | null, active: boolean): string | null {
 }
 
 function PresenceRow({
-  snapshot, member, session, runs, approvals, connection, providers,
+  snapshot, member, session, runs, approvals, connection, providers, onOpen,
 }: {
   snapshot: GroupSnapshot; member: GroupMember; session: Session | undefined; runs: readonly SessionRun[];
   approvals: readonly Approval[]; connection: 'online' | 'connecting' | 'offline'; providers: readonly ProviderInfo[];
+  onOpen: (agent: ActivityAgent) => void;
 }) {
   const presence = memberPresence({ snapshot, member, session, runs, approvals, connection });
   const elapsed = useElapsed(presence.startedAt, presence.working);
   const summary = session ? configSummary({ model: session.model, effort: session.effort, policy: session.policy, serviceTier: session.serviceTier ?? 'standard' }, providers, session.provider) : null;
+  const currentTask = useMingle((state) => {
+    const delivery = snapshot.deliveries.filter((item) => item.memberId === member.id && (item.status === 'queued' || item.status === 'running'))
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt)).at(-1);
+    const assignment = delivery && snapshot.assignments.find((item) => item.deliveryId === delivery.id);
+    return assignment ? state.boot?.tasks.find((task) => task.id === assignment.taskId)?.title ?? null : null;
+  });
+  const activityState = member.failure?.kind === 'quota_exhausted' ? 'quota-exhausted' : ACTIVITY_STATE[presence.state];
+  const open = () => onOpen({
+    agentId: member.id, handle: member.handle, name: session?.name ?? member.handle, provider: session?.provider ?? null,
+    model: session?.model ?? 'Model not reported', local: true, ownerDisplayName: 'You', deviceName: 'this device',
+    role: member.role === 'peer' ? 'worker' : member.role, state: activityState,
+    currentTask, sessionId: member.sessionId, failureMessage: member.failure?.message ?? null,
+  });
   return (
     <li className={`agent-presence__row is-${presence.state}`}>
-      <div className="agent-presence__identity" title={ROLE_LABEL[member.role]}>
-        <AgentIdentity handle={member.handle} identityKey={member.sessionId} provider={session?.provider} />
-        <span className="agent-presence__state" title={`${presence.label}${elapsed ? ` · ${elapsed}` : ''}`} aria-label={`${presence.label}${elapsed ? `, elapsed ${elapsed}` : ''}`}>
-          <span className={presence.working ? 'activity-shimmer' : undefined}>{presence.label}</span>
-          {elapsed ? <time className="agent-presence__elapsed" dateTime={presence.startedAt ?? undefined} aria-live="off">{elapsed}</time> : null}
-        </span>
-      </div>
-      {summary && session ? <small className="agent-presence__model" title={`${summary.model} · ${summary.detail}`}>{summary.model} · {summary.detail.split(' · ')[0]}</small> : null}
-      {presence.detail ? <small className="agent-presence__detail" title={presence.detail}>{presence.detail}</small> : null}
+      <button type="button" className="agent-presence__open" onClick={open} aria-label={`Open @${member.handle} conversation, ${presence.label}`}>
+        <div className="agent-presence__identity" title={ROLE_LABEL[member.role]}>
+          <AgentIdentity handle={member.handle} identityKey={member.sessionId} provider={session?.provider} />
+          <span className="agent-presence__state" title={`${presence.label}${elapsed ? ` · ${elapsed}` : ''}`} aria-label={`${presence.label}${elapsed ? `, elapsed ${elapsed}` : ''}`}>
+            <span className={presence.working ? 'activity-shimmer' : undefined}>{presence.label}</span>
+            {elapsed ? <time className="agent-presence__elapsed" dateTime={presence.startedAt ?? undefined} aria-live="off">{elapsed}</time> : null}
+          </span>
+        </div>
+        {summary && session ? <small className="agent-presence__model" title={`${summary.model} · ${summary.detail}`}>{summary.model} · {summary.detail.split(' · ')[0]}</small> : null}
+        {presence.detail ? <small className="agent-presence__detail" title={presence.detail}>{presence.detail}</small> : null}
+      </button>
     </li>
   );
 }
@@ -58,6 +81,7 @@ export function AgentPresenceRail({
   const resizeFrame = useRef<number | null>(null);
   const resizeVersion = useRef(0);
   const [expanded, setExpanded] = useState(true);
+  const [selectedAgent, setSelectedAgent] = useState<ActivityAgent | null>(null);
   const presence = members.map((member) => memberPresence({
     snapshot, member, session: sessions.find((session) => session.id === member.sessionId), runs, approvals, connection,
   }));
@@ -147,6 +171,7 @@ export function AgentPresenceRail({
   };
 
   return (
+    <>
     <aside ref={panel} onTransitionEnd={settleSize} className={`agent-presence${expanded ? ' is-expanded' : ' is-collapsed'}${hidden ? ' is-hidden' : ''}`} aria-label="Agent presence" aria-hidden={hidden} inert={hidden}>
       <header ref={head} className="agent-presence__head">
         <strong>Agents</strong>
@@ -157,9 +182,11 @@ export function AgentPresenceRail({
       </header>
       <ul ref={list} className="agent-presence__list" id={listId} aria-hidden={!expanded} inert={!expanded}>
         {members.map((member) => (
-          <PresenceRow key={member.id} snapshot={snapshot} member={member} session={sessions.find((item) => item.id === member.sessionId)} runs={runs} approvals={approvals} connection={connection} providers={providers} />
+          <PresenceRow key={member.id} snapshot={snapshot} member={member} session={sessions.find((item) => item.id === member.sessionId)} runs={runs} approvals={approvals} connection={connection} providers={providers} onOpen={setSelectedAgent} />
         ))}
       </ul>
     </aside>
+    {selectedAgent ? <AgentActivityDrawer key={`${selectedAgent.agentId}:${selectedAgent.sessionId ?? ''}`} projectId={snapshot.group.projectId} agent={selectedAgent} onClose={() => setSelectedAgent(null)} /> : null}
+    </>
   );
 }

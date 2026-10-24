@@ -5,6 +5,7 @@ import type { TeamChatAgent, TeamChatMessage, TeamChatSnapshot } from '@mingle/c
 import { useMingle } from '../../store/store';
 import { api, errorMessage } from '../../lib/api';
 import { ProviderMark } from '../ui';
+import { TeamPresenceBubble } from '../team-orchestration/activity/TeamPresenceBubble';
 import './team-chat.css';
 
 const clock = (value: string): string => {
@@ -187,6 +188,7 @@ export function TeamChatPanel({ projectId, onClose }: { projectId: string; onClo
 
   const dialog = <div className="team-chat__veil">
     <section className="team-chat" role="dialog" aria-modal="true" aria-labelledby="team-chat-title">
+      <TeamPresenceBubble projectId={projectId} />
       <header className="team-chat__topbar">
         <div className="team-chat__title-icon"><MessageCircle size={18} /></div>
         <div className="team-chat__title-copy"><h1 id="team-chat-title">Team chat</h1><span>{snapshot?.project.name ?? 'Shared project'} · {snapshot?.members.length ?? '—'} teammates · {visibleAgents.length} agents</span></div>
