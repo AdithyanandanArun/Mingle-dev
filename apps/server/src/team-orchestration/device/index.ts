@@ -95,6 +95,7 @@ export function createDeviceSide(deps: DeviceSideDeps): {
 } {
   const db: DatabaseSync = deps.store.db;
   const active = new Map<string, ActiveDelivery>();
+  const cancelled = new Set<string>();
   const work = new Set<Promise<unknown>>();
   const lastActivitySentAt = new Map<string, number>();
   const hostDecisions = new Set<string>();
@@ -268,15 +269,29 @@ export function createDeviceSide(deps: DeviceSideDeps): {
     const consent: TeamConsent = { ...previous, state: parsed.state as TeamConsentState, updatedAt: ISO() };
     saveConsent(consent);
     if (consent.state === 'paused' || consent.state === 'revoked') {
-      const rows = db.prepare(`SELECT delivery_id,session_id,status FROM mingle_team_device_deliveries
-        WHERE shared_project_id=? AND status IN ('accepted','running','awaiting-approval')`).all(localBinding.shared_project_id) as Array<{ delivery_id: string; session_id: string; status: string }>;
-      const consentedDeliveries = db.prepare(`SELECT delivery_id FROM mingle_team_device_deliveries
-        WHERE shared_project_id=? AND agent_id IN (${consent.agentIds.map(() => '?').join(',')}) AND status IN ('accepted','running','awaiting-approval')`)
-        .all(consent.sharedProjectId, ...consent.agentIds) as Array<{ delivery_id: string }>;
-      const activeIds = new Set(consentedDeliveries.map((delivery) => delivery.delivery_id));
-      for (const delivery of rows) if (activeIds.has(delivery.delivery_id)) {
+      let rows: Array<{ delivery_id: string; agent_id: string; session_id: string; status: string }> = [];
+      if (consent.agentIds.length) {
+        const rawRows = db.prepare(`SELECT delivery_id,agent_id,session_id,status FROM mingle_team_device_deliveries
+        WHERE shared_project_id=? AND agent_id IN (${consent.agentIds.map(() => '?').join(',')})
+        AND status IN ('accepted','running','awaiting-approval')`).all(consent.sharedProjectId, ...consent.agentIds);
+        rows = rawRows as Array<{ delivery_id: string; agent_id: string; session_id: string; status: string }>;
+      }
+      for (const delivery of rows) {
         proxy.closeDelivery(delivery.delivery_id);
-        deps.runtime.interrupt(delivery.session_id);
+        if (delivery.status === 'accepted') {
+          cancelled.add(delivery.delivery_id);
+          const changed = db.prepare(`UPDATE mingle_team_device_deliveries SET status='interrupted',error=?,updated_at=?
+            WHERE delivery_id=? AND status='accepted'`).run('Owner consent was paused or revoked before the run started.', ISO(), delivery.delivery_id);
+          if (Number(changed.changes) === 1) {
+            const shared = await findBindingBySharedProject(consent.teamId, consent.sharedProjectId);
+            const host = shared ? await hostDeviceId(shared) : null;
+            if (host) await sendStatus(consent.teamId, host, { sharedProjectId: consent.sharedProjectId,
+              deliveryId: delivery.delivery_id, agentId: delivery.agent_id, status: 'interrupted' }).catch(() => undefined);
+          }
+        } else {
+          active.get(delivery.delivery_id)?.controller.abort();
+          deps.runtime.interrupt(delivery.session_id);
+        }
       }
     }
     const payload = TeamConsentPayloadSchema.parse({ sharedProjectId: consent.sharedProjectId, agentIds: consent.agentIds,
@@ -553,14 +568,10 @@ export function createDeviceSide(deps: DeviceSideDeps): {
       return;
     }
     const payload = parsed.data;
-    const validation = await validateDelivery(envelope, payload);
-    if ('rejection' in validation) {
-      await sendStatus(envelope.teamId, envelope.fromDeviceId, { sharedProjectId: payload.sharedProjectId,
-        deliveryId: payload.deliveryId, agentId: payload.agentId, status: 'rejected', rejection: validation.rejection });
-      return;
-    }
     const duplicate = db.prepare('SELECT request_json,status,run_id FROM mingle_team_device_deliveries WHERE delivery_id=?').get(payload.deliveryId) as { request_json: string; status: string; run_id: string | null } | undefined;
     if (duplicate) {
+      const shared = await findBindingBySharedProject(envelope.teamId, payload.sharedProjectId);
+      if (!shared || !await authorizedHost(envelope, shared)) return;
       if (duplicate.request_json !== JSON.stringify(payload)) {
         await sendStatus(envelope.teamId, envelope.fromDeviceId, { sharedProjectId: payload.sharedProjectId,
           deliveryId: payload.deliveryId, agentId: payload.agentId, status: 'rejected', rejection: 'invalid' });
@@ -570,6 +581,12 @@ export function createDeviceSide(deps: DeviceSideDeps): {
         await sendStatus(envelope.teamId, envelope.fromDeviceId, { sharedProjectId: payload.sharedProjectId,
           deliveryId: payload.deliveryId, agentId: payload.agentId, status, runId: duplicate.run_id });
       }
+      return;
+    }
+    const validation = await validateDelivery(envelope, payload);
+    if ('rejection' in validation) {
+      await sendStatus(envelope.teamId, envelope.fromDeviceId, { sharedProjectId: payload.sharedProjectId,
+        deliveryId: payload.deliveryId, agentId: payload.agentId, status: 'rejected', rejection: validation.rejection });
       return;
     }
     const at = ISO();
@@ -655,6 +672,20 @@ export function createDeviceSide(deps: DeviceSideDeps): {
       const localAgent = shared.agents.find((candidate) => candidate.id === payload.agentId)!;
       const proxyConnection = await proxy.create({ teamId: shared.teamId, sharedProjectId: shared.sharedProjectId,
         hostDeviceId: (await hostDeviceId(shared))!, deliveryId: payload.deliveryId, agentId: payload.agentId });
+      const beforeStart = deliveryStartRejection(payload);
+      if (cancelled.has(payload.deliveryId) || beforeStart || !isAcceptedDelivery(payload.deliveryId)) {
+        const row = db.prepare('SELECT status FROM mingle_team_device_deliveries WHERE delivery_id=?').get(payload.deliveryId) as { status: string } | undefined;
+        if (row?.status === 'accepted') {
+          const reason = beforeStart ?? 'paused';
+          const changed = db.prepare(`UPDATE mingle_team_device_deliveries SET status=?,error=?,updated_at=? WHERE delivery_id=? AND status='accepted'`)
+            .run('rejected', `Delivery no longer eligible to start: ${reason}.`, ISO(), payload.deliveryId);
+          if (Number(changed.changes) === 1) await sendStatus(shared.teamId, (await hostDeviceId(shared))!, {
+            sharedProjectId: shared.sharedProjectId, deliveryId: payload.deliveryId, agentId: payload.agentId,
+            status: 'rejected', rejection: reason,
+          }).catch(() => undefined);
+        }
+        return;
+      }
       const controller = new AbortController();
       const requestEntry = TeamAgentActivityEntrySchema.parse({ id: randomUUID(), runId: null, at: ISO(), kind: 'request',
         text: safeText(payload.content, 8_000) });
@@ -680,7 +711,7 @@ export function createDeviceSide(deps: DeviceSideDeps): {
         entries: [requestEntry], text: '', activityState: 'working', activityWaiters: [],
         timer: null, controller, replyPosted: false, artifactFailures: [] };
       active.set(payload.deliveryId, live);
-      db.prepare(`UPDATE mingle_team_device_deliveries SET status='running',run_id=?,worktree_path=?,branch=?,base_revision=?,updated_at=? WHERE delivery_id=?`)
+      db.prepare(`UPDATE mingle_team_device_deliveries SET status='running',run_id=?,worktree_path=?,branch=?,base_revision=?,updated_at=? WHERE delivery_id=? AND status='accepted'`)
         .run(runId, isolated.path, isolated.branch, isolated.baseRevision, ISO(), payload.deliveryId);
       await sendStatus(shared.teamId, (await hostDeviceId(shared))!, { sharedProjectId: shared.sharedProjectId,
         deliveryId: payload.deliveryId, agentId: payload.agentId, status: 'running', runId });
@@ -721,16 +752,32 @@ export function createDeviceSide(deps: DeviceSideDeps): {
     } catch (error) {
       const failure = runId ? failureFor(sessionId, runId) : createFailure(sessionId, null, deps.store.getSession(sessionId)?.provider ?? 'claude', errorMessage(error));
       if (live) await sendActivity(live, 'failed').catch(() => undefined);
-      db.prepare(`UPDATE mingle_team_device_deliveries SET status='failed',error=?,updated_at=? WHERE delivery_id=?`)
+      const changed = db.prepare(`UPDATE mingle_team_device_deliveries SET status='failed',error=?,updated_at=?
+        WHERE delivery_id=? AND status IN ('accepted','running','awaiting-approval')`)
         .run(safeText(failure.message, 1000), ISO(), payload.deliveryId);
       const toDeviceId = await hostDeviceId(shared).catch(() => null);
-      if (toDeviceId) await sendStatus(shared.teamId, toDeviceId, { sharedProjectId: shared.sharedProjectId,
+      if (Number(changed.changes) === 1 && toDeviceId) await sendStatus(shared.teamId, toDeviceId, { sharedProjectId: shared.sharedProjectId,
         deliveryId: payload.deliveryId, agentId: payload.agentId, status: 'failed', runId, failure }).catch(() => undefined);
     } finally {
       proxy.closeDelivery(payload.deliveryId);
       if (live?.timer) clearTimeout(live.timer);
       active.delete(payload.deliveryId);
     }
+  }
+
+  function isAcceptedDelivery(deliveryId: string): boolean {
+    const row = db.prepare('SELECT status FROM mingle_team_device_deliveries WHERE delivery_id=?').get(deliveryId) as { status: string } | undefined;
+    return row?.status === 'accepted';
+  }
+
+  function deliveryStartRejection(payload: TeamDeliveryPayload): 'no-consent' | 'needs-reconsent' | 'paused' | 'invalid' | null {
+    const consent = localConsent(payload.sharedProjectId);
+    if (!consent || !consent.agentIds.includes(payload.agentId)) return 'no-consent';
+    if (consent.state !== 'granted') return consent.state === 'paused' || consent.state === 'revoked' ? 'paused' : 'needs-reconsent';
+    if (permissionRank(payload.permissionLevel) > permissionRank(consent.permissionLevel) || payload.settingsVersion < consent.settingsVersion) return 'invalid';
+    const structure = latestStructure(payload.sharedProjectId);
+    if (structure && (payload.settingsVersion < structure.settings.version || payload.permissionLevel !== structure.settings.permissionLevel)) return 'invalid';
+    return null;
   }
 
   function failureFor(sessionId: string, runId: string): ProviderFailure {
@@ -838,6 +885,17 @@ export function createDeviceSide(deps: DeviceSideDeps): {
     if (!row || !['accepted', 'running', 'awaiting-approval'].includes(row.status)) return;
     proxy.closeDelivery(parsed.data.deliveryId);
     active.get(parsed.data.deliveryId)?.controller.abort();
+    if (row.status === 'accepted') {
+      cancelled.add(parsed.data.deliveryId);
+      const changed = db.prepare(`UPDATE mingle_team_device_deliveries SET status='interrupted',error=?,updated_at=?
+        WHERE delivery_id=? AND status='accepted'`).run(parsed.data.reason, ISO(), parsed.data.deliveryId);
+      if (Number(changed.changes) === 1) await sendStatus(envelope.teamId, envelope.fromDeviceId, {
+        sharedProjectId: parsed.data.sharedProjectId, deliveryId: parsed.data.deliveryId,
+        agentId: (db.prepare('SELECT agent_id FROM mingle_team_device_deliveries WHERE delivery_id=?').get(parsed.data.deliveryId) as { agent_id: string }).agent_id,
+        status: 'interrupted',
+      }).catch(() => undefined);
+      return;
+    }
     deps.runtime.interrupt(row.session_id);
   }
 

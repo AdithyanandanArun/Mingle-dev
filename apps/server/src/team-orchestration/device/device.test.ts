@@ -26,6 +26,7 @@ interface Fixture {
   store: Store; side: ReturnType<typeof createDeviceSide>; routes: Array<{ method: string; path: string; handler: (ctx: any) => unknown }>;
   projectId: string; root: string; repo: string; worktree: string; sent: Sent[]; roster: any[]; handler: ((envelope: any) => Promise<void>) | null;
   runtime: FakeRuntime; exportCalls: any[]; importCalls: any[]; executionOrder: string[]; chatReplies: any[]; members: any[]; setConsent(permission?: 'supervised' | 'full-access', settingsVersion?: number): Promise<any>;
+  holdImports(gate: Promise<void>): void;
   deliver(overrides?: Record<string, unknown>, sender?: string): Promise<void>; close(): Promise<void>;
 }
 
@@ -165,6 +166,7 @@ async function fixture(): Promise<Fixture> {
   };
   const exportCalls: any[] = [];
   const importCalls: any[] = [];
+  let importGate: Promise<void> | null = null;
   const executionOrder: string[] = [];
   const distributed: any = {
     transport,
@@ -183,7 +185,7 @@ async function fixture(): Promise<Fixture> {
       exportTeamArtifact: async (input: any) => { exportCalls.push(input); return { revision: input.revision, transferId: `transfer-${exportCalls.length}`,
         ...(input.taskId ? { taskId: input.taskId } : {}), ...(input.path ? { path: input.path } : {}), ref: `refs/mingle/team/${input.revision}` }; },
     },
-    importTeamArtifact: async (input: any) => { importCalls.push(input); executionOrder.push('import'); return input.artifact; },
+    importTeamArtifact: async (input: any) => { importCalls.push(input); executionOrder.push('import'); await importGate; return input.artifact; },
   };
   const runtime = new FakeRuntime();
   runtime.store = store;
@@ -196,6 +198,7 @@ async function fixture(): Promise<Fixture> {
   side.routes((method, route, routeHandler) => routes.push({ method, path: route, handler: routeHandler }));
   const result: Fixture = {
     store, side, routes, projectId: project.id, root, repo, worktree, sent, roster, get handler() { return handler; }, runtime, exportCalls, importCalls, executionOrder, chatReplies, members,
+    holdImports(gate) { importGate = gate; },
     async setConsent(permission = 'supervised', settingsVersion = 1) {
       const body = { sessionIds: [session.id], permissionLevel: permission, settingsVersion, disclaimerVersion: TEAM_CONSENT_DISCLAIMER_VERSION };
       return callRoute(result, 'POST', '/api/projects/:projectId/team-consent', { projectId: project.id }, body);
@@ -363,6 +366,27 @@ describe('owner-device team orchestration', () => {
     expect(changed.state).toBe('paused');
     await waitFor(() => f.sent.some((message) => message.payload?.deliveryId === payload.deliveryId && message.payload?.status === 'interrupted'));
     expect(f.runtime.isActive(f.store.listSessions(f.projectId)[0]!.id)).toBe(false);
+  });
+
+  it('cancels an accepted delivery paused during artifact preparation before the provider can start', async () => {
+    const f = await fixture();
+    await sendStructure(f);
+    await f.setConsent();
+    let releaseImport!: () => void;
+    const importGate = new Promise<void>((resolve) => { releaseImport = resolve; });
+    f.holdImports(importGate);
+    const revision = runGit(f.worktree, 'rev-parse', 'HEAD').trim();
+    const payload = deliveryPayload({ deliveryId: `delivery-${randomUUID()}`, inputArtifacts: [{ revision, transferId: 'blocked-import' }] });
+    await f.handler?.({ id: randomUUID(), teamId: TEAM, fromDeviceId: HOST_DEVICE, toDeviceId: OWN_DEVICE, kind: 'teamgroup.delivery', payload });
+    await waitFor(() => f.importCalls.length === 1);
+
+    await callRoute(f, 'PATCH', '/api/projects/:projectId/team-consent', { projectId: f.projectId }, { state: 'paused' });
+    releaseImport();
+    await waitFor(() => f.sent.some((message) => message.payload?.deliveryId === payload.deliveryId && message.payload?.status === 'interrupted'));
+    expect(f.runtime.startCount).toBe(0);
+
+    await f.handler?.({ id: randomUUID(), teamId: TEAM, fromDeviceId: HOST_DEVICE, toDeviceId: OWN_DEVICE, kind: 'teamgroup.delivery', payload });
+    expect(f.sent.at(-1)?.payload).toMatchObject({ deliveryId: payload.deliveryId, status: 'interrupted' });
   });
 
   it('preserves provider quota-exhausted failures when reporting a remote run failure', async () => {
