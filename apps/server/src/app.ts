@@ -40,6 +40,7 @@ import { ProjectCollaborationService, type ProjectInvitationEmailSender } from '
 import { RequestRemoteDelegationSchema } from '../../../packages/contracts/src/remote-execution.ts';
 import { TeamChatService } from './team-chat/service.ts';
 import { createTeamOrchestration, type TeamOrchestrationDeviceSideFactory } from './team-orchestration/index.ts';
+import { createDeviceSide } from './team-orchestration/device/index.ts';
 
 export interface ApplicationOptions extends ConfigOptions {
   /** Provider adapters and detection. Inject a fake in tests; the CLI entry passes ./providers/index.ts. */
@@ -181,7 +182,10 @@ export function createApplication(options: ApplicationOptions): MingleApplicatio
   const teamOrchestration = createTeamOrchestration({
     store, runtime, hub, transport: distributed.transport, account, distributed, collaboration: projectCollaboration,
     groups, teamChat, teamMcp, recovery, changed: () => store.touch(),
-    deviceSideFactory: options.teamOrchestrationDeviceSideFactory,
+    // Every device can contribute agents, so the owner-side executor is on by default; tests may substitute it.
+    deviceSideFactory: options.teamOrchestrationDeviceSideFactory ?? (() => createDeviceSide({
+      store, runtime, transport: distributed.transport, account, distributed, collaboration: projectCollaboration, teamChat, hub, changed: () => store.touch(),
+    })),
   });
   runtime.setTeamProxyService(teamOrchestration.host);
   groups.setTeamDispatchGuard((sessionId, groupId) => teamOrchestration.host.guardGroupDispatch(sessionId, groupId));

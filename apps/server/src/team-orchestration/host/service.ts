@@ -632,7 +632,9 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
   }
 
   private async onEnvelope(envelope: import('@mingle/contracts').AuthenticatedTransportMessage): Promise<void> {
-    if (this.closed || !envelope.kind.startsWith('teamgroup.')) return;
+    // Other teamgroup.* kinds belong to the owner-device side sharing this transport.
+    const hostKinds = ['teamgroup.consent', 'teamgroup.delivery.status', 'teamgroup.tool.call', 'teamgroup.approval.request'];
+    if (this.closed || !hostKinds.includes(envelope.kind)) return;
     const localDevice = this.options.transport.snapshot(envelope.teamId).deviceId;
     if (!localDevice || envelope.toDeviceId !== localDevice) throw new HttpError(403, 'Team orchestration envelope is not addressed to this device.');
     if (envelope.kind === 'teamgroup.consent') return this.receiveConsent(envelope);
