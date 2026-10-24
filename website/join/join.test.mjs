@@ -10,7 +10,7 @@ test('valid invitations become an app link with no automatic execution', () => {
 });
 
 test('malformed, duplicated, oversized and injected invitations reject', () => {
-  for (const fragment of ['', 'token=' + 'a'.repeat(43), '#token=short', '#token=' + 'a'.repeat(129),
+  for (const fragment of ['', 'token=' + 'a'.repeat(43), '#token=short', '#token=' + 'A'.repeat(42), '#token=' + 'A'.repeat(129),
     '#token=' + 'a'.repeat(43) + '&token=' + 'b'.repeat(43), '#token=' + 'a'.repeat(43) + '&redirect=https://evil.test',
     '#token=javascript:alert(1)', '#token=' + 'a'.repeat(43) + '%0A', '#other=' + 'a'.repeat(43), '#token=' + 'a'.repeat(2048)]) {
     assert.equal(appLinkFromFragment(fragment), null, fragment.slice(0, 80));

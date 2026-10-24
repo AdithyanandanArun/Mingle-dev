@@ -1,22 +1,29 @@
-const INVITATION_PREFIX = 'mingle://join?token=';
-const INVITATION_PATTERN = /^mingle:\/\/join\?token=([A-Za-z0-9_-]{32,512})(?![\s\S])/;
+const INVITATION_PATTERN = /^mingle:(?:\/\/join|join)\/?\?token=([A-Za-z0-9_-]{43,128})(?![\s\S])/i;
 const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f]/;
 export const MAX_PENDING_PROJECT_INVITATIONS = 16;
 
 function isCanonicalBase64UrlToken(token) {
   return typeof token === 'string'
-    && token.length >= 32
-    && token.length <= 512
+    && token.length >= 43
+    && token.length <= 128
     && token.length % 4 !== 1
     && /^[A-Za-z0-9_-]+$/.test(token)
     && Buffer.from(token, 'base64url').toString('base64url') === token;
 }
 
-/** Accepts only the documented, canonical invitation link shape. */
+/** Accepts the canonical invitation link and common OS/browser slash variants. */
 export function parseProjectInvitationUrl(value) {
-  if (typeof value !== 'string' || value.length > INVITATION_PREFIX.length + 512 || CONTROL_CHARACTERS.test(value)) return null;
+  if (typeof value !== 'string' || value.length > 160 || value.includes('#') || CONTROL_CHARACTERS.test(value)) return null;
   const match = INVITATION_PATTERN.exec(value);
   return match && isCanonicalBase64UrlToken(match[1]) ? match[1] : null;
+}
+
+/** Restores a live window and gives it focus, including when it was hidden or minimized. */
+export function focusProjectInvitationWindow(window) {
+  if (!window || window.isDestroyed()) return;
+  if (window.isMinimized()) window.restore();
+  window.show();
+  window.focus();
 }
 
 /** Builds a renderer handoff URL only for Mingle's local loopback workspace. */

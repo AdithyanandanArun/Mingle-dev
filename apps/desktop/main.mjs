@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { createAccountKeyManager } from './account-storage/account-key.mjs';
 import { createAccountKeyIpcHandler } from './account-storage/account-key-ipc.mjs';
 import { configureLinuxPasswordStore } from './account-storage/linux-backend.mjs';
-import { createProjectInvitationDispatcher, isProjectInvitationWorkspaceUrl } from './project-invitation.mjs';
+import { createProjectInvitationDispatcher, focusProjectInvitationWindow, isProjectInvitationWorkspaceUrl } from './project-invitation.mjs';
 
 const root = app.isPackaged ? join(process.resourcesPath, 'workspace') : fileURLToPath(new URL('../../', import.meta.url));
 const serverRoot = join(root, 'apps/server');
@@ -77,10 +77,7 @@ function notifyBrowserPopoutClosed(sessionId) {
 }
 
 function focusMainWindow() {
-  if (!isLiveWindow(mainWindow)) return;
-  if (mainWindow.isMinimized()) mainWindow.restore();
-  mainWindow.show();
-  mainWindow.focus();
+  focusProjectInvitationWindow(mainWindow);
 }
 
 function sendProjectInvitation(window, token) {
@@ -255,6 +252,7 @@ async function openWorkspace() {
   mainWindow = window;
   configureWorkspaceWindow(window, new URL(url).origin);
   await window.loadURL(projectInvitationDispatcher.getStartupUrl());
+  focusMainWindow();
   projectInvitationDispatcher.markWorkspaceReady();
 }
 

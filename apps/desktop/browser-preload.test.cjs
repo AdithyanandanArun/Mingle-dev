@@ -14,8 +14,14 @@ function loadPreload() {
     invoke() { return Promise.resolve(false); },
   };
   const contextBridge = { exposeInMainWorld(name, value) { exposed.set(name, value); } };
+  const sandboxBuffer = {
+    from(value, encoding) {
+      if (encoding === 'base64url') throw new TypeError('Unknown encoding: base64url');
+      return Buffer.from(value, encoding);
+    },
+  };
   vm.runInNewContext(preloadSource, {
-    Buffer,
+    Buffer: sandboxBuffer,
     require: name => name === 'electron' ? { contextBridge, ipcRenderer } : assert.fail(`Unexpected import: ${name}`),
   }, { filename: 'browser-preload.cjs' });
   return {
@@ -24,28 +30,29 @@ function loadPreload() {
   };
 }
 
-test('preload queues canonical invitations until subscribe, ignores invalid payloads, and unsubscribes', () => {
+test('sandboxed preload queues valid invitations with a Buffer shim lacking base64url support', () => {
   const { exposed, emit } = loadPreload();
   const api = exposed.get('mingleProjectInvitations');
   assert.deepEqual([...Object.keys(api)], ['onInvitation']);
   assert.equal('ipcRenderer' in api, false);
 
-  const firstToken = 'A'.repeat(32);
+  const firstToken = Buffer.alloc(32, 1).toString('base64url');
   emit(firstToken);
   emit(firstToken); // A duplicate is coalesced while no UI listener exists.
   emit('not-an-invitation-token');
-  emit('A'.repeat(33)); // Invalid base64url length.
+  emit('A'.repeat(42)); // Below the server contract's minimum length.
+  emit('A'.repeat(45)); // Invalid base64url length.
   emit(null);
 
   const received = [];
   const unsubscribe = api.onInvitation(value => received.push(value));
   assert.deepEqual(received, [firstToken]);
-  const liveToken = 'B'.repeat(32);
+  const liveToken = Buffer.alloc(32, 2).toString('base64url');
   emit(liveToken);
   assert.deepEqual(received, [firstToken, liveToken]);
 
   unsubscribe();
-  const queuedAfterUnsubscribe = 'C'.repeat(32);
+  const queuedAfterUnsubscribe = Buffer.alloc(32, 3).toString('base64url');
   emit(queuedAfterUnsubscribe);
   const laterReceived = [];
   api.onInvitation(value => laterReceived.push(value));
@@ -55,10 +62,10 @@ test('preload queues canonical invitations until subscribe, ignores invalid payl
 test('preload invitation queue is bounded to unique pending tokens', () => {
   const { exposed, emit } = loadPreload();
   const api = exposed.get('mingleProjectInvitations');
-  const expected = Array.from({ length: 16 }, (_, index) => Buffer.alloc(24, index).toString('base64url'));
+  const expected = Array.from({ length: 16 }, (_, index) => Buffer.alloc(32, index).toString('base64url'));
   for (const token of expected) emit(token);
   for (let count = 0; count < 100; count++) emit(expected[0]);
-  emit(Buffer.alloc(24, 99).toString('base64url'));
+  emit(Buffer.alloc(32, 99).toString('base64url'));
 
   const received = [];
   api.onInvitation(token => received.push(token));

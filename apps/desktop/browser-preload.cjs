@@ -2,17 +2,18 @@ const { contextBridge, ipcRenderer } = require('electron');
 
 const sessionPattern = /^[A-Za-z0-9_-]{1,80}$/;
 const listeners = new Set();
-const projectInvitationTokenPattern = /^[A-Za-z0-9_-]{32,512}$/;
+const projectInvitationTokenPattern = /^[A-Za-z0-9_-]{43,128}$/;
 const maxPendingProjectInvitations = 16;
 const projectInvitationListeners = new Set();
 const pendingProjectInvitations = [];
 const pendingProjectInvitationTokens = new Set();
 
-function isCanonicalProjectInvitationToken(token) {
+// The main process enforces canonical base64url bytes. Sandboxed Electron preload Buffer shims
+// do not necessarily implement Node's base64url encoding, so this boundary checks its safe shape.
+function isProjectInvitationToken(token) {
   return typeof token === 'string'
     && projectInvitationTokenPattern.test(token)
-    && token.length % 4 !== 1
-    && Buffer.from(token, 'base64url').toString('base64url') === token;
+    && token.length % 4 !== 1;
 }
 
 function notifyProjectInvitation(listener, token) {
@@ -20,7 +21,7 @@ function notifyProjectInvitation(listener, token) {
 }
 
 ipcRenderer.on('mingle.project-invitation', (_event, token) => {
-  if (!isCanonicalProjectInvitationToken(token)) return;
+  if (!isProjectInvitationToken(token)) return;
   if (projectInvitationListeners.size > 0) {
     for (const listener of [...projectInvitationListeners]) notifyProjectInvitation(listener, token);
     return;

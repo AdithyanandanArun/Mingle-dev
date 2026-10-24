@@ -47,7 +47,20 @@ function tokenFromDeepLink(value: unknown): string | null {
   if (!raw) return null;
   try {
     const url = new URL(raw, window.location.origin);
-    if (url.protocol === 'mingle:') return url.hostname === 'join' ? url.searchParams.get('token') : null;
+    if (url.protocol === 'mingle:') {
+      const validJoinTarget = (url.hostname.toLowerCase() === 'join' && ['', '/'].includes(url.pathname))
+        || (!url.hostname && ['join', 'join/'].includes(url.pathname));
+      if (!validJoinTarget || raw.length > 160 || raw.includes('#') || /[\u0000-\u001f\u007f-\u009f]/.test(raw) || url.username || url.password || url.port) return null;
+      const entries = [...url.searchParams.entries()];
+      const token = entries.length === 1 && entries[0]?.[0] === 'token' ? entries[0][1] : null;
+      if (!token || url.search !== `?token=${token}` || !/^[A-Za-z0-9_-]{43,128}$/.test(token) || token.length % 4 === 1) return null;
+      try {
+        const base64 = token.replace(/-/g, '+').replace(/_/g, '/');
+        const binary = atob(base64 + '='.repeat((4 - base64.length % 4) % 4));
+        const canonical = btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+        return canonical === token ? token : null;
+      } catch { return null; }
+    }
     const isLoopback = ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname);
     if (url.origin !== window.location.origin && !(isLoopback && ['localhost', '127.0.0.1', '[::1]'].includes(window.location.hostname))) return null;
     return url.searchParams.get('join') ?? new URLSearchParams(url.hash.replace(/^#/, '')).get('join');
@@ -97,6 +110,7 @@ export function App() {
     const openInvitation = (token: string | null) => {
       if (!token) return;
       cleanJoinTokenFromLocation();
+      useMingle.getState().closeDialog();
       setJoinSuspended(false);
       setActiveInvitation({ token, sequence: ++invitationSequence.current });
     };
@@ -186,6 +200,7 @@ export function App() {
         </div>
       </main>
       <Dialogs />
+      {activeInvitation ? <style>{'.scrim:has(.pc-join) { z-index: 500; }'}</style> : null}
       {activeInvitation && !joinSuspended ? <ProjectInviteJoinDialog
         key={activeInvitation.sequence}
         token={activeInvitation.token}
