@@ -29,6 +29,7 @@ declare global {
 interface ActiveInvitation { token: string; sequence: number }
 
 const AgentMap = lazy(() => import('./views/AgentMap'));
+const TeamStructure = lazy(() => import('./views/TeamStructure'));
 
 function cleanJoinTokenFromLocation(): string | null {
   const url = new URL(window.location.href);
@@ -195,6 +196,7 @@ export function App() {
             {view === 'tasks' ? <TasksView /> : null}
             {view === 'activity' ? <ActivityView /> : null}
             {view === 'map' ? <Suspense fallback={<div className="editor__state"><Spinner label="Loading map" /></div>}><AgentMap /></Suspense> : null}
+            {view === 'team-structure' ? <Suspense fallback={<div className="editor__state"><Spinner label="Loading team structure" /></div>}><TeamStructure /></Suspense> : null}
             {view === 'settings' ? <SettingsPage /> : null}
           </Boundary>
         </div>

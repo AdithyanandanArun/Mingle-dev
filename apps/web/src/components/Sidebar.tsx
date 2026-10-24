@@ -13,7 +13,7 @@ import { useRetainedPresence } from '../lib/motion';
 import { TeamChatEntry } from './team-chat/TeamChatEntry';
 
 const VIEWS: { view: View; label: string; icon: typeof Kanban }[] = [
-  { view: 'tasks', label: 'Tasks', icon: Kanban }, { view: 'activity', label: 'Activity', icon: Activity }, { view: 'map', label: 'Agent map', icon: Network },
+  { view: 'tasks', label: 'Tasks', icon: Kanban }, { view: 'activity', label: 'Activity', icon: Activity }, { view: 'map', label: 'Agent map', icon: Network }, { view: 'team-structure', label: 'Team structure', icon: Network },
 ];
 const GROUPS: { id: string; label: string; match: (session: Session) => boolean }[] = [
   { id: 'pinned', label: 'Pinned', match: (session) => session.pinned },

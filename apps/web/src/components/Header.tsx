@@ -9,7 +9,7 @@ import { stopGroup } from '../lib/groupActions';
 import { GroupControl } from './group/GroupControl';
 import { cx } from '../lib/format';
 
-const TITLES = { workspace: 'Workspace', tasks: 'Tasks', activity: 'Activity', map: 'Agent map', settings: 'Settings' } as const;
+const TITLES = { workspace: 'Workspace', tasks: 'Tasks', activity: 'Activity', map: 'Agent map', 'team-structure': 'Team structure', settings: 'Settings' } as const;
 const EMPTY_SESSIONS: Session[] = [];
 
 export function Header() {
