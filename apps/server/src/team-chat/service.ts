@@ -102,6 +102,16 @@ export class TeamChatService {
     return work;
   }
 
+  private notifyTeamChatUpdated(teamId: string, sharedProjectId: string): void {
+    const project = this.options.store.db.prepare(`SELECT local_project_id FROM mingle_project_collaboration_sources
+      WHERE team_id=? AND shared_project_id=? UNION ALL SELECT local_project_id FROM mingle_project_collaboration_joins
+      WHERE team_id=? AND shared_project_id=? LIMIT 1`).get(teamId, sharedProjectId, teamId, sharedProjectId) as DbRow | undefined;
+    if (project && typeof project.local_project_id === 'string') {
+      this.options.store.recordEvent({ projectId: project.local_project_id, type: 'team.chat.updated', summary: 'Shared team chat updated',
+        payload: { sharedProjectId } });
+    } else this.options.store.touch();
+  }
+
   private ensureOpen(): void {
     if (this.closed) throw new HttpError(503, 'Team chat is closing.');
   }
@@ -179,10 +189,10 @@ export class TeamChatService {
   }
 
   private setDeliveryState(messageId: string, state: TeamChatMessage['deliveryState']): void {
-    const row = this.options.store.db.prepare('SELECT delivery_state FROM team_chat_messages WHERE id=?').get(messageId) as { delivery_state: string } | undefined;
+    const row = this.options.store.db.prepare('SELECT delivery_state,team_id,shared_project_id FROM team_chat_messages WHERE id=?').get(messageId) as DbRow | undefined;
     if (row && row.delivery_state !== state) {
       this.options.store.db.prepare('UPDATE team_chat_messages SET delivery_state=? WHERE id=?').run(state, messageId);
-      this.options.store.touch();
+      this.notifyTeamChatUpdated(String(row.team_id), String(row.shared_project_id));
     }
   }
 
@@ -359,6 +369,7 @@ export class TeamChatService {
       if (!sameIdentity) throw new HttpError(409, 'A team chat message ID was reused with different content.');
       if (runRank(parsed.runState) > runRank(existing.runState)) {
         this.options.store.db.prepare('UPDATE team_chat_messages SET run_state=? WHERE id=?').run(parsed.runState, parsed.id);
+        this.notifyTeamChatUpdated(parsed.teamId, parsed.sharedProjectId);
       }
       const refreshed = this.options.store.db.prepare('SELECT * FROM team_chat_messages WHERE id=?').get(parsed.id) as DbRow;
       return { ...this.rowMessage(refreshed), deliveryState: localDelivery };
@@ -381,7 +392,7 @@ export class TeamChatService {
       }
       throw new HttpError(500, 'The team chat message could not be saved.');
     }
-    this.options.store.touch();
+    this.notifyTeamChatUpdated(parsed.teamId, parsed.sharedProjectId);
     return this.rowMessage(savedRow);
   }
 
@@ -393,7 +404,7 @@ export class TeamChatService {
     if (runRank(state) <= runRank(message.runState)) return null;
     this.options.store.db.prepare('UPDATE team_chat_messages SET run_state=? WHERE id=?').run(state, messageId);
     const updated = this.options.store.db.prepare('SELECT * FROM team_chat_messages WHERE id=?').get(messageId) as DbRow | undefined;
-    if (updated) this.options.store.touch();
+    if (updated) this.notifyTeamChatUpdated(message.teamId, message.sharedProjectId);
     return updated ? this.rowMessage(updated) : null;
   }
 
@@ -579,10 +590,10 @@ export class TeamChatService {
     } catch {
       deliveryState = 'failed';
     }
-    const prior = this.options.store.db.prepare('SELECT delivery_state FROM team_chat_messages WHERE id=?').get(message.id) as { delivery_state: string } | undefined;
+    const prior = this.options.store.db.prepare('SELECT delivery_state,team_id,shared_project_id FROM team_chat_messages WHERE id=?').get(message.id) as DbRow | undefined;
     if (prior && prior.delivery_state !== deliveryState) {
       this.options.store.db.prepare('UPDATE team_chat_messages SET delivery_state=? WHERE id=?').run(deliveryState, message.id);
-      this.options.store.touch();
+      this.notifyTeamChatUpdated(String(prior.team_id), String(prior.shared_project_id));
     }
   }
 
@@ -625,7 +636,7 @@ export class TeamChatService {
     } catch {
       for (const message of imported) this.options.store.db.prepare('UPDATE team_chat_messages SET delivery_state=? WHERE id=?').run('failed', message.id);
     }
-    if (imported.length) this.options.store.touch();
+    if (imported.length) this.notifyTeamChatUpdated(shared.project!.teamId, shared.project!.sharedProjectId);
     const finalMessages = imported.map((message) => {
       const row = this.options.store.db.prepare('SELECT * FROM team_chat_messages WHERE id=?').get(message.id) as DbRow;
       return this.rowMessage(row);

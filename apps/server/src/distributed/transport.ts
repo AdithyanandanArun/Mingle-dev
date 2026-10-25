@@ -89,6 +89,7 @@ export class TransportService {
   private lastError: string | null = null;
   private lastSyncAt: number | null = null;
   private syncPromise: Promise<void> | null = null;
+  private syncAgain = false;
   private timer: NodeJS.Timeout | null = null;
   private readonly wakeSubscriptions = new Map<string, { client: SupabaseClient; channel: ReturnType<SupabaseClient['channel']> }>();
   private readonly wakeUnavailable = new Set<string>();
@@ -107,7 +108,7 @@ export class TransportService {
     this.ensureTables();
   }
 
-  /** Starts the optional outbound polling loop; no inbound listener or network port is opened. */
+  /** Starts mailbox polling and optional Realtime wake subscriptions; no inbound listener or network port is opened. */
   start(): void {
     if (this.closed || this.timer) return;
     const intervalMs = this.options.syncIntervalMs ?? 3_000;
@@ -336,8 +337,18 @@ export class TransportService {
     }).finally(() => {
       this.notifyIfChanged(before);
       this.syncPromise = null;
+      if (this.syncAgain && !this.closed) {
+        this.syncAgain = false;
+        void this.sync();
+      }
     });
     return this.syncPromise;
+  }
+
+  private wakeSync(): void {
+    if (this.closed) return;
+    if (this.syncPromise) { this.syncAgain = true; return; }
+    void this.sync();
   }
 
   async close(): Promise<void> {
@@ -461,7 +472,7 @@ export class TransportService {
     try {
       const channel = client.channel(this.wakeChannelName(deviceId), { config: { broadcast: { ack: false } } });
       channel.on('broadcast', { event: 'wake' }, () => {
-        if (!this.closed) void this.sync();
+        this.wakeSync();
       });
       this.wakeSubscriptions.set(key, { client, channel });
       channel.subscribe((status) => {

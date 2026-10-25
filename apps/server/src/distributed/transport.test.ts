@@ -41,7 +41,7 @@ class MailboxCloud {
   now: () => number = Date.now;
   failEnvelopeWrites = 0;
   readonly wakes: Array<{ channel: string; event: string; payload: unknown }> = [];
-  private readonly wakeListeners = new Map<string, Set<(event: string, payload: unknown) => void>>();
+  private readonly wakeListeners = new Map<string, Set<(payload: unknown) => void>>();
   constructor(private readonly realtime = false) {}
   private active(user: string, team: string): boolean { return this.members.get(team)?.has(user) ?? false; }
   private device(id: string, team: string): CloudDevice | undefined { return this.devices.find((row) => row.id === id && row.team_id === team); }

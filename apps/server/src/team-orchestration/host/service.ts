@@ -940,8 +940,8 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
           idempotencyKey: `teamgroup-structure:${context.project.sharedProjectId}:${payload.settings.version}:${structureDigest}:${deviceId}`.slice(0, 200) });
       } catch { /* structure remains saved locally and will be broadcast on the next change */ }
     }
-    this.options.store.touch();
-    this.options.changed?.();
+    this.options.store.recordEvent({ projectId: context.localProjectId, type: 'team.structure.updated', summary: 'Shared team structure updated',
+      payload: { teamSession: payload.teamSession, settingsVersion: payload.settings.version } });
     void this.options.transport.sync().catch(() => undefined);
   }
 
@@ -1126,14 +1126,34 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
 
   private async onEnvelope(envelope: import('@mingle/contracts').AuthenticatedTransportMessage): Promise<void> {
     // Other teamgroup.* kinds belong to the owner-device side sharing this transport.
-    const hostKinds = ['teamgroup.consent', 'teamgroup.delivery.status', 'teamgroup.tool.call', 'teamgroup.approval.request'];
+    const hostKinds = ['execution.agents', 'teamgroup.consent', 'teamgroup.delivery.status', 'teamgroup.tool.call', 'teamgroup.approval.request'];
     if (this.closed || !hostKinds.includes(envelope.kind)) return;
     const localDevice = this.options.transport.snapshot(envelope.teamId).deviceId;
     if (!localDevice || envelope.toDeviceId !== localDevice) throw new HttpError(403, 'Team orchestration envelope is not addressed to this device.');
+    if (envelope.kind === 'execution.agents') return this.onPublishedAgents(envelope);
     if (envelope.kind === 'teamgroup.consent') return this.receiveConsent(envelope);
     if (envelope.kind === 'teamgroup.delivery.status') return this.receiveStatus(envelope);
     if (envelope.kind === 'teamgroup.tool.call') return this.receiveToolCall(envelope);
     if (envelope.kind === 'teamgroup.approval.request') return this.receiveApproval(envelope);
+  }
+
+  private async onPublishedAgents(envelope: import('@mingle/contracts').AuthenticatedTransportMessage): Promise<void> {
+    const payload = envelope.payload && typeof envelope.payload === 'object' ? envelope.payload as Record<string, unknown> : null;
+    const agents = Array.isArray(payload?.agents) ? payload.agents : [];
+    const published = agents.find((agent) => agent && typeof agent === 'object'
+      && typeof (agent as Record<string, unknown>).sharedProjectId === 'string') as Record<string, unknown> | undefined;
+    if (!published || typeof published.sharedProjectId !== 'string') return;
+    const sharedProjectId = published.sharedProjectId;
+    const row = this.readHost(envelope.teamId, sharedProjectId);
+    if (!row || row.host_device_id !== envelope.toDeviceId) return;
+    await this.mutations.run(`${envelope.teamId}\0${sharedProjectId}`, async () => {
+      const current = this.readHost(envelope.teamId, sharedProjectId);
+      if (!current || current.host_device_id !== envelope.toDeviceId) return;
+      const context = await this.context(current.local_project_id);
+      if (!context.isHost || context.project.sharedProjectId !== sharedProjectId || context.project.teamId !== envelope.teamId
+        || !context.agents.some((agent) => agent.deviceId === envelope.fromDeviceId)) return;
+      await this.broadcastStructure(context, current);
+    });
   }
 
   private async verifyOwnerDevice(teamId: string, deviceId: string, accountId: string): Promise<void> {

@@ -1,6 +1,7 @@
 import { rmSync } from 'node:fs';
 import type { SupabaseClient, User } from '@supabase/supabase-js';
 import { expect, it, vi } from 'vitest';
+import { TEAM_CONSENT_DISCLAIMER_VERSION } from '@mingle/contracts';
 import { AccountService } from '../account/service.ts';
 import { makeRepo, runGit, startTestApp, tmpDir, waitFor, type TestApp } from '../test-utils.ts';
 import { ProjectInvitationCloudFixture } from '../project-collaboration-cloud.test-utils.ts';
@@ -104,6 +105,43 @@ it('shares imported session history and team messages over HTTP and the encrypte
       JSON.stringify(agentReply.json.messages)).toBe(true);
     expect(leader.fake.runs).toHaveLength(0);
     expect(teammate.app.store.db.prepare('SELECT run_state FROM team_chat_messages WHERE id=?').get(agentMessage.json.id)?.run_state).toBeNull();
+
+    const publishedHostAgent = await leader.api('POST', '/api/distributed/agents/publish', {
+      teamId: join.json.teamId, sharedProjectId: join.json.sharedProjectId, sessionIds: [sessionId],
+    });
+    expect(publishedHostAgent.status, JSON.stringify(publishedHostAgent.json)).toBe(200);
+    await leader.app.distributed.transport.sync();
+    await teammate.app.distributed.transport.sync();
+    await leader.app.distributed.transport.sync();
+    const enabled = await leader.api('POST', `/api/projects/${projects[0]}/team-orchestration/enable`, {
+      leaderOrchestration: true, permissionLevel: 'supervised', orchestratorAgentId: sessionId, fallbackAgentIds: [],
+    });
+    expect(enabled.status, JSON.stringify(enabled.json)).toBe(200);
+    await teammate.app.distributed.transport.sync();
+    const joinedStructure = await teammate.api('GET', `/api/projects/${projects[1]}/team-structure`);
+    expect(joinedStructure.status, JSON.stringify(joinedStructure.json)).toBe(200);
+    expect(joinedStructure.json.teamSession).toMatchObject({ title: 'Team chat acceptance team' });
+
+    const consent = await teammate.api('POST', `/api/projects/${projects[1]}/team-consent`, {
+      sessionIds: [join.json.sessionId], permissionLevel: 'supervised', settingsVersion: joinedStructure.json.settings.version,
+      disclaimerVersion: TEAM_CONSENT_DISCLAIMER_VERSION,
+    });
+    expect(consent.status, JSON.stringify(consent.json)).toBe(200);
+    await leader.app.distributed.transport.sync();
+    const hostAgents = await leader.api('GET', `/api/projects/${projects[0]}/team-agents`);
+    expect(hostAgents.status, JSON.stringify(hostAgents.json)).toBe(200);
+    expect(hostAgents.json.agents).toContainEqual(expect.objectContaining({
+      agentId: consent.json.agentIds[0], consent: 'granted', groupId: expect.any(String),
+    }));
+
+    const fullAccess = await leader.api('PATCH', `/api/projects/${projects[0]}/team-orchestration`, {
+      expectedVersion: joinedStructure.json.settings.version, permissionLevel: 'full-access',
+    });
+    expect(fullAccess.status, JSON.stringify(fullAccess.json)).toBe(200);
+    await teammate.app.distributed.transport.sync();
+    const needsReconsent = await teammate.api('GET', `/api/projects/${projects[1]}/team-structure`);
+    expect(needsReconsent.status, JSON.stringify(needsReconsent.json)).toBe(200);
+    expect(needsReconsent.json.myConsent).toMatchObject({ state: 'needs-reconsent' });
   } finally {
     while (apps.length) await apps.pop()!.cleanup();
     vi.restoreAllMocks();

@@ -113,6 +113,15 @@ export function createDeviceSide(deps: DeviceSideDeps): {
     deps.changed?.();
   }
 
+  function recordStructureUpdated(sharedProjectId: string, summary: string, teamSession?: TeamStructurePayload['teamSession'] | null): void {
+    const project = db.prepare(`SELECT local_project_id FROM mingle_project_collaboration_sources WHERE shared_project_id=?
+      UNION ALL SELECT local_project_id FROM mingle_project_collaboration_joins WHERE shared_project_id=? LIMIT 1`)
+      .get(sharedProjectId, sharedProjectId) as { local_project_id: string } | undefined;
+    if (!project) { changed(); return; }
+    deps.store.recordEvent({ projectId: project.local_project_id, type: 'team.structure.updated', summary,
+      payload: { sharedProjectId, ...(teamSession !== undefined ? { teamSession: teamSession ?? null } : {}) } });
+  }
+
   function track<T>(promise: Promise<T>): Promise<T> {
     work.add(promise);
     void promise.finally(() => work.delete(promise)).catch(() => undefined);
@@ -175,7 +184,6 @@ export function createDeviceSide(deps: DeviceSideDeps): {
     db.prepare(`INSERT INTO mingle_team_device_consents(shared_project_id,account_id,device_id,consent_json,updated_at)
       VALUES(?,?,?,?,?) ON CONFLICT(shared_project_id,account_id,device_id) DO UPDATE SET consent_json=excluded.consent_json,updated_at=excluded.updated_at`)
       .run(consent.sharedProjectId, consent.accountId, consent.deviceId, JSON.stringify(consent), updatedAt);
-    changed();
   }
 
   async function binding(projectId: string): Promise<SharedBinding> {
@@ -266,6 +274,7 @@ export function createDeviceSide(deps: DeviceSideDeps): {
       disclaimerVersion: input.disclaimerVersion, state: 'granted', acceptedAt: at, updatedAt: at,
     };
     saveConsent(consent);
+    recordStructureUpdated(shared.sharedProjectId, 'Team consent updated');
     const payload = TeamConsentPayloadSchema.parse({ sharedProjectId: shared.sharedProjectId, agentIds,
       permissionLevel: input.permissionLevel, settingsVersion: input.settingsVersion,
       disclaimerVersion: input.disclaimerVersion, state: 'granted', at });
@@ -297,6 +306,7 @@ export function createDeviceSide(deps: DeviceSideDeps): {
     const previous = parseConsent(JSON.parse(selected.consent_json));
     const consent: TeamConsent = { ...previous, state: parsed.state as TeamConsentState, updatedAt: ISO() };
     saveConsent(consent);
+    recordStructureUpdated(consent.sharedProjectId, 'Team consent updated');
     if (consent.state === 'paused' || consent.state === 'revoked') {
       let rows: Array<{ delivery_id: string; agent_id: string; session_id: string; status: string }> = [];
       if (consent.agentIds.length) {
@@ -370,7 +380,8 @@ export function createDeviceSide(deps: DeviceSideDeps): {
     if (sessionChanged) {
       deps.store.recordEvent({ projectId: localBinding.projectId, type: 'team.session.updated', summary: 'Shared team session updated',
         payload: { teamSession: parsed.data.teamSession ?? null } });
-    } else changed();
+    }
+    recordStructureUpdated(sharedProjectId, 'Shared team structure updated', parsed.data.teamSession ?? null);
   }
 
   async function findBindingBySharedProject(teamId: string, sharedProjectId: string): Promise<SharedBinding | null> {

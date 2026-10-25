@@ -189,6 +189,7 @@ function fixture(options: { deviceId?: string; role?: 'leader' | 'admin' | 'memb
     store, project, local, host, outgoing, finished, enqueued, artifactImports, agents, group: () => group, setRole(value: typeof role) { role = value; },
     setDevice(deviceId: string) { localDeviceId = deviceId; },
     setOwnerOnline(value: boolean) { ownerOnline = value; },
+    addPublishedAgent(agent: typeof agents[number]) { agents.push(agent); },
     failNextSync() { failNextSync = true; },
     pumpCount() { return pumpCount; },
     delayAuthorization(gate: Promise<void>) { delayedAuthorization = gate; },
@@ -286,6 +287,34 @@ it('uses owner-name handles with provider and numeric suffixes when an owner has
   const snapshot = await fx.host.availableAgents(PROJECT);
 
   expect(snapshot.agents.map((agent) => agent.handle)).toEqual(['owner-codex', 'owner-2']);
+});
+
+it('rebroadcasts structure after published agents, permission changes, and renewed consent', async () => {
+  const fx = fixture();
+  await fx.host.enable(PROJECT, enableInput());
+  await grantRemote(fx);
+  let structures = fx.outgoing.filter((entry) => entry.kind === 'teamgroup.structure');
+  expect(structures.length).toBeGreaterThanOrEqual(2);
+
+  fx.addPublishedAgent({ id: 'newly-published-agent', name: 'New Codex', accountId: OWNER, deviceId: OWNER_DEVICE,
+    projectId: PROJECT, sessionId: 'owner-session-new', provider: 'codex', model: 'gpt-6-codex', state: 'idle' });
+  await fx.incoming('execution.agents', { generatedAt: new Date().toISOString(), agents: [{ sharedProjectId: SHARED }] });
+  structures = fx.outgoing.filter((entry) => entry.kind === 'teamgroup.structure');
+  expect(structures.length).toBeGreaterThanOrEqual(3);
+  expect((await fx.host.availableAgents(PROJECT)).agents.map((agent) => agent.agentId)).toContain('newly-published-agent');
+
+  const settings = await fx.host.update(PROJECT, { expectedVersion: 1, permissionLevel: 'full-access' });
+  expect(settings.settings?.version).toBe(2);
+  expect((fx.outgoing.filter((entry) => entry.kind === 'teamgroup.structure').at(-1)?.payload as any).settings.permissionLevel).toBe('full-access');
+  expect((await fx.host.structure(PROJECT)).members.find((member) => member.agentId === REMOTE_AGENT)?.consent).toBe('needs-reconsent');
+
+  await fx.incoming('teamgroup.consent', {
+    sharedProjectId: SHARED, agentIds: [REMOTE_AGENT], permissionLevel: 'full-access', settingsVersion: 2,
+    disclaimerVersion: TEAM_CONSENT_DISCLAIMER_VERSION, state: 'granted', at: new Date().toISOString(),
+  });
+  const updated = fx.outgoing.filter((entry) => entry.kind === 'teamgroup.structure').at(-1)?.payload as any;
+  expect(updated.settings).toMatchObject({ permissionLevel: 'full-access', version: 2 });
+  expect(updated.members.find((member: { agentId: string }) => member.agentId === REMOTE_AGENT)?.consent).toBe('granted');
 });
 
 it('converts one session into its team group, creates a remote proxy member, and routes it to the owner device', async () => {

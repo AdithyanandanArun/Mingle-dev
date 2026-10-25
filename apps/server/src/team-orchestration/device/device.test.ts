@@ -263,10 +263,12 @@ describe('owner-device team orchestration', () => {
     await sendStructure(f, { ...structure(1), teamSession: { groupId: 'group-updated', sessionId: 'session-lead', title: 'Renamed session' } });
     expect(f.side.latestStructure(SHARED)?.teamSession).toEqual({ groupId: 'group-updated', sessionId: 'session-lead', title: 'Renamed session' });
     expect(f.store.listEvents().filter((event) => event.type === 'team.session.updated')).toHaveLength(2);
+    expect(f.store.listEvents().filter((event) => event.type === 'team.structure.updated')).toHaveLength(2);
     const accepted = await f.setConsent();
     expect(accepted).toMatchObject({ state: 'granted', permissionLevel: 'supervised', agentIds: [AGENT_ID], hostSync: 'sent' });
     expect(f.sent.some((message) => message.kind === 'teamgroup.consent' && message.toDeviceId === HOST_DEVICE)).toBe(true);
     expect(f.side.localConsent(SHARED)?.state).toBe('granted');
+    expect(f.store.listEvents().filter((event) => event.type === 'team.structure.updated').at(-1)?.projectId).toBe(f.projectId);
 
     const paused = await callRoute(f, 'PATCH', '/api/projects/:projectId/team-consent', { projectId: f.projectId }, { state: 'paused' });
     expect(paused.state).toBe('paused');
@@ -277,6 +279,9 @@ describe('owner-device team orchestration', () => {
     await sendStructure(f, structure(2, 'full-access'));
     expect(f.side.latestStructure(SHARED)?.settings.version).toBe(2);
     expect(f.side.localConsent(SHARED)?.state).toBe('needs-reconsent');
+    expect(f.store.listEvents().filter((event) => event.type === 'team.structure.updated').at(-1)?.payload).toMatchObject({
+      sharedProjectId: SHARED, teamSession: { groupId: 'group-shared-session' },
+    });
     await f.setConsent('full-access', 2);
     await sendStructure(f, { ...structure(3, 'full-access'), disclaimerVersion: '2027-01.1' });
     expect(f.side.localConsent(SHARED)?.state).toBe('needs-reconsent');
