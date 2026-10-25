@@ -81,6 +81,8 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
     changed?: () => void;
     now?: () => number;
     deliveryTimeoutMs?: number;
+    /** Publishes this device's sessions to the shared roster; the call replaces the device's published set. */
+    publishLocalAgents?(input: { teamId: string; sharedProjectId: string; sessionIds: string[] }): Promise<unknown>;
   }) {
     this.now = options.now ?? Date.now;
     this.deliveryTimeoutMs = Math.min(15 * 60_000, Math.max(1_000, options.deliveryTimeoutMs ?? 90_000));
@@ -552,8 +554,19 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
     const input = AddTeamAgentSchema.parse(rawInput);
     const initial = await this.context(projectId);
     return this.mutations.run(this.mutationKey(initial), async () => {
-      const context = await this.requireEditor(projectId);
+      let context = await this.requireEditor(projectId);
       const { teamId, sharedProjectId } = context.project;
+      // The lead's own agents in the session join the shared roster, so teammates see and can mention them.
+      const localSessionIds = anchorSessionId ? [anchorSessionId] : (requestedGroupId ? this.groupOrNull(requestedGroupId)?.members ?? [] : [])
+        .filter((member) => !member.removedAt && !this.isProxySession(member.sessionId)).map((member) => member.sessionId);
+      const ownPublished = context.agents.filter((candidate) => candidate.deviceId === context.localDeviceId && candidate.sessionId).map((candidate) => candidate.sessionId!);
+      const unpublished = localSessionIds.filter((sessionId) => !ownPublished.includes(sessionId));
+      if (unpublished.length && this.options.publishLocalAgents) {
+        try {
+          await this.options.publishLocalAgents({ teamId, sharedProjectId, sessionIds: [...new Set([...ownPublished, ...unpublished])] });
+          context = await this.requireEditor(projectId);
+        } catch { /* Sessions of providers without remote execution stay local-only; the add itself still proceeds. */ }
+      }
       const agent = context.agents.find((candidate) => candidate.id === input.agentId && candidate.deviceId !== context.localDeviceId);
       if (!agent || !agent.sessionId || !ProviderSchema.safeParse(agent.provider).success || !agent.model) {
         throw new HttpError(404, `Team agent ${input.agentId} is unknown or unusable.`);
