@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { AlertTriangle, Check, RefreshCw, ShieldCheck } from 'lucide-react';
 import { TEAM_CONSENT_DISCLAIMER, TEAM_CONSENT_DISCLAIMER_VERSION } from '@mingle/contracts';
 import type { TeamStructureSnapshot } from '@mingle/contracts';
@@ -14,7 +14,9 @@ export function TeamConsentSheet({ projectId, initialSelectedSessionIds, onClose
   onAccepted?: () => void;
   presentation?: 'modal' | 'inline';
 }) {
-  const sessions = useMingle((state) => (state.boot?.sessions ?? []).filter((session) => session.projectId === projectId));
+  // Select the stable store array and filter outside the selector; a fresh array per read loops the renderer.
+  const allSessions = useMingle((state) => state.boot?.sessions);
+  const sessions = useMemo(() => (allSessions ?? []).filter((session) => session.projectId === projectId), [allSessions, projectId]);
   const [snapshot, setSnapshot] = useState<TeamStructureSnapshot | null>(null);
   const [selectedSessionIds, setSelectedSessionIds] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
