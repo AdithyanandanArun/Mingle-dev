@@ -103,7 +103,6 @@ export function AddAgentDialog({ sessionId }: { sessionId: string }) {
   const [teamAgents, setTeamAgents] = useState<TeamAvailableAgentsSnapshot | null>(null);
   const [teamAgentsLoading, setTeamAgentsLoading] = useState(false);
   const [teamAgentsError, setTeamAgentsError] = useState<string | null>(null);
-  const [teamAgentBusyId, setTeamAgentBusyId] = useState<string | null>(null);
   const motion = useDiagramMotion(motionRoot, mode);
 
   const loadTeamAgents = useCallback(async (signal?: AbortSignal) => {
@@ -234,24 +233,23 @@ export function AddAgentDialog({ sessionId }: { sessionId: string }) {
   };
 
   const addTeammateAgent = async (agentId: string) => {
-    if (!teamAgents?.canAdd || teamAgents.agents.find((agent) => agent.agentId === agentId)?.usable !== true || teamAgentBusyId) return;
-    setTeamAgentBusyId(agentId);
-    setError(null);
+    if (!teamAgents?.canAdd || teamAgents.agents.find((agent) => agent.agentId === agentId)?.usable !== true) return;
+    const store = useMingle.getState();
+    store.closeDialog();
+    store.toast('info', 'Adding teammate agent…');
     try {
       const snapshot = group
         ? await teamSessionsApi.addToGroup(group.group.id, { agentId })
         : await teamSessionsApi.addToSession(sessionId, { agentId, mode: mode ?? 'orchestrated' });
-      const store = useMingle.getState();
       store.applyGroup(snapshot);
-      await store.refreshNow();
-      await teamStructure.refresh().catch(() => null);
-      store.toast('success', `Added teammate agent to ${snapshot.group.title || 'the team session'}.`);
-      store.closeDialog();
       store.selectSession(snapshot.group.anchorSessionId);
+      store.toast('success', `Added teammate agent to ${snapshot.group.title || 'the team session'}.`);
       window.requestAnimationFrame(() => document.getElementById(`composer-${snapshot.group.anchorSessionId}`)?.focus());
+      void store.refreshNow().catch((cause) => store.toast('error', errorMessage(cause)));
+      void teamStructure.refresh().catch(() => null);
     } catch (cause) {
-      setError(errorMessage(cause));
-    } finally { setTeamAgentBusyId(null); }
+      store.toast('error', errorMessage(cause));
+    }
   };
 
   const title = joining ? 'Add agent' : step === 'mode' ? 'Add agent' : `Add agent · ${mode ? TITLES[mode] : ''}`;
@@ -368,13 +366,13 @@ export function AddAgentDialog({ sessionId }: { sessionId: string }) {
               {teamAgents?.agents.length ? <ul className="roster team-agent-roster" aria-label="Teammates’ agents">
                 {teamAgents.agents.map((remote) => {
                   const disabledReason = !teamAgents.canAdd ? teamAgents.reason ?? 'You cannot add teammate agents from this device.' : !remote.usable ? remote.unusableReason ?? 'This agent cannot be added right now.' : undefined;
-                  const unavailable = Boolean(disabledReason || teamAgentBusyId);
+                  const unavailable = Boolean(disabledReason);
                   const displayName = teamAgentDisplayName(remote.name, remote.ownerDisplayName, remote.provider);
                   return <li className="roster__row team-agent-row" key={remote.agentId}>
                     <div className="roster__who"><AgentIdentity handle={remote.handle} identityKey={remote.agentId} provider={remote.provider} /><small>{displayName}</small><small>{teamAgentMetadata({ ownerDisplayName: remote.ownerDisplayName, provider: remote.provider, model: remote.model, deviceName: remote.deviceName })}</small></div>
                     <div className="roster__detail"><span>{remote.effort ?? 'Effort not reported'}</span>{disabledReason ? <small className="roster__warn">{disabledReason}</small> : null}</div>
                     <div className="team-agent-row__action"><span className={`team-agent-online${remote.online ? ' is-online' : ''}`}><i aria-hidden="true" />{remote.online ? 'Online' : 'Offline'}</span>
-                      <Button size="sm" disabled={unavailable} why={disabledReason ?? (teamAgentBusyId ? 'Adding another teammate agent…' : undefined)} busy={teamAgentBusyId === remote.agentId} onClick={() => void addTeammateAgent(remote.agentId)}>Add</Button>
+                      <Button size="sm" disabled={unavailable} why={disabledReason} onClick={() => void addTeammateAgent(remote.agentId)}>Add</Button>
                     </div>
                   </li>;
                 })}

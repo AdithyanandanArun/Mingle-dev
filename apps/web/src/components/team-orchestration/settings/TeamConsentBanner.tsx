@@ -5,6 +5,7 @@ import { Button } from '../../ui';
 import { TeamOrchestrationApiError, teamOrchestrationApi } from './api';
 import { TeamConsentSheet } from './TeamConsentSheet';
 import { useTeamStructure } from '../../../lib/team-structure-context';
+import { sharedAgentCountLabel } from './team-consent-flow';
 import './team-orchestration-settings.css';
 
 export function TeamConsentBanner({ projectId }: { projectId: string }) {
@@ -56,7 +57,7 @@ export function TeamConsentBanner({ projectId }: { projectId: string }) {
     <section className={`team-consent-banner${needsConsent ? ' is-action-needed' : ''}`} aria-label="Team agent sharing status">
       <span className="team-consent-banner__icon">{needsConsent ? <AlertTriangle size={15} /> : <ShieldCheck size={15} />}</span>
       <div className="team-consent-banner__copy">
-        <strong>{needsConsent ? consent?.state === 'needs-reconsent' ? 'Your agents need renewed consent' : 'Share your agents with the team' : consent?.state === 'revoked' ? 'Agent sharing is revoked' : `Your ${consent.agentIds.length} agent${consent.agentIds.length === 1 ? '' : 's'} ${consent.state === 'paused' ? 'are paused' : 'are shared'} · ${level}`}</strong>
+        <strong>{needsConsent ? consent?.state === 'needs-reconsent' ? 'Your agents need renewed consent' : 'Share your agents with the team' : consent?.state === 'revoked' ? 'Agent sharing is revoked' : sharedAgentCountLabel(consent.agentIds.length, consent.state === 'paused' ? 'paused' : 'shared', level)}</strong>
         {error ? <small role="alert">{error}</small> : consent?.state === 'needs-reconsent' ? <small>The group permission level or consent terms changed. Review and agree again before new work is delivered.</small> : needsConsent ? <small>Choose which local agents teammates may send work to. Sharing is optional and revocable.</small> : null}
       </div>
       {needsConsent || consent?.state === 'revoked' ? <Button size="sm" variant="primary" disabled={busy} onClick={openSheet}>{consent?.state === 'needs-reconsent' ? 'Review consent' : consent?.state === 'revoked' ? 'Share agents again' : 'Choose agents'}</Button>

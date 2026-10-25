@@ -1,4 +1,6 @@
-import type { DirectoryListing } from '@mingle/contracts';
+import type { DirectoryListing, Policy, ProviderInfo, ProviderModel } from '@mingle/contracts';
+
+const JOIN_POLICIES: Policy[] = ['supervised', 'balanced', 'auto', 'full-access'];
 
 type DirectoryLookup = (path: string, query: string, hidden: boolean) => Promise<DirectoryListing>;
 
@@ -19,4 +21,11 @@ export function joinSuccessCopy(agentCount: number, consentSkipped: boolean): st
   const noun = count === 1 ? 'agent' : 'agents';
   const verb = count === 1 ? 'is' : 'are';
   return `${count} idle ${noun} ${verb} ready. The project lead can now add your ${noun} from Add agents. No model run has started.`;
+}
+
+/** Mirrors the server's documented permission defaults when provider metadata omits model policies. */
+export function joinAgentPolicyChoices(info: Pick<ProviderInfo, 'id' | 'policies'> | undefined, model: Pick<ProviderModel, 'policies'> | undefined): Policy[] {
+  const policies = model?.policies ?? info?.policies;
+  const fallback: Policy[] = info?.id === 'opencode' ? ['supervised', 'balanced', 'full-access'] : ['supervised', 'balanced'];
+  return JOIN_POLICIES.filter((policy) => policies ? policies.includes(policy) : fallback.includes(policy));
 }

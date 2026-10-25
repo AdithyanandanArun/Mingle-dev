@@ -10,7 +10,7 @@ import { POLICY_DESCRIPTION, POLICY_LABEL } from '../../lib/groups';
 import { createIdempotencyKey, distributedApi } from '../distributed/api';
 import { Badge, Button, InlineError, Modal, ProviderMark, StatusDot } from '../ui';
 import { projectCollaborationApi, CollaborationApiError, recordText, type CollaborationRecord, type InvitationPreview, type ProjectCollaborationSnapshot } from './api';
-import { joinSuccessCopy, resolveJoinCloneParent } from './join-flow';
+import { joinAgentPolicyChoices, joinSuccessCopy, resolveJoinCloneParent } from './join-flow';
 import { TeamConsentSheet } from '../team-orchestration/settings/TeamConsentSheet';
 import { TeamOrchestrationSettings } from '../team-orchestration/settings/TeamOrchestrationSettings';
 import '../../styles/project-collaboration.css';
@@ -18,7 +18,6 @@ import '../../styles/project-collaboration.css';
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const INVITATION_TOKEN_PATTERN = /^[A-Za-z0-9_-]{43,128}$/;
 const JOIN_PROVIDERS: Provider[] = ['codex', 'claude', 'opencode'];
-const JOIN_POLICIES: Policy[] = ['supervised', 'balanced', 'auto', 'full-access'];
 
 function errorStatus(cause: unknown): number {
   return cause instanceof CollaborationApiError ? cause.status : 0;
@@ -28,18 +27,9 @@ function selectedProviderInfo(providers: readonly ProviderInfo[], provider: stri
   return providers.find((item) => item.id === provider && JOIN_PROVIDERS.includes(item.id));
 }
 
-function supervisedModels(info: ProviderInfo | undefined): ProviderModel[] {
+function eligibleModels(info: ProviderInfo | undefined): ProviderModel[] {
   if (!info?.available) return [];
-  return info.models.filter((model) => {
-    const policies = model.policies ?? info.policies;
-    const supportsSupervised = policies ? policies.includes('supervised') : JOIN_PROVIDERS.includes(info.id);
-    return supportsSupervised && reasoningChoices(info, model).length > 0;
-  });
-}
-
-function policyChoices(info: ProviderInfo | undefined, model: ProviderModel | undefined): Policy[] {
-  const policies = model?.policies ?? info?.policies;
-  return JOIN_POLICIES.filter((policy) => policies ? policies.includes(policy) : policy === 'supervised');
+  return info.models.filter((model) => joinAgentPolicyChoices(info, model).length > 0 && reasoningChoices(info, model).length > 0);
 }
 
 /** Use native catalog choices when reported; otherwise mirror the runtime's documented defaults. */
@@ -323,7 +313,7 @@ export function ProjectInviteJoinDialog({ token, onClose, onOpenAccountSettings,
   const providers = boot?.providers ?? [];
   const eligibleProviders = useMemo(() => JOIN_PROVIDERS.flatMap((id) => {
     const info = selectedProviderInfo(providers, id);
-    return info && supervisedModels(info).length ? [info] : [];
+    return info && eligibleModels(info).length ? [info] : [];
   }), [providers]);
   const [inviteState, setInviteState] = useState<InviteState>('loading');
   const [preview, setPreview] = useState<InvitationPreview | null>(null);
@@ -446,16 +436,16 @@ export function ProjectInviteJoinDialog({ token, onClose, onOpenAccountSettings,
     setAgentDrafts((current) => {
       if (!current.length) {
         const first = eligibleProviders[0]!;
-        const model = supervisedModels(first)[0]!;
+        const model = eligibleModels(first)[0]!;
         return [{ id: nextAgentId.current++, provider: first.id as Provider, model: model.id, effort: preferredEffort(first, model), policy: 'supervised' }];
       }
       return current.map((draft) => {
         const provider = eligibleProviders.find((item) => item.id === draft.provider) ?? eligibleProviders[0]!;
-        const models = supervisedModels(provider);
+        const models = eligibleModels(provider);
         const model = models.find((item) => item.id === draft.model) ?? models[0]!;
         const efforts = reasoningChoices(provider, model);
         const effort = efforts.find((item) => item.id === draft.effort)?.id ?? preferredEffort(provider, model);
-        const policies = policyChoices(provider, model);
+        const policies = joinAgentPolicyChoices(provider, model);
         const policy = policies.includes(draft.policy) ? draft.policy : policies.includes('supervised') ? 'supervised' : policies[0]!;
         return { ...draft, provider: provider.id as Provider, model: model.id, effort, policy };
       });
@@ -480,18 +470,18 @@ export function ProjectInviteJoinDialog({ token, onClose, onOpenAccountSettings,
 
   const setAgentProvider = (index: number, providerId: string) => {
     const provider = eligibleProviders.find((item) => item.id === providerId);
-    const model = provider && supervisedModels(provider)[0];
+    const model = provider && eligibleModels(provider)[0];
     if (!provider || !model) return;
     setAgentDrafts((current) => current.map((draft, draftIndex) => draftIndex === index
-      ? { ...draft, provider: provider.id as Provider, model: model.id, effort: preferredEffort(provider, model), policy: policyChoices(provider, model).includes(draft.policy) ? draft.policy : 'supervised' }
+      ? { ...draft, provider: provider.id as Provider, model: model.id, effort: preferredEffort(provider, model), policy: joinAgentPolicyChoices(provider, model).includes(draft.policy) ? draft.policy : 'supervised' }
       : draft));
   };
 
   const agentRowsValid = agentDrafts.length > 0 && agentDrafts.length <= 4 && agentDrafts.every((draft) => {
     const provider = eligibleProviders.find((item) => item.id === draft.provider);
-    const model = supervisedModels(provider).find((item) => item.id === draft.model);
+    const model = eligibleModels(provider).find((item) => item.id === draft.model);
     return Boolean(provider && model && reasoningChoices(provider, model).some((choice) => choice.id === draft.effort)
-      && policyChoices(provider, model).includes(draft.policy));
+      && joinAgentPolicyChoices(provider, model).includes(draft.policy));
   });
   const canJoin = inviteState === 'ready' && Boolean(preview && signedIn && emailMatches && selectedProject && agentRowsValid && !joining && !workspaceBusy);
 
@@ -678,24 +668,24 @@ export function ProjectInviteJoinDialog({ token, onClose, onOpenAccountSettings,
         <h3 id="pc-agent-heading">Choose one or more local agents</h3>
         <p className="pc-step-copy">Agents are created idle and use your existing provider sign-ins. No model run starts during joining.</p>
         {selectedProject ? <p className="pc-project-ref"><FolderOpen size={13} /> {selectedProject.name}<span>· {selectedProject.path}</span></p> : null}
-        {!eligibleProviders.length ? <div className="pc-state-card pc-state-card--setup"><CircleAlert size={19} /><div><h3>No eligible provider is ready</h3><p>Choose an available Claude, Codex, or OpenCode provider with a Supervised model. Provider authentication and setup remain on this device.</p><Button size="sm" onClick={onOpenProviderSettings}>Open provider settings</Button></div></div> : null}
+        {!eligibleProviders.length ? <div className="pc-state-card pc-state-card--setup"><CircleAlert size={19} /><div><h3>No eligible provider is ready</h3><p>Choose an available Claude, Codex, or OpenCode provider with a supported model and permission mode. Provider authentication and setup remain on this device.</p><Button size="sm" onClick={onOpenProviderSettings}>Open provider settings</Button></div></div> : null}
         <div className="pc-provider-availability" aria-label="Provider availability">
           {JOIN_PROVIDERS.map((id) => {
             const info = providers.find((candidate) => candidate.id === id);
-            const choices = info ? supervisedModels(info) : [];
+            const choices = info ? eligibleModels(info) : [];
             const status = !info ? 'Not reported by this device' : !info.available ? `Unavailable${info.reason ? ` · ${info.reason}` : ''}`
-              : !choices.length ? `Available, but no Supervised model is reported${info.reason ? ` · ${info.reason}` : ''}`
-                : `${choices.length} Supervised model${choices.length === 1 ? '' : 's'} available${info.reason ? ` · ${info.reason}` : ''}`;
+              : !choices.length ? `Available, but no compatible model is reported${info.reason ? ` · ${info.reason}` : ''}`
+                : `${choices.length} model${choices.length === 1 ? '' : 's'} available${info.reason ? ` · ${info.reason}` : ''}`;
             return <p key={id} className={info?.available && choices.length ? 'is-available' : ''}><ProviderMark provider={id} size={15} /><strong>{info?.name ?? id}</strong><span>{status}</span></p>;
           })}
           <Button size="sm" variant="ghost" onClick={onOpenProviderSettings}>Provider settings</Button>
         </div>
         {agentDrafts.map((draft, index) => {
           const info = eligibleProviders.find((candidate) => candidate.id === draft.provider);
-          const models = supervisedModels(info);
+          const models = eligibleModels(info);
           const model = models.find((candidate) => candidate.id === draft.model);
           const efforts = info && model ? reasoningChoices(info, model) : [];
-          const policies = info && model ? policyChoices(info, model) : [];
+          const policies = info && model ? joinAgentPolicyChoices(info, model) : [];
           return <fieldset className="pc-agent-card" key={draft.id}><legend>Agent {index + 1}</legend>
             <div className="pc-agent-config">
               <label className="pc-field"><span>Provider</span><select value={draft.provider} onChange={(event) => setAgentProvider(index, event.target.value)}>{eligibleProviders.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
@@ -704,7 +694,7 @@ export function ProjectInviteJoinDialog({ token, onClose, onOpenAccountSettings,
                 if (!next) return;
                 setAgentDrafts((current) => current.map((entry, rowIndex) => {
                   if (rowIndex !== index) return entry;
-                  const policies = policyChoices(info, next);
+                  const policies = joinAgentPolicyChoices(info, next);
                   return { ...entry, model: next.id, effort: preferredEffort(info!, next), policy: policies.includes(entry.policy) ? entry.policy : 'supervised' };
                 }));
               }}>{models.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
@@ -717,7 +707,7 @@ export function ProjectInviteJoinDialog({ token, onClose, onOpenAccountSettings,
         })}
         {eligibleProviders.length && agentDrafts.length < 4 ? <Button type="button" size="sm" variant="ghost" className="pc-add-agent" onClick={() => {
           const provider = eligibleProviders[0]!;
-          const model = supervisedModels(provider)[0]!;
+          const model = eligibleModels(provider)[0]!;
           setAgentDrafts((current) => [...current, { id: nextAgentId.current++, provider: provider.id as Provider, model: model.id, effort: preferredEffort(provider, model), policy: 'supervised' }]);
         }}><Plus size={14} />Add another agent</Button> : null}
         {error ? <InlineError>{error}</InlineError> : null}
