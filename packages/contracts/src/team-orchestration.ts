@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { ProviderSchema, EffortSchema } from './provider-config';
 import { ProviderFailureSchema } from './resilience';
+import { AgentHandleSchema, GroupModeSchema } from './groups';
 
 /**
  * Cross-device team orchestration. See docs/team-orchestration.md.
@@ -131,6 +132,8 @@ export interface TeamStructureSnapshot {
   leaderHistory: TeamLeaderChange[];
   /** When the orchestrator is unavailable and no fallback applied: a human must pick a new leader. */
   needsLeader: boolean;
+  /** The ordinary multi-agent session that teammates' agents were added to, if any (docs/team-sessions.md). */
+  teamSession?: TeamSessionRef | null;
   observedAt: string;
 }
 
@@ -207,6 +210,8 @@ export const TeamStructurePayloadSchema = z.object({
     reason: z.enum(['manual', 'fallback-quota', 'fallback-offline', 'restored', 'removed']), byAccountId: Uuid.nullable(),
   }).strict()).max(50),
   needsLeader: z.boolean(),
+  /** Optional so older hosts' broadcasts still validate. */
+  teamSession: z.object({ groupId: Id, sessionId: Id, title: z.string().max(200) }).strict().nullable().optional(),
 }).strict();
 export type TeamStructurePayload = z.infer<typeof TeamStructurePayloadSchema>;
 
@@ -283,3 +288,58 @@ export const TeamApprovalRequestPayloadSchema = z.object({
 export const TeamApprovalDecisionPayloadSchema = z.object({
   sharedProjectId: Uuid, deliveryId: Id, approvalId: Id, decision: z.enum(['approved', 'denied']),
 }).strict();
+
+/* ---------------------------------------------------------------------------------------------
+ * Team sessions (docs/team-sessions.md): teammates' agents are added through the ordinary
+ * "Add agents" flow of a session, exactly like local agents. There is no separate team chat UI.
+ * ------------------------------------------------------------------------------------------- */
+
+/** The project's single shared multi-agent session on the host device. */
+export interface TeamSessionRef { groupId: string; sessionId: string; title: string }
+
+/** One teammate-contributed agent that could be added to a session on this device. */
+export interface TeamAvailableAgent {
+  /** Roster agent id (stable across devices). */
+  agentId: string;
+  handle: string; name: string;
+  provider: z.infer<typeof ProviderSchema>; model: string; effort: z.infer<typeof EffortSchema> | null;
+  ownerAccountId: string; ownerDisplayName: string;
+  deviceId: string; deviceName: string;
+  online: boolean;
+  /** 'none' when the owner has not shared this agent with the team. */
+  consent: TeamConsentState | 'none';
+  /** True when this device may add the agent to a session right now. */
+  usable: boolean;
+  /** Plain-language reason when not usable (offline, paused, needs re-consent, not lead/admin, …). */
+  unusableReason: string | null;
+  /** Group (multi-agent session) on the host that already contains this agent, if any. */
+  groupId: string | null;
+}
+
+/** GET /api/projects/:projectId/team-agents — lists teammates' agents for the Add agents dialog. */
+export interface TeamAvailableAgentsSnapshot {
+  projectId: string;
+  /** Null when the project is not shared with a team; agents is then empty. */
+  teamId: string | null; sharedProjectId: string | null;
+  /** True when the signed-in account is the team lead/admin on the host device. */
+  canAdd: boolean;
+  /** Why canAdd is false, in plain language. */
+  reason: string | null;
+  permissionLevel: TeamPermissionLevel | null;
+  teamSession: TeamSessionRef | null;
+  agents: TeamAvailableAgent[];
+}
+
+/**
+ * POST /api/sessions/:id/team-agents and POST /api/groups/:id/team-agents.
+ * Adds a teammate's agent; a single session is converted into a multi-agent session first.
+ * Responds with the resulting GroupSnapshot.
+ */
+export const AddTeamAgentSchema = z.object({
+  agentId: Id,
+  /** Optional @handle override; defaults to the published handle (deduplicated if needed). */
+  handle: AgentHandleSchema.optional(),
+  /** Used only when converting a single session; defaults to 'orchestrated'. */
+  mode: GroupModeSchema.optional(),
+}).strict();
+export type AddTeamAgent = z.infer<typeof AddTeamAgentSchema>;
