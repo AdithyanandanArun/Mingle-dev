@@ -227,6 +227,11 @@ async function grantRemote(fx: ReturnType<typeof fixture>, settingsVersion = 1):
   });
 }
 
+async function addRemoteToSession(fx: ReturnType<typeof fixture>): Promise<GroupSnapshot> {
+  await grantRemote(fx);
+  return fx.host.addAgentToSession(LOCAL_AGENT, { agentId: REMOTE_AGENT });
+}
+
 function seedRemoteConsent(fx: ReturnType<typeof fixture>): void {
   const at = new Date().toISOString();
   fx.store.db.prepare(`INSERT INTO mingle_team_host_consents(team_id,shared_project_id,agent_id,owner_account_id,owner_device_id,state,
@@ -238,9 +243,16 @@ it('authorizes host changes, enforces optimistic versions, validates broadcasts,
   const fx = fixture();
   const enabled = await fx.host.enable(PROJECT, enableInput());
   expect(enabled.settings?.version).toBe(1);
+  expect(enabled.teamSession).toBeNull();
+  expect(fx.group()).toBeNull();
+  expect(fx.store.db.prepare('SELECT group_id FROM mingle_team_host_projects WHERE team_id=? AND shared_project_id=?').get(TEAM, SHARED))
+    .toEqual({ group_id: '' });
   const broadcast = fx.outgoing.find((entry) => entry.kind === 'teamgroup.structure');
   expect(TeamStructurePayloadSchema.safeParse(broadcast?.payload).success).toBe(true);
   await expect(fx.host.update(PROJECT, { expectedVersion: 99, leaderOrchestration: false })).rejects.toMatchObject({ status: 409 });
+  const changedWithoutSession = await fx.host.update(PROJECT, { expectedVersion: 1, permissionLevel: 'full-access' });
+  expect(changedWithoutSession).toMatchObject({ settings: { version: 2, permissionLevel: 'full-access' }, teamSession: null });
+  expect(fx.group()).toBeNull();
 
   const denied = fixture({ role: 'member' });
   await expect(denied.host.enable(PROJECT, enableInput())).rejects.toMatchObject({ status: 403 });
@@ -251,13 +263,13 @@ it('authorizes host changes, enforces optimistic versions, validates broadcasts,
     id: 'chat-untagged', teamId: TEAM, sharedProjectId: SHARED, body: 'Plan a fix', mentions: [],
     author: { kind: 'human', accountId: ACCOUNT, displayName: 'Lead Ada' },
   });
-  expect(routed).toBe('routed');
-  expect(fx.enqueued.at(-1)?.recipients).toBeUndefined();
+  expect(routed).toBe('handled');
+  expect(fx.enqueued).toHaveLength(0);
   await fx.host.routeTeamChatMessage(PROJECT, {
     id: 'chat-mentioned', teamId: TEAM, sharedProjectId: SHARED, body: 'Check this', mentions: [REMOTE_AGENT],
     author: { kind: 'human', accountId: ACCOUNT, displayName: 'Lead Ada' },
   });
-  expect(fx.enqueued.at(-1)?.recipients).toEqual(['owner']);
+  expect(fx.enqueued).toHaveLength(0);
   expect(fx.outgoing.every((entry) => entry.kind !== 'teamgroup.delivery')).toBe(true);
 });
 
@@ -277,6 +289,21 @@ it('lists teammate agents with consent, online, host-role, and existing-group us
   const readOnly = await fx.host.availableAgents(PROJECT);
   expect(readOnly).toMatchObject({ canAdd: false, reason: expect.stringContaining('team lead') });
   expect(readOnly.agents[0]).toMatchObject({ usable: false, unusableReason: expect.stringContaining('team lead') });
+});
+
+it('keeps explicit team enablement group-free until Add agents converts a session', async () => {
+  const fx = fixture();
+  const enabled = await fx.host.enable(PROJECT, enableInput());
+  expect(enabled.teamSession).toBeNull();
+  expect(fx.group()).toBeNull();
+  expect(fx.store.db.prepare('SELECT group_id FROM mingle_team_host_projects WHERE team_id=? AND shared_project_id=?').get(TEAM, SHARED))
+    .toEqual({ group_id: '' });
+
+  await grantRemote(fx);
+  expect((await fx.host.structure(PROJECT)).teamSession).toBeNull();
+  expect(fx.group()).toBeNull();
+  const group = await fx.host.addAgentToSession(LOCAL_AGENT, { agentId: REMOTE_AGENT });
+  expect((await fx.host.structure(PROJECT)).teamSession).toMatchObject({ groupId: group.group.id, sessionId: LOCAL_AGENT });
 });
 
 it('uses owner-name handles with provider and numeric suffixes when an owner has multiple agents', async () => {
@@ -423,6 +450,8 @@ it('clears and broadcasts the team session when its group is deleted, keeping te
   expect(fx.outgoing.filter((entry) => entry.kind === 'teamgroup.structure').at(-1)?.payload).toMatchObject({ teamSession: null, members: [] });
   const structure = await fx.host.structure(PROJECT);
   expect(structure).toMatchObject({ enabled: true, teamSession: null });
+  expect(fx.store.db.prepare('SELECT group_id FROM mingle_team_host_projects WHERE team_id=? AND shared_project_id=?').get(TEAM, SHARED))
+    .toEqual({ group_id: '' });
   expect((await fx.host.availableAgents(PROJECT)).agents[0]).toMatchObject({ consent: 'granted', usable: true });
 
   const next = await fx.host.addAgentToSession(LOCAL_AGENT, { agentId: REMOTE_AGENT });
@@ -453,34 +482,35 @@ it('returns 404 for an unknown published agent and 409 for an agent without cons
   await expect(fx.host.addAgentToSession(LOCAL_AGENT, { agentId: REMOTE_AGENT })).rejects.toMatchObject({ status: 409, message: expect.stringContaining('consent') });
 });
 
-it('routes untagged member messages through the existing group mode even when legacy leader orchestration is off', async () => {
+it('does not route member messages into a group before a teammate agent is added', async () => {
   const fx = fixture();
   await fx.host.enable(PROJECT, enableInput());
   await fx.host.update(PROJECT, { expectedVersion: 1, leaderOrchestration: false });
   const result = await fx.host.routeTeamChatMessage(PROJECT, { id: 'member-untagged', teamId: TEAM, sharedProjectId: SHARED,
     body: 'Use the group mode', mentions: [], author: { kind: 'human', accountId: OWNER, displayName: 'Owner Sam' } });
-  expect(result).toBe('routed');
-  expect(fx.enqueued.at(-1)?.recipients).toBeUndefined();
+  expect(result).toBe('handled');
+  expect(fx.enqueued).toHaveLength(0);
 });
 
 it('pumps queued team work when renewed owner consent makes a remote member eligible', async () => {
   const fx = fixture();
-  await fx.host.enable(PROJECT, enableInput(REMOTE_AGENT));
-  const group = fx.group()!;
-  expect(group.members.find((member) => member.id === group.group.orchestratorMemberId)?.held).toBe(true);
+  const group = await addRemoteToSession(fx);
+  const remote = group.members.find((member) => member.sessionId.startsWith('proxy_'))!;
+  remote.held = true;
+  fx.store.db.prepare(`UPDATE mingle_team_host_consents SET state='paused' WHERE team_id=? AND shared_project_id=? AND agent_id=?`)
+    .run(TEAM, SHARED, REMOTE_AGENT);
+  expect(remote.held).toBe(true);
 
   await grantRemote(fx);
 
-  expect(group.members.find((member) => member.id === group.group.orchestratorMemberId)?.held).toBe(false);
+  expect(group.members.find((member) => member.sessionId.startsWith('proxy_'))?.held).toBe(false);
   expect(fx.pumpCount()).toBe(1);
 });
 
 it('dispatches remote proxy deliveries, proxies team MCP calls, rejects mismatched owners, and records completion', async () => {
   const fx = fixture();
-  await fx.host.enable(PROJECT, enableInput(REMOTE_AGENT));
-  await grantRemote(fx);
+  const group = await addRemoteToSession(fx);
   const sessionId = String((fx.store.db.prepare('SELECT session_id FROM mingle_team_proxy_sessions WHERE agent_id=?').get(REMOTE_AGENT) as { session_id: string }).session_id);
-  const group = fx.group()!;
   const member = group.members.find((candidate) => candidate.sessionId === sessionId)!;
   const deliveryId = 'team-delivery-1';
   const requestId = 'team-request-1';
@@ -549,10 +579,8 @@ it('dispatches remote proxy deliveries, proxies team MCP calls, rejects mismatch
 
 it('imports remote artifacts into isolated refs and includes those ref names in the orchestrator result', async () => {
   const fx = fixture();
-  await fx.host.enable(PROJECT, enableInput(REMOTE_AGENT));
-  await grantRemote(fx);
+  const group = await addRemoteToSession(fx);
   const sessionId = String((fx.store.db.prepare('SELECT session_id FROM mingle_team_proxy_sessions WHERE agent_id=?').get(REMOTE_AGENT) as { session_id: string }).session_id);
-  const group = fx.group()!;
   const member = group.members.find((candidate) => candidate.sessionId === sessionId)!;
   const deliveryId = 'team-artifact-delivery';
   const requestId = 'team-artifact-request';
@@ -578,8 +606,7 @@ it('imports remote artifacts into isolated refs and includes those ref names in 
 
 it('rolls back a manual roster change when the group scheduler rejects the transition', async () => {
   const fx = fixture();
-  await fx.host.enable(PROJECT, enableInput());
-  await grantRemote(fx);
+  await addRemoteToSession(fx);
   fx.failNextSync();
 
   await expect(fx.host.change(PROJECT, { action: 'set-role', agentId: REMOTE_AGENT, role: 'idle', expectedVersion: 1 }))
@@ -595,8 +622,10 @@ it('leaves host leader settings unchanged when an automatic scheduler handover f
   const fx = fixture();
   await fx.host.enable(PROJECT, enableInput(REMOTE_AGENT));
   await grantRemote(fx);
+  const group = await fx.host.addAgentToSession(LOCAL_AGENT, { agentId: REMOTE_AGENT });
+  await fx.host.change(PROJECT, { action: 'set-orchestrator', agentId: REMOTE_AGENT, expectedVersion: 2 });
+  await fx.host.update(PROJECT, { expectedVersion: 3, fallbackAgentIds: [LOCAL_AGENT] });
   const proxyId = String((fx.store.db.prepare('SELECT session_id FROM mingle_team_proxy_sessions WHERE agent_id=?').get(REMOTE_AGENT) as { session_id: string }).session_id);
-  const group = fx.group()!;
   const member = group.members.find((candidate) => candidate.sessionId === proxyId)!;
   const deliveryId = 'quota-handover-scheduler-failure';
   const requestId = 'quota-handover-scheduler-failure-request';
@@ -615,9 +644,9 @@ it('leaves host leader settings unchanged when an automatic scheduler handover f
 
   const hostRow = fx.store.db.prepare('SELECT settings_json,needs_leader,leader_history_json FROM mingle_team_host_projects WHERE team_id=? AND shared_project_id=?')
     .get(TEAM, SHARED) as { settings_json: string; needs_leader: number; leader_history_json: string };
-  expect(JSON.parse(hostRow.settings_json)).toMatchObject({ version: 1, orchestratorAgentId: REMOTE_AGENT });
+  expect(JSON.parse(hostRow.settings_json)).toMatchObject({ version: 4, orchestratorAgentId: REMOTE_AGENT, fallbackAgentIds: [LOCAL_AGENT] });
   expect(hostRow.needs_leader).toBe(1);
-  expect(JSON.parse(hostRow.leader_history_json)).toEqual([]);
+  expect(JSON.parse(hostRow.leader_history_json)).toMatchObject([expect.objectContaining({ reason: 'manual', toAgentId: REMOTE_AGENT })]);
   expect(group.group.orchestratorMemberId).toBe(member.id);
   expect(group.group.paused).toBe(true);
 });
@@ -626,21 +655,22 @@ it('supports idle, fallback, promote/swap and remove changes with leader history
   const fx = fixture();
   await fx.host.enable(PROJECT, enableInput());
   await grantRemote(fx);
-  const idle = await fx.host.change(PROJECT, { action: 'set-role', agentId: REMOTE_AGENT, role: 'idle', expectedVersion: 1 });
+  await fx.host.addAgentToSession(LOCAL_AGENT, { agentId: REMOTE_AGENT });
+  const idle = await fx.host.change(PROJECT, { action: 'set-role', agentId: REMOTE_AGENT, role: 'idle', expectedVersion: 2 });
   expect(idle.members.find((member) => member.agentId === REMOTE_AGENT)).toMatchObject({ role: 'idle', state: 'paused' });
-  const worker = await fx.host.change(PROJECT, { action: 'set-role', agentId: REMOTE_AGENT, role: 'worker', expectedVersion: 2 });
+  const worker = await fx.host.change(PROJECT, { action: 'set-role', agentId: REMOTE_AGENT, role: 'worker', expectedVersion: 3 });
   expect(worker.members.find((member) => member.agentId === REMOTE_AGENT)?.role).toBe('worker');
-  const fallback = await fx.host.change(PROJECT, { action: 'set-fallbacks', agentIds: [REMOTE_AGENT], expectedVersion: 3 });
+  const fallback = await fx.host.change(PROJECT, { action: 'set-fallbacks', agentIds: [REMOTE_AGENT], expectedVersion: 4 });
   expect(fallback.members.find((member) => member.agentId === REMOTE_AGENT)?.fallbackRank).toBe(1);
-  const promoted = await fx.host.change(PROJECT, { action: 'set-orchestrator', agentId: REMOTE_AGENT, previousRole: 'idle', expectedVersion: 4 });
+  const promoted = await fx.host.change(PROJECT, { action: 'set-orchestrator', agentId: REMOTE_AGENT, previousRole: 'idle', expectedVersion: 5 });
   expect(promoted.settings?.orchestratorAgentId).toBe(REMOTE_AGENT);
   expect(promoted.members.find((member) => member.agentId === LOCAL_AGENT)?.role).toBe('idle');
-  const swapped = await fx.host.change(PROJECT, { action: 'set-orchestrator', agentId: LOCAL_AGENT, previousRole: 'worker', expectedVersion: 5 });
+  const swapped = await fx.host.change(PROJECT, { action: 'set-orchestrator', agentId: LOCAL_AGENT, previousRole: 'worker', expectedVersion: 6 });
   expect(swapped.settings?.orchestratorAgentId).toBe(LOCAL_AGENT);
   expect(swapped.members.find((member) => member.agentId === REMOTE_AGENT)?.role).toBe('worker');
-  const removedWorker = await fx.host.change(PROJECT, { action: 'remove', agentId: REMOTE_AGENT, expectedVersion: 6 });
+  const removedWorker = await fx.host.change(PROJECT, { action: 'remove', agentId: REMOTE_AGENT, expectedVersion: 7 });
   expect(removedWorker.members.some((member) => member.agentId === REMOTE_AGENT)).toBe(false);
-  const removedLeader = await fx.host.change(PROJECT, { action: 'remove', agentId: LOCAL_AGENT, expectedVersion: 7 });
+  const removedLeader = await fx.host.change(PROJECT, { action: 'remove', agentId: LOCAL_AGENT, expectedVersion: 8 });
   expect(removedLeader.needsLeader).toBe(true);
   expect(removedLeader.settings?.orchestratorAgentId).toBeNull();
   expect(removedLeader.leaderHistory.at(-1)).toMatchObject({ reason: 'removed', fromAgentId: LOCAL_AGENT, toAgentId: null });
@@ -651,8 +681,10 @@ it('promotes a consented online fallback after quota exhaustion and never infers
   const fx = fixture();
   await fx.host.enable(PROJECT, enableInput(REMOTE_AGENT));
   await grantRemote(fx);
+  const group = await fx.host.addAgentToSession(LOCAL_AGENT, { agentId: REMOTE_AGENT });
+  await fx.host.change(PROJECT, { action: 'set-orchestrator', agentId: REMOTE_AGENT, expectedVersion: 2 });
+  await fx.host.update(PROJECT, { expectedVersion: 3, fallbackAgentIds: [LOCAL_AGENT] });
   const proxyId = String((fx.store.db.prepare('SELECT session_id FROM mingle_team_proxy_sessions WHERE agent_id=?').get(REMOTE_AGENT) as { session_id: string }).session_id);
-  const group = fx.group()!;
   const member = group.members.find((candidate) => candidate.sessionId === proxyId)!;
   const deliveryId = 'quota-delivery';
   const requestId = 'quota-request';
@@ -699,10 +731,8 @@ it('fails a proxy delivery at its configurable timeout using the injected clock'
   let clock = Date.now();
   try {
     const fx = fixture({ deliveryTimeoutMs: 5_000, now: () => clock });
-    await fx.host.enable(PROJECT, enableInput(REMOTE_AGENT));
-    await grantRemote(fx);
+    const group = await addRemoteToSession(fx);
     const sessionId = String((fx.store.db.prepare('SELECT session_id FROM mingle_team_proxy_sessions WHERE agent_id=?').get(REMOTE_AGENT) as { session_id: string }).session_id);
-    const group = fx.group()!;
     const member = group.members.find((candidate) => candidate.sessionId === sessionId)!;
     const deliveryId = 'timeout-delivery';
     const requestId = 'timeout-request';
