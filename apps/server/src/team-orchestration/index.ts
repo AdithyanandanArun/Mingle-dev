@@ -25,6 +25,7 @@ export interface TeamOrchestrationOptions {
   changed?: () => void;
   now?: () => number;
   deliveryTimeoutMs?: number;
+  deliveryMaxDurationMs?: number;
   deviceSide?: TeamOrchestrationDeviceSide;
   deviceSideFactory?: TeamOrchestrationDeviceSideFactory;
 }
@@ -52,6 +53,7 @@ export function createTeamOrchestration(options: TeamOrchestrationOptions): {
     authorizeTeam: (input) => options.distributed.authorizeTeam(input), collaboration: options.collaboration,
     groups: options.groups, teamMcp: options.teamMcp, recovery: options.recovery,
     deviceSide, changed: options.changed, now: options.now, deliveryTimeoutMs: options.deliveryTimeoutMs,
+    deliveryMaxDurationMs: options.deliveryMaxDurationMs,
     publishLocalAgents: (input) => options.distributed.execution.publishAgents(input),
   });
   host.setTeamChat(options.teamChat);

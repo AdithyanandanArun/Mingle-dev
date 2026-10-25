@@ -1,8 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto';
 import {
-  AddTeamAgentSchema, EnableTeamOrchestrationSchema, TeamAgentActivityEntrySchema, TeamApprovalDecisionPayloadSchema,
+  AddTeamAgentSchema, EnableTeamOrchestrationSchema, TeamApprovalDecisionPayloadSchema,
   TeamApprovalRequestPayloadSchema, TeamConsentPayloadSchema, TeamDeliveryPayloadSchema,
-  TeamDeliveryStatusPayloadSchema, TeamInterruptPayloadSchema, TeamOrchestrationSettingsSchema,
+  TeamActivityPayloadSchema, TeamDeliveryHeartbeatPayloadSchema, TeamDeliveryStatusPayloadSchema, TeamInterruptPayloadSchema, TeamOrchestrationSettingsSchema,
   TEAM_CONSENT_DISCLAIMER_VERSION, TeamPermissionLevelSchema, TeamStructureChangeSchema, TeamStructurePayloadSchema, TeamToolCallPayloadSchema,
   TeamToolResultPayloadSchema, TeamArtifactRefSchema,
   type ProviderFailure, type TeamAgentRole, type TeamAgentState, type TeamConsentState,
@@ -58,6 +58,7 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
   private readonly unsubscribeStore: () => void;
   private readonly active = new Map<string, { runId: string; controller: AbortController }>();
   private readonly timers = new Map<string, ReturnType<typeof setTimeout>>();
+  private readonly heartbeatSequences = new Map<string, number>();
   private readonly pending = new Set<Promise<unknown>>();
   private readonly chatByDelivery = new Map<string, string>();
   private readonly chatDeliveryCounts = new Map<string, number>();
@@ -65,6 +66,7 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
   private closed = false;
   private readonly now: () => number;
   private readonly deliveryTimeoutMs: number;
+  private readonly deliveryMaxDurationMs: number;
   private chat?: TeamOrchestrationChat;
 
   constructor(private readonly options: {
@@ -81,11 +83,14 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
     changed?: () => void;
     now?: () => number;
     deliveryTimeoutMs?: number;
+    deliveryMaxDurationMs?: number;
     /** Publishes this device's sessions to the shared roster; the call replaces the device's published set. */
     publishLocalAgents?(input: { teamId: string; sharedProjectId: string; sessionIds: string[] }): Promise<unknown>;
   }) {
     this.now = options.now ?? Date.now;
     this.deliveryTimeoutMs = Math.min(15 * 60_000, Math.max(1_000, options.deliveryTimeoutMs ?? 90_000));
+    this.deliveryMaxDurationMs = Math.min(24 * 60 * 60_000,
+      Math.max(this.deliveryTimeoutMs, options.deliveryMaxDurationMs ?? 2 * 60 * 60_000));
     this.unsubscribe = options.transport.onMessage((message) => this.onEnvelope(message));
     this.unsubscribeStore = options.store.subscribe((event) => {
       if (!event) return;
@@ -101,16 +106,13 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
   }
 
   private recoverProxyDeliveries(): void {
-    const rows = this.hostRows.prepare(`SELECT delivery_id,run_id FROM mingle_team_host_deliveries
-      WHERE status IN ('queued','accepted','running','awaiting-approval')`).all() as Array<{ delivery_id: string; run_id: string }>;
-    if (!rows.length) return;
-    const at = new Date(this.now()).toISOString();
+    const rows = this.hostRows.prepare(`SELECT delivery_id,session_id,run_id FROM mingle_team_host_deliveries
+      WHERE status IN ('queued','accepted','running','awaiting-approval')`).all() as Array<{ delivery_id: string; session_id: string; run_id: string }>;
     for (const row of rows) {
-      // A host restart never replays an owner-device provider run. It may have completed remotely,
-      // but an unacknowledged terminal result is represented as interrupted rather than guessed.
-      this.hostRows.prepare(`UPDATE mingle_team_host_deliveries SET status='interrupted',failure_json=?,updated_at=? WHERE delivery_id=?`)
-        .run(JSON.stringify({ message: 'The host restarted before receiving a terminal delivery status.' }), at, row.delivery_id);
-      this.hostRows.prepare("UPDATE mingle_team_host_approvals SET state='expired' WHERE delivery_id=? AND state='pending'").run(row.delivery_id);
+      // The owner device continues independently of the host process. Keep its durable delivery
+      // live and resume the persisted idle deadline rather than interrupting valid remote work.
+      this.active.set(row.session_id, { runId: row.run_id, controller: new AbortController() });
+      this.armDeliveryTimeout(row.delivery_id);
     }
   }
 
@@ -1167,16 +1169,16 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
     const controller = new AbortController();
     const mcp = this.options.teamMcp.create(input.runId, input.session, controller.signal, context);
     this.active.set(input.session.id, { runId: input.runId, controller });
-    const at = new Date(this.now()).toISOString();
+    const issuedAt = this.now();
+    const at = new Date(issuedAt).toISOString();
     const sourceChatId = this.chatByDelivery.get(context.deliveryId) ?? null;
     this.hostRows.prepare(`INSERT INTO mingle_team_host_deliveries(delivery_id,team_id,shared_project_id,group_id,request_id,agent_id,session_id,
       owner_account_id,owner_device_id,run_id,remote_run_id,status,content,source_chat_message_id,artifacts_json,failure_json,issued_at,timeout_at,updated_at)
       VALUES(?,?,?,?,?,?,?,?,?,?,NULL,'accepted',?,?, '[]',NULL,?,?,?)`)
       .run(context.deliveryId, proxy.team_id, proxy.shared_project_id, context.groupId, context.requestId, proxy.agent_id, input.session.id,
-        proxy.owner_account_id, proxy.owner_device_id, input.runId, basePayload.content, sourceChatId, at, this.now() + this.deliveryTimeoutMs, at);
-    const timer = setTimeout(() => this.timeout(context.deliveryId), this.deliveryTimeoutMs);
-    timer.unref();
-    this.timers.set(context.deliveryId, timer);
+        proxy.owner_account_id, proxy.owner_device_id, input.runId, basePayload.content, sourceChatId, at,
+        this.deliveryDeadline(issuedAt, issuedAt), at);
+    this.armDeliveryTimeout(context.deliveryId);
     this.track((async () => {
       try {
         await this.options.authorizeTeam({ teamId: proxy.team_id, peerDeviceId: proxy.owner_device_id });
@@ -1301,13 +1303,16 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
 
   private async onEnvelope(envelope: import('@mingle/contracts').AuthenticatedTransportMessage): Promise<void> {
     // Other teamgroup.* kinds belong to the owner-device side sharing this transport.
-    const hostKinds = ['execution.agents', 'teamgroup.consent', 'teamgroup.delivery.status', 'teamgroup.tool.call', 'teamgroup.approval.request'];
+    const hostKinds = ['execution.agents', 'teamgroup.consent', 'teamgroup.delivery.status', 'teamgroup.delivery.heartbeat',
+      'teamgroup.activity', 'teamgroup.tool.call', 'teamgroup.approval.request'];
     if (this.closed || !hostKinds.includes(envelope.kind)) return;
     const localDevice = this.options.transport.snapshot(envelope.teamId).deviceId;
     if (!localDevice || envelope.toDeviceId !== localDevice) throw new HttpError(403, 'Team orchestration envelope is not addressed to this device.');
     if (envelope.kind === 'execution.agents') return this.onPublishedAgents(envelope);
     if (envelope.kind === 'teamgroup.consent') return this.receiveConsent(envelope);
     if (envelope.kind === 'teamgroup.delivery.status') return this.receiveStatus(envelope);
+    if (envelope.kind === 'teamgroup.delivery.heartbeat') return this.receiveHeartbeat(envelope);
+    if (envelope.kind === 'teamgroup.activity') return this.receiveActivity(envelope.payload, envelope);
     if (envelope.kind === 'teamgroup.tool.call') return this.receiveToolCall(envelope);
     if (envelope.kind === 'teamgroup.approval.request') return this.receiveApproval(envelope);
   }
@@ -1413,6 +1418,59 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
     return this.hostRows.prepare('SELECT * FROM mingle_team_host_deliveries WHERE delivery_id=?').get(deliveryId) as DeliveryRow | undefined;
   }
 
+  private async receiveHeartbeat(envelope: import('@mingle/contracts').AuthenticatedTransportMessage): Promise<void> {
+    const parsed = TeamDeliveryHeartbeatPayloadSchema.safeParse(envelope.payload);
+    if (!parsed.success) throw new HttpError(400, 'Team delivery heartbeat payload is invalid.');
+    const delivery = this.delivery(parsed.data.deliveryId);
+    if (!delivery || delivery.team_id !== envelope.teamId || delivery.shared_project_id !== parsed.data.sharedProjectId) return;
+    if (delivery.owner_device_id !== envelope.fromDeviceId || delivery.agent_id !== parsed.data.agentId
+      || delivery.remote_run_id && delivery.remote_run_id !== parsed.data.runId) {
+      throw new HttpError(403, 'The delivery heartbeat came from a different device, agent, or run.');
+    }
+    await this.verifyOwnerDevice(delivery.team_id, envelope.fromDeviceId, delivery.owner_account_id);
+    if (!liveDelivery(delivery.status)) return;
+    const prior = this.heartbeatSequences.get(delivery.delivery_id) ?? 0;
+    if (parsed.data.sequence <= prior) return;
+    this.heartbeatSequences.set(delivery.delivery_id, parsed.data.sequence);
+    this.extendDeliveryTimeout(delivery.delivery_id);
+  }
+
+  private deliveryDeadline(now: number, issuedAt: number): number {
+    return Math.min(now + this.deliveryTimeoutMs, issuedAt + this.deliveryMaxDurationMs);
+  }
+
+  private armDeliveryTimeout(deliveryId: string): void {
+    const previous = this.timers.get(deliveryId);
+    if (previous) clearTimeout(previous);
+    this.timers.delete(deliveryId);
+    const delivery = this.delivery(deliveryId);
+    if (!delivery || !liveDelivery(delivery.status)) return;
+    const timer = setTimeout(() => this.timeout(deliveryId), Math.max(0, delivery.timeout_at - this.now()));
+    timer.unref();
+    this.timers.set(deliveryId, timer);
+  }
+
+  /** Persist only the idle deadline: heartbeats are not user-visible store mutations. */
+  private extendDeliveryTimeout(deliveryId: string): void {
+    const delivery = this.delivery(deliveryId);
+    if (!delivery || !liveDelivery(delivery.status)) return;
+    const issuedAt = Date.parse(delivery.issued_at);
+    const deadline = this.deliveryDeadline(this.now(), Number.isFinite(issuedAt) ? issuedAt : this.now());
+    if (deadline > delivery.timeout_at) {
+      this.hostRows.prepare(`UPDATE mingle_team_host_deliveries SET timeout_at=?
+        WHERE delivery_id=? AND status IN ('queued','accepted','running','awaiting-approval')`)
+        .run(deadline, deliveryId);
+    }
+    this.armDeliveryTimeout(deliveryId);
+  }
+
+  private timedOutDelivery(delivery: DeliveryRow): boolean {
+    if (delivery.status !== 'failed') return false;
+    const message = safeJson<{ message?: unknown } | null>(delivery.failure_json ?? 'null', null)?.message;
+    return typeof message === 'string' && message.startsWith('The remote agent stopped responding')
+      || typeof message === 'string' && message.startsWith('The remote agent timed out while its device was offline');
+  }
+
   private async receiveStatus(envelope: import('@mingle/contracts').AuthenticatedTransportMessage): Promise<void> {
     const parsed = TeamDeliveryStatusPayloadSchema.safeParse(envelope.payload);
     if (!parsed.success) throw new HttpError(400, 'Team delivery status payload is invalid.');
@@ -1422,18 +1480,19 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
     await this.verifyOwnerDevice(observed.team_id, envelope.fromDeviceId, observed.owner_account_id);
     const delivery = this.delivery(parsed.data.deliveryId);
     if (!delivery || delivery.team_id !== envelope.teamId || delivery.shared_project_id !== parsed.data.sharedProjectId
-      || delivery.owner_device_id !== envelope.fromDeviceId || delivery.agent_id !== parsed.data.agentId || !liveDelivery(delivery.status)) return;
+      || delivery.owner_device_id !== envelope.fromDeviceId || delivery.agent_id !== parsed.data.agentId) return;
+    const lateCompletion = parsed.data.status === 'completed' && this.timedOutDelivery(delivery);
+    if (!liveDelivery(delivery.status) && !lateCompletion) return;
+    if (!lateCompletion) this.extendDeliveryTimeout(delivery.delivery_id);
     if (parsed.data.status === 'accepted' || parsed.data.status === 'running' || parsed.data.status === 'awaiting-approval') {
-      const priorStatuses = parsed.data.status === 'running' ? ['accepted', 'awaiting-approval']
-        : parsed.data.status === 'awaiting-approval' ? ['running'] : [];
-      if (!priorStatuses.length) return;
-      const placeholders = priorStatuses.map(() => '?').join(',');
+      const next = parsed.data.status === 'awaiting-approval' && delivery.status === 'running'
+        || parsed.data.status === 'running' && ['accepted', 'queued', 'awaiting-approval'].includes(delivery.status)
+        ? parsed.data.status : null;
+      if (!next) return;
       const changed = this.hostRows.prepare(`UPDATE mingle_team_host_deliveries SET status=?,remote_run_id=COALESCE(?,remote_run_id),updated_at=?
-        WHERE delivery_id=? AND status IN (${placeholders})`)
-        .run(parsed.data.status, parsed.data.runId, parsed.data.at, delivery.delivery_id, ...priorStatuses);
+        WHERE delivery_id=? AND status=?`).run(next, parsed.data.runId, parsed.data.at, delivery.delivery_id, delivery.status);
       if (Number(changed.changes) !== 1) return;
-      this.options.store.updateSession(delivery.session_id, { status: parsed.data.status === 'awaiting-approval' ? 'waiting' : 'running' });
-      this.options.store.touch();
+      this.options.store.updateSession(delivery.session_id, { status: next === 'awaiting-approval' ? 'waiting' : 'running' });
       return;
     }
     const failure = parsed.data.failure ? ProviderFailureSchema.parse({ ...parsed.data.failure, sessionId: delivery.session_id, runId: delivery.run_id,
@@ -1445,15 +1504,20 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
     const rejection = parsed.data.status === 'rejected' ? `Remote agent rejected delivery: ${parsed.data.rejection ?? 'invalid'}` : undefined;
     const failureJson = failure ? JSON.stringify(failure) : rejection ? JSON.stringify({ message: redactSecrets(rejection).slice(0, 500) }) : null;
     const claimed = this.hostRows.prepare(`UPDATE mingle_team_host_deliveries SET status=?,failure_json=?,remote_run_id=COALESCE(?,remote_run_id),updated_at=?
-      WHERE delivery_id=? AND status IN ('queued','accepted','running','awaiting-approval')`)
-      .run(outcome, failureJson, parsed.data.runId, parsed.data.at, delivery.delivery_id);
+      WHERE delivery_id=? AND (status IN ('queued','accepted','running','awaiting-approval') OR (status='failed' AND ?=1))`)
+      .run(outcome, failureJson, parsed.data.runId, parsed.data.at, delivery.delivery_id, Number(lateCompletion));
     if (Number(claimed.changes) !== 1) return;
 
     if (parsed.data.status === 'completed') {
       // The remote provider has finished. Close the proxy run before taking the project Git lease
       // for ref-only imports, so other host sessions cannot race the repository mutation.
       const run = this.options.store.getRun(delivery.run_id);
-      this.options.store.finishRun(delivery.run_id, 'completed', run ? Math.max(0, this.now() - Date.parse(run.startedAt)) : null, parsed.data.at);
+      if (run?.status === 'running') {
+        this.options.store.finishRun(delivery.run_id, 'completed', Math.max(0, this.now() - Date.parse(run.startedAt)), parsed.data.at);
+      } else if (run && (lateCompletion || liveDelivery(delivery.status)) && run.status !== 'completed') {
+        this.hostRows.prepare(`UPDATE session_runs SET status='completed',finished_at=?,duration_ms=? WHERE id=? AND status IN ('failed','interrupted')`)
+          .run(parsed.data.at, Math.max(0, this.now() - Date.parse(run.startedAt)), delivery.run_id);
+      }
       this.options.store.updateSession(delivery.session_id, { status: 'idle', error: null });
       this.options.recovery.clearFailure(delivery.session_id);
       const importedArtifacts: import('@mingle/contracts').TeamArtifactRef[] = [];
@@ -1507,6 +1571,7 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
     const timer = this.timers.get(deliveryId);
     if (timer) clearTimeout(timer);
     this.timers.delete(deliveryId);
+    this.heartbeatSequences.delete(deliveryId);
     const current = this.active.get(delivery.session_id);
     if (current?.runId === delivery.run_id) {
       current.controller.abort();
@@ -1568,14 +1633,17 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
   private timeout(deliveryId: string): void {
     this.timers.delete(deliveryId);
     const delivery = this.delivery(deliveryId);
-    if (!delivery || !liveDelivery(delivery.status) || delivery.timeout_at > this.now()) return;
+    if (!delivery || !liveDelivery(delivery.status)) return;
+    if (delivery.timeout_at > this.now()) { this.armDeliveryTimeout(deliveryId); return; }
     const interrupt = TeamInterruptPayloadSchema.parse({ sharedProjectId: delivery.shared_project_id, deliveryId, reason: 'The host delivery timed out.' });
     this.track(this.options.transport.send({ teamId: delivery.team_id, toDeviceId: delivery.owner_device_id, kind: 'teamgroup.interrupt', payload: interrupt,
       idempotencyKey: `teamgroup-interrupt:${deliveryId}:timeout`.slice(0, 200) }).then(() => this.options.transport.sync()).catch(() => undefined));
     const row = this.readHost(delivery.team_id, delivery.shared_project_id);
     const wasLeader = row ? this.settings(row).orchestratorAgentId === delivery.agent_id : false;
-    void this.finishDelivery(deliveryId, 'failed', undefined, 'The remote agent timed out; it is marked offline.')
-      .then(() => wasLeader ? this.promoteFallback(delivery.team_id, delivery.shared_project_id, 'fallback-offline') : undefined);
+    const deviceOffline = !this.isOnline(delivery.team_id, delivery.owner_device_id);
+    const message = deviceOffline ? 'The remote agent timed out while its device was offline.' : 'The remote agent stopped responding.';
+    void this.finishDelivery(deliveryId, 'failed', undefined, message)
+      .then(() => wasLeader && deviceOffline ? this.promoteFallback(delivery.team_id, delivery.shared_project_id, 'fallback-offline') : undefined);
   }
 
   private async receiveToolCall(envelope: import('@mingle/contracts').AuthenticatedTransportMessage): Promise<void> {
@@ -1587,6 +1655,7 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
     }
     if (delivery.owner_device_id !== envelope.fromDeviceId || delivery.agent_id !== parsed.data.agentId) throw new HttpError(403, 'The team tool call came from a different device or agent.');
     await this.verifyOwnerDevice(delivery.team_id, envelope.fromDeviceId, delivery.owner_account_id);
+    this.extendDeliveryTimeout(delivery.delivery_id);
     const active = this.active.get(delivery.session_id);
     if (!active || active.runId !== delivery.run_id) throw new HttpError(409, 'The team tool call run is no longer active.');
     let result: unknown;
@@ -1607,6 +1676,7 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
     if (!delivery || delivery.team_id !== envelope.teamId || delivery.shared_project_id !== parsed.data.sharedProjectId || !liveDelivery(delivery.status)) throw new HttpError(404, 'Approval request is outside an active delivery.');
     if (delivery.owner_device_id !== envelope.fromDeviceId || delivery.agent_id !== parsed.data.agentId) throw new HttpError(403, 'Approval request came from a different device or agent.');
     await this.verifyOwnerDevice(delivery.team_id, envelope.fromDeviceId, delivery.owner_account_id);
+    this.extendDeliveryTimeout(delivery.delivery_id);
     const existing = this.hostRows.prepare('SELECT approval_id FROM mingle_team_host_approvals WHERE delivery_id=? AND remote_approval_id=?')
       .get(delivery.delivery_id, parsed.data.approvalId) as { approval_id: string } | undefined;
     if (existing) return;
@@ -1728,10 +1798,18 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
   }
 
   async receiveActivity(payload: unknown, envelope: import('@mingle/contracts').AuthenticatedTransportMessage): Promise<void> {
-    // Activity persistence belongs to the device mirror. This method intentionally only provides a validated boundary hook.
-    const parsed = TeamAgentActivityEntrySchema.safeParse(payload);
-    if (!parsed.success) throw new HttpError(400, 'Team activity entry is invalid.');
+    const parsed = TeamActivityPayloadSchema.safeParse(payload);
+    if (!parsed.success) throw new HttpError(400, 'Team activity payload is invalid.');
     await this.options.authorizeTeam({ teamId: envelope.teamId, peerDeviceId: envelope.fromDeviceId });
+    if (!parsed.data.runId) return;
+    const candidates = this.hostRows.prepare(`SELECT * FROM mingle_team_host_deliveries
+      WHERE team_id=? AND shared_project_id=? AND agent_id=? AND owner_device_id=?
+        AND status IN ('queued','accepted','running','awaiting-approval') ORDER BY issued_at DESC`)
+      .all(envelope.teamId, parsed.data.sharedProjectId, parsed.data.agentId, envelope.fromDeviceId) as DeliveryRow[];
+    const delivery = candidates.find((candidate) => !candidate.remote_run_id || candidate.remote_run_id === parsed.data.runId);
+    if (!delivery) return;
+    await this.verifyOwnerDevice(delivery.team_id, envelope.fromDeviceId, delivery.owner_account_id);
+    this.extendDeliveryTimeout(delivery.delivery_id);
   }
 
   async close(): Promise<void> {

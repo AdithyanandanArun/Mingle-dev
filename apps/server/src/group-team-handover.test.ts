@@ -100,3 +100,35 @@ it('keeps every member a peer when the team roster syncs into a cowork session',
   expect(after.group.orchestratorMemberId).toBeNull();
   expect(after.members.filter((member) => !member.removedAt).map((member) => member.role)).toEqual(['peer', 'peer']);
 });
+
+it('accepts a late remote completion after a timeout-only group failure', async () => {
+  const test = await startTestApp({ exampleWorkspace: false });
+  apps.push(test);
+  const path = makeRepo();
+  repos.push(path);
+  const project = test.app.store.insertProject({ id: 'late-team-delivery-project', name: 'Late team delivery', path });
+  const remote = test.app.store.insertSession({ projectId: project.id, id: 'late_remote_agent', name: 'Remote agent', provider: 'codex', model: 'gpt-6-codex',
+    effort: 'medium', policy: 'supervised', isolated: false, worktreePath: path, branch: null });
+  const groupId = 'group-late-remote-delivery';
+  test.app.groups.createTeamGroup({ id: groupId, projectId: project.id, title: 'Late remote delivery', orchestratorSessionId: remote.id,
+    members: [{ sessionId: remote.id, handle: 'remote', role: 'orchestrator', held: false }] });
+  const member = test.app.groups.get(groupId).members.find((candidate) => candidate.sessionId === remote.id)!;
+  const at = new Date().toISOString();
+  test.app.store.db.prepare(`INSERT INTO group_messages(id,group_id,sender_member_id,recipient_member_ids,kind,content,request_id,reply_to_id,source_message_id,source_run_id,client_message_id,created_at,invocation,context_refs_json)
+    VALUES(?,?,NULL,?,'user',?,NULL,NULL,NULL,NULL,NULL,?,NULL,NULL)`).run('late-message', groupId, JSON.stringify([member.id]), 'Do the work', at);
+  test.app.store.db.prepare(`INSERT INTO group_requests(id,group_id,message_id,planner_member_id,status,turns_used,created_at,updated_at,intent,execution_plan_id)
+    VALUES(?,?,?,?,'active',1,?,?, 'normal',NULL)`).run('late-request', groupId, 'late-message', member.id, at, at);
+  test.app.store.db.prepare(`INSERT INTO group_deliveries(id,group_id,request_id,message_id,member_id,kind,status,run_id,hop,attempts,retryable,error,assignment_id,started_at,created_at,updated_at,coordinator_epoch,task_id)
+    VALUES(?,?,?,?,?,'request','running','late-remote-run',0,1,0,NULL,NULL,?,?,?,1,NULL)`)
+    .run('late-delivery', groupId, 'late-request', 'late-message', member.id, at, at, at);
+
+  test.app.store.updateSession(remote.id, { status: 'error', error: 'The remote agent stopped responding.' });
+  test.app.groups.onRunFinished(remote.id, 'late-remote-run', 'failed');
+  expect(test.app.groups.get(groupId).deliveries.find((delivery) => delivery.id === 'late-delivery'))
+    .toMatchObject({ status: 'failed', error: 'The remote agent stopped responding.' });
+
+  test.app.store.updateSession(remote.id, { status: 'idle', error: null });
+  test.app.groups.onRunFinished(remote.id, 'late-remote-run', 'completed');
+  expect(test.app.groups.get(groupId).deliveries.find((delivery) => delivery.id === 'late-delivery'))
+    .toMatchObject({ status: 'completed', error: null });
+});

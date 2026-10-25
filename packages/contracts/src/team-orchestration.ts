@@ -181,6 +181,8 @@ export const TEAM_GROUP_KINDS = {
   interrupt: 'teamgroup.interrupt',
   /** owner → host: delivery lifecycle + final result. */
   deliveryStatus: 'teamgroup.delivery.status',
+  /** owner → host: periodic signal that a remote delivery is still executing. */
+  deliveryHeartbeat: 'teamgroup.delivery.heartbeat',
   /** owner → host: a team tool call (assign/message/artifact/status) made by a remote agent run. */
   toolCall: 'teamgroup.tool.call',
   /** host → owner: result of that tool call. */
@@ -263,6 +265,13 @@ export const TeamDeliveryStatusPayloadSchema = z.object({
   at: IsoTime,
 }).strict();
 export type TeamDeliveryStatusPayload = z.infer<typeof TeamDeliveryStatusPayloadSchema>;
+
+export const TeamDeliveryHeartbeatPayloadSchema = z.object({
+  sharedProjectId: Uuid, deliveryId: Id, agentId: Id, runId: Id,
+  /** Monotonic for this owner-side delivery execution. */
+  sequence: z.number().int().min(1), at: IsoTime,
+}).strict();
+export type TeamDeliveryHeartbeatPayload = z.infer<typeof TeamDeliveryHeartbeatPayloadSchema>;
 
 export const TeamToolCallPayloadSchema = z.object({
   sharedProjectId: Uuid, deliveryId: Id, callId: Id, agentId: Id,

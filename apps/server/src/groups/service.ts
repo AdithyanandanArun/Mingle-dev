@@ -73,6 +73,9 @@ const MAX_ASSIGNMENTS_PER_RUN = 10;
 const STALL_RUN_THRESHOLD = 3;
 const SNAPSHOT_MESSAGES = 500;
 const SNAPSHOT_DELIVERIES = 300;
+const isRecoverableRemoteCompletion = (status: DeliveryRow['status'], message: string | null | undefined): boolean =>
+  status === 'failed' && (message === 'The remote agent stopped responding.' || message === 'The remote agent timed out while its device was offline.')
+  || status === 'interrupted' && message === 'Interrupted because Mingle restarted';
 const SNAPSHOT_REQUESTS = 100;
 const FULL_SHA = /^[0-9a-f]{40,64}$/i;
 const DEFAULT_LIMITS = { maxParallel: 2, maxTurns: 80, maxHops: 6 };
@@ -1969,10 +1972,41 @@ export class GroupService {
         delivery = this.repo.getDelivery(candidate.id);
       }
     }
+    if (delivery && outcome === 'completed' && isRecoverableRemoteCompletion(delivery.status, delivery.error)) {
+      this.completeLateRemoteResult(delivery, sessionId, runId);
+      return;
+    }
     if (!delivery || delivery.status !== 'running') return;
     if (outcome === 'completed') this.recovery?.clearFailure(sessionId);
     this.settle(delivery, outcome);
     this.teamRunFinishedHook?.({ sessionId, runId, outcome, groupId: delivery.groupId, deliveryId: delivery.id });
+  }
+
+  private completeLateRemoteResult(delivery: DeliveryRow, sessionId: string, runId: string): void {
+    const group = this.repo.getGroup(delivery.groupId);
+    const member = this.repo.getMember(delivery.memberId);
+    if (!group || !member || member.sessionId !== sessionId) return;
+    const completed = this.store.tx(() => {
+      if (!this.repo.transitionDelivery(delivery.id, delivery.status, 'completed', { error: null, retryable: false })) return false;
+      const assignment = delivery.assignmentId ? this.repo.getAssignment(delivery.assignmentId) : undefined;
+      const taskId = assignment?.taskId ?? delivery.taskId;
+      const task = taskId ? this.store.getTask(taskId) : undefined;
+      if (task?.status === 'ready') {
+        this.tasks.markRunning(task);
+        this.tasks.finishRun(task.id, 'completed');
+      }
+      this.event(group, 'group.delivery.completed', `Late remote result completed: @${member.handle}`, {
+        deliveryId: delivery.id, runId, kind: delivery.kind, afterIdleTimeout: true,
+      }, sessionId);
+      this.refreshRequest(delivery.requestId, false);
+      return true;
+    });
+    if (!completed) return;
+    this.recovery?.clearFailure(sessionId);
+    this.refreshRecoveryState(group.id);
+    this.notifyCoordinator(delivery.requestId);
+    this.teamRunFinishedHook?.({ sessionId, runId, outcome: 'completed', groupId: delivery.groupId, deliveryId: delivery.id });
+    this.schedule(group.id);
   }
 
   /** Called after provider cleanup: reconcile any missed callback, then let the queue advance. */

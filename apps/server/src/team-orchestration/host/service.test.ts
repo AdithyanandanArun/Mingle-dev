@@ -30,7 +30,7 @@ afterEach(async () => {
   while (paths.length) rmSync(paths.pop()!, { recursive: true, force: true });
 });
 
-function fixture(options: { deviceId?: string; role?: 'leader' | 'admin' | 'member'; deliveryTimeoutMs?: number; now?: () => number } = {}) {
+function fixture(options: { deviceId?: string; role?: 'leader' | 'admin' | 'member'; deliveryTimeoutMs?: number; deliveryMaxDurationMs?: number; now?: () => number } = {}) {
   const store = new Store(openDatabase(':memory:'));
   const repo = makeRepo();
   paths.push(repo);
@@ -184,7 +184,7 @@ function fixture(options: { deviceId?: string; role?: 'leader' | 'admin' | 'memb
   const host = new TeamOrchestrationHost({ store, git: teamGit as any, account: account as any, transport: transport as any,
     authorizeTeam: async () => { const gate = delayedAuthorization; delayedAuthorization = null; await gate; },
     collaboration: collaboration as any, groups: groupService as any, teamMcp: teamMcp as any, recovery: recovery as any,
-    deliveryTimeoutMs: options.deliveryTimeoutMs ?? 60_000, now: options.now });
+    deliveryTimeoutMs: options.deliveryTimeoutMs ?? 60_000, deliveryMaxDurationMs: options.deliveryMaxDurationMs, now: options.now });
   const fx = {
     store, project, local, host, outgoing, finished, enqueued, artifactImports, agents, group: () => group, setRole(value: typeof role) { role = value; },
     setDevice(deviceId: string) { localDeviceId = deviceId; },
@@ -789,7 +789,7 @@ it('promotes a consented online fallback after quota exhaustion and never infers
   expect(group.group.paused).toBe(true);
 });
 
-it('fails a proxy delivery at its configurable timeout using the injected clock', async () => {
+it('fails a proxy delivery at its configurable idle timeout using the injected clock', async () => {
   vi.useFakeTimers({ now: new Date('2026-10-24T12:00:00.000Z') });
   let clock = Date.now();
   try {
@@ -805,12 +805,146 @@ it('fails a proxy delivery at its configurable timeout using the injected clock'
     fx.store.insertRun({ id: 'timeout-host-run', sessionId, userMessageId: userMessage.id, provider: 'codex', model: 'gpt-6-codex', startedAt: new Date().toISOString() });
     fx.host.start({ session: fx.store.getSession(sessionId)!, runId: 'timeout-host-run', content: 'Wait remotely', options: { groupDeliveryId: deliveryId },
       context: { groupId: group.group.id, memberId: member.id, requestId, deliveryId, hop: 0, instructions: 'Instructions' } });
+    fx.setOwnerOnline(false);
     clock += 5_000;
     await vi.advanceTimersByTimeAsync(5_000);
     await Promise.resolve();
-    expect(fx.store.getSession(sessionId)?.error).toContain('timed out');
+    expect(fx.store.getSession(sessionId)?.error).toContain('device was offline');
     expect(fx.finished).toContainEqual({ sessionId, runId: 'timeout-host-run', outcome: 'failed' });
     expect((fx.store.db.prepare('SELECT status FROM mingle_team_host_deliveries WHERE delivery_id=?').get(deliveryId) as { status: string }).status).toBe('failed');
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+it('keeps a proxy delivery alive on owner signals and times out after the last signal without a visible state event', async () => {
+  vi.useFakeTimers({ now: new Date('2026-10-24T12:00:00.000Z') });
+  let clock = Date.now();
+  try {
+    const fx = fixture({ deliveryTimeoutMs: 5_000, now: () => clock });
+    const group = await addRemoteToSession(fx);
+    const sessionId = String((fx.store.db.prepare('SELECT session_id FROM mingle_team_proxy_sessions WHERE agent_id=?').get(REMOTE_AGENT) as { session_id: string }).session_id);
+    const member = group.members.find((candidate) => candidate.sessionId === sessionId)!;
+    const deliveryId = 'heartbeat-delivery';
+    const requestId = 'heartbeat-request';
+    group.deliveries.push({ id: deliveryId, groupId: group.group.id, requestId, messageId: 'heartbeat-message', memberId: member.id,
+      status: 'running', runId: 'heartbeat-host-run', hop: 0, error: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), kind: 'request' });
+    const userMessage = fx.store.insertMessage({ sessionId, role: 'user', content: 'Work for longer than the idle timeout', runId: 'heartbeat-host-run' });
+    fx.store.insertRun({ id: 'heartbeat-host-run', sessionId, userMessageId: userMessage.id, provider: 'codex', model: 'gpt-6-codex', startedAt: new Date().toISOString() });
+    fx.host.start({ session: fx.store.getSession(sessionId)!, runId: 'heartbeat-host-run', content: 'Work', options: { groupDeliveryId: deliveryId },
+      context: { groupId: group.group.id, memberId: member.id, requestId, deliveryId, hop: 0, instructions: 'Instructions' } });
+    await vi.waitFor(() => expect(fx.outgoing.find((entry) => entry.kind === 'teamgroup.delivery')).toBeTruthy());
+    const touch = vi.spyOn(fx.store, 'touch');
+    const touchCount = touch.mock.calls.length;
+    const firstHeartbeat = { sharedProjectId: SHARED, deliveryId, agentId: REMOTE_AGENT, runId: 'owner-run-heartbeat', sequence: 1, at: new Date().toISOString() };
+    clock += 4_000;
+    await vi.advanceTimersByTimeAsync(4_000);
+    await fx.incoming('teamgroup.delivery.heartbeat', firstHeartbeat);
+    expect(fx.store.db.prepare('SELECT timeout_at FROM mingle_team_host_deliveries WHERE delivery_id=?').get(deliveryId))
+      .toMatchObject({ timeout_at: clock + 5_000 });
+    expect(touch).toHaveBeenCalledTimes(touchCount);
+
+    clock += 4_000;
+    await vi.advanceTimersByTimeAsync(4_000);
+    expect(fx.store.db.prepare('SELECT status FROM mingle_team_host_deliveries WHERE delivery_id=?').get(deliveryId)).toMatchObject({ status: 'accepted' });
+    await fx.incoming('teamgroup.tool.call', { sharedProjectId: SHARED, deliveryId, callId: 'liveness-tool-call', agentId: REMOTE_AGENT,
+      tool: 'team_members', args: {} });
+    clock += 4_000;
+    await vi.advanceTimersByTimeAsync(4_000);
+    expect(fx.store.db.prepare('SELECT status FROM mingle_team_host_deliveries WHERE delivery_id=?').get(deliveryId)).toMatchObject({ status: 'accepted' });
+    await fx.incoming('teamgroup.activity', { sharedProjectId: SHARED, agentId: REMOTE_AGENT, state: 'working',
+      runId: 'owner-run-heartbeat', entries: [] });
+    expect(touch).toHaveBeenCalledTimes(touchCount);
+    clock += 4_000;
+    await vi.advanceTimersByTimeAsync(4_000);
+    expect(fx.store.db.prepare('SELECT status FROM mingle_team_host_deliveries WHERE delivery_id=?').get(deliveryId)).toMatchObject({ status: 'accepted' });
+    clock += 1_000;
+    await vi.advanceTimersByTimeAsync(1_000);
+    await Promise.resolve();
+    expect(fx.store.db.prepare('SELECT status FROM mingle_team_host_deliveries WHERE delivery_id=?').get(deliveryId)).toMatchObject({ status: 'failed' });
+    expect(fx.store.getSession(sessionId)?.error).toContain('stopped responding');
+    touch.mockRestore();
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+it('enforces the configurable absolute safety cap even while owner heartbeats continue', async () => {
+  vi.useFakeTimers({ now: new Date('2026-10-24T12:00:00.000Z') });
+  let clock = Date.now();
+  try {
+    const fx = fixture({ deliveryTimeoutMs: 5_000, deliveryMaxDurationMs: 9_000, now: () => clock });
+    const group = await addRemoteToSession(fx);
+    const sessionId = String((fx.store.db.prepare('SELECT session_id FROM mingle_team_proxy_sessions WHERE agent_id=?').get(REMOTE_AGENT) as { session_id: string }).session_id);
+    const member = group.members.find((candidate) => candidate.sessionId === sessionId)!;
+    const deliveryId = 'absolute-cap-delivery';
+    const requestId = 'absolute-cap-request';
+    group.deliveries.push({ id: deliveryId, groupId: group.group.id, requestId, messageId: deliveryId, memberId: member.id,
+      status: 'running', runId: 'absolute-cap-run', hop: 0, error: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), kind: 'request' });
+    const userMessage = fx.store.insertMessage({ sessionId, role: 'user', content: 'Continue until the cap', runId: 'absolute-cap-run' });
+    fx.store.insertRun({ id: 'absolute-cap-run', sessionId, userMessageId: userMessage.id, provider: 'codex', model: 'gpt-6-codex', startedAt: new Date().toISOString() });
+    fx.host.start({ session: fx.store.getSession(sessionId)!, runId: 'absolute-cap-run', content: 'Work', options: { groupDeliveryId: deliveryId },
+      context: { groupId: group.group.id, memberId: member.id, requestId, deliveryId, hop: 0, instructions: 'Instructions' } });
+    await vi.waitFor(() => expect(fx.outgoing.some((entry) => entry.kind === 'teamgroup.delivery')).toBe(true));
+    clock += 4_000;
+    await vi.advanceTimersByTimeAsync(4_000);
+    await fx.incoming('teamgroup.delivery.heartbeat', { sharedProjectId: SHARED, deliveryId, agentId: REMOTE_AGENT,
+      runId: 'owner-cap-run', sequence: 1, at: new Date().toISOString() });
+    clock += 3_000;
+    await vi.advanceTimersByTimeAsync(3_000);
+    await fx.incoming('teamgroup.delivery.heartbeat', { sharedProjectId: SHARED, deliveryId, agentId: REMOTE_AGENT,
+      runId: 'owner-cap-run', sequence: 2, at: new Date().toISOString() });
+    clock += 2_000;
+    await vi.advanceTimersByTimeAsync(2_000);
+    await Promise.resolve();
+    expect(fx.store.db.prepare('SELECT status,timeout_at FROM mingle_team_host_deliveries WHERE delivery_id=?').get(deliveryId))
+      .toMatchObject({ status: 'failed', timeout_at: clock });
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+it('accepts a late completion after an idle timeout but not after an explicit interruption', async () => {
+  vi.useFakeTimers({ now: new Date('2026-10-24T12:00:00.000Z') });
+  let clock = Date.now();
+  try {
+    const fx = fixture({ deliveryTimeoutMs: 5_000, now: () => clock });
+    const group = await addRemoteToSession(fx);
+    const sessionId = String((fx.store.db.prepare('SELECT session_id FROM mingle_team_proxy_sessions WHERE agent_id=?').get(REMOTE_AGENT) as { session_id: string }).session_id);
+    const member = group.members.find((candidate) => candidate.sessionId === sessionId)!;
+    const deliveryId = 'late-completion-delivery';
+    const requestId = 'late-completion-request';
+    group.deliveries.push({ id: deliveryId, groupId: group.group.id, requestId, messageId: deliveryId, memberId: member.id,
+      status: 'running', runId: 'late-host-run', hop: 0, error: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), kind: 'assignment' });
+    const userMessage = fx.store.insertMessage({ sessionId, role: 'user', content: 'Wait for a remote result', runId: 'late-host-run' });
+    fx.store.insertRun({ id: 'late-host-run', sessionId, userMessageId: userMessage.id, provider: 'codex', model: 'gpt-6-codex', startedAt: new Date().toISOString() });
+    fx.host.start({ session: fx.store.getSession(sessionId)!, runId: 'late-host-run', content: 'Work', options: { groupDeliveryId: deliveryId },
+      context: { groupId: group.group.id, memberId: member.id, requestId, deliveryId, hop: 0, instructions: 'Instructions' } });
+    await vi.waitFor(() => expect(fx.outgoing.find((entry) => entry.kind === 'teamgroup.delivery')).toBeTruthy());
+    clock += 5_000;
+    await vi.advanceTimersByTimeAsync(5_000);
+    await Promise.resolve();
+    expect(fx.store.db.prepare('SELECT status FROM mingle_team_host_deliveries WHERE delivery_id=?').get(deliveryId)).toMatchObject({ status: 'failed' });
+
+    await fx.incoming('teamgroup.delivery.status', { sharedProjectId: SHARED, deliveryId, agentId: REMOTE_AGENT, status: 'completed',
+      runId: 'owner-late-run', finalText: 'The remote work completed after the host timeout.', artifacts: [], at: new Date().toISOString() });
+    expect(fx.store.db.prepare('SELECT status FROM mingle_team_host_deliveries WHERE delivery_id=?').get(deliveryId)).toMatchObject({ status: 'completed' });
+    expect(fx.store.getRun('late-host-run')?.status).toBe('completed');
+    expect(fx.store.listMessages(sessionId, { limit: 20 }).some((message) => message.content === 'The remote work completed after the host timeout.')).toBe(true);
+
+    const interruptedId = 'late-after-interrupt-delivery';
+    const next = group.members.find((candidate) => candidate.sessionId === sessionId)!;
+    group.deliveries.push({ id: interruptedId, groupId: group.group.id, requestId, messageId: interruptedId, memberId: next.id,
+      status: 'running', runId: 'interrupted-host-run', hop: 0, error: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), kind: 'assignment' });
+    const interruptedMessage = fx.store.insertMessage({ sessionId, role: 'user', content: 'Interrupt this', runId: 'interrupted-host-run' });
+    fx.store.insertRun({ id: 'interrupted-host-run', sessionId, userMessageId: interruptedMessage.id, provider: 'codex', model: 'gpt-6-codex', startedAt: new Date().toISOString() });
+    fx.host.start({ session: fx.store.getSession(sessionId)!, runId: 'interrupted-host-run', content: 'Work', options: { groupDeliveryId: interruptedId },
+      context: { groupId: group.group.id, memberId: next.id, requestId, deliveryId: interruptedId, hop: 0, instructions: 'Instructions' } });
+    await vi.waitFor(() => expect(fx.outgoing.some((entry) => entry.kind === 'teamgroup.delivery' && (entry.payload as { deliveryId?: string }).deliveryId === interruptedId)).toBe(true));
+    fx.host.interrupt(sessionId);
+    await fx.incoming('teamgroup.delivery.status', { sharedProjectId: SHARED, deliveryId: interruptedId, agentId: REMOTE_AGENT, status: 'completed',
+      runId: 'owner-too-late', finalText: 'Must be discarded after explicit interruption.', artifacts: [], at: new Date().toISOString() });
+    expect(fx.store.db.prepare('SELECT status FROM mingle_team_host_deliveries WHERE delivery_id=?').get(interruptedId)).toMatchObject({ status: 'interrupted' });
   } finally {
     vi.useRealTimers();
   }
