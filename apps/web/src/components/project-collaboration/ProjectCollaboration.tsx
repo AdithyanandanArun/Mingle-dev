@@ -10,6 +10,7 @@ import { POLICY_DESCRIPTION, POLICY_LABEL } from '../../lib/groups';
 import { createIdempotencyKey, distributedApi } from '../distributed/api';
 import { Badge, Button, InlineError, Modal, ProviderMark, StatusDot } from '../ui';
 import { projectCollaborationApi, CollaborationApiError, recordText, type CollaborationRecord, type InvitationPreview, type ProjectCollaborationSnapshot } from './api';
+import { resolveJoinCloneParent } from './join-flow';
 import { TeamConsentSheet } from '../team-orchestration/settings/TeamConsentSheet';
 import { TeamOrchestrationSettings } from '../team-orchestration/settings/TeamOrchestrationSettings';
 import '../../styles/project-collaboration.css';
@@ -353,11 +354,10 @@ export function ProjectInviteJoinDialog({ token, onClose, onOpenAccountSettings,
   const inviteEmail = preview?.email.trim().toLowerCase() ?? '';
   const emailMatches = Boolean(accountEmail && inviteEmail && accountEmail === inviteEmail);
   const signedIn = account?.status === 'signed-in';
-  const parentPath = directoryListing?.path ?? '';
+  const parentPath = directoryPath.trim();
   const cloneName = folderName.trim();
   const resultingPath = parentPath && cloneName ? nativePathJoin(parentPath, cloneName, directoryListing?.separator ?? '/') : '';
   const listedDirectories = directoryListing?.directories ?? [];
-  const validParent = Boolean(directoryListing && (directoryListing.canCreateWithin ?? directoryListing.canSelect));
 
   useEffect(() => {
     const controller = new AbortController();
@@ -512,11 +512,22 @@ export function ProjectInviteJoinDialog({ token, onClose, onOpenAccountSettings,
   };
 
   const cloneRepository = async () => {
-    if (!preview?.repositoryUrl || !validParent || !cloneName || workspaceBusy) return;
+    if (!preview?.repositoryUrl || !parentPath || !cloneName || workspaceBusy) return;
     setWorkspaceBusy(true);
     setError(null);
+    setDirectoryError(null);
+    let destination: DirectoryListing;
     try {
-      const project = await api.cloneProject({ url: preview.repositoryUrl, name: cloneName, parentPath });
+      destination = await resolveJoinCloneParent(parentPath, api.directories);
+    } catch (cause) {
+      setDirectoryError(errorMessage(cause));
+      setWorkspaceBusy(false);
+      return;
+    }
+    setDirectoryListing(destination);
+    setDirectoryPath(destination.displayPath);
+    try {
+      const project = await api.cloneProject({ url: preview.repositoryUrl, name: cloneName, parentPath: destination.path });
       await useMingle.getState().refreshNow();
       setSelectedProjectId(project.id);
       setStep('agents');
@@ -656,7 +667,7 @@ export function ProjectInviteJoinDialog({ token, onClose, onOpenAccountSettings,
           </div> : null}
           {error ? <InlineError>{error}</InlineError> : null}
           <div className="pc-join-actions"><Button type="button" variant="ghost" disabled={workspaceBusy} onClick={() => { setError(null); setStep('invite'); }}><ArrowLeft size={14} />Back</Button>
-            {source === 'clone' ? <Button type="button" variant="primary" disabled={!preview.repositoryUrl || !validParent || !cloneName || workspaceBusy || !emailMatches} busy={workspaceBusy} onClick={() => void cloneRepository()}>Clone and continue</Button>
+            {source === 'clone' ? <Button type="button" variant="primary" disabled={!preview.repositoryUrl || !directoryPath.trim() || !cloneName || workspaceBusy || !emailMatches} busy={workspaceBusy} onClick={() => void cloneRepository()}>Clone and continue</Button>
               : <Button type="button" variant="primary" disabled={!canContinueWorkspace} onClick={() => { setError(null); setStep('agents'); }}>Use this checkout <ChevronRight size={15} /></Button>}
           </div>
           {source === 'clone' && workspaceBusy ? <p className="pc-loading" role="status">Cloning repository… This may take a little while.</p> : null}

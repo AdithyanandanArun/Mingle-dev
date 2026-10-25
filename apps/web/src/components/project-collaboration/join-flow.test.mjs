@@ -1,0 +1,21 @@
+import assert from 'node:assert/strict';
+import test from 'node:test';
+import { resolveJoinCloneParent } from './join-flow.ts';
+
+test('resolves the typed repository parent path instead of reusing the last Browse result', async () => {
+  const calls = [];
+  const resolved = { path: '/home/member/typed-location', displayPath: '/home/member/typed-location', canSelect: true, canCreateWithin: true };
+  const listing = await resolveJoinCloneParent('  /home/member/typed-location  ', async (...args) => {
+    calls.push(args);
+    return resolved;
+  });
+
+  assert.deepEqual(calls, [['/home/member/typed-location', '', false]]);
+  assert.equal(listing.path, '/home/member/typed-location');
+});
+
+test('rejects an unusable typed parent before attempting the clone', async () => {
+  await assert.rejects(resolveJoinCloneParent('/home/member/not-a-folder', async () => ({
+    path: '/home/member/not-a-folder', displayPath: '/home/member/not-a-folder', canSelect: false, canCreateWithin: false,
+  })), /existing folder/i);
+});
