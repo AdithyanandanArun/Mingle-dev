@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import type { SupabaseClient, User } from '@supabase/supabase-js';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { HttpError } from '../util.ts';
 import { fingerprintForPublicKeys, generateDeviceKeyMaterial, openEnvelope, sealEnvelope } from './crypto.ts';
 import { TransportService } from './transport.ts';
@@ -40,6 +40,9 @@ class MailboxCloud {
   readonly members = new Map<string, Set<string>>([[teamId, new Set([userA, userB])]]);
   now: () => number = Date.now;
   failEnvelopeWrites = 0;
+  readonly wakes: Array<{ channel: string; event: string; payload: unknown }> = [];
+  private readonly wakeListeners = new Map<string, Set<(event: string, payload: unknown) => void>>();
+  constructor(private readonly realtime = false) {}
   private active(user: string, team: string): boolean { return this.members.get(team)?.has(user) ?? false; }
   private device(id: string, team: string): CloudDevice | undefined { return this.devices.find((row) => row.id === id && row.team_id === team); }
   private owns(user: string, id: string, team: string): boolean { return this.device(id, team)?.owner_id === user; }
@@ -50,7 +53,38 @@ class MailboxCloud {
       this.links.some((link) => link.team_id === team && link.device_id === a && link.peer_device_id === b && link.peer_fingerprint === right.fingerprint) &&
       this.links.some((link) => link.team_id === team && link.device_id === b && link.peer_device_id === a && link.peer_fingerprint === left.fingerprint));
   }
-  client(user: string): SupabaseClient { return { from: (table: string) => new MailboxQuery(this, user, table) } as unknown as SupabaseClient; }
+  client(user: string): SupabaseClient {
+    if (!this.realtime) return { from: (table: string) => new MailboxQuery(this, user, table) } as unknown as SupabaseClient;
+    return {
+      from: (table: string) => new MailboxQuery(this, user, table),
+      channel: (name: string) => {
+        const cloud = this;
+        let listener: ((payload: unknown) => void) | undefined;
+        const channel: any = {
+          on(_type: string, filter: { event: string }, callback: (payload: unknown) => void) {
+            listener = (payload) => callback({ payload });
+            channel.event = filter.event;
+            return channel;
+          },
+          subscribe(callback?: (status: string) => void) {
+            let listeners = cloud.wakeListeners.get(name);
+            if (!listeners) { listeners = new Set(); cloud.wakeListeners.set(name, listeners); }
+            if (listener) listeners.add(listener);
+            channel.unsubscribe = async () => { listeners?.delete(listener!); return 'ok'; };
+            callback?.('SUBSCRIBED');
+            return channel;
+          },
+          async send(message: { event: string; payload: unknown }) {
+            cloud.wakes.push({ channel: name, event: message.event, payload: structuredClone(message.payload) });
+            for (const deliver of [...(cloud.wakeListeners.get(name) ?? [])]) deliver(message.payload);
+            return 'ok';
+          },
+        };
+        return channel;
+      },
+      removeChannel: async (channel: any) => channel.unsubscribe?.() ?? 'ok',
+    } as unknown as SupabaseClient;
+  }
   private isoNow(): string { return new Date(this.now()).toISOString(); }
   async execute(user: string, table: string, action: string, values: any, filters: Array<[string, string, unknown]>, range: [number, number] | null, order: Array<[string, boolean]>, returning: boolean): Promise<Result> {
     const rows = this.table(table);
@@ -243,6 +277,23 @@ it('does not notify listeners during repeated idle syncs for a registered device
   await new Promise((resolve) => setTimeout(resolve, 2_200));
   await transport.close();
   expect(notifications).toBe(0);
+});
+
+it('uses a payload-free Realtime wake to pull a newly delivered mailbox message immediately', async () => {
+  const cloud = new MailboxCloud(true);
+  const { first, second, b } = await pairedServices(cloud);
+  const received: string[] = [];
+  const unsubscribe = second.onMessage((message) => { received.push(message.kind); });
+  try {
+    await first.send({ teamId, toDeviceId: b.id, kind: 'collaboration.message', payload: { content: 'private mailbox content' }, idempotencyKey: 'wake-now' });
+    await vi.waitFor(() => expect(received).toEqual(['collaboration.message']), { timeout: 1_000 });
+    expect(cloud.wakes).toContainEqual({ channel: `mingle-device-wake:${b.id}`, event: 'wake', payload: {} });
+    expect(JSON.stringify(cloud.wakes)).not.toContain('private mailbox content');
+  } finally {
+    unsubscribe();
+    await first.close();
+    await second.close();
+  }
 });
 
 describe('TransportService authenticated mailbox', () => {

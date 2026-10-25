@@ -90,6 +90,8 @@ export class TransportService {
   private lastSyncAt: number | null = null;
   private syncPromise: Promise<void> | null = null;
   private timer: NodeJS.Timeout | null = null;
+  private readonly wakeSubscriptions = new Map<string, { client: SupabaseClient; channel: ReturnType<SupabaseClient['channel']> }>();
+  private readonly wakeUnavailable = new Set<string>();
   private closed = false;
   private readonly now: () => number;
   private readonly retryBaseMs: number;
@@ -108,7 +110,7 @@ export class TransportService {
   /** Starts the optional outbound polling loop; no inbound listener or network port is opened. */
   start(): void {
     if (this.closed || this.timer) return;
-    const intervalMs = this.options.syncIntervalMs ?? 5_000;
+    const intervalMs = this.options.syncIntervalMs ?? 3_000;
     void this.sync();
     this.timer = setInterval(() => { void this.sync(); }, Math.max(1_000, intervalMs));
     this.timer.unref();
@@ -344,6 +346,8 @@ export class TransportService {
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
     await this.syncPromise;
+    await Promise.allSettled([...this.wakeSubscriptions.values()].map(({ client, channel }) => client.removeChannel(channel)));
+    this.wakeSubscriptions.clear();
     this.handlers.clear();
     this.keyCache.clear();
   }
@@ -360,6 +364,7 @@ export class TransportService {
       }
       for (const local of localDevices) {
         try {
+          this.ensureWakeSubscription(client, user.id, local.device_id);
           await this.refreshTeam(client, user.id, local.team_id, local.device_id);
           await this.flushOutbox(client, user.id, local.team_id, local.device_id);
           await this.pullInbox(client, user.id, local.team_id, local.device_id);
@@ -430,6 +435,7 @@ export class TransportService {
         if (error && !duplicateIdentity) throw new Error('cloud-insert');
         this.db.prepare(`UPDATE mingle_transport_outbox SET status = 'delivered', attempts = attempts + 1, next_attempt_at = 0, error = NULL WHERE id = ? AND account_id = ?`)
           .run(entry.id, accountId);
+        this.broadcastWake(client, entry.to_device_id);
       } catch (error) {
         const attempts = entry.attempts + 1;
         const retry = Math.min(MAX_RETRY_MS, this.retryBaseMs * (2 ** Math.min(20, attempts - 1)));
@@ -439,6 +445,53 @@ export class TransportService {
         this.lastError = message;
         this.status = 'offline';
       }
+    }
+  }
+
+  private wakeChannelName(deviceId: string): string {
+    return `mingle-device-wake:${deviceId}`;
+  }
+
+  /** Public Realtime broadcasts carry only a wake hint; the authenticated mailbox remains authoritative. */
+  private ensureWakeSubscription(client: SupabaseClient, accountId: string, deviceId: string): void {
+    const key = `${accountId}:${deviceId}`;
+    const current = this.wakeSubscriptions.get(key);
+    if (current?.client === client || this.wakeUnavailable.has(key)) return;
+    if (current) void current.client.removeChannel(current.channel).catch(() => undefined);
+    try {
+      const channel = client.channel(this.wakeChannelName(deviceId), { config: { broadcast: { ack: false } } });
+      channel.on('broadcast', { event: 'wake' }, () => {
+        if (!this.closed) void this.sync();
+      });
+      this.wakeSubscriptions.set(key, { client, channel });
+      channel.subscribe((status) => {
+        if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
+          this.wakeUnavailable.add(key);
+          if (this.wakeSubscriptions.get(key)?.channel === channel) this.wakeSubscriptions.delete(key);
+          void client.removeChannel(channel).catch(() => undefined);
+        }
+      });
+    } catch {
+      // Realtime is an optional accelerator. The mailbox polling loop remains authoritative.
+      this.wakeUnavailable.add(key);
+    }
+  }
+
+  private broadcastWake(client: SupabaseClient, deviceId: string): void {
+    try {
+      const channel = client.channel(this.wakeChannelName(deviceId), { config: { broadcast: { ack: false } } });
+      channel.subscribe((status) => {
+        if (status !== 'SUBSCRIBED') {
+          void client.removeChannel(channel).catch(() => undefined);
+          return;
+        }
+        void channel.send({ type: 'broadcast', event: 'wake', payload: {} }).then(
+          () => client.removeChannel(channel),
+          () => client.removeChannel(channel),
+        ).catch(() => undefined);
+      });
+    } catch {
+      // A missing or unavailable Realtime transport silently falls back to mailbox polling.
     }
   }
 
