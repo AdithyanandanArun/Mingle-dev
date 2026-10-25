@@ -27,6 +27,7 @@ interface Fixture {
   store: Store; side: ReturnType<typeof createDeviceSide>; routes: Array<{ method: string; path: string; handler: (ctx: any) => unknown }>;
   projectId: string; root: string; repo: string; worktree: string; sent: Sent[]; roster: any[]; handler: ((envelope: any) => Promise<void>) | null;
   runtime: FakeRuntime; exportCalls: any[]; importCalls: any[]; executionOrder: string[]; chatReplies: any[]; members: any[]; setConsent(permission?: 'supervised' | 'full-access', settingsVersion?: number): Promise<any>;
+  failTerminalStatusSends(count: number): void;
   holdImports(gate: Promise<void>): void;
   restartSide(): Promise<void>;
   deliver(overrides?: Record<string, unknown>, sender?: string): Promise<void>; close(): Promise<void>;
@@ -138,6 +139,7 @@ async function fixture(): Promise<Fixture> {
     .run(randomUUID(), ACCOUNT, OWN_DEVICE, project.id, TEAM, SHARED);
 
   const sent: Sent[] = [];
+  let terminalStatusFailures = 0;
   const roster: any[] = [];
   const members = [
     { accountId: LEAD, role: 'leader', displayName: 'Lead' },
@@ -153,7 +155,13 @@ async function fixture(): Promise<Fixture> {
   const transport: any = {
     snapshot: (teamId?: string) => ({ deviceId: OWN_DEVICE, devices: devices.filter((device) => !teamId || device.teamId === teamId),
       links: [{ deviceId: OWN_DEVICE, peerDeviceId: HOST_DEVICE, mutual: true }, { deviceId: OWN_DEVICE, peerDeviceId: OTHER_DEVICE, mutual: true }] }),
-    send: async (input: Sent) => { sent.push({ ...input, sentAt: Date.now() }); return `envelope-${sent.length}`; },
+    send: async (input: Sent) => {
+      if (input.kind === 'teamgroup.delivery.status' && ['completed', 'failed', 'interrupted'].includes(input.payload?.status) && terminalStatusFailures > 0) {
+        terminalStatusFailures--;
+        throw new Error('temporary mailbox queue failure');
+      }
+      sent.push({ ...input, sentAt: Date.now() }); return `envelope-${sent.length}`;
+    },
     sync: async () => undefined,
     onMessage: (next: (envelope: any) => Promise<void>) => { handler = next; return () => { handler = null; }; },
   };
@@ -201,12 +209,13 @@ async function fixture(): Promise<Fixture> {
   let side!: ReturnType<typeof createDeviceSide>;
   const startSide = () => {
     side = createDeviceSide({ store, runtime: runtime as any, transport, account, distributed, collaboration, teamChat: teamChat as any,
-      activityThrottleMs: 15, toolTimeoutMs: 30 });
+      activityThrottleMs: 15, toolTimeoutMs: 30, heartbeatIntervalMs: 15, terminalStatusRetryMs: 15 });
     side.routes((method, route, routeHandler) => routes.push({ method, path: route, handler: routeHandler }));
   };
   startSide();
   const result: Fixture = {
     store, get side() { return side; }, routes, projectId: project.id, root, repo, worktree, sent, roster, get handler() { return handler; }, runtime, exportCalls, importCalls, executionOrder, chatReplies, members,
+    failTerminalStatusSends(count) { terminalStatusFailures = count; },
     holdImports(gate) { importGate = gate; },
     async restartSide() { await side.close(); routes.length = 0; startSide(); },
     async setConsent(permission = 'supervised', settingsVersion = 1) {
@@ -369,6 +378,59 @@ describe('owner-device team orchestration', () => {
     expect(savedLegacy.agent_id).toBe(AGENT_ID);
     expect(JSON.parse(savedLegacy.request_json).agentId).toBe(AGENT_ID);
     expect(f.runtime.startCount).toBe(2);
+  });
+
+  it('heartbeats during a long owner-side run and stops heartbeating after completion', async () => {
+    const f = await fixture();
+    await sendStructure(f);
+    await f.setConsent();
+    f.runtime.mode = 'manual';
+    const payload = deliveryPayload({ deliveryId: `delivery-${randomUUID()}` });
+    await f.deliver(payload);
+    const sessionId = f.store.listSessions(f.projectId)[0]!.id;
+    await waitFor(() => f.runtime.active.get(sessionId));
+    const heartbeatCount = () => f.sent.filter((message) => message.kind === 'teamgroup.delivery.heartbeat'
+      && message.payload.deliveryId === payload.deliveryId).length;
+    await waitFor(() => heartbeatCount() >= 2);
+    const heartbeats = f.sent.filter((message) => message.kind === 'teamgroup.delivery.heartbeat' && message.payload.deliveryId === payload.deliveryId);
+    expect(heartbeats.map((message) => message.payload.sequence)).toEqual([1, 2]);
+    const runId = f.runtime.active.get(sessionId)!;
+    f.runtime.complete(sessionId, runId, f.runtime.optionsByRun.get(runId));
+    await waitFor(() => f.sent.some((message) => message.kind === 'teamgroup.delivery.status'
+      && message.payload.deliveryId === payload.deliveryId && message.payload.status === 'completed'));
+    const completedHeartbeatCount = heartbeatCount();
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    expect(heartbeatCount()).toBe(completedHeartbeatCount);
+  });
+
+  it('keeps awaiting owner approval alive with heartbeats and retries a failed terminal status enqueue', async () => {
+    const f = await fixture();
+    await sendStructure(f);
+    await f.setConsent();
+    f.runtime.mode = 'approval';
+    const waiting = deliveryPayload({ deliveryId: `delivery-${randomUUID()}` });
+    await f.deliver(waiting);
+    const approval = await waitFor(() => f.store.pendingApprovals()[0]);
+    await waitFor(() => f.sent.some((message) => message.kind === 'teamgroup.delivery.status'
+      && message.payload.deliveryId === waiting.deliveryId && message.payload.status === 'awaiting-approval'));
+    await waitFor(() => f.sent.some((message) => message.kind === 'teamgroup.delivery.heartbeat' && message.payload.deliveryId === waiting.deliveryId));
+    expect(f.store.db.prepare('SELECT status FROM mingle_team_device_deliveries WHERE delivery_id=?').get(waiting.deliveryId))
+      .toMatchObject({ status: 'awaiting-approval' });
+    await f.handler?.({ id: randomUUID(), teamId: TEAM, fromDeviceId: HOST_DEVICE, toDeviceId: OWN_DEVICE,
+      kind: 'teamgroup.interrupt', payload: { sharedProjectId: SHARED, deliveryId: waiting.deliveryId, reason: 'stop after approval wait' } });
+    await waitFor(() => f.sent.some((message) => message.kind === 'teamgroup.delivery.status'
+      && message.payload.deliveryId === waiting.deliveryId && message.payload.status === 'interrupted'));
+    expect(approval.status).toBe('pending');
+
+    f.runtime.mode = 'complete';
+    f.failTerminalStatusSends(1);
+    const result = deliveryPayload({ deliveryId: `delivery-${randomUUID()}` });
+    await f.deliver(result);
+    await waitFor(() => f.sent.some((message) => message.kind === 'teamgroup.delivery.status'
+      && message.payload.deliveryId === result.deliveryId && message.payload.status === 'completed'));
+    const saved = f.store.db.prepare('SELECT terminal_status_json FROM mingle_team_device_deliveries WHERE delivery_id=?')
+      .get(result.deliveryId) as { terminal_status_json: string };
+    expect(JSON.parse(saved.terminal_status_json)).toMatchObject({ deliveryId: result.deliveryId, status: 'completed' });
   });
 
   it('bounds each teammate-triggered run by the saved session, team, and owner-consent policies', async () => {
@@ -545,13 +607,13 @@ describe('owner-device team orchestration', () => {
   });
 });
 
-describe('team device migration 21 and session base migration 22', () => {
+describe('team device migration 21, session base migration 22, and terminal status migration 23', () => {
   it('creates its owner-device tables when upgraded from schema version 20', () => {
     const root = mkdtempSync(path.join(os.tmpdir(), 'mingle-team-device-migration-'));
     roots.push(root);
     const file = path.join(root, 'state.sqlite');
     const db = openDatabase(file);
-    expect((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(22);
+    expect((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(23);
     db.close();
     for (const legacyVersion of [19, 20]) {
       const older = new DatabaseSync(file);
@@ -559,7 +621,7 @@ describe('team device migration 21 and session base migration 22', () => {
         DROP TABLE mingle_team_device_structures; DROP TABLE mingle_team_device_consents; PRAGMA user_version=${legacyVersion};`);
       older.close();
       const upgraded = openDatabase(file);
-      expect((upgraded.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(22);
+      expect((upgraded.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(23);
       expect(upgraded.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='mingle_team_device_consents'").get()).toBeTruthy();
       upgraded.close();
     }

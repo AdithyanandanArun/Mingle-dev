@@ -7,7 +7,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import {
   AcceptTeamConsentSchema, TEAM_CONSENT_DISCLAIMER_VERSION, TeamActivityPayloadSchema,
   TeamApprovalDecisionPayloadSchema, TeamApprovalRequestPayloadSchema, TeamConsentPayloadSchema,
-  TeamDeliveryPayloadSchema, TeamDeliveryStatusPayloadSchema, TeamInterruptPayloadSchema,
+  TeamDeliveryHeartbeatPayloadSchema, TeamDeliveryPayloadSchema, TeamDeliveryStatusPayloadSchema, TeamInterruptPayloadSchema,
   TeamStructurePayloadSchema, TeamAgentActivityEntrySchema, UpdateTeamConsentSchema,
 } from '@mingle/contracts';
 import type {
@@ -45,6 +45,8 @@ export interface DeviceSideDeps {
   /** Injectable timing bounds keep transport/runtime tests deterministic. */
   activityThrottleMs?: number;
   toolTimeoutMs?: number;
+  heartbeatIntervalMs?: number;
+  terminalStatusRetryMs?: number;
 }
 
 interface Row extends Record<string, unknown> {
@@ -64,6 +66,8 @@ interface ActiveDelivery {
   activityState: 'idle' | 'queued' | 'working' | 'awaiting-approval' | 'quota-exhausted' | 'offline' | 'paused' | 'failed';
   activityWaiters: Array<() => void>;
   timer: NodeJS.Timeout | null;
+  heartbeatTimer: NodeJS.Timeout | null;
+  heartbeatSequence: number;
   controller: AbortController;
   replyPosted: boolean;
   artifactFailures: string[];
@@ -103,6 +107,7 @@ export function createDeviceSide(deps: DeviceSideDeps): {
   const work = new Set<Promise<unknown>>();
   const runWaiters = new Set<() => void>();
   const lastActivitySentAt = new Map<string, number>();
+  const terminalStatusRetries = new Map<string, NodeJS.Timeout>();
   const hostDecisions = new Set<string>();
   let closed = false;
   const proxy = new TeamMcpProxy(deps.transport, deps.toolTimeoutMs);
@@ -327,7 +332,7 @@ export function createDeviceSide(deps: DeviceSideDeps): {
             const shared = await findBindingBySharedProject(consent.teamId, consent.sharedProjectId);
             const host = shared ? await hostDeviceId(shared) : null;
             if (host) await sendStatus(consent.teamId, host, { sharedProjectId: consent.sharedProjectId,
-              deliveryId: delivery.delivery_id, agentId: delivery.agent_id, status: 'interrupted' }).catch(() => undefined);
+              deliveryId: delivery.delivery_id, agentId: delivery.agent_id, status: 'interrupted' });
           }
         } else {
           active.get(delivery.delivery_id)?.controller.abort();
@@ -604,7 +609,74 @@ export function createDeviceSide(deps: DeviceSideDeps): {
   }): Promise<void> {
     const payload = TeamDeliveryStatusPayloadSchema.parse({ ...input, runId: input.runId ?? null,
       artifacts: input.artifacts ?? [], at: ISO() });
-    await send(teamId, toDeviceId, 'teamgroup.delivery.status', payload, `teamdelivery:${input.deliveryId}:${input.status}`);
+    const terminal = ['completed', 'failed', 'interrupted', 'rejected'].includes(input.status);
+    if (terminal) {
+      db.prepare('UPDATE mingle_team_device_deliveries SET terminal_status_json=? WHERE delivery_id=?')
+        .run(JSON.stringify(payload), input.deliveryId);
+    }
+    try {
+      await send(teamId, toDeviceId, 'teamgroup.delivery.status', payload, statusIdempotencyKey(payload));
+      await deps.transport.sync();
+    } catch (error) {
+      if (!terminal) throw error;
+      scheduleTerminalStatusRetry(teamId, toDeviceId, payload);
+    }
+  }
+
+  function scheduleTerminalStatusRetry(teamId: string, toDeviceId: string, payload: ReturnType<typeof TeamDeliveryStatusPayloadSchema.parse>): void {
+    if (closed) return;
+    const prior = terminalStatusRetries.get(payload.deliveryId);
+    if (prior) clearTimeout(prior);
+    const timer = setTimeout(() => {
+      terminalStatusRetries.delete(payload.deliveryId);
+      void track(sendStatusPayload(teamId, toDeviceId, payload));
+    }, Math.max(1, deps.terminalStatusRetryMs ?? 3_000));
+    timer.unref();
+    terminalStatusRetries.set(payload.deliveryId, timer);
+  }
+
+  async function sendStatusPayload(teamId: string, toDeviceId: string, payload: ReturnType<typeof TeamDeliveryStatusPayloadSchema.parse>): Promise<void> {
+    try {
+      await send(teamId, toDeviceId, 'teamgroup.delivery.status', payload, statusIdempotencyKey(payload));
+      await deps.transport.sync();
+      const timer = terminalStatusRetries.get(payload.deliveryId);
+      if (timer) clearTimeout(timer);
+      terminalStatusRetries.delete(payload.deliveryId);
+    } catch {
+      scheduleTerminalStatusRetry(teamId, toDeviceId, payload);
+    }
+  }
+
+  function statusIdempotencyKey(payload: ReturnType<typeof TeamDeliveryStatusPayloadSchema.parse>): string {
+    return `teamdelivery:${payload.deliveryId}:${payload.status}:${Date.parse(payload.at)}`.slice(0, 200);
+  }
+
+  async function resendSavedTerminalStatus(teamId: string, toDeviceId: string, deliveryId: string): Promise<boolean> {
+    const row = db.prepare('SELECT terminal_status_json FROM mingle_team_device_deliveries WHERE delivery_id=?')
+      .get(deliveryId) as { terminal_status_json: string | null } | undefined;
+    if (!row?.terminal_status_json) return false;
+    let payload: ReturnType<typeof TeamDeliveryStatusPayloadSchema.parse>;
+    try { payload = TeamDeliveryStatusPayloadSchema.parse(JSON.parse(row.terminal_status_json)); }
+    catch { return false; }
+    if (!['completed', 'failed', 'interrupted', 'rejected'].includes(payload.status)) return false;
+    await sendStatusPayload(teamId, toDeviceId, payload);
+    return true;
+  }
+
+  async function sendHeartbeat(delivery: ActiveDelivery): Promise<void> {
+    const host = await hostDeviceId({ projectId: delivery.projectId, teamId: delivery.teamId,
+      sharedProjectId: delivery.payload.sharedProjectId,
+      members: (await deps.collaboration.snapshot(delivery.projectId)).members,
+      agents: (await deps.collaboration.snapshot(delivery.projectId)).agents });
+    if (!host || closed || !active.has(delivery.payload.deliveryId)) return;
+    const sequence = ++delivery.heartbeatSequence;
+    const payload = TeamDeliveryHeartbeatPayloadSchema.parse({ sharedProjectId: delivery.payload.sharedProjectId,
+      deliveryId: delivery.payload.deliveryId, agentId: delivery.payload.agentId, runId: delivery.runId, sequence, at: ISO() });
+    try {
+      await send(delivery.teamId, host, 'teamgroup.delivery.heartbeat', payload,
+        `teamdelivery-heartbeat:${delivery.payload.deliveryId}:${sequence}`);
+      await deps.transport.sync();
+    } catch { /* A failed cloud insert remains queued in the durable transport outbox for retry. */ }
   }
 
   async function receiveDelivery(envelope: AuthenticatedEnvelope): Promise<void> {
@@ -627,7 +699,8 @@ export function createDeviceSide(deps: DeviceSideDeps): {
         ?? resolvedBinding.agents.find((agent) => agent.sessionId === parsed.data.agentId && agent.deviceId === ownDeviceId)
       : undefined;
     const payload = localAgent ? { ...parsed.data, agentId: localAgent.id } : parsed.data;
-    const duplicate = db.prepare('SELECT request_json,status,run_id FROM mingle_team_device_deliveries WHERE delivery_id=?').get(payload.deliveryId) as { request_json: string; status: string; run_id: string | null } | undefined;
+    const duplicate = db.prepare('SELECT request_json,status,run_id,terminal_status_json FROM mingle_team_device_deliveries WHERE delivery_id=?')
+      .get(payload.deliveryId) as { request_json: string; status: string; run_id: string | null; terminal_status_json: string | null } | undefined;
     if (duplicate) {
       const shared = await findBindingBySharedProject(envelope.teamId, payload.sharedProjectId);
       if (!shared || !await authorizedHost(envelope, shared)) return;
@@ -639,6 +712,7 @@ export function createDeviceSide(deps: DeviceSideDeps): {
         await sendStatus(envelope.teamId, envelope.fromDeviceId, { sharedProjectId: payload.sharedProjectId,
           deliveryId: payload.deliveryId, agentId: payload.agentId, status: 'rejected', rejection: 'invalid' });
       } else {
+        if (await resendSavedTerminalStatus(envelope.teamId, envelope.fromDeviceId, payload.deliveryId)) return;
         const status = ['accepted', 'running', 'awaiting-approval', 'completed', 'failed', 'interrupted', 'rejected'].includes(duplicate.status)
           ? duplicate.status as 'accepted' | 'running' | 'awaiting-approval' | 'completed' | 'failed' | 'interrupted' | 'rejected' : 'accepted';
         await sendStatus(envelope.teamId, envelope.fromDeviceId, { sharedProjectId: payload.sharedProjectId,
@@ -664,7 +738,7 @@ export function createDeviceSide(deps: DeviceSideDeps): {
     }
     void track(executeDelivery(payload, validation.shared, validation.sessionId));
     await sendStatus(envelope.teamId, envelope.fromDeviceId, { sharedProjectId: payload.sharedProjectId,
-      deliveryId: payload.deliveryId, agentId: payload.agentId, status: 'accepted' }).catch(() => undefined);
+      deliveryId: payload.deliveryId, agentId: payload.agentId, status: 'accepted' });
   }
 
   async function isolatedWorktree(shared: SharedBinding, payload: TeamDeliveryPayload, sessionId: string): Promise<{ path: string; branch: string | null; baseRevision: string | null }> {
@@ -750,7 +824,7 @@ export function createDeviceSide(deps: DeviceSideDeps): {
           if (Number(changed.changes) === 1) await sendStatus(shared.teamId, (await hostDeviceId(shared))!, {
             sharedProjectId: shared.sharedProjectId, deliveryId: payload.deliveryId, agentId: payload.agentId,
             status: 'rejected', rejection: reason,
-          }).catch(() => undefined);
+          });
         }
         return;
       }
@@ -781,8 +855,10 @@ export function createDeviceSide(deps: DeviceSideDeps): {
       live = { payload, teamId: shared.teamId, projectId: shared.projectId, sessionId, runId,
         baseRevision: isolated.baseRevision, worktreePath: isolated.path, branch: isolated.branch,
         entries: [requestEntry], text: '', activityState: 'working', activityWaiters: [],
-        timer: null, controller, replyPosted: false, artifactFailures: [] };
+        timer: null, heartbeatTimer: null, heartbeatSequence: 0, controller, replyPosted: false, artifactFailures: [] };
       active.set(payload.deliveryId, live);
+      live.heartbeatTimer = setInterval(() => { void track(sendHeartbeat(live!)); }, Math.max(1, deps.heartbeatIntervalMs ?? 15_000));
+      live.heartbeatTimer.unref();
       db.prepare(`UPDATE mingle_team_device_deliveries SET status='running',run_id=?,worktree_path=?,branch=?,base_revision=?,updated_at=? WHERE delivery_id=? AND status='accepted'`)
         .run(runId, isolated.path, isolated.branch, isolated.baseRevision, ISO(), payload.deliveryId);
       await sendStatus(shared.teamId, (await hostDeviceId(shared))!, { sharedProjectId: shared.sharedProjectId,
@@ -829,10 +905,11 @@ export function createDeviceSide(deps: DeviceSideDeps): {
         .run(safeText(failure.message, 1000), ISO(), payload.deliveryId);
       const toDeviceId = await hostDeviceId(shared).catch(() => null);
       if (Number(changed.changes) === 1 && toDeviceId) await sendStatus(shared.teamId, toDeviceId, { sharedProjectId: shared.sharedProjectId,
-        deliveryId: payload.deliveryId, agentId: payload.agentId, status: 'failed', runId, failure }).catch(() => undefined);
+        deliveryId: payload.deliveryId, agentId: payload.agentId, status: 'failed', runId, failure });
     } finally {
       proxy.closeDelivery(payload.deliveryId);
       if (live?.timer) clearTimeout(live.timer);
+      if (live?.heartbeatTimer) clearInterval(live.heartbeatTimer);
       active.delete(payload.deliveryId);
     }
   }
@@ -976,7 +1053,7 @@ export function createDeviceSide(deps: DeviceSideDeps): {
         sharedProjectId: parsed.data.sharedProjectId, deliveryId: parsed.data.deliveryId,
         agentId: (db.prepare('SELECT agent_id FROM mingle_team_device_deliveries WHERE delivery_id=?').get(parsed.data.deliveryId) as { agent_id: string }).agent_id,
         status: 'interrupted',
-      }).catch(() => undefined);
+      });
       return;
     }
     deps.runtime.interrupt(row.session_id);
@@ -1015,13 +1092,26 @@ export function createDeviceSide(deps: DeviceSideDeps): {
       proxy.closeDelivery(delivery.payload.deliveryId);
       deps.runtime.interrupt(delivery.sessionId);
       if (delivery.timer) clearTimeout(delivery.timer);
+      if (delivery.heartbeatTimer) clearInterval(delivery.heartbeatTimer);
       for (const resolve of delivery.activityWaiters.splice(0)) resolve();
     }
+    for (const timer of terminalStatusRetries.values()) clearTimeout(timer);
+    terminalStatusRetries.clear();
     await Promise.allSettled([...work]);
     await proxy.close();
   }
 
-  track(reconcilePersistedDeliveries());
+  track(reconcilePersistedDeliveries().then(async () => {
+    const rows = db.prepare(`SELECT d.request_json,s.team_id FROM mingle_team_device_deliveries d
+      JOIN mingle_team_device_structures s ON s.shared_project_id=d.shared_project_id
+      WHERE d.terminal_status_json IS NOT NULL`).all() as Array<{ request_json: string; team_id: string }>;
+    for (const row of rows) {
+      try {
+        const request = TeamDeliveryPayloadSchema.parse(JSON.parse(row.request_json));
+        await resendSavedTerminalStatus(row.team_id, request.integrationDeviceId, request.deliveryId);
+      } catch { /* Invalid old rows remain visible locally and cannot redirect a status message. */ }
+    }
+  }));
   return { routes, close, latestStructure, localConsent };
 }
 

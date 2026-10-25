@@ -383,10 +383,13 @@ const MIGRATIONS: (string | ((db: DatabaseSync) => void))[] = [
        expires_at TEXT NOT NULL, UNIQUE(delivery_id,remote_approval_id)
      );`);
    },
-     // Migration 21 keeps owner-device team state local and creates every table/index idempotently.
-     ensureTeamDeviceTables,
-     // Migration 22 records the Git commit each newly-created session worktree started from.
-     ensureSessionWorktreeBases,
+    // Migration 21 keeps owner-device team state local and creates every table/index idempotently.
+    ensureTeamDeviceTables,
+    // Migration 22 records the Git commit each newly-created session worktree started from.
+    ensureSessionWorktreeBases,
+    // Migration 23 keeps terminal owner-device status payloads durable until mailbox enqueue succeeds.
+    (db) => addColumn(db, 'mingle_team_device_deliveries', 'terminal_status_json',
+      'ALTER TABLE mingle_team_device_deliveries ADD COLUMN terminal_status_json TEXT;'),
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;
