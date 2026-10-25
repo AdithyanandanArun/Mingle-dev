@@ -191,7 +191,7 @@ export function App() {
     try {
       const structure = await teamSessionsApi.structure(projectId);
       store.setTeamSessionInfo(projectId, structure.teamSession ?? null, structure.host.isThisDevice);
-      if (!structure.host.isThisDevice && structure.teamSession) {
+      if (structure.teamSession) {
         store.openTeamSession(projectId, structure.teamSession.sessionId);
         return;
       }

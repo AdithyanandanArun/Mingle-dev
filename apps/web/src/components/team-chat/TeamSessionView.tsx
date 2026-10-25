@@ -61,8 +61,9 @@ function TeamMessage({ message, teamSession, agents, members }: {
   </div>;
 }
 
-function TeamSessionComposer({ projectId, sessionId, agents, structure, onSent }: {
-  projectId: string; sessionId: string; agents: readonly TeamChatAgent[]; structure: TeamStructureSnapshot | null; onSent: () => Promise<unknown>;
+function TeamSessionComposer({ projectId, sessionId, agents, structure, onMessage, onSent }: {
+  projectId: string; sessionId: string; agents: readonly TeamChatAgent[]; structure: TeamStructureSnapshot | null;
+  onMessage: (message: TeamChatMessage) => void; onSent: () => Promise<unknown>;
 }) {
   const draft = useMingle((state) => state.drafts[sessionId] ?? '');
   const connection = useMingle((state) => state.connection);
@@ -122,10 +123,7 @@ function TeamSessionComposer({ projectId, sessionId, agents, structure, onSent }
     setSending(true); setError(null);
     try {
       const sent = await api.sendTeamChatMessage(projectId, { body, mentions: mentionedIds });
-      setSnapshot((current) => current ? {
-        ...current,
-        messages: current.messages.some((message) => message.id === sent.id) ? current.messages : [...current.messages, sent].sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id)).slice(-200),
-      } : current);
+      onMessage(sent);
       setDraft(''); setPicked([]); setCaret(0);
       try { await onSent(); } catch { /* accepted sends remain cleared if the mirror refresh is delayed */ }
       input.current?.focus();
@@ -287,7 +285,12 @@ export function TeamSessionView({ projectId, teamSession, structure }: {
           </div>
         </div>
         {error && snapshot ? <div className="chat__error team-session__error" role="alert"><span>{error}</span><button type="button" className="link-btn" onClick={() => void refresh().catch((cause) => setError(errorMessage(cause)))}>Retry</button></div> : null}
-        <TeamSessionComposer projectId={projectId} sessionId={teamSession.sessionId} agents={agents} structure={structureSnapshot} onSent={async () => { await refresh(); }} />
+        <TeamSessionComposer projectId={projectId} sessionId={teamSession.sessionId} agents={agents} structure={structureSnapshot}
+          onMessage={(sent) => setSnapshot((current) => current ? {
+            ...current,
+            messages: current.messages.some((message) => message.id === sent.id) ? current.messages : [...current.messages, sent].sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id)).slice(-200),
+          } : current)}
+          onSent={async () => { await refresh(); }} />
         <div className="composer-wrap"><GitBar project={project} session={null} /></div>
       </section>
       <AgentPresenceRail snapshot={null} members={[]} sessions={sessions} runs={[]} approvals={[]} connection={connection} providers={[]} hidden={contextOpen} teamMembers={members} teamStates={teamStates} projectId={projectId} />

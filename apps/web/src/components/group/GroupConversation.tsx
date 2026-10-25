@@ -20,6 +20,7 @@ import { GroupResultSummary } from './GroupResultSummary';
 import { AttachmentHistory } from '../AttachmentHistory';
 import { appendContextReference, ContextReferenceChips } from '../MessageContextControls';
 import { GroupRemoteActivity } from '../distributed/GroupRemoteActivity';
+import { useTeamStructure } from '../../lib/team-structure-context';
 
 const NO_SESSIONS: Session[] = [];
 const NO_MESSAGES: Message[] = [];
@@ -142,6 +143,7 @@ function GroupMessageRow({ item, snapshot }: { item: GroupItem; snapshot: GroupS
 
 export function GroupConversation({ snapshot }: { snapshot: GroupSnapshot }) {
   const project = useProject();
+  const teamStructure = useTeamStructure();
   const sessions = useMingle((s) => s.boot?.sessions ?? NO_SESSIONS);
   const tasks = useMingle((s) => s.boot?.tasks ?? NO_TASKS);
   const messages = useMingle((s) => s.boot?.messages ?? NO_MESSAGES);
@@ -312,7 +314,8 @@ export function GroupConversation({ snapshot }: { snapshot: GroupSnapshot }) {
       </div>
       <GroupComposer key={snapshot.group.id} snapshot={snapshot} anchor={anchor} onOpenMembers={() => useMingle.getState().setGroupMembersOpen(snapshot.group.id)} footer={<GitBar project={project} session={anchor} />} />
       </section>
-      <AgentPresenceRail snapshot={snapshot} members={members} sessions={sessions} runs={allRuns} approvals={approvals ?? []} connection={connection} providers={providers} hidden={contextOpen} />
+      <AgentPresenceRail snapshot={snapshot} members={members} sessions={sessions} runs={allRuns} approvals={approvals ?? []} connection={connection} providers={providers} hidden={contextOpen}
+        teamMembers={teamStructure.snapshot?.projectId === project.id ? teamStructure.snapshot.members : []} projectId={project.id} />
       </div>
     </div>
   );
