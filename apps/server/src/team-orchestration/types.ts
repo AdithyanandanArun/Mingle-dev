@@ -81,6 +81,7 @@ export interface TeamProxyStartInput {
 export interface TeamProxyRuntimeService {
   isProxySession(sessionId: string): boolean;
   isActive(sessionId: string): boolean;
+  isRunLive(sessionId: string, runId: string): boolean;
   activeCount(): number;
   start(input: TeamProxyStartInput): void;
   interrupt(sessionId: string): boolean;

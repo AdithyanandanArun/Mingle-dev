@@ -104,6 +104,41 @@ describe('GitSyncService', () => {
       deliveryId: 'different-delivery', artifact, sourceDeviceId: source.deviceFor(pair.teamId) })).rejects.toThrow(/does not match this project, delivery/i);
     await expect(pair.destinationService.importTeamArtifact({ teamId: pair.teamId, sharedProjectId: pair.sharedProjectId,
       deliveryId: 'delivery-team-artifact', artifact, sourceDeviceId: source.deviceFor(pair.teamId) })).resolves.toMatchObject({ ref: artifact.ref });
+    await expect(pair.destinationService.integrateTeamArtifact({ teamId: pair.teamId, sharedProjectId: pair.sharedProjectId,
+      deliveryId: 'delivery-team-artifact', worktreePath: destination.root, artifact: imported }))
+      .resolves.toMatchObject({ beforeRevision: originalDestinationHead, revision: sourceHead, integrated: true });
+    expect(readFileSync(path.join(destination.root, 'team-output.txt'), 'utf8')).toBe('committed team output\n');
+    expect(importRunGit(destination.root, ['rev-parse', 'HEAD']).trim()).toBe(sourceHead);
+  });
+
+  it('keeps a verified artifact in its isolated ref when the host workspace has diverged', async () => {
+    const { source, destination } = prepareClones();
+    writeFileSync(path.join(source.root, 'remote-output.txt'), 'remote result\n');
+    importRunGit(source.root, ['add', 'remote-output.txt']);
+    importRunGit(source.root, ['commit', '-q', '-m', 'remote result']);
+    const sourceHead = importRunGit(source.root, ['rev-parse', 'HEAD']).trim();
+    writeFileSync(path.join(destination.root, 'host-change.txt'), 'host work\n');
+    importRunGit(destination.root, ['add', 'host-change.txt']);
+    importRunGit(destination.root, ['commit', '-q', '-m', 'host change']);
+    const hostHead = importRunGit(destination.root, ['rev-parse', 'HEAD']).trim();
+    const pair = await bindPair(source, destination);
+    const artifact = await pair.sourceService.exportTeamArtifact({ teamId: pair.teamId, sharedProjectId: pair.sharedProjectId,
+      sourceWorktreePath: source.root, revision: sourceHead, toDeviceId: destination.deviceFor(pair.teamId), deliveryId: 'delivery-diverged-team-artifact' });
+    for (const message of source.messages.filter((item) => item.kind.startsWith('git.team-artifact.'))) {
+      await pair.destinationService.onEnvelope(envelope({ teamId: pair.teamId, fromDeviceId: source.deviceFor(pair.teamId),
+        toDeviceId: destination.deviceFor(pair.teamId), kind: message.kind, payload: message.payload }));
+    }
+    const imported = await pair.destinationService.importTeamArtifact({ teamId: pair.teamId, sharedProjectId: pair.sharedProjectId,
+      deliveryId: 'delivery-diverged-team-artifact', artifact, sourceDeviceId: source.deviceFor(pair.teamId) });
+    writeFileSync(path.join(destination.root, 'uncommitted-host-change.txt'), 'keep this edit\n');
+    await expect(pair.destinationService.integrateTeamArtifact({ teamId: pair.teamId, sharedProjectId: pair.sharedProjectId,
+      deliveryId: 'delivery-diverged-team-artifact', worktreePath: destination.root, artifact: imported })).rejects.toThrow(/uncommitted changes/);
+    rmSync(path.join(destination.root, 'uncommitted-host-change.txt'), { force: true });
+    await expect(pair.destinationService.integrateTeamArtifact({ teamId: pair.teamId, sharedProjectId: pair.sharedProjectId,
+      deliveryId: 'delivery-diverged-team-artifact', worktreePath: destination.root, artifact: imported })).rejects.toThrow(/diverged/);
+    expect(importRunGit(destination.root, ['rev-parse', 'HEAD']).trim()).toBe(hostHead);
+    expect(() => readFileSync(path.join(destination.root, 'remote-output.txt'))).toThrow();
+    expect(importRunGit(destination.root, ['rev-parse', imported.ref!]).trim()).toBe(sourceHead);
   });
 
   it('uses the session-start merge base when no upstream or default remote-tracking ref is available', async () => {

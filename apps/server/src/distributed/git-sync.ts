@@ -575,6 +575,57 @@ export class GitSyncService {
     } finally { await rm(temp, { recursive: true, force: true }); }
   }
 
+  /** Fast-forward one verified incoming team artifact into the selected group worktree. */
+  async integrateTeamArtifact(input: {
+    teamId: string; sharedProjectId: string; deliveryId: string; worktreePath: string; artifact: unknown;
+  }): Promise<{ beforeRevision: string; revision: string; integrated: boolean }> {
+    const artifact = TeamArtifactRefSchema.parse(input.artifact);
+    if (!artifact.transferId || !artifact.ref) throw conflict('A team artifact must be imported before it can be integrated.');
+    const owner = await currentUser(this.options.account);
+    const row = this.teamArtifactRow(artifact.transferId);
+    if (!row || row.direction !== 'incoming' || row.status !== 'imported' || row.team_id !== input.teamId
+      || row.shared_project_id !== input.sharedProjectId || row.delivery_id !== input.deliveryId || row.owner_id !== owner.id) {
+      throw conflict('The imported team artifact does not match this authenticated project and delivery.');
+    }
+    await this.authorizeTeamArtifact({ teamId: row.team_id, sharedProjectId: row.shared_project_id,
+      deliveryId: row.delivery_id, peerDeviceId: row.source_device_id, direction: 'import' });
+    const offer = TeamArtifactOfferSchema.parse(parseJson<unknown>(row.offer_json, 'team artifact offer'));
+    const refName = teamArtifactRef(input.sharedProjectId, input.deliveryId, offer.revision);
+    if (artifact.revision.toLowerCase() !== offer.revision.toLowerCase() || artifact.ref !== refName
+      || row.ref_name !== refName || artifact.path !== offer.path || artifact.taskId !== offer.taskId) {
+      throw conflict('The team artifact does not match its verified incoming ref.');
+    }
+    const binding = await resolveProjectBinding(this.options, this.db,
+      { teamId: row.team_id, sharedProjectId: row.shared_project_id, peerDeviceId: row.source_device_id }, owner.id);
+    const worktreePath = await realpath(input.worktreePath);
+    await this.assertSameRepository(binding.canonicalPath, worktreePath);
+    const beforeRevision = line((await repositoryGit(this.options.repository, worktreePath,
+      ['rev-parse', '--verify', 'HEAD'], { maxOutputBytes: 4096 })).stdout).toLowerCase();
+    const importedRevision = line((await repositoryGit(this.options.repository, binding.canonicalPath,
+      ['rev-parse', '--verify', `${refName}^{commit}`], { maxOutputBytes: 4096 })).stdout).toLowerCase();
+    if (importedRevision !== offer.revision.toLowerCase()) throw conflict('The imported team artifact ref no longer resolves to its verified commit.');
+    if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(beforeRevision)) throw conflict('The host team workspace has no valid Git HEAD.');
+    const dirty = await repositoryGit(this.options.repository, worktreePath,
+      ['status', '--porcelain=v1', '--untracked-files=all'], { maxOutputBytes: 64 * 1024 });
+    if (dirty.stdout.length) throw conflict(`The host team workspace has uncommitted changes; the remote artifact remains available at ${refName} for review.`);
+    if (beforeRevision !== importedRevision) {
+      const ancestor = await repositoryGit(this.options.repository, worktreePath,
+        ['merge-base', '--is-ancestor', beforeRevision, refName], { allowFailure: true, maxOutputBytes: 4096 });
+      if (ancestor.code !== 0) {
+        throw conflict(`The artifact was imported as ${refName}, but the host team workspace has diverged; review or integrate that ref manually.`);
+      }
+      try {
+        await repositoryGit(this.options.repository, worktreePath,
+          ['-c', 'commit.gpgSign=false', 'merge', '--ff-only', '--no-edit', refName], { timeoutMs: 60_000, maxOutputBytes: 64 * 1024 });
+      } catch (error) {
+        throw conflict(`The artifact was imported as ${refName}, but could not be integrated into the host team workspace: ${errorMessage(error)}`);
+      }
+    }
+    const revision = line((await repositoryGit(this.options.repository, worktreePath,
+      ['rev-parse', '--verify', 'HEAD'], { maxOutputBytes: 4096 })).stdout).toLowerCase();
+    return { beforeRevision, revision, integrated: beforeRevision !== revision };
+  }
+
   private async waitForTeamArtifactRetry(transferId: string): Promise<TeamArtifactRow> {
     const expiresAt = Date.now() + 60_000;
     while (Date.now() < expiresAt) {
@@ -630,7 +681,8 @@ export class GitSyncService {
     if (!row || row.direction !== 'incoming' || row.owner_id !== ownerId || row.source_device_id !== envelope.fromDeviceId) throw conflict('Team artifact chunk has no matching authenticated offer.');
     await this.authorizeTeamArtifact({ teamId: row.team_id, sharedProjectId: row.shared_project_id,
       deliveryId: row.delivery_id, peerDeviceId: envelope.fromDeviceId, direction: 'import' });
-    await resolveProjectBinding(this.options, this.db, row, ownerId);
+    await resolveProjectBinding(this.options, this.db, { teamId: row.team_id, sharedProjectId: row.shared_project_id,
+      peerDeviceId: envelope.fromDeviceId }, ownerId);
     const offer = TeamArtifactOfferSchema.parse(parseJson<unknown>(row.offer_json, 'team artifact offer'));
     if (chunk.chunkCount !== offer.chunkCount || chunk.index >= offer.chunkCount) throw conflict('Team artifact chunk dimensions differ from the authenticated offer.');
     const bytes = Buffer.from(chunk.data, 'base64');
@@ -656,7 +708,8 @@ export class GitSyncService {
       this.db.prepare(`UPDATE ${TEAM_ARTIFACT_TABLE} SET status='failed',updated_at=? WHERE transfer_id=?`).run(nowIso(), chunk.transferId);
       throw conflict('Team artifact bundle failed its advertised size or SHA-256 check.');
     }
-    const binding = await resolveProjectBinding(this.options, this.db, row, ownerId);
+    const binding = await resolveProjectBinding(this.options, this.db, { teamId: row.team_id, sharedProjectId: row.shared_project_id,
+      peerDeviceId: envelope.fromDeviceId }, ownerId);
     const temp = await mkdtemp(path.join(os.tmpdir(), 'mingle-team-artifact-verify-'));
     const bundlePath = path.join(temp, 'received.bundle');
     try {

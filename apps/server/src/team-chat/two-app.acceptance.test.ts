@@ -1,10 +1,45 @@
-import { rmSync } from 'node:fs';
+import { readFileSync, rmSync, writeFileSync } from 'node:fs';
+import path from 'node:path';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import type { SupabaseClient, User } from '@supabase/supabase-js';
 import { expect, it, vi } from 'vitest';
-import { TEAM_CONSENT_DISCLAIMER_VERSION } from '@mingle/contracts';
+import { TEAM_CONSENT_DISCLAIMER_VERSION, type TeamMcpConnection } from '@mingle/contracts';
 import { AccountService } from '../account/service.ts';
-import { makeRepo, runGit, startTestApp, tmpDir, waitFor, type TestApp } from '../test-utils.ts';
+import { FakeProviders, makeRepo, runGit, startTestApp, tmpDir, waitFor, type TestApp } from '../test-utils.ts';
 import { ProjectInvitationCloudFixture } from '../project-collaboration-cloud.test-utils.ts';
+
+const FULL_ACCESS_POLICIES = ['supervised', 'balanced', 'auto', 'full-access'] as const;
+
+async function callTeamTool(connection: TeamMcpConnection, name: string, args: Record<string, unknown> = {}): Promise<any> {
+  const client = new Client({ name: 'mingle-two-app-acceptance', version: '1.0.0' }, { capabilities: {} });
+  const transport = new StreamableHTTPClientTransport(new URL(connection.url), {
+    requestInit: { headers: { Authorization: `Bearer ${connection.token}` } },
+  });
+  await client.connect(transport);
+  try {
+    const result = await client.callTool({ name, arguments: args });
+    const text = (result.content as Array<{ type: string; text?: string }>).find((item) => item.type === 'text')?.text;
+    if (result.isError) throw new Error(`${name} failed: ${text ?? 'no error details'}`);
+    if (!text) return null;
+    return JSON.parse(text);
+  } finally { await client.close(); }
+}
+
+function fullAccessFakeProviders(): FakeProviders {
+  const fake = new FakeProviders();
+  const detect = fake.detectProviders.bind(fake);
+  fake.detectProviders = async (settings) => [
+    ...(await detect(settings)).map((provider) => ({
+      ...provider,
+      policies: [...FULL_ACCESS_POLICIES],
+      models: provider.models.map((model) => ({ ...model, policies: [...FULL_ACCESS_POLICIES] })),
+    })),
+    { id: 'opencode', name: 'OpenCode', available: true, version: 'fake', executable: '/fake/opencode', reason: null,
+      policies: [...FULL_ACCESS_POLICIES], models: [{ id: 'fake-opencode', name: 'Fake OpenCode', policies: [...FULL_ACCESS_POLICIES] }] },
+  ];
+  return fake;
+}
 
 it('shares imported session history and team messages over HTTP and the encrypted two-device mailbox without inference', async () => {
   const users = [
@@ -37,10 +72,14 @@ it('shares imported session history and team messages over HTTP and the encrypte
     for (const user of users) {
       const dataDir = tmpDir('mingle-team-chat-app-');
       accounts.set(dataDir, user);
-      apps.push(await startTestApp({ dataDir, env: {}, exampleWorkspace: false, projectCollaboration: { emailSender } }));
-      const repo = makeRepo();
+      apps.push(await startTestApp({ dataDir, env: {}, exampleWorkspace: false, fake: fullAccessFakeProviders(), projectCollaboration: { emailSender } }));
+      const repo = repositories.length ? tmpDir('mingle-team-chat-clone-') : makeRepo();
+      if (repositories.length) runGit(path.dirname(repo), 'clone', '--quiet', repositories[0]!, repo);
       repositories.push(repo);
-      runGit(repo, 'remote', 'add', 'origin', 'https://github.com/example/team-chat-acceptance.git');
+      runGit(repo, 'config', 'user.name', 'Team acceptance');
+      runGit(repo, 'config', 'user.email', `team-acceptance-${repositories.length}@example.invalid`);
+      if (repositories.length === 1) runGit(repo, 'remote', 'add', 'origin', 'https://github.com/example/team-chat-acceptance.git');
+      else runGit(repo, 'remote', 'set-url', 'origin', 'https://github.com/example/team-chat-acceptance.git');
     }
     const [leader, teammate] = apps as [TestApp, TestApp];
     const projects: string[] = [];
@@ -49,7 +88,7 @@ it('shares imported session history and team messages over HTTP and the encrypte
       expect(created.status, JSON.stringify(created.json)).toBe(201);
       projects.push(created.json.id);
     }
-    const sessionResponse = await leader.api('POST', '/api/sessions', { projectId: projects[0], name: 'History to share', provider: 'claude', model: 'claude-sonnet-5-5', effort: 'high' });
+    const sessionResponse = await leader.api('POST', '/api/sessions', { projectId: projects[0], name: 'History to share', provider: 'opencode', model: 'fake-opencode', effort: 'none', policy: 'full-access' });
     expect(sessionResponse.status, JSON.stringify(sessionResponse.json)).toBe(201);
     const sessionId = sessionResponse.json.id as string;
     leader.app.store.insertMessage({ sessionId, role: 'user', content: 'The team agreed to use a small API surface.', createdAt: '2026-10-20T10:00:00.000Z' });
@@ -66,7 +105,7 @@ it('shares imported session history and team messages over HTTP and the encrypte
     const teammateAgentId = teammateCollaboration.json.agents.find((agent: { sessionId: string }) => agent.sessionId === join.json.sessionId)?.id;
     expect(teammateAgentId).toMatch(/^agent_/);
     const additionalSession = await teammate.api('POST', '/api/sessions', { projectId: projects[1], name: 'Second teammate agent',
-      provider: 'claude', model: 'claude-sonnet-5-5', effort: 'high', policy: 'supervised' });
+      provider: 'opencode', model: 'fake-opencode', effort: 'none', policy: 'full-access' });
     expect(additionalSession.status, JSON.stringify(additionalSession.json)).toBe(201);
 
     const consent = await teammate.api('POST', `/api/projects/${projects[1]}/team-consent`, {
@@ -128,8 +167,11 @@ it('shares imported session history and team messages over HTTP and the encrypte
     const added = await leader.api('POST', `/api/sessions/${sessionId}/team-agents`, { agentId: consent.json.agentIds[0] });
     expect(added.status, JSON.stringify(added.json)).toBe(200);
     expect(added.json.members.some((member: { sessionId: string }) => member.sessionId.startsWith('proxy_'))).toBe(true);
-    await teammate.app.distributed.transport.sync();
-    const joinedStructure = await teammate.api('GET', `/api/projects/${projects[1]}/team-structure`);
+    const joinedStructure = await waitFor(async () => {
+      await teammate.app.distributed.transport.sync();
+      const response = await teammate.api('GET', `/api/projects/${projects[1]}/team-structure`);
+      return response.json.teamSession ? response : null;
+    }, 6000, 'member device team-session structure');
     expect(joinedStructure.status, JSON.stringify(joinedStructure.json)).toBe(200);
     expect(joinedStructure.json.teamSession).toMatchObject({ title: 'History to share' });
     const hostAgents = await leader.api('GET', `/api/projects/${projects[0]}/team-agents`);
@@ -142,6 +184,7 @@ it('shares imported session history and team messages over HTTP and the encrypte
     const secondAgentId = secondCollaboration.json.agents.find((agent: { sessionId: string }) => agent.sessionId === additionalSession.json.id)?.id;
     expect(secondAgentId).toMatch(/^agent_/);
     const firstHostAgent = hostAgents.json.agents.find((agent: { agentId: string }) => agent.agentId === teammateAgentId);
+    const secondAgent = hostAgents.json.agents.find((agent: { agentId: string }) => agent.agentId === secondAgentId);
     let teamGroupId = firstHostAgent?.groupId;
     if (!teamGroupId) {
       const added = await leader.api('POST', `/api/sessions/${sessionId}/team-agents`, { agentId: teammateAgentId });
@@ -149,10 +192,11 @@ it('shares imported session history and team messages over HTTP and the encrypte
       teamGroupId = added.json.group.id;
     }
     expect(teamGroupId).toEqual(expect.any(String));
-    const secondAgent = hostAgents.json.agents.find((agent: { agentId: string }) => agent.agentId === secondAgentId);
     expect(secondAgent).toMatchObject({ consent: 'granted', groupId: null });
     const addSecondAgent = await leader.api('POST', `/api/groups/${teamGroupId}/team-agents`, { agentId: secondAgentId });
     expect(addSecondAgent.status, JSON.stringify(addSecondAgent.json)).toBe(200);
+    const proxySessionId = (leader.app.store.db.prepare(`SELECT session_id FROM mingle_team_proxy_sessions
+      WHERE team_id=? AND shared_project_id=? AND agent_id=?`).get(join.json.teamId, join.json.sharedProjectId, secondAgentId) as { session_id: string }).session_id;
     await teammate.app.distributed.transport.sync();
     const hostStructure = await leader.api('GET', `/api/projects/${projects[0]}/team-structure`);
     const memberStructure = await teammate.api('GET', `/api/projects/${projects[1]}/team-structure`);
@@ -161,26 +205,6 @@ it('shares imported session history and team messages over HTTP and the encrypte
     expect(hostOwnMember?.handle, JSON.stringify({ host: hostStructure.json.members, member: memberStructure.json.members })).toBeTruthy();
     expect(memberHostMember?.handle).toBe(hostOwnMember?.handle);
     expect(memberStructure.json.teamSession).toMatchObject({ title: 'History to share' });
-
-    teammate.fake.script = async (_options, emit) => { emit({ type: 'text', text: 'Remote agent completed the task.' }); };
-    const mentioned = await leader.api('POST', `/api/projects/${projects[0]}/team-chat/messages`, {
-      body: `@${secondAgent.handle} check the shared project.`,
-      mentions: [secondAgentId],
-    });
-    expect(mentioned.status, JSON.stringify(mentioned.json)).toBe(200);
-    await waitFor(() => teammate.fake.runs.some((run) => run.session.id === additionalSession.json.id), 6000, 'member-device fake provider run');
-    expect(teammate.fake.runs.find((run) => run.session.id === additionalSession.json.id)?.prompt).toContain('check the shared project');
-    await waitFor(() => leader.app.groups.get(teamGroupId).deliveries.some((delivery) => delivery.status === 'completed'), 6000, 'host group delivery completion');
-    const proxySessionId = (leader.app.store.db.prepare(`SELECT session_id FROM mingle_team_proxy_sessions
-      WHERE team_id=? AND shared_project_id=? AND agent_id=?`).get(join.json.teamId, join.json.sharedProjectId, secondAgentId) as { session_id: string }).session_id;
-    await waitFor(() => leader.app.store.listMessages(proxySessionId).some((message) => message.role === 'assistant' && message.content.includes('Remote agent completed the task.')),
-      6000, 'final reply in the host proxy session');
-    await waitFor(async () => {
-      await leader.app.distributed.transport.sync();
-      const transcript = await leader.api('GET', `/api/projects/${projects[0]}/team-chat?limit=20`);
-      return transcript.json.messages.find((message: { author: { kind: string; agentId?: string }; body: string }) =>
-        message.author.kind === 'agent' && message.author.agentId === secondAgentId && message.body.includes('Remote agent completed the task.'));
-    }, 6000, 'signed teammate reply in the host transcript');
 
     const latestStructure = await leader.api('GET', `/api/projects/${projects[0]}/team-structure`);
     const fullAccess = await leader.api('PATCH', `/api/projects/${projects[0]}/team-orchestration`, {
@@ -191,6 +215,141 @@ it('shares imported session history and team messages over HTTP and the encrypte
     const needsReconsent = await teammate.api('GET', `/api/projects/${projects[1]}/team-structure`);
     expect(needsReconsent.status, JSON.stringify(needsReconsent.json)).toBe(200);
     expect(needsReconsent.json.myConsent).toMatchObject({ state: 'needs-reconsent' });
+
+    const reconsent = await teammate.api('POST', `/api/projects/${projects[1]}/team-consent`, {
+      sessionIds: [join.json.sessionId, additionalSession.json.id], permissionLevel: 'full-access',
+      settingsVersion: fullAccess.json.settings.version, disclaimerVersion: TEAM_CONSENT_DISCLAIMER_VERSION,
+    });
+    expect(reconsent.status, JSON.stringify(reconsent.json)).toBe(200);
+    expect(reconsent.json).toMatchObject({ state: 'granted', permissionLevel: 'full-access' });
+    await leader.app.distributed.transport.sync();
+    expect(leader.app.store.getSession(sessionId)?.policy).toBe('full-access');
+    expect(teammate.app.store.getSession(additionalSession.json.id)?.policy).toBe('full-access');
+    expect(fullAccess.json.settings.permissionLevel).toBe('full-access');
+
+    const assignmentTaskIds: string[] = [];
+    const workerRuns: Array<{ baseRevision: string; worktreePath: string }> = [];
+    const leadReviews: Array<{ head: string; html: string; css: string; workerAsked: boolean }> = [];
+    let orchestratorAssignments = 0;
+    leader.fake.script = async (options, emit) => {
+      if (options.session.id !== sessionId) { emit({ type: 'text', text: 'Unrelated local turn.' }); return; }
+      if (!options.teamMcp) throw new Error('The local orchestrator did not receive the host Team MCP connection.');
+      const roster = await callTeamTool(options.teamMcp, 'team_members');
+      if (roster.role !== 'orchestrator' || roster.canAssign !== true || !roster.members.some((member: { handle: string }) => member.handle === secondAgent.handle)) {
+        throw new Error('The host orchestrator could not see the remote worker in its team tools.');
+      }
+      if (orchestratorAssignments === 0) {
+        const assigned = await callTeamTool(options.teamMcp, 'team_assign', {
+          recipient: secondAgent.handle, title: 'Build the static landing page',
+          objective: 'Build the small static landing page requested by the user.',
+          acceptanceCriteria: 'index.html and styles.css are committed and provide a responsive landing page.',
+          scope: ['index.html', 'styles.css'],
+        });
+        assignmentTaskIds.push(assigned.taskId);
+        orchestratorAssignments += 1;
+        emit({ type: 'text', text: 'I planned the task and delegated the landing page to the teammate’s agent.' });
+        return;
+      }
+      if (orchestratorAssignments === 1) {
+        const inbox = await callTeamTool(options.teamMcp, 'team_inbox');
+        const workspace = options.session.worktreePath;
+        const html = readFileSync(path.join(workspace, 'index.html'), 'utf8');
+        const css = readFileSync(path.join(workspace, 'styles.css'), 'utf8');
+        const head = runGit(workspace, 'rev-parse', '--verify', 'HEAD').trim();
+        leadReviews.push({ head, html, css, workerAsked: inbox.messages.some((message: { content: string }) => message.content.includes('Please review the landing page')) });
+        if (!html.includes('Welcome to Northstar') || !css.includes('.hero')) throw new Error('The remote files were not integrated before orchestrator review.');
+        const assigned = await callTeamTool(options.teamMcp, 'team_assign', {
+          recipient: secondAgent.handle, title: 'Polish the landing page button',
+          objective: 'Add a visible hover treatment to the primary landing-page button.',
+          acceptanceCriteria: 'The primary button has an accessible, visible hover treatment in styles.css.',
+          scope: ['styles.css'],
+        });
+        assignmentTaskIds.push(assigned.taskId);
+        orchestratorAssignments += 1;
+        emit({ type: 'text', text: 'I reviewed the delivered files in the host workspace and requested a focused CSS fix.' });
+        return;
+      }
+      const html = readFileSync(path.join(options.session.worktreePath, 'index.html'), 'utf8');
+      const css = readFileSync(path.join(options.session.worktreePath, 'styles.css'), 'utf8');
+      if (!css.includes('.hero__cta:hover')) throw new Error('The follow-up fix did not arrive in the host group workspace.');
+      emit({ type: 'text', text: `The landing page is integrated in the host group workspace. It includes ${html.includes('Northstar') ? 'the Northstar page' : 'the requested page'} and the reviewed button fix.` });
+    };
+
+    teammate.fake.runs.length = 0;
+    teammate.fake.script = async (options, emit) => {
+      const runIndex = workerRuns.length;
+      const taskId = assignmentTaskIds[runIndex];
+      if (!taskId || !options.teamMcp) throw new Error('The remote worker did not receive its assignment task or Team MCP connection.');
+      const workerView = await callTeamTool(options.teamMcp, 'team_members');
+      if (workerView.role !== 'worker' || workerView.canAssign !== false) throw new Error('The remote worker has incorrect Team MCP role metadata.');
+      await callTeamTool(options.teamMcp, 'team_status', { taskId, status: 'running', note: 'Starting the assigned landing-page work.' });
+      const worktreePath = options.session.worktreePath;
+      const baseRevision = runGit(worktreePath, 'rev-parse', '--verify', 'HEAD').trim();
+      if (runIndex === 0) {
+        writeFileSync(path.join(worktreePath, 'index.html'), '<!doctype html>\n<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Northstar</title><link rel="stylesheet" href="styles.css"><main class="hero"><h1>Welcome to Northstar</h1><p>Make your next idea real.</p><a class="hero__cta" href="#start">Get started</a></main></html>\n');
+        writeFileSync(path.join(worktreePath, 'styles.css'), 'body{margin:0;font:16px system-ui;background:#101820;color:#f8fafc}.hero{min-height:100vh;display:grid;place-content:center;gap:1rem;padding:2rem;text-align:center}.hero__cta{justify-self:center;padding:.8rem 1.2rem;border-radius:.5rem;background:#72d6c9;color:#10202a;text-decoration:none}\n');
+      } else {
+        const html = readFileSync(path.join(worktreePath, 'index.html'), 'utf8');
+        const currentCss = readFileSync(path.join(worktreePath, 'styles.css'), 'utf8');
+        if (!html.includes('Welcome to Northstar') || !currentCss.includes('.hero__cta')) throw new Error('The follow-up worker did not start from the integrated host state.');
+        writeFileSync(path.join(worktreePath, 'styles.css'), `${currentCss}\n.hero__cta:hover{background:#f4bd50;transform:translateY(-2px)}\n`);
+      }
+      workerRuns.push({ baseRevision, worktreePath });
+      await callTeamTool(options.teamMcp, 'team_status', { taskId, status: 'review', note: 'The requested files are ready for review; Mingle will snapshot uncommitted changes for handoff.' });
+      await callTeamTool(options.teamMcp, 'team_message', {
+        recipient: hostOwnMember.handle, content: 'Please review the landing page in your workspace and send any focused fixes.', expectsReply: false,
+      });
+      emit({ type: 'text', text: `Created the ${runIndex === 0 ? 'landing page' : 'requested button fix'} and left its files for automatic artifact snapshot.` });
+    };
+
+    const request = await leader.api('POST', `/api/groups/${teamGroupId}/messages`, {
+      content: 'Build a small static landing website with index.html and styles.css. You are the orchestrator: plan, delegate the implementation to the teammate agent, review what they deliver, ask for fixes, and summarise.',
+    });
+    expect(request.status, JSON.stringify(request.json)).toBe(202);
+    await waitFor(async () => {
+      await teammate.app.distributed.transport.sync();
+      await leader.app.distributed.transport.sync();
+      return workerRuns.length === 2;
+    }, 15_000, 'both delegated remote worker runs');
+    await waitFor(() => orchestratorAssignments === 2 && leader.fake.runs.length >= 3, 15_000, 'orchestrator review, fix request, and summary');
+    await waitFor(() => leader.app.groups.get(teamGroupId).requests.some((item) => item.status === 'completed'), 15_000, 'completed cross-device group request');
+
+    const firstWorkerRevision = runGit(workerRuns[0]!.worktreePath, 'rev-parse', '--verify', 'HEAD').trim();
+    const secondWorkerRevision = runGit(workerRuns[1]!.worktreePath, 'rev-parse', '--verify', 'HEAD').trim();
+    expect(workerRuns[1]!.baseRevision).toBe(firstWorkerRevision);
+    expect(leadReviews).toHaveLength(1);
+    expect(leadReviews[0]).toMatchObject({ head: firstWorkerRevision, workerAsked: true });
+    expect(leadReviews[0]!.html).toContain('Welcome to Northstar');
+    expect(leadReviews[0]!.css).toContain('.hero__cta');
+    const groupWorkspace = leader.app.store.getSession(sessionId)!.worktreePath;
+    expect(runGit(groupWorkspace, 'rev-parse', '--verify', 'HEAD').trim()).toBe(secondWorkerRevision);
+    expect(readFileSync(path.join(groupWorkspace, 'index.html'), 'utf8')).toContain('Welcome to Northstar');
+    expect(readFileSync(path.join(groupWorkspace, 'styles.css'), 'utf8')).toContain('.hero__cta:hover');
+    expect(teammate.fake.runs).toHaveLength(2);
+
+    const completedRemoteRuns = leader.app.store.bootstrapRuns().filter((run) => run.sessionId === proxySessionId && run.status === 'completed')
+      .sort((left, right) => Date.parse(left.startedAt) - Date.parse(right.startedAt));
+    expect(completedRemoteRuns).toHaveLength(2);
+    expect(completedRemoteRuns[0]!.changes?.files.map((file) => file.path)).toEqual(['index.html', 'styles.css']);
+    expect(completedRemoteRuns[1]!.changes?.files.map((file) => file.path)).toEqual(['styles.css']);
+    const remoteProxyMessages = leader.app.store.listMessages(proxySessionId, { limit: 20 }).filter((message) => message.role === 'assistant');
+    expect(remoteProxyMessages.some((message) => message.content.includes('left its files for automatic artifact snapshot'))).toBe(true);
+    expect(remoteProxyMessages.some((message) => message.content.includes('Integrated into the host group workspace')
+      && message.content.includes('index.html') && message.content.includes('styles.css'))).toBe(true);
+
+    await waitFor(async () => {
+      await teammate.app.distributed.transport.sync();
+      const transcript = await teammate.api('GET', `/api/projects/${projects[1]}/team-chat?limit=50`);
+      return transcript.json.messages.find((message: { author: { kind: string }; body: string }) => message.author.kind === 'agent'
+        && message.body.includes('The landing page is integrated in the host group workspace.'));
+    }, 10_000, 'member-device shared team session result');
+    await waitFor(async () => {
+      await teammate.app.distributed.transport.sync();
+      const transcript = await teammate.api('GET', `/api/projects/${projects[1]}/team-chat?limit=50`);
+      return transcript.json.messages.find((message: { author: { kind: string; agentId?: string }; body: string }) =>
+        message.author.kind === 'agent' && message.author.agentId === secondAgentId
+        && message.body.includes('left its files for automatic artifact snapshot'));
+    }, 10_000, 'member-device remote worker reply');
   } finally {
     while (apps.length) await apps.pop()!.cleanup();
     vi.restoreAllMocks();

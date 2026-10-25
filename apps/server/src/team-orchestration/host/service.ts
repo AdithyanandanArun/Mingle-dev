@@ -7,7 +7,7 @@ import {
   TeamToolResultPayloadSchema, TeamArtifactRefSchema,
   type ProviderFailure, type TeamAgentRole, type TeamAgentState, type TeamConsentState,
   type TeamAvailableAgentsSnapshot, type TeamLeaderChange, type TeamPermissionLevel, type TeamStructureMember, type TeamSessionRef,
-  type TeamOrchestrationSettings, type TeamStructureSnapshot,
+  type TeamArtifactRef, type TeamOrchestrationSettings, type TeamStructureSnapshot,
 } from '@mingle/contracts';
 import { ProviderFailureSchema, ProviderSchema, TeamStructurePayloadSchema as StructureSchema, TeamDeliveryPayloadSchema as DeliverySchema } from '@mingle/contracts';
 import type { DatabaseSync } from 'node:sqlite';
@@ -21,6 +21,7 @@ import type {
 } from '../types.ts';
 import { HttpError } from '../../util.ts';
 import { git } from '../../repository/git-run.ts';
+import { captureRunTree, compareRunTrees } from '../../run-changes.ts';
 import { redactSecrets } from '../../providers/common.ts';
 import type { ProjectCollaborationSnapshot } from '../../../../../packages/contracts/src/project-collaboration.ts';
 import { KeyedLock } from '../../repository/lock.ts';
@@ -72,6 +73,8 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
   constructor(private readonly options: {
     store: Store;
     git?: Pick<GitSyncService, 'exportTeamArtifact' | 'importTeamArtifact'>;
+    integrateTeamArtifact?: (input: { localProjectId: string; teamId: string; sharedProjectId: string; deliveryId: string;
+      worktreePath: string; artifact: TeamArtifactRef }) => Promise<{ beforeRevision: string; revision: string; integrated: boolean }>;
     account: TeamOrchestrationAccount;
     transport: TeamOrchestrationTransport;
     authorizeTeam(input: { teamId: string; peerDeviceId?: string }): Promise<unknown>;
@@ -1127,6 +1130,10 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
   }
 
   isActive(sessionId: string): boolean { return this.active.has(sessionId); }
+  isRunLive(sessionId: string, runId: string): boolean {
+    const active = this.active.get(sessionId);
+    return Boolean(active && active.runId === runId && !active.controller.signal.aborted);
+  }
   activeCount(): number { return this.active.size; }
 
   private proxy(sessionId: string): ProxyRow | undefined {
@@ -1157,6 +1164,7 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
     const member = group.members.find((candidate) => candidate.id === context.memberId && candidate.sessionId === input.session.id);
     const delivery = group.deliveries.find((candidate) => candidate.id === context.deliveryId && candidate.status === 'running');
     if (!member || !delivery || delivery.requestId !== context.requestId) throw new HttpError(409, 'The group delivery is no longer active.');
+    const groupWorkspace = this.groupWorkspace(context.groupId);
     const enabledRole = member.role === 'orchestrator' ? 'orchestrator' : 'worker';
     const basePayload = DeliverySchema.parse({
       sharedProjectId: proxy.shared_project_id, deliveryId: context.deliveryId, groupId: context.groupId,
@@ -1184,7 +1192,7 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
         await this.options.authorizeTeam({ teamId: proxy.team_id, peerDeviceId: proxy.owner_device_id });
         let baseRevision: string | undefined;
         try {
-          const head = (await git(input.session.worktreePath, ['rev-parse', '--verify', 'HEAD'])).stdout.trim();
+          const head = (await git(groupWorkspace?.worktreePath ?? input.session.worktreePath, ['rev-parse', '--verify', 'HEAD'])).stdout.trim();
           if (/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(head)) baseRevision = head;
         } catch { /* A delivery can proceed without a transfer base when Git state is unavailable. */ }
         const inputArtifacts = await this.exportHandoffArtifacts(input.consumedHandoffs ?? [], input.session.projectId,
@@ -1471,6 +1479,16 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
       || typeof message === 'string' && message.startsWith('The remote agent timed out while its device was offline');
   }
 
+  private groupWorkspace(groupId: string): { projectId: string; sessionId: string; worktreePath: string; branch: string | null } | undefined {
+    try {
+      const snapshot = this.options.groups.get(groupId);
+      const anchor = snapshot.members.find((member) => member.sessionId === snapshot.group.anchorSessionId && !member.removedAt);
+      const session = anchor ? this.options.store.getSession(anchor.sessionId) : undefined;
+      if (!session || session.projectId !== snapshot.group.projectId || this.isProxySession(session.id)) return undefined;
+      return { projectId: session.projectId, sessionId: session.id, worktreePath: session.worktreePath, branch: session.branch };
+    } catch { return undefined; }
+  }
+
   private async receiveStatus(envelope: import('@mingle/contracts').AuthenticatedTransportMessage): Promise<void> {
     const parsed = TeamDeliveryStatusPayloadSchema.safeParse(envelope.payload);
     if (!parsed.success) throw new HttpError(400, 'Team delivery status payload is invalid.');
@@ -1520,28 +1538,55 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
       }
       this.options.store.updateSession(delivery.session_id, { status: 'idle', error: null });
       this.options.recovery.clearFailure(delivery.session_id);
-      const importedArtifacts: import('@mingle/contracts').TeamArtifactRef[] = [];
+      // The remote provider has stopped. Release the proxy's runtime lock before acquiring the
+      // repository lease to integrate its verified commits into the group's anchor worktree.
+      this.releaseProxyRun(delivery);
+      const importedArtifacts: TeamArtifactRef[] = [];
+      const integratedArtifacts: TeamArtifactRef[] = [];
       const artifactFailures: string[] = [];
+      const workspace = this.groupWorkspace(delivery.group_id);
+      const workspaceBefore = workspace ? await captureRunTree(workspace.worktreePath) : null;
       for (const untrustedArtifact of parsed.data.artifacts) {
         const artifact = TeamArtifactRefSchema.parse(untrustedArtifact);
         try {
           if (!this.options.git) throw new Error('Git artifact import is unavailable on the host.');
-          importedArtifacts.push(await this.options.git.importTeamArtifact({ teamId: delivery.team_id,
+          const imported = await this.options.git.importTeamArtifact({ teamId: delivery.team_id,
             sharedProjectId: delivery.shared_project_id, deliveryId: delivery.delivery_id, artifact,
-            sourceDeviceId: envelope.fromDeviceId }));
+            sourceDeviceId: envelope.fromDeviceId });
+          importedArtifacts.push(imported);
+          if (!workspace || !this.options.integrateTeamArtifact) {
+            artifactFailures.push(`Commit ${artifact.revision.slice(0, 12)} was imported as ${imported.ref ?? 'an isolated ref'} but the host group workspace is unavailable for integration.`);
+            continue;
+          }
+          await this.options.integrateTeamArtifact({ localProjectId: workspace.projectId, teamId: delivery.team_id,
+            sharedProjectId: delivery.shared_project_id, deliveryId: delivery.delivery_id, worktreePath: workspace.worktreePath, artifact: imported });
+          integratedArtifacts.push(imported);
         } catch (error) {
           artifactFailures.push(redactSecrets(error instanceof Error ? error.message : 'Artifact import failed.').slice(0, 500));
         }
       }
       this.hostRows.prepare('UPDATE mingle_team_host_deliveries SET artifacts_json=? WHERE delivery_id=? AND status=\'completed\'')
         .run(JSON.stringify(importedArtifacts), delivery.delivery_id);
+      let workspaceChanges: import('@mingle/contracts').RunChanges | undefined;
+      if (workspace && integratedArtifacts.length && workspaceBefore) {
+        const workspaceAfter = await captureRunTree(workspace.worktreePath);
+        workspaceChanges = await compareRunTrees(workspace.worktreePath, workspaceBefore, workspaceAfter);
+        this.options.store.setRunChanges(delivery.run_id, workspaceChanges);
+      }
       const artifactSummary = importedArtifacts.length
-        ? `\n\nImported committed artifacts (isolated refs; not merged):\n${importedArtifacts.map((artifact) =>
+        ? `\n\nImported committed artifacts:\n${importedArtifacts.map((artifact) =>
           `- ${safeArtifactText(artifact.path ?? 'committed artifact', 120)} @ ${artifact.revision}${artifact.taskId ? ` (task ${safeArtifactText(artifact.taskId, 80)})` : ''}\n  Git ref: ${safeArtifactText(artifact.ref ?? '', 255)}`,
         ).join('\n')}` : '';
-      const failureSummary = artifactFailures.length ? `\n\nArtifact import failures:\n${artifactFailures.map((failure) => `- ${failure}`).join('\n')}`.slice(0, 15_000) : '';
-      const finalBudget = Math.max(0, 50_000 - artifactSummary.length - failureSummary.length);
-      const finalText = `${parsed.data.finalText ? redactSecrets(parsed.data.finalText).slice(0, finalBudget) : ''}${artifactSummary}${failureSummary}`;
+      const workspaceSummary = integratedArtifacts.length
+        ? workspaceChanges?.summary.status === 'available'
+          ? workspaceChanges.summary.files.length
+            ? `\n\nIntegrated into the host group workspace${workspace?.branch ? ` (${safeArtifactText(workspace.branch, 200)})` : ''}; changed files:\n${workspaceChanges.summary.files.map((file) => `- ${safeArtifactText(file.path, 500)} (${file.status})`).join('\n')}${workspaceChanges.summary.truncated ? '\n- Additional changed files were omitted from this summary.' : ''}`
+            : '\n\nIntegrated into the host group workspace; no new file changes were recorded.'
+          : '\n\nIntegrated into the host group workspace, but its changed-file summary is unavailable.'
+        : '';
+      const failureSummary = artifactFailures.length ? `\n\nArtifact import/integration failures:\n${artifactFailures.map((failure) => `- ${failure}`).join('\n')}`.slice(0, 15_000) : '';
+      const finalBudget = Math.max(0, 50_000 - artifactSummary.length - workspaceSummary.length - failureSummary.length);
+      const finalText = `${parsed.data.finalText ? redactSecrets(parsed.data.finalText).slice(0, finalBudget) : ''}${artifactSummary}${workspaceSummary}${failureSummary}`;
       if (finalText) this.options.store.insertMessage({ sessionId: delivery.session_id, runId: delivery.run_id, role: 'assistant', content: finalText });
       this.finishClaimedDelivery(delivery, 'completed', undefined, undefined, parsed.data.at);
       const project = this.readHost(delivery.team_id, delivery.shared_project_id);
@@ -1572,12 +1617,7 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
     if (timer) clearTimeout(timer);
     this.timers.delete(deliveryId);
     this.heartbeatSequences.delete(deliveryId);
-    const current = this.active.get(delivery.session_id);
-    if (current?.runId === delivery.run_id) {
-      current.controller.abort();
-      this.active.delete(delivery.session_id);
-    }
-    this.options.teamMcp.revoke(delivery.run_id);
+    this.releaseProxyRun(delivery);
     this.expireApprovals(delivery);
     const run = this.options.store.getRun(delivery.run_id);
     if (run?.status === 'running' && outcome !== 'completed') {
@@ -1591,6 +1631,15 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
     this.options.store.touch();
     if (failure?.kind === 'quota_exhausted') this.options.store.updateSession(delivery.session_id, { error: failure.message });
     if (delivery.source_chat_message_id) this.finishChatDelivery(delivery.delivery_id, delivery.source_chat_message_id, outcome);
+  }
+
+  private releaseProxyRun(delivery: DeliveryRow): void {
+    const current = this.active.get(delivery.session_id);
+    if (current?.runId === delivery.run_id) {
+      current.controller.abort();
+      this.active.delete(delivery.session_id);
+    }
+    this.options.teamMcp.revoke(delivery.run_id);
   }
 
   private finishChatDelivery(deliveryId: string, sourceMessageId: string, outcome: 'completed' | 'failed' | 'interrupted'): void {

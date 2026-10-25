@@ -182,6 +182,7 @@ export function createApplication(options: ApplicationOptions): MingleApplicatio
   const teamOrchestration = createTeamOrchestration({
     store, runtime, hub, transport: distributed.transport, account, distributed, collaboration: projectCollaboration,
     groups, teamChat, teamMcp, recovery, changed: () => store.touch(),
+    integrateTeamArtifact: (input) => distributed.integrateTeamArtifact(input),
     // Every device can contribute agents, so the owner-side executor is on by default; tests may substitute it.
     deviceSideFactory: options.teamOrchestrationDeviceSideFactory ?? (() => createDeviceSide({
       store, runtime, transport: distributed.transport, account, distributed, collaboration: projectCollaboration, teamChat, hub, changed: () => store.touch(),

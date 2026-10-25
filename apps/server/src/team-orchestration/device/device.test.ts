@@ -1,6 +1,6 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { DatabaseSync } from 'node:sqlite';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -36,6 +36,9 @@ interface Fixture {
 class FakeRuntime {
   startCount = 0;
   mode: 'complete' | 'approval' | 'manual' | 'failed' = 'complete';
+  commitChanges = true;
+  writeDefaultArtifact = true;
+  onWorktree?: (worktreePath: string, runId: string) => void;
   active = new Map<string, string>();
   optionsByRun = new Map<string, any>();
   executionOrder: string[] = [];
@@ -90,9 +93,12 @@ class FakeRuntime {
   complete(sessionId: string, runId: string, options: any): void {
     const session = this.store.getSession(sessionId)!;
     if (options.worktree?.path) {
-      writeFileSync(path.join(options.worktree.path, `artifact-${runId}.txt`), `result from ${runId}\n`);
-      runGit(options.worktree.path, '-c', 'user.name=Worker', '-c', 'user.email=worker@example.invalid', 'add', `artifact-${runId}.txt`);
-      runGit(options.worktree.path, '-c', 'user.name=Worker', '-c', 'user.email=worker@example.invalid', 'commit', '-m', `artifact ${runId}`);
+      if (this.writeDefaultArtifact) writeFileSync(path.join(options.worktree.path, `artifact-${runId}.txt`), `result from ${runId}\n`);
+      this.onWorktree?.(options.worktree.path, runId);
+      if (this.commitChanges && this.writeDefaultArtifact) {
+        runGit(options.worktree.path, '-c', 'user.name=Worker', '-c', 'user.email=worker@example.invalid', 'add', `artifact-${runId}.txt`);
+        runGit(options.worktree.path, '-c', 'user.name=Worker', '-c', 'user.email=worker@example.invalid', 'commit', '-m', `artifact ${runId}`);
+      }
     }
     options.onActivity?.({ type: 'text', text: 'Final result: safe output' } satisfies AdapterEvent);
     this.store.insertMessage({ sessionId, role: 'assistant', content: 'Final result: safe output', runId });
@@ -364,7 +370,11 @@ describe('owner-device team orchestration', () => {
     const completed = f.sent.find((message) => message.payload?.status === 'completed' && message.payload.deliveryId === payload.deliveryId)?.payload;
     expect(completed).toMatchObject({ finalText: 'Final result: safe output', artifacts: [{ transferId: 'transfer-1' }] });
     expect(f.exportCalls).toHaveLength(1);
-    expect(f.exportCalls[0]).toMatchObject({ toDeviceId: HOST_DEVICE, deliveryId: payload.deliveryId, sourceWorktreePath: f.worktree });
+    const deliveryWorktree = f.runtime.optionsByRun.get(completed.runId)?.worktree?.path;
+    expect(deliveryWorktree).toEqual(expect.any(String));
+    expect(deliveryWorktree).not.toBe(f.worktree);
+    expect(runGit(deliveryWorktree, 'rev-parse', 'HEAD').trim()).toBe(f.exportCalls[0].revision);
+    expect(f.exportCalls[0]).toMatchObject({ toDeviceId: HOST_DEVICE, deliveryId: payload.deliveryId, sourceWorktreePath: deliveryWorktree });
     expect(f.chatReplies).toHaveLength(1);
     expect(f.chatReplies[0]).toEqual([f.projectId, AGENT_ID, 'Final result: safe output', payload.requestId, payload.deliveryId]);
 
@@ -378,6 +388,46 @@ describe('owner-device team orchestration', () => {
     expect(savedLegacy.agent_id).toBe(AGENT_ID);
     expect(JSON.parse(savedLegacy.request_json).agentId).toBe(AGENT_ID);
     expect(f.runtime.startCount).toBe(2);
+  });
+
+  it('snapshots uncommitted provider files into a clean artifact commit while excluding secrets and ignored paths', async () => {
+    const f = await fixture();
+    const originalSessionHead = runGit(f.worktree, 'rev-parse', '--verify', 'HEAD').trim();
+    writeFileSync(path.join(f.repo, '.gitignore'), 'ignored-output.txt\n');
+    runGit(f.repo, 'config', 'user.name', 'Owner');
+    runGit(f.repo, 'config', 'user.email', 'owner@example.invalid');
+    runGit(f.repo, 'add', '.gitignore');
+    runGit(f.repo, '-c', 'user.name=Owner', '-c', 'user.email=owner@example.invalid', 'commit', '-m', 'Ignore generated local output');
+    await sendStructure(f);
+    await f.setConsent();
+    f.runtime.commitChanges = false;
+    f.runtime.writeDefaultArtifact = false;
+    f.runtime.onWorktree = (worktreePath) => {
+      writeFileSync(path.join(worktreePath, 'index.html'), '<!doctype html><title>Uncommitted landing page</title>\n');
+      writeFileSync(path.join(worktreePath, 'styles.css'), 'body{font-family:system-ui}\n');
+      writeFileSync(path.join(worktreePath, '.env'), 'PRIVATE_VALUE=do-not-transfer\n');
+      writeFileSync(path.join(worktreePath, 'ignored-output.txt'), 'ignored local output\n');
+    };
+    const payload = deliveryPayload({ deliveryId: `delivery-${randomUUID()}` });
+    const envelope = { id: randomUUID(), teamId: TEAM, fromDeviceId: HOST_DEVICE, toDeviceId: OWN_DEVICE, kind: 'teamgroup.delivery', payload };
+    await f.handler?.(envelope);
+    await waitFor(() => f.sent.some((message) => message.kind === 'teamgroup.delivery.status'
+      && message.payload.deliveryId === payload.deliveryId && message.payload.status === 'completed'));
+
+    const completed = f.sent.find((message) => message.kind === 'teamgroup.delivery.status'
+      && message.payload.deliveryId === payload.deliveryId && message.payload.status === 'completed')!.payload;
+    expect(completed.artifacts).toHaveLength(1);
+    expect(completed.finalText).toContain('protected or ignored path(s) were excluded');
+    const worktreePath = f.exportCalls[0]!.sourceWorktreePath as string;
+    const committedPaths = runGit(worktreePath, 'show', '--pretty=format:', '--name-only', completed.artifacts[0]!.revision)
+      .split('\n').filter(Boolean).sort();
+    expect(committedPaths).toEqual(['index.html', 'styles.css']);
+    expect(runGit(f.worktree, 'rev-parse', '--verify', 'HEAD').trim()).toBe(originalSessionHead);
+    expect(() => readFileSync(path.join(f.worktree, 'index.html'))).toThrow();
+    expect(() => readFileSync(path.join(f.worktree, 'styles.css'))).toThrow();
+    expect(() => readFileSync(path.join(worktreePath, '.env'))).not.toThrow();
+    expect(runGit(worktreePath, 'rev-parse', '--verify', 'HEAD').trim()).toBe(completed.artifacts[0]!.revision);
+    expect(f.runtime.startCount).toBe(1);
   });
 
   it('heartbeats during a long owner-side run and stops heartbeating after completion', async () => {
@@ -425,12 +475,29 @@ describe('owner-device team orchestration', () => {
     f.runtime.mode = 'complete';
     f.failTerminalStatusSends(1);
     const result = deliveryPayload({ deliveryId: `delivery-${randomUUID()}` });
-    await f.deliver(result);
-    await waitFor(() => f.sent.some((message) => message.kind === 'teamgroup.delivery.status'
-      && message.payload.deliveryId === result.deliveryId && message.payload.status === 'completed'));
+    const resultEnvelope = { id: randomUUID(), teamId: TEAM, fromDeviceId: HOST_DEVICE, toDeviceId: OWN_DEVICE, kind: 'teamgroup.delivery', payload: result };
+    await f.handler?.(resultEnvelope);
+    await waitFor(() => {
+      const row = f.store.db.prepare('SELECT status,terminal_status_json FROM mingle_team_device_deliveries WHERE delivery_id=?')
+        .get(result.deliveryId) as { status: string; terminal_status_json: string | null } | undefined;
+      return row?.status === 'completed' && row.terminal_status_json;
+    }, 4000, 'durable completion payload before status retry');
     const saved = f.store.db.prepare('SELECT terminal_status_json FROM mingle_team_device_deliveries WHERE delivery_id=?')
       .get(result.deliveryId) as { terminal_status_json: string };
-    expect(JSON.parse(saved.terminal_status_json)).toMatchObject({ deliveryId: result.deliveryId, status: 'completed' });
+    const savedPayload = JSON.parse(saved.terminal_status_json);
+    expect(savedPayload).toMatchObject({ deliveryId: result.deliveryId, status: 'completed', runId: expect.any(String),
+      finalText: 'Final result: safe output', artifacts: [{ transferId: 'transfer-1' }] });
+    await f.restartSide();
+    await waitFor(() => f.sent.some((message) => message.kind === 'teamgroup.delivery.status'
+      && message.payload.deliveryId === result.deliveryId && message.payload.status === 'completed'));
+    const resent = f.sent.find((message) => message.kind === 'teamgroup.delivery.status'
+      && message.payload.deliveryId === result.deliveryId && message.payload.status === 'completed')!.payload;
+    expect(resent).toEqual(savedPayload);
+    await f.handler?.(resultEnvelope);
+    const replays = f.sent.filter((message) => message.kind === 'teamgroup.delivery.status'
+      && message.payload.deliveryId === result.deliveryId && message.payload.status === 'completed');
+    expect(replays.at(-1)?.payload).toEqual(savedPayload);
+    expect(f.runtime.startCount).toBe(2);
   });
 
   it('bounds each teammate-triggered run by the saved session, team, and owner-consent policies', async () => {

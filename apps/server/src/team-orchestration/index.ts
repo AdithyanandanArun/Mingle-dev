@@ -23,6 +23,7 @@ export interface TeamOrchestrationOptions {
   teamMcp: TeamMcpProxy;
   recovery: Pick<RecoveryService, 'recordFailure' | 'clearFailure'>;
   changed?: () => void;
+  integrateTeamArtifact?: (input: Parameters<TeamOrchestrationDeviceDependencies['distributed']['integrateTeamArtifact']>[0]) => ReturnType<TeamOrchestrationDeviceDependencies['distributed']['integrateTeamArtifact']>;
   now?: () => number;
   deliveryTimeoutMs?: number;
   deliveryMaxDurationMs?: number;
@@ -52,6 +53,7 @@ export function createTeamOrchestration(options: TeamOrchestrationOptions): {
     }, account: options.account, transport: options.transport,
     authorizeTeam: (input) => options.distributed.authorizeTeam(input), collaboration: options.collaboration,
     groups: options.groups, teamMcp: options.teamMcp, recovery: options.recovery,
+    integrateTeamArtifact: options.integrateTeamArtifact,
     deviceSide, changed: options.changed, now: options.now, deliveryTimeoutMs: options.deliveryTimeoutMs,
     deliveryMaxDurationMs: options.deliveryMaxDurationMs,
     publishLocalAgents: (input) => options.distributed.execution.publishAgents(input),

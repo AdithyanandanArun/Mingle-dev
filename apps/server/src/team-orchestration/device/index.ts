@@ -26,11 +26,16 @@ import type { TeamChatService } from '../../team-chat/service.ts';
 import { HttpError, errorMessage, nowIso, redactSecrets } from '../../util.ts';
 import { git, trimmed } from '../../repository/git-run.ts';
 import { TeamMcpProxy } from './mcp-proxy.ts';
+import { createCommit } from '../../repository/commit.ts';
+import { signingConfigured } from '../../repository/inspect.ts';
+import { isDeniedName } from '../../paths.ts';
 
 type AddRoute = (method: string, path: string, handler: (context: Ctx) => unknown | Promise<unknown>) => unknown;
 type DeviceTransport = DistributedWorkspaceService['transport'];
 type DeviceStore = Pick<Store, 'db' | 'tx' | 'touch' | 'subscribe' | 'recordEvent' | 'getProject' | 'getSession' | 'listSessions' | 'getRun' | 'listMessages' | 'listRunTools' | 'latestProviderFailure'>;
 type DeviceRuntime = Pick<SessionRuntime, 'start' | 'isActive' | 'interrupt' | 'decide'>;
+
+const MAX_AUTO_COMMIT_PATHS = 1_000;
 
 export interface DeviceSideDeps {
   store: DeviceStore;
@@ -697,8 +702,8 @@ export function createDeviceSide(deps: DeviceSideDeps): {
         ?? resolvedBinding.agents.find((agent) => agent.sessionId === parsed.data.agentId && agent.deviceId === ownDeviceId)
       : undefined;
     const payload = localAgent ? { ...parsed.data, agentId: localAgent.id } : parsed.data;
-    const duplicate = db.prepare('SELECT request_json,status,run_id,terminal_status_json FROM mingle_team_device_deliveries WHERE delivery_id=?')
-      .get(payload.deliveryId) as { request_json: string; status: string; run_id: string | null; terminal_status_json: string | null } | undefined;
+    const duplicate = db.prepare('SELECT request_json,status,run_id,session_id,terminal_status_json FROM mingle_team_device_deliveries WHERE delivery_id=?')
+      .get(payload.deliveryId) as { request_json: string; status: string; run_id: string | null; session_id: string; terminal_status_json: string | null } | undefined;
     if (duplicate) {
       const shared = await findBindingBySharedProject(envelope.teamId, payload.sharedProjectId);
       if (!shared || !await authorizedHost(envelope, shared)) return;
@@ -711,6 +716,14 @@ export function createDeviceSide(deps: DeviceSideDeps): {
           deliveryId: payload.deliveryId, agentId: payload.agentId, status: 'rejected', rejection: 'invalid' });
       } else {
         if (await resendSavedTerminalStatus(envelope.teamId, envelope.fromDeviceId, payload.deliveryId)) return;
+        if (duplicate.status === 'completed' && duplicate.run_id) {
+          const finalText = safeText(deps.store.listMessages(duplicate.session_id, { limit: 2_000 })
+            .filter((message) => message.runId === duplicate.run_id && message.role === 'assistant' && message.kind !== 'streaming')
+            .map((message) => message.content).join('\n\n').trim(), 50_000);
+          await sendStatus(envelope.teamId, envelope.fromDeviceId, { sharedProjectId: payload.sharedProjectId,
+            deliveryId: payload.deliveryId, agentId: payload.agentId, status: 'completed', runId: duplicate.run_id, finalText, artifacts: [] });
+          return;
+        }
         const status = ['accepted', 'running', 'awaiting-approval', 'completed', 'failed', 'interrupted', 'rejected'].includes(duplicate.status)
           ? duplicate.status as 'accepted' | 'running' | 'awaiting-approval' | 'completed' | 'failed' | 'interrupted' | 'rejected' : 'accepted';
         await sendStatus(envelope.teamId, envelope.fromDeviceId, { sharedProjectId: payload.sharedProjectId,
@@ -752,7 +765,7 @@ export function createDeviceSide(deps: DeviceSideDeps): {
       if (object.code !== 0) throw new HttpError(409, 'An input artifact revision has not been imported into this device’s local Git objects.');
     }
     if (baseRevision) {
-      const exists = await git(session.worktreePath, ['cat-file', '-e', `${baseRevision}^{commit}`], { allowFailure: true, maxBuffer: 4096 });
+      const exists = await git(projectRoot, ['cat-file', '-e', `${baseRevision}^{commit}`], { allowFailure: true, maxBuffer: 4096 });
       if (exists.code !== 0) throw new HttpError(409, 'The delivery base revision is not present in the owner-selected local project repository.');
     }
     if (session.isolated) {
@@ -761,8 +774,6 @@ export function createDeviceSide(deps: DeviceSideDeps): {
       const top = trimmed(await git(worktreePath, ['rev-parse', '--show-toplevel']));
       const canonicalTop = await realpath(top);
       if (canonicalTop === projectRoot) throw new HttpError(409, 'The shared agent session is not an isolated Git worktree.');
-      baseRevision = trimmed(await git(worktreePath, ['rev-parse', '--verify', 'HEAD']));
-      return { path: worktreePath, branch: session.branch, baseRevision };
     }
     if (!baseRevision) baseRevision = trimmed(await git(projectRoot, ['rev-parse', '--verify', 'HEAD']));
     const directory = path.join(os.tmpdir(), 'mingle-team-agent-worktrees', createHash('sha256').update(shared.sharedProjectId).digest('hex').slice(0, 20));
@@ -773,7 +784,53 @@ export function createDeviceSide(deps: DeviceSideDeps): {
     return { path: worktreePath, branch, baseRevision };
   }
 
+  async function commitEligibleChanges(activeDelivery: ActiveDelivery): Promise<void> {
+    try {
+      const worktreePath = activeDelivery.worktreePath;
+      const [tracked, untracked] = await Promise.all([
+        git(worktreePath, ['diff', '--no-renames', '--name-only', '-z', 'HEAD', '--'], { maxBuffer: 8 * 1024 * 1024 }),
+        git(worktreePath, ['ls-files', '--others', '--exclude-standard', '--full-name', '-z', '--', '.'], { maxBuffer: 8 * 1024 * 1024 }),
+      ]);
+      const candidates = [...new Set([...tracked.stdout.split('\0'), ...untracked.stdout.split('\0')].filter(Boolean))].sort();
+      if (!candidates.length) return;
+      if (candidates.length > MAX_AUTO_COMMIT_PATHS) throw new Error(`There are more than ${MAX_AUTO_COMMIT_PATHS} changed paths to snapshot safely.`);
+      const candidatesWithoutSecrets = candidates.filter((file) => !file.split('/').some(isDeniedName));
+      const ignoredResult = candidatesWithoutSecrets.length
+        ? await git(worktreePath, ['check-ignore', '--no-index', '-z', '--stdin'], {
+          allowFailure: true, stdin: `${candidatesWithoutSecrets.join('\0')}\0`, maxBuffer: 8 * 1024 * 1024,
+        })
+        : { stdout: '' };
+      const ignored = new Set(ignoredResult.stdout.split('\0').filter(Boolean));
+      const paths = candidatesWithoutSecrets.filter((file) => !ignored.has(file));
+      const excluded = candidates.length - paths.length;
+      if (excluded) {
+        const note = `${excluded} protected or ignored path(s) were excluded from remote artifact commits.`;
+        activeDelivery.entries.push(TeamAgentActivityEntrySchema.parse({ id: randomUUID(), runId: activeDelivery.runId,
+          at: ISO(), kind: 'status', text: note }));
+        activeDelivery.artifactFailures.push(note);
+      }
+      if (!paths.length) return;
+      const head = trimmed(await git(worktreePath, ['rev-parse', '--verify', 'HEAD']));
+      const branch = activeDelivery.branch;
+      if (!branch) throw new Error('The isolated delivery worktree has no branch for a controlled artifact commit.');
+      const commit = await createCommit(worktreePath, branch, head, paths, `Mingle team delivery ${activeDelivery.payload.deliveryId}`, {
+        sign: await signingConfigured(worktreePath),
+        beforeCommit: async () => {
+          if (cancelled.has(activeDelivery.payload.deliveryId)) throw new Error('The team delivery was cancelled before its file snapshot could be committed.');
+        },
+      });
+      activeDelivery.entries.push(TeamAgentActivityEntrySchema.parse({ id: randomUUID(), runId: activeDelivery.runId,
+        at: ISO(), kind: 'artifact', text: `Snapshotted ${commit.paths.length} uncommitted provider change(s) as commit ${commit.commit.slice(0, 12)} for transfer.` }));
+    } catch (error) {
+      const message = safeText(errorMessage(error), 500);
+      activeDelivery.artifactFailures.push(`Local changes could not be snapshotted into a committed artifact: ${message}`);
+      activeDelivery.entries.push(TeamAgentActivityEntrySchema.parse({ id: randomUUID(), runId: activeDelivery.runId,
+        at: ISO(), kind: 'error', text: `Local changes could not be snapshotted into a committed artifact: ${message}` }));
+    }
+  }
+
   async function exportCommits(activeDelivery: ActiveDelivery): Promise<Array<{ revision: string; transferId?: string; taskId?: string; ref?: string }>> {
+    await commitEligibleChanges(activeDelivery);
     const head = trimmed(await git(activeDelivery.worktreePath, ['rev-parse', '--verify', 'HEAD']));
     if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(head) || head === activeDelivery.baseRevision) return [];
     const args = activeDelivery.baseRevision
@@ -869,12 +926,19 @@ export function createDeviceSide(deps: DeviceSideDeps): {
           .filter((message) => message.runId === runId && message.role === 'assistant' && message.kind !== 'streaming')
           .map((message) => message.content).join('\n\n').trim(), 50_000);
         const artifacts = await exportCommits(live);
-        const transferFailures = live.artifactFailures.length
-          ? `\n\nArtifact transfer failures:\n${live.artifactFailures.map((failure) => `- ${failure}`).join('\n')}` : '';
-        const finalText = safeText(`${initialFinalText}${transferFailures}`, 50_000);
-        db.prepare(`UPDATE mingle_team_device_deliveries SET status='completed',updated_at=? WHERE delivery_id=?`).run(ISO(), payload.deliveryId);
-        await sendStatus(shared.teamId, (await hostDeviceId(shared))!, { sharedProjectId: shared.sharedProjectId,
-          deliveryId: payload.deliveryId, agentId: payload.agentId, status: 'completed', runId, finalText, artifacts });
+        const artifactIssues = live.artifactFailures.length
+          ? `\n\nArtifact preparation/transfer issues:\n${live.artifactFailures.map((failure) => `- ${failure}`).join('\n')}` : '';
+        const finalText = safeText(`${initialFinalText}${artifactIssues}`, 50_000);
+        const completedPayload = TeamDeliveryStatusPayloadSchema.parse({ sharedProjectId: shared.sharedProjectId,
+          deliveryId: payload.deliveryId, agentId: payload.agentId, status: 'completed', runId, finalText, artifacts, at: ISO() });
+        const completed = db.prepare(`UPDATE mingle_team_device_deliveries
+          SET status='completed',run_id=?,error=NULL,terminal_status_json=?,updated_at=?
+          WHERE delivery_id=? AND status IN ('accepted','running','awaiting-approval')`)
+          .run(runId, JSON.stringify(completedPayload), completedPayload.at, payload.deliveryId);
+        if (Number(completed.changes) === 1) await sendStatusPayload(shared.teamId, payload.integrationDeviceId, completedPayload);
+        else if (!await resendSavedTerminalStatus(shared.teamId, payload.integrationDeviceId, payload.deliveryId)) {
+          throw new Error('The completed team result could not be durably saved for host delivery.');
+        }
         void sendActivity(live, 'idle').catch(() => undefined);
         try {
           if (finalText && !live.replyPosted) {

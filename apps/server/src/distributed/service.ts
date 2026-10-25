@@ -130,7 +130,10 @@ export class DistributedWorkspaceService {
         const state = await this.git.snapshot(envelope.teamId);
         const binding = state.bindings.find((binding) => binding.teamId === envelope.teamId && binding.sharedProjectId === sharedProjectId);
         if (!binding) throw new HttpError(409, 'Bind this shared project before receiving Git work.');
-        await options.repository.withExternalMutation(binding.localProjectId, () => this.git.onEnvelope(envelope));
+        const artifactTransfer = envelope.kind.startsWith('git.team-artifact.');
+        const mutate = artifactTransfer ? options.repository.withExternalRefMutation.bind(options.repository)
+          : options.repository.withExternalMutation.bind(options.repository);
+        await mutate(binding.localProjectId, () => this.git.onEnvelope(envelope));
       }
       else if (envelope.kind.startsWith('command.')) await this.commands.onEnvelope(envelope);
     });
@@ -317,6 +320,16 @@ export class DistributedWorkspaceService {
     const binding = snapshot.bindings.find((candidate) => candidate.teamId === input.teamId && candidate.sharedProjectId === input.sharedProjectId);
     if (!binding) throw new HttpError(409, 'Bind this shared project before importing a team artifact.');
     return this.options.repository.withExternalRefMutation(binding.localProjectId, () => this.git.importTeamArtifact(input));
+  }
+
+  /** Integrate verified remote commits into a group worktree under the repository's mutation lease. */
+  async integrateTeamArtifact(input: Parameters<GitSyncService['integrateTeamArtifact']>[0] & { localProjectId: string }) {
+    const snapshot = await this.git.snapshot(input.teamId);
+    const binding = snapshot.bindings.find((candidate) => candidate.teamId === input.teamId
+      && candidate.sharedProjectId === input.sharedProjectId && candidate.localProjectId === input.localProjectId);
+    if (!binding) throw new HttpError(409, 'Bind this shared project to the selected host project before integrating a team artifact.');
+    const { localProjectId: _localProjectId, ...artifactInput } = input;
+    return this.options.repository.withExternalMutation(binding.localProjectId, () => this.git.integrateTeamArtifact(artifactInput));
   }
 
   /** A provider tool approval for remote work belongs to the same destination owner as the run. */

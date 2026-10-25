@@ -178,7 +178,8 @@ export class SessionRuntime {
   /** A cleanup lock can outlive provider execution; it must not keep tool authority alive. */
   isRunLive(sessionId: string, runId: string): boolean {
     const run = this.active.get(sessionId);
-    return Boolean(run && run.id === runId && run.acceptingTools && !run.closed && !run.controller.signal.aborted);
+    if (run) return run.id === runId && run.acceptingTools && !run.closed && !run.controller.signal.aborted;
+    return Boolean(this.teamProxy?.isRunLive(sessionId, runId));
   }
 
   /**
