@@ -339,6 +339,10 @@ describe('TransportService authenticated mailbox', () => {
       await first.sync();
       expect(notifications).toBe(0);
 
+      await first.send({ teamId, toDeviceId: b.id, kind: 'teamgroup.delivery.heartbeat', payload: { deliveryId: 'heartbeat-1' }, idempotencyKey: 'heartbeat-1' });
+      expect(notifications).toBe(0);
+      expect(first.snapshot(teamId).outbox.some((item) => item.kind === 'teamgroup.delivery.heartbeat')).toBe(false);
+
       await first.send({ teamId, toDeviceId: b.id, kind: 'collaboration.message', payload: { content: 'new durable message' }, idempotencyKey: 'notify-once' });
       expect(notifications).toBe(1);
       await first.sync();

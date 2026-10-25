@@ -130,7 +130,8 @@ export class TransportService {
       .all(...(teamId ? [accountId, teamId] : [accountId])) as Record<string, unknown>[]).map((row) => this.publicDevice(row));
     const links = (this.db.prepare(`SELECT * FROM mingle_transport_links_cache WHERE account_id = ?${teamId ? ' AND team_id = ?' : ''} ORDER BY created_at,device_id,peer_device_id`)
       .all(...(teamId ? [accountId, teamId] : [accountId])) as Record<string, unknown>[]).map((row) => this.publicLink(row));
-    const outbox = (this.db.prepare(`SELECT id,team_id,to_device_id,kind,created_at,expires_at,status,attempts,error FROM mingle_transport_outbox WHERE account_id = ?${teamId ? ' AND team_id = ?' : ''} ORDER BY created_at DESC LIMIT 100`)
+    const outbox = (this.db.prepare(`SELECT id,team_id,to_device_id,kind,created_at,expires_at,status,attempts,error FROM mingle_transport_outbox
+      WHERE account_id = ? AND kind != 'teamgroup.delivery.heartbeat'${teamId ? ' AND team_id = ?' : ''} ORDER BY created_at DESC LIMIT 100`)
       .all(...(teamId ? [accountId, teamId] : [accountId])) as Record<string, unknown>[]).map((row) => this.publicOutbox(row));
     const hasActiveDevice = localDevices.some((row) => row.registered === 1);
     let status = this.status;
@@ -726,9 +727,9 @@ export class TransportService {
     const links = this.db.prepare('SELECT team_id,device_id,peer_device_id,peer_fingerprint,created_at,mutual FROM mingle_transport_links_cache WHERE account_id = ? ORDER BY team_id,device_id,peer_device_id')
       .all(accountId);
     const outbox = this.db.prepare(`SELECT id,team_id,to_device_id,kind,created_at,expires_at,status,attempts,error
-      FROM mingle_transport_outbox WHERE account_id = ? ORDER BY created_at DESC,id DESC LIMIT 100`).all(accountId);
+      FROM mingle_transport_outbox WHERE account_id = ? AND kind != 'teamgroup.delivery.heartbeat' ORDER BY created_at DESC,id DESC LIMIT 100`).all(accountId);
     const inbox = this.db.prepare(`SELECT id,team_id,from_device_id,to_device_id,kind,status,attempts,error,received_at
-      FROM mingle_transport_inbox WHERE account_id = ? ORDER BY received_at DESC,id DESC LIMIT 1000`).all(accountId);
+      FROM mingle_transport_inbox WHERE account_id = ? AND kind != 'teamgroup.delivery.heartbeat' ORDER BY received_at DESC,id DESC LIMIT 1000`).all(accountId);
     const localDevices = this.localDevices(accountId);
     const snapshot = this.snapshot();
     return JSON.stringify({ accountId, status: snapshot.status, error: snapshot.error, deviceId: snapshot.deviceId, localDevices, devices, links, outbox, inbox });
