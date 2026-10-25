@@ -57,6 +57,9 @@ interface ActiveRun {
   intent: 'normal' | 'plan';
   executionPlanId?: string;
   context?: string;
+  contextRefs?: Message['contextRefs'];
+  deferContextResolution?: boolean;
+  resolveSkills?: () => Promise<ProviderSkill[]>;
   attachmentOwnerKind?: 'message' | 'group_message';
   attachmentOwnerId?: string;
   changeBaseline: RunTreeSnapshot | null;
@@ -83,7 +86,8 @@ interface ActiveCompaction {
 export interface StartOptions {
   groupDeliveryId?: string; taskId?: string; userMessage?: { content: string; kind?: string }; skills?: ProviderSkill[];
   attachmentIds?: string[]; attachmentOwnerKind?: 'message' | 'group_message'; attachmentOwnerId?: string;
-  invocation?: NativeInvocation; context?: string; contextRefs?: Message['contextRefs']; intent?: 'normal' | 'plan'; executionPlanId?: string;
+  invocation?: NativeInvocation; context?: string; contextRefs?: Message['contextRefs']; deferContextResolution?: boolean;
+  resolveSkills?: () => Promise<ProviderSkill[]>; intent?: 'normal' | 'plan'; executionPlanId?: string;
   /** Device-owned team delivery: bypass local group context and use its encrypted Team MCP proxy. */
   teamRun?: boolean; teamMcp?: import('@mingle/contracts').TeamMcpConnection;
   /** Group-level permission applied only to this provider invocation; the saved session is unchanged. */
@@ -185,7 +189,7 @@ export class SessionRuntime {
     const session = this.store.getSession(sessionId);
     if (!session) throw notFound('Session not found');
     if (this.stopping.has(sessionId)) throw conflict('This session is being removed from Mingle.');
-    if (options.intent === 'plan' && (options.invocation || options.skills?.length)) throw badRequest('Native plan generation cannot run provider commands or skills. Send a regular planning prompt instead.');
+    if (options.intent === 'plan' && (options.invocation || options.skills?.length || options.resolveSkills)) throw badRequest('Native plan generation cannot run provider commands or skills. Send a regular planning prompt instead.');
     const executionPlan = options.executionPlanId ? this.store.getSessionPlan(options.executionPlanId) : undefined;
     if (options.executionPlanId && (!executionPlan || executionPlan.sessionId !== sessionId
       || !((executionPlan.status === 'approved' && executionPlan.approvedRevision === executionPlan.revision)
@@ -239,6 +243,7 @@ export class SessionRuntime {
       id: runId, startedAt: nowIso(), provider: session.provider, tick: performance.now(), tools: new Map(), activityTimer: null,
       sessionId, controller: new AbortController(), closed: false, cleanupPending: false, acceptingTools: false, approvals: new Map(), questions: new Map(), stream: null, flushTimer: null, consumedHandoffs: handoffs.map((h) => h.id), firstEvent: false, capabilityTokens: [],
       baseInput: session.inputTokens, baseOutput: session.outputTokens, baseCost: session.costUsd, taskId: options.taskId ?? null, skills: options.skills ?? [], invocation, intent: options.intent ?? 'normal', executionPlanId: options.executionPlanId,
+      contextRefs: options.contextRefs, deferContextResolution: options.deferContextResolution, resolveSkills: options.resolveSkills,
       context: [options.context, invocation && handoffs.length ? this.composePrompt(handoffs, '') : undefined].filter(Boolean).join('\n\n') || undefined,
       attachmentOwnerKind: options.attachmentOwnerKind ?? 'message', attachmentOwnerId: options.attachmentOwnerId, changeBaseline: null, dispatchState: 'unknown',
       teamRun: options.teamRun === true, teamMcpConnection: options.teamMcp, onActivity: options.onActivity,
@@ -411,6 +416,11 @@ export class SessionRuntime {
         await this.finish(run, 'interrupted', null, unavailableRunChanges('The run was interrupted before work started.'));
         return;
       }
+      if (run.deferContextResolution && run.contextRefs?.length) {
+        const context = await buildMessageContext(run.contextRefs, startSession.worktreePath, (_sessionId, messageId) => this.store.getMessage(messageId));
+        run.context = [run.context, context].filter(Boolean).join('\n\n') || undefined;
+      }
+      if (run.resolveSkills) run.skills = await run.resolveSkills();
       const adapter = this.providers.createAdapter(startSession.provider);
       const savedSession = this.store.getSession(run.sessionId) ?? startSession;
       const session: Session = {

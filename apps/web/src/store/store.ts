@@ -267,6 +267,7 @@ const send = (event: ClientEvent): boolean => {
 };
 
 export const useMingle = create<MingleState>((set, get) => {
+  let lastBootstrapText: string | null = null;
   const savePersisted = (): void => {
     const s = get();
     const data: Persisted = {
@@ -434,6 +435,37 @@ export const useMingle = create<MingleState>((set, get) => {
     };
   };
 
+  const addOptimisticSessionMessage = (event: Event): void => {
+    const message = (event as CustomEvent<{ message?: Message }>).detail?.message;
+    if (!message || !message.id.startsWith('optimistic:')) return;
+    set((s) => s.boot && !s.boot.messages.some((row) => row.id === message.id)
+      ? { boot: { ...s.boot, messages: [...s.boot.messages, message] } } : {});
+  };
+  const removeOptimisticSessionMessage = (event: Event): void => {
+    const messageId = (event as CustomEvent<{ messageId?: string }>).detail?.messageId;
+    if (!messageId) return;
+    set((s) => s.boot?.messages.some((row) => row.id === messageId)
+      ? { boot: { ...s.boot, messages: s.boot.messages.filter((row) => row.id !== messageId) } } : {});
+  };
+  const addOptimisticGroupMessage = (event: Event): void => {
+    const detail = (event as CustomEvent<{ groupId?: string; message?: import('@mingle/contracts').GroupMessage }>).detail;
+    if (!detail?.groupId || !detail.message) return;
+    set((s) => {
+      if (!s.boot) return {};
+      const groups = s.boot.groups ?? [];
+      if (!groups.some((group) => group.group.id === detail.groupId)) return {};
+      return { boot: { ...s.boot, groups: groups.map((group) => group.group.id === detail.groupId
+        ? { ...group, messages: [...group.messages, detail.message!] } : group) } };
+    });
+  };
+  const removeOptimisticGroupMessage = (event: Event): void => {
+    const detail = (event as CustomEvent<{ groupId?: string; messageId?: string }>).detail;
+    if (!detail?.groupId || !detail.messageId) return;
+    set((s) => s.boot?.groups?.some((group) => group.group.id === detail.groupId && group.messages.some((message) => message.id === detail.messageId))
+      ? { boot: { ...s.boot!, groups: s.boot!.groups!.map((group) => group.group.id === detail.groupId
+        ? { ...group, messages: group.messages.filter((message) => message.id !== detail.messageId) } : group) } } : {});
+  };
+
   const initialTerminal: TerminalState = { status: 'idle', terminalId: null, exitCode: null, projectId: null, sessionId: null, label: '', note: null };
 
   return {
@@ -476,6 +508,14 @@ export const useMingle = create<MingleState>((set, get) => {
     init() {
       if (started) return;
       started = true;
+      window.addEventListener('mingle:optimistic-session-message', addOptimisticSessionMessage);
+      window.addEventListener('mingle:optimistic-session-remove', removeOptimisticSessionMessage);
+      window.addEventListener('mingle:optimistic-group-message', addOptimisticGroupMessage);
+      window.addEventListener('mingle:optimistic-group-remove', removeOptimisticGroupMessage);
+      window.addEventListener('mingle:optimistic-group-accepted', (event) => {
+        const snapshot = (event as CustomEvent<{ snapshot?: GroupSnapshot }>).detail?.snapshot;
+        if (snapshot) get().applyGroup(snapshot);
+      });
       connect();
       void get().refreshNow();
       window.addEventListener('online', handleOnline);
@@ -493,7 +533,18 @@ export const useMingle = create<MingleState>((set, get) => {
           try {
             const next = await api.bootstrap();
             const s = get();
-            const boot = reconcileBootstrap(s.boot, next);
+            const serialized = JSON.stringify(next);
+            if (serialized === lastBootstrapText) {
+              if (s.bootLoading || s.bootError || s.staleError) set({ bootError: null, staleError: null, bootLoading: false });
+              continue;
+            }
+            lastBootstrapText = serialized;
+            const pendingOptimistic = s.boot?.messages.filter((message) => message.id.startsWith('optimistic:') &&
+              !next.messages.some((saved) => saved.role === 'user' && saved.sessionId === message.sessionId && saved.content === message.content &&
+                Math.abs(Date.parse(saved.createdAt) - Date.parse(message.createdAt)) < 10_000)) ?? [];
+            const boot = reconcileBootstrap(s.boot, pendingOptimistic.length
+              ? { ...next, messages: [...next.messages, ...pendingOptimistic] }
+              : next);
             const sel = resolveSelection(s, boot);
             set({ boot, bootError: null, staleError: null, bootLoading: false, streams: pruneStreams(s.streams, boot), ...sel });
             savePersisted();

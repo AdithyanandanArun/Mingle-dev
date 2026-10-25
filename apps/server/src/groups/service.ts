@@ -620,20 +620,7 @@ export class GroupService {
       const session = this.store.getSession(member.sessionId);
       if (!session) throw conflict(`@${member.handle} is unavailable.`);
       if (!this.catalog) throw conflict('Provider command discovery is unavailable. Refresh and try again.');
-      const catalog = await this.catalog(session, true);
-      const table = input.invocation.kind === 'command' ? nativeActionCommands(session.provider, catalog.commands) : nativeActionSkills(session.provider, catalog.skills);
-      const selected = table.find((item) => item.id === input.invocation!.id && item.name === input.invocation!.name && ('enabled' in item ? item.enabled : true));
-      if (!selected) throw unprocessable('That provider action changed or is no longer available. Refresh the menu and select it again.');
-      const freshGroup = this.requireGroup(groupId);
-      const freshMembers = this.repo.members(groupId, false);
-      const freshMember = freshMembers.find((row) => row.id === member.id);
-      const freshSession = freshMember ? this.store.getSession(freshMember.sessionId) : undefined;
-      if (!freshMember || !freshSession || freshGroup.projectId !== group.projectId || freshMember.sessionId !== session.id || freshSession.provider !== session.provider || freshSession.model !== session.model) {
-        throw conflict('The selected group agent or its settings changed while loading actions. Refresh and select the action again.');
-      }
-      group = freshGroup; members = freshMembers;
-      if (input.clientMessageId && this.repo.messageByClientId(group.id, input.clientMessageId)) return this.snapshot(group);
-      invocation = { kind: input.invocation.kind, id: selected.id, name: selected.name, arguments: input.invocation.arguments, memberId: member.id, sessionId: session.id, provider: session.provider, model: session.model };
+      invocation = { kind: input.invocation.kind, id: input.invocation.id, name: input.invocation.name, arguments: input.invocation.arguments, memberId: member.id, sessionId: session.id, provider: session.provider, model: session.model };
       requested = [member.id];
       if (input.attachmentIds?.length && session.provider === 'opencode') throw unprocessable('OpenCode native slash commands cannot carry attachments. Remove the attachments or send a regular message.');
     }
@@ -648,9 +635,7 @@ export class GroupService {
       if (ref.sourceGroupId !== group.id || !sourceMember) throw unprocessable('A quoted source must be an assistant message from this group.');
       validateQuoteCitation(ref, this.store.getMessage(ref.sourceMessageId));
     }
-    // Reject missing, binary, oversized, denied, or escaped file refs before accepting a durable queued delivery.
-    await buildMessageContext(input.contextRefs, (ref) => this.store.getSession(ref.sourceSessionId, true)?.worktreePath,
-      (_sessionId, messageId) => this.store.getMessage(messageId));
+    // File content is loaded by startDelivery after this durable request has been returned to the client.
     group = this.requireGroup(groupId);
     members = this.repo.members(group.id, false);
     if (invocation) {
@@ -2147,7 +2132,7 @@ export class GroupService {
     this.pending.add(groupId);
     if (this.scheduled) return;
     this.scheduled = true;
-    queueMicrotask(() => {
+    setImmediate(() => {
       this.scheduled = false;
       const ids = [...this.pending];
       this.pending.clear();

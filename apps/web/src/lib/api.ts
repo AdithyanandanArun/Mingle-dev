@@ -1,6 +1,6 @@
 import type {
   AddGroupAgent, AntigravityAuthState, AntigravityInstallState, Approval, AppSettings, Bootstrap, BrowserAction, BrowserConnect, BrowserDiscovery, BrowserSessionState, BrowserTab, CreateGroup, DirectoryListing, ExternalConversationDetails, ExternalConversationList, FileEntry, GitHubState, GitStatus, GroupSnapshot, ImportConversationResult, Project, ProjectContext, ProviderCatalog, ProviderInfo,
-  RepositoryBranch, RepositoryCommit, RepositoryMutationResult, RepositoryPullRequest, RepositoryPush, RepositoryState, RunChanges, SendGroupMessage, Session, SessionUsage, ToolCall, Task, TaskStatus, WorkspaceEvent, MessageContextRef, EditSessionPlan, SessionPlan, UserInputAnswers, UserQuestion,
+  RepositoryBranch, RepositoryCommit, RepositoryMutationResult, RepositoryPullRequest, RepositoryPush, RepositoryState, RunChanges, SendGroupMessage, Session, SessionUsage, ToolCall, Task, TaskStatus, WorkspaceEvent, Message, MessageContextRef, EditSessionPlan, SessionPlan, UserInputAnswers, UserQuestion,
 } from '@mingle/contracts';
 import type { AccountState, AccountConnection, AccountPreferences, SavedAccountPreferences, AttachmentRef, NativeActionCatalog } from '@mingle/contracts';
 import type { ProjectCollaborationSnapshot, SendTeamChatMessage, TeamChatSnapshot, TeamChatMessage } from '@mingle/contracts';
@@ -116,6 +116,9 @@ const withSession = <T extends object>(body: T, sessionId: string | null): T & {
 
 const groupBase = (groupId: string): string => `/api/groups/${encodeURIComponent(groupId)}`;
 const browserBase = (sessionId: string): string => `/api/sessions/${encodeURIComponent(sessionId)}/browser`;
+const dispatchLocalEvent = (name: string, detail: unknown): void => {
+  if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent(name, { detail }));
+};
 
 export const api = {
   account: (signal?: AbortSignal) => json<AccountState>('/api/account', 'GET', undefined, signal),
@@ -172,7 +175,23 @@ export const api = {
   recoverGroup: (id: string, action: ApiRecoveryActionRequest) => json<ApiRecoveryActionResult>(`${groupBase(id)}/recovery`, 'POST', action),
   addGroupAgent: (id: string, input: AddGroupAgent) => json<GroupSnapshot>(`${groupBase(id)}/agents`, 'POST', input),
   removeGroupMember: (id: string, memberId: string) => json<GroupSnapshot>(`${groupBase(id)}/members/${encodeURIComponent(memberId)}`, 'DELETE'),
-  sendGroupMessage: (id: string, input: SendGroupMessage) => json<GroupSnapshot>(`${groupBase(id)}/messages`, 'POST', input),
+  sendGroupMessage: async (id: string, input: SendGroupMessage) => {
+    const message: import('@mingle/contracts').GroupMessage = {
+      id: `optimistic:${input.clientMessageId ?? crypto.randomUUID()}`, seq: Date.now(), groupId: id, senderMemberId: null,
+      recipientMemberIds: input.recipients ?? [], kind: 'user', content: input.content,
+      requestId: null, replyToId: null, sourceMessageId: null, sourceRunId: null, createdAt: new Date().toISOString(),
+      ...(input.contextRefs?.length ? { contextRefs: input.contextRefs } : {}),
+    };
+    dispatchLocalEvent('mingle:optimistic-group-message', { groupId: id, message });
+    try {
+      const snapshot = await json<GroupSnapshot>(`${groupBase(id)}/messages`, 'POST', input);
+      dispatchLocalEvent('mingle:optimistic-group-accepted', { snapshot });
+      return snapshot;
+    } catch (error) {
+      dispatchLocalEvent('mingle:optimistic-group-remove', { groupId: id, messageId: message.id });
+      throw error;
+    }
+  },
   groupActionCatalog: (id: string, memberId: string, signal?: AbortSignal, refresh = false) => json<NativeActionCatalog>(`${groupBase(id)}/members/${encodeURIComponent(memberId)}/catalog${refresh ? '?refresh=true' : ''}`, 'GET', undefined, signal),
   stopGroup: (id: string) => json<GroupSnapshot>(`${groupBase(id)}/stop`, 'POST', {}),
   resumeGroupMember: (id: string, memberId: string) => json<GroupSnapshot>(`${groupBase(id)}/members/${encodeURIComponent(memberId)}/resume`, 'POST', {}),
@@ -184,7 +203,21 @@ export const api = {
   toolCall: (id: string) => json<ToolCall>(`/api/tool-calls/${encodeURIComponent(id)}`),
   renameSession: (id: string, name: string) => json<Session>(`/api/sessions/${encodeURIComponent(id)}`, 'PATCH', { name }),
   deleteSession: (id: string) => json<{ ok: boolean; notices?: string[] }>(`/api/sessions/${encodeURIComponent(id)}`, 'DELETE'),
-  sendMessage: (id: string, content: string, skills?: string[], attachmentIds?: string[], contextRefs?: MessageContextRef[], intent: 'normal' | 'plan' = 'normal') => json<{ accepted: boolean }>(`/api/sessions/${encodeURIComponent(id)}/messages`, 'POST', { content, intent, ...(skills?.length ? { skills } : {}), ...(attachmentIds?.length ? { attachmentIds } : {}), ...(contextRefs?.length ? { contextRefs } : {}) }),
+  sendMessage: async (id: string, content: string, skills?: string[], attachmentIds?: string[], contextRefs?: MessageContextRef[], intent: 'normal' | 'plan' = 'normal') => {
+    const message: Message = {
+      id: `optimistic:${crypto.randomUUID()}`, sessionId: id, role: 'user', content, createdAt: new Date().toISOString(),
+      ...(contextRefs?.length ? { contextRefs } : {}),
+    };
+    dispatchLocalEvent('mingle:optimistic-session-message', { message });
+    try {
+      return await json<{ accepted: boolean }>(`/api/sessions/${encodeURIComponent(id)}/messages`, 'POST', {
+        content, intent, ...(skills?.length ? { skills } : {}), ...(attachmentIds?.length ? { attachmentIds } : {}), ...(contextRefs?.length ? { contextRefs } : {}),
+      });
+    } catch (error) {
+      dispatchLocalEvent('mingle:optimistic-session-remove', { messageId: message.id });
+      throw error;
+    }
+  },
   editPlan: (id: string, input: EditSessionPlan) => json<SessionPlan>(`/api/plans/${encodeURIComponent(id)}`, 'PATCH', input),
   approvePlan: (id: string, revision: number) => json<SessionPlan>(`/api/plans/${encodeURIComponent(id)}/approve`, 'POST', { revision }),
   executePlan: (id: string) => json<{ accepted: true; runId: string | null; deliveryId?: string; plan: SessionPlan }>(`/api/plans/${encodeURIComponent(id)}/execute`, 'POST', {}),

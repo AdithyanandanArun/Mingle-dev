@@ -8,7 +8,6 @@ import type { Bootstrap, SessionUsage } from '@mingle/contracts';
 import { gitStatus } from './git.ts';
 import type { Hub } from './hub.ts';
 import { listDirectory, readTextFile, searchFiles, writeTextFile } from './paths.ts';
-import { buildMessageContext } from './message-context.ts';
 import type { ProviderService } from './provider-service.ts';
 import type { SessionRuntime } from './runtime.ts';
 import type { Store } from './store.ts';
@@ -414,13 +413,24 @@ export function buildRouter(s: Services) {
       return new Reply(202, await s.groups.send(group.group.id, { content, attachmentIds, contextRefs, ...(id === group.group.anchorSessionId ? {} : { recipients: [member.id] }) }));
     }
     if (s.runtime.isActive(id)) throw conflict('Session already has an active run or provider cleanup is still in progress');
-    const catalog = selected?.length ? await s.providers.catalog(session, true) : null;
-    const skills = [...new Set(selected ?? [])].map((key) => {
-      const skill = catalog?.skills.find((row) => row.id === key && row.enabled);
-      if (!skill) throw badRequest('A selected skill is no longer available. Refresh the skill picker and select it again.');
-      return skill;
-    });
-    if (session.provider === 'claude' && skills.length > 1) throw badRequest('Claude supports one explicitly selected skill per message.');
+    const skillIds = [...new Set(selected ?? [])];
+    if (intent === 'plan' && skillIds.length) throw badRequest('Native plan generation cannot run provider commands or skills. Send a regular planning prompt instead.');
+    if (session.provider === 'claude' && skillIds.length > 1) throw badRequest('Claude supports one explicitly selected skill per message.');
+    const resolveSkills = skillIds.length ? async () => {
+      const catalog = await s.providers.catalog(session, true);
+      const skills = skillIds.map((key) => {
+        const skill = catalog.skills.find((row) => row.id === key && row.enabled);
+        if (!skill) throw badRequest('A selected skill is no longer available. Refresh the skill picker and select it again.');
+        return skill;
+      });
+      const current = s.store.getSession(id);
+      if (!current) throw notFound('Session not found');
+      if (s.groups.forSession(id)) throw conflict('This session joined a group while loading skills. Send through its group conversation.');
+      if (current.provider !== session.provider || current.model !== session.model || current.worktreePath !== session.worktreePath) {
+        throw conflict('Session settings changed while loading skills. Send the message again.');
+      }
+      return skills;
+    } : undefined;
     const attachmentRows = s.attachments.validate({ kind: 'session', id }, attachmentIds ?? []);
     if (attachmentRows.some((row) => row.kind === 'image')) {
       const info = s.providers.cached()?.find((row) => row.id === session.provider);
@@ -438,8 +448,7 @@ export function buildRouter(s: Services) {
       if (ref.kind === 'quote' && (ref.sourceGroupId || ref.sourceSessionId !== id)) throw badRequest('A quoted source must come from this session. Choose text from a message in this conversation.');
       if (ref.kind === 'file' && ref.sourceSessionId !== id) throw badRequest('A file reference must come from this session worktree. Choose the file again.');
     }
-    const context = await buildMessageContext(contextRefs, latest.worktreePath, (_sessionId, messageId) => s.store.getMessage(messageId));
-    s.runtime.start(id, content, { intent, skills, attachmentIds, context, contextRefs });
+    s.runtime.start(id, content, { intent, attachmentIds, contextRefs, deferContextResolution: true, resolveSkills });
     return new Reply(202, { accepted: true });
   });
   add('POST', '/api/sessions/:id/interrupt', (ctx) => {
