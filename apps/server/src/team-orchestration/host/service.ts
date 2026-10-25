@@ -874,8 +874,13 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
     this.options.store.tx(() => {
       this.persistSettings(row, next);
       if (rankPermission(next.permissionLevel) > rankPermission(prior.permissionLevel)) {
-        this.hostRows.prepare(`UPDATE mingle_team_host_consents SET state='needs-reconsent',updated_at=? WHERE team_id=? AND shared_project_id=? AND state='granted'`)
-          .run(next.updatedAt, context.project.teamId, context.project.sharedProjectId);
+        // Only consents given below the new level need renewing; an owner who already allowed it keeps sharing.
+        const below = TeamPermissionLevelSchema.options.filter((level) => rankPermission(level) < rankPermission(next.permissionLevel));
+        if (below.length) {
+          this.hostRows.prepare(`UPDATE mingle_team_host_consents SET state='needs-reconsent',updated_at=? WHERE team_id=? AND shared_project_id=? AND state='granted'
+            AND permission_level IN (${below.map(() => '?').join(',')})`)
+            .run(next.updatedAt, context.project.teamId, context.project.sharedProjectId, ...below);
+        }
       }
       if (group) this.syncTeamRoster(context, row.group_id, next);
       else this.syncSessions(context, next);

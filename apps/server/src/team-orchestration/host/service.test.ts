@@ -273,6 +273,18 @@ it('authorizes host changes, enforces optimistic versions, validates broadcasts,
   expect(fx.outgoing.every((entry) => entry.kind !== 'teamgroup.delivery')).toBe(true);
 });
 
+it('keeps a full-access consent granted when the team level is raised to full access', async () => {
+  const fx = fixture();
+  await fx.host.enable(PROJECT, enableInput());
+  await fx.incoming('teamgroup.consent', {
+    sharedProjectId: SHARED, agentIds: [REMOTE_AGENT], permissionLevel: 'full-access', settingsVersion: 1,
+    disclaimerVersion: TEAM_CONSENT_DISCLAIMER_VERSION, state: 'granted', at: new Date().toISOString(),
+  });
+  await fx.host.update(PROJECT, { expectedVersion: 1, permissionLevel: 'full-access' });
+  expect((await fx.host.structure(PROJECT)).members.find((member) => member.agentId === REMOTE_AGENT)?.consent).toBe('granted');
+  expect((await fx.host.availableAgents(PROJECT)).agents.find((agent) => agent.agentId === REMOTE_AGENT)).toMatchObject({ consent: 'granted' });
+});
+
 it('lazily migrates legacy local session IDs in host state while preserving assigned handles', async () => {
   const fx = fixture();
   const localSession = (id: string, name: string) => fx.store.insertSession({ id, projectId: PROJECT, name,
