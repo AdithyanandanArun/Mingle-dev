@@ -234,6 +234,17 @@ describe('RemoteExecutionService', () => {
     expect(destination.transport.sent.filter((entry) => entry.kind === 'execution.agents')).toHaveLength(2);
   });
 
+  it('leaves an archived published session out of the snapshot until refresh revokes it', async () => {
+    const destination = createFixture({ deviceId: DEVICE_B, peerId: DEVICE_A, ownerId: OWNER_B, projectId: 'project_archived', sessionId: 'session_archived', sessionName: 'Archived', provider: 'opencode' });
+    await destination.service.bindProject({ teamId: TEAM, sharedProjectId: SHARED_PROJECT, localProjectId: 'project_archived' });
+    await destination.service.publishAgents({ teamId: TEAM, sharedProjectId: SHARED_PROJECT, sessionIds: ['session_archived'] });
+    destination.db.prepare("UPDATE sessions SET archived_at = ? WHERE id = 'session_archived'").run(now());
+
+    expect((await destination.service.snapshot(TEAM)).agents.filter((entry) => entry.deviceId === DEVICE_B)).toHaveLength(0);
+    expect(await destination.service.refreshPublishedAgents({ teamId: TEAM, sharedProjectId: SHARED_PROJECT })).toHaveLength(0);
+    expect(destination.db.prepare("SELECT revoked_at FROM mingle_remote_agents WHERE session_id = 'session_archived'").get()).toMatchObject({ revoked_at: expect.any(String) });
+  });
+
   it('pins approval to the destination owner and dispatches once only after fresh known quota', async () => {
     const source = createFixture({ deviceId: DEVICE_A, peerId: DEVICE_B, ownerId: OWNER_A, projectId: 'project_a2', sessionId: 'session_a2', sessionName: 'Source', provider: 'codex', seedFailure: true });
     const destination = createFixture({ deviceId: DEVICE_B, peerId: DEVICE_A, ownerId: OWNER_B, projectId: 'project_b2', sessionId: 'session_b2', sessionName: 'Destination', provider: 'claude' });

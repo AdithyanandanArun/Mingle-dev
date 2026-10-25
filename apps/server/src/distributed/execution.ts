@@ -369,7 +369,10 @@ export class RemoteExecutionService {
       const deviceId = String(row.device_id);
       if (deviceId === identity.deviceId) {
         if (String(row.owner_id) !== identity.ownerId) continue;
-        const session = this.localSession(String(row.session_id));
+        // A published session archived since publishing is no longer offered; the next refresh revokes it.
+        let session: Session;
+        try { session = this.localSession(String(row.session_id)); }
+        catch { continue; }
         const presence: RemotePresence = this.options.runtime.isActive(session.id) || ['running', 'waiting'].includes(session.status) ? 'busy' : 'idle';
         agents.push(this.agentFromRow(row, presence));
         continue;
