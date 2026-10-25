@@ -5,6 +5,7 @@ import type { TeamPermissionLevel, TeamStructureSnapshot } from '@mingle/contrac
 import { useMingle } from '../../../store/store';
 import { Button, Modal, ProviderMark, StatusDot } from '../../ui';
 import { TeamOrchestrationApiError, teamOrchestrationApi } from './api';
+import { initialConsentSessionIds } from './team-consent-flow';
 import './team-orchestration-settings.css';
 
 export function TeamConsentSheet({ projectId, initialSelectedSessionIds, onClose, onAccepted, presentation = 'modal' }: {
@@ -36,7 +37,7 @@ export function TeamConsentSheet({ projectId, initialSelectedSessionIds, onClose
       if (!initialized.current) {
         const sharedAgentIds = new Set(next.myConsent?.agentIds ?? []);
         const priorSessions = next.members.filter((member) => member.local && sharedAgentIds.has(member.agentId) && member.sessionId).map((member) => member.sessionId!);
-        setSelectedSessionIds(initialSelectedSessionIds ? [...initialSelectedSessionIds] : priorSessions);
+        setSelectedSessionIds(initialConsentSessionIds(initialSelectedSessionIds, priorSessions, sessions.map((session) => session.id)));
         initialized.current = true;
       }
     } catch (cause) {
