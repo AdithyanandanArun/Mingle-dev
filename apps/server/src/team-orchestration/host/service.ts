@@ -293,7 +293,11 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
         changed = true;
       }
     });
-    if (changed) this.options.store.touch();
+    if (!changed) return;
+    this.options.store.touch();
+    // Members still hold the structure sent under the old ids; send them the migrated one.
+    const migrated = this.readHost(context.project.teamId, context.project.sharedProjectId);
+    if (migrated) setTimeout(() => { void this.broadcastStructure(context, migrated).catch(() => undefined); }, 0);
   }
 
   private async context(projectId: string): Promise<ProjectContext> {
@@ -1020,7 +1024,8 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
       if (!agent.sessionId) continue;
       const provider = ProviderSchema.safeParse(agent.provider);
       if (!provider.success) continue;
-      const info = roleRows.get(agent.id) ?? payloadMembers.get(agent.id);
+      // A structure sent before the host migrated to canonical ids names the host's agents by session id.
+      const info = roleRows.get(agent.id) ?? payloadMembers.get(agent.id) ?? payloadMembers.get(agent.sessionId);
       if (row && !info) continue;
       const handle = info?.handle ?? `${agent.provider ?? 'agent'}${members.length + 1}`.slice(0, 32);
       const sessionId = agent.deviceId === localDeviceId ? agent.sessionId : row

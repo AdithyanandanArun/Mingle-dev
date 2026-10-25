@@ -306,7 +306,12 @@ it('lazily migrates legacy local session IDs in host state while preserving assi
     permission_level,settings_version,disclaimer_version,accepted_at,updated_at) VALUES(?,?,?,?,?,'granted','supervised',1,?,?,?)`)
     .run(TEAM, SHARED, leader.id, ACCOUNT, DEVICE, TEAM_CONSENT_DISCLAIMER_VERSION, at, at);
 
+  const broadcastsBefore = fx.outgoing.filter((entry) => entry.kind === 'teamgroup.structure').length;
   const migrated = await fx.host.structure(PROJECT);
+  // Members still hold the structure sent under session ids, so the migrated structure is sent to them.
+  await waitFor(() => fx.outgoing.filter((entry) => entry.kind === 'teamgroup.structure').length > broadcastsBefore);
+  const resent = fx.outgoing.filter((entry) => entry.kind === 'teamgroup.structure').at(-1)?.payload as { members: Array<{ agentId: string; handle: string }> };
+  expect(resent.members).toContainEqual(expect.objectContaining({ agentId: 'agent_host_leader', handle: leaderHandle }));
   expect(migrated.settings).toMatchObject({ orchestratorAgentId: 'agent_host_leader', fallbackAgentIds: ['agent_host_fallback'], version: enabled.settings?.version });
   expect(migrated.leaderHistory[0]).toMatchObject({ fromAgentId: 'agent_host_leader', toAgentId: 'agent_host_fallback' });
   expect(fx.store.db.prepare(`SELECT agent_id,handle FROM mingle_team_host_roster WHERE team_id=? AND shared_project_id=? AND agent_id=?`)
