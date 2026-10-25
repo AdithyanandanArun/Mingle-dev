@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { ArrowUp, AtSign, Loader2, X } from 'lucide-react';
-import { TeamAgentStateSchema, type TeamChatAgent, type TeamChatMessage, type TeamSessionRef, type TeamStructureMember, type TeamStructureSnapshot } from '@mingle/contracts';
+import { TeamAgentStateSchema, type Session, type TeamChatAgent, type TeamChatMessage, type TeamSessionRef, type TeamStructureMember, type TeamStructureSnapshot } from '@mingle/contracts';
 import { useMingle } from '../../store/store';
 import { api, errorMessage } from '../../lib/api';
 import { clockTime, cx } from '../../lib/format';
@@ -20,6 +20,7 @@ const RUN_STATE_LABEL: Record<NonNullable<TeamChatMessage['runState']>, string> 
   queued: 'Queued', running: 'Agent working', 'awaiting-approval': 'Waiting for approval',
   completed: 'Turn complete', failed: 'Agent turn failed', interrupted: 'Interrupted',
 };
+const EMPTY_SESSIONS: Session[] = [];
 
 function canonicalHandle(agent: TeamChatAgent, member?: TeamStructureMember): string {
   if (member?.handle) return member.handle;
@@ -195,7 +196,7 @@ export function TeamSessionView({ projectId, teamSession, structure }: {
   projectId: string; teamSession: TeamSessionRef; structure: TeamStructureSnapshot | null;
 }) {
   const project = useMingle((state) => state.boot?.projects.find((item) => item.id === projectId));
-  const sessions = useMingle((state) => state.boot?.sessions ?? []);
+  const sessions = useMingle((state) => state.boot?.sessions ?? EMPTY_SESSIONS);
   const connection = useMingle((state) => state.connection);
   const contextOpen = useMingle((state) => state.contextOpen);
   const teamStructure = useTeamStructure();
