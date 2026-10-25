@@ -97,6 +97,7 @@ export function AddAgentDialog({ sessionId }: { sessionId: string }) {
   const [adjustOrchestrator, setAdjustOrchestrator] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [sharedProject, setSharedProject] = useState(false);
   const [teamAgents, setTeamAgents] = useState<TeamAvailableAgentsSnapshot | null>(null);
   const [teamAgentsLoading, setTeamAgentsLoading] = useState(false);
   const [teamAgentsError, setTeamAgentsError] = useState<string | null>(null);
@@ -110,7 +111,8 @@ export function AddAgentDialog({ sessionId }: { sessionId: string }) {
     try {
       const collaboration = await api.projectCollaboration(projectId, signal);
       if (signal?.aborted) return;
-      if (!collaboration.project) { setTeamAgents(null); return; }
+      if (!collaboration.project) { setSharedProject(false); setTeamAgents(null); return; }
+      setSharedProject(true);
       setTeamAgents(await teamSessionsApi.availableAgents(projectId, signal));
     } catch (cause) {
       if (!signal?.aborted) setTeamAgentsError(errorMessage(cause));
@@ -121,7 +123,7 @@ export function AddAgentDialog({ sessionId }: { sessionId: string }) {
 
   useEffect(() => {
     const controller = new AbortController();
-    setTeamAgents(null);
+    setSharedProject(false); setTeamAgents(null);
     void loadTeamAgents(controller.signal);
     return () => controller.abort();
   }, [loadTeamAgents]);
@@ -348,7 +350,7 @@ export function AddAgentDialog({ sessionId }: { sessionId: string }) {
                   description={isolated ? 'The agent edits its own Git worktree and branch, created when it is added. The project folder is untouched.' : `The agent edits the shared project folder${project ? ` (${shortPath(project.path)})` : ''}, so concurrent edits can collide with other agents.`} />
               </div>
             </section>
-            {teamAgents || teamAgentsLoading || teamAgentsError ? <section className="team-agents-section" aria-labelledby={`${idBase}-team-agents`}>
+            {sharedProject && (teamAgents || teamAgentsLoading || teamAgentsError) ? <section className="team-agents-section" aria-labelledby={`${idBase}-team-agents`}>
               <div className="team-agents-section__heading"><div><h3 className="gd-h" id={`${idBase}-team-agents`}>Teammates’ agents</h3><p className="field__hint">Add an agent that runs on its owner’s computer. It joins this conversation just like a local agent.</p></div>
                 {teamAgentsError ? <button type="button" className="link-btn" onClick={() => void loadTeamAgents()}>Retry</button> : null}
               </div>
