@@ -74,3 +74,29 @@ it('allows removal of the last remote proxy while retaining the host conversatio
   expect(after.members.filter((member) => !member.removedAt).map((member) => member.sessionId)).toEqual([lead.id]);
   expect(after.group.anchorSessionId).toBe(lead.id);
 });
+
+it('keeps every member a peer when the team roster syncs into a cowork session', async () => {
+  const test = await startTestApp({ exampleWorkspace: false });
+  apps.push(test);
+  const path = makeRepo();
+  repos.push(path);
+  const project = test.app.store.insertProject({ id: 'team-cowork-project', name: 'Cowork team', path });
+  const lead = test.app.store.insertSession({ projectId: project.id, name: 'Local agent', provider: 'claude', model: 'claude-sonnet-5-5',
+    effort: 'high', policy: 'supervised', isolated: false, worktreePath: path, branch: null });
+  const remote = test.app.store.insertSession({ projectId: project.id, name: 'Remote agent', provider: 'codex', model: 'gpt-6-codex',
+    effort: 'medium', policy: 'supervised', isolated: false, worktreePath: path, branch: null });
+  const groupId = 'group-team-cowork';
+  test.app.groups.createTeamGroup({ id: groupId, projectId: project.id, title: 'Cowork team', orchestratorSessionId: lead.id, mode: 'cowork',
+    members: [
+      { sessionId: lead.id, handle: 'claude1', role: 'orchestrator', held: false },
+      { sessionId: remote.id, handle: 'codex1', role: 'worker', held: false },
+    ] });
+  test.app.groups.syncTeamRosterMembers(groupId, [
+    { sessionId: lead.id, handle: 'claude1', role: 'orchestrator', held: false },
+    { sessionId: remote.id, handle: 'codex1', role: 'worker', held: false },
+  ]);
+  const after = test.app.groups.get(groupId);
+  expect(after.group.mode).toBe('cowork');
+  expect(after.group.orchestratorMemberId).toBeNull();
+  expect(after.members.filter((member) => !member.removedAt).map((member) => member.role)).toEqual(['peer', 'peer']);
+});

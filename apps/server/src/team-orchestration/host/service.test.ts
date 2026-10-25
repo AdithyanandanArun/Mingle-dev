@@ -122,10 +122,12 @@ function fixture(options: { deviceId?: string; role?: 'leader' | 'admin' | 'memb
   const enqueued: Array<{ content: string; recipients?: string[]; clientMessageId: string }> = [];
   const groupService = {
     createTeamGroup(input: { id: string; projectId: string; title: string; orchestratorSessionId: string; mode?: 'cowork' | 'orchestrated' | 'current-leads'; members: Array<{ sessionId: string; handle: string; role: 'orchestrator' | 'worker' | 'idle'; held: boolean }> }) {
+      // Mirrors GroupService.createTeamGroup: cowork groups have only peers and no orchestrator.
+      const cowork = input.mode === 'cowork';
       const members = input.members.map((member) => ({ id: `member-${member.sessionId}`, groupId: input.id, sessionId: member.sessionId,
-        handle: member.handle, role: member.role === 'orchestrator' ? 'orchestrator' as const : 'worker' as const, held: member.held, joinedAt: new Date().toISOString(), removedAt: null }));
+        handle: member.handle, role: cowork ? 'peer' as const : member.role === 'orchestrator' ? 'orchestrator' as const : 'worker' as const, held: member.held, joinedAt: new Date().toISOString(), removedAt: null }));
       group = { group: { id: input.id, projectId: input.projectId, title: input.title, anchorSessionId: input.orchestratorSessionId, mode: input.mode ?? 'orchestrated',
-        orchestratorMemberId: members.find((member) => member.sessionId === input.orchestratorSessionId)?.id ?? null, paused: false, pauseReason: null, maxParallel: 2, maxTurns: 80, maxHops: 6, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() },
+        orchestratorMemberId: cowork ? null : members.find((member) => member.sessionId === input.orchestratorSessionId)?.id ?? null, paused: false, pauseReason: null, maxParallel: 2, maxTurns: 80, maxHops: 6, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() },
         members, deliveries: [], requests: [], messages: [], assignments: [] };
       return group;
     },

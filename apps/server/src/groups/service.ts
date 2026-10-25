@@ -251,7 +251,8 @@ export class GroupService {
       for (const member of wanted) {
         const session = this.store.getSession(member.sessionId);
         if (!session || session.projectId !== group.projectId) throw conflict('A team agent session is unavailable in this project.');
-        const role: GroupMember['role'] = member.role === 'orchestrator' ? 'orchestrator' : group.mode === 'cowork' ? 'peer' : 'worker';
+        // Cowork groups have no orchestrator; every member, including the team's chosen leader, is a peer.
+        const role: GroupMember['role'] = group.mode === 'cowork' ? 'peer' : member.role === 'orchestrator' ? 'orchestrator' : 'worker';
         const existing = bySession.get(member.sessionId);
         if (existing) {
           if (existing.handle !== member.handle && this.repo.handleTaken(groupId, member.handle)) throw conflict(`@${member.handle} is already in use.`);
