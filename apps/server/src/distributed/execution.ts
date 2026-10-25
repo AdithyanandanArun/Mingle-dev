@@ -532,30 +532,42 @@ export class RemoteExecutionService {
         AND owner_id = ? AND revoked_at IS NULL ORDER BY published_at`, parsed.teamId, parsed.sharedProjectId, identity.deviceId, identity.ownerId);
       const at = nowIso();
       const agents: RemoteAgent[] = [];
+      let changed = false;
       for (const row of rows) {
         let session: Session;
         try { session = this.localSession(String(row.session_id)); }
-        catch { this.run('UPDATE mingle_remote_agents SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL', at, String(row.id)); continue; }
+        catch {
+          changed = this.run('UPDATE mingle_remote_agents SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL', at, String(row.id)) > 0 || changed;
+          continue;
+        }
         if (session.projectId !== binding.localProjectId || !EXECUTABLE_PROVIDERS.has(session.provider)) {
-          this.run('UPDATE mingle_remote_agents SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL', at, String(row.id));
+          changed = this.run('UPDATE mingle_remote_agents SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL', at, String(row.id)) > 0 || changed;
           continue;
         }
         if (session.policy !== 'supervised') throw conflict('Remote execution requires a supervised session so native tools remain owner-gated. Select a supervised session; Mingle will not change its saved policy.');
         const active = this.options.runtime.isActive(session.id) || ['running', 'waiting'].includes(session.status);
         const presence: RemotePresence = active ? 'busy' : 'idle';
         const groupId = this.groupIdForSession(session.id);
-        this.run(`UPDATE mingle_remote_agents SET name = ?, provider = ?, model = ?, policy = ?, config_digest = ?,
-          presence = ?, presence_known = 1, presence_observed_at = ?, active_group_id = ? WHERE id = ? AND revoked_at IS NULL`,
-        safeText(session.name, 100) || 'Agent', session.provider, safeText(session.model, 150), session.policy,
-        configDigest(session), presence, at, groupId, String(row.id));
+        const name = safeText(session.name, 100) || 'Agent';
+        const model = safeText(session.model, 150);
+        const digest = configDigest(session);
+        const profileChanged = row.name !== name || row.provider !== session.provider || row.model !== model || row.policy !== session.policy ||
+          row.config_digest !== digest || row.presence !== presence || Number(row.presence_known) !== 1 || row.active_group_id !== groupId;
+        if (profileChanged) {
+          changed = this.run(`UPDATE mingle_remote_agents SET name = ?, provider = ?, model = ?, policy = ?, config_digest = ?,
+            published_at = ?, presence = ?, presence_known = 1, presence_observed_at = ?, active_group_id = ? WHERE id = ? AND revoked_at IS NULL`,
+          name, session.provider, model, session.policy, digest, at, presence, at, groupId, String(row.id)) > 0 || changed;
+        }
         const refreshed = this.get('SELECT * FROM mingle_remote_agents WHERE id = ?', String(row.id));
         if (refreshed) agents.push(this.agentFromRow(refreshed, presence));
       }
-      await this.sendToPeers(client, identity, parsed.sharedProjectId, 'execution.agents', { generatedAt: at, agents }, `agents-refresh:${at}`);
-      this.recordEvent(identity, parsed.sharedProjectId, 'agents.refreshed', `Refreshed ${agents.length} published agent metadata record(s).`, {
-        agentIds: agents.map((agent) => agent.id), quotaProbed: false,
-      });
-      this.options.changed();
+      if (changed) {
+        await this.sendToPeers(client, identity, parsed.sharedProjectId, 'execution.agents', { generatedAt: at, agents }, `agents-refresh:${at}`);
+        this.recordEvent(identity, parsed.sharedProjectId, 'agents.refreshed', `Refreshed ${agents.length} published agent metadata record(s).`, {
+          agentIds: agents.map((agent) => agent.id), quotaProbed: false,
+        });
+        this.options.changed();
+      }
       return agents;
     });
   }

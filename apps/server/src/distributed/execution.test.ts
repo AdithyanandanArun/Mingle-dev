@@ -227,6 +227,11 @@ describe('RemoteExecutionService', () => {
     expect(refreshed).toMatchObject([{ name: 'Updated name', presence: 'busy', quotaState: 'unknown' }]);
     expect(destination.transport.sent.filter((entry) => entry.kind === 'execution.agents')).toHaveLength(2);
     expect(destination.runCalls).toHaveLength(0);
+
+    const observedAt = refreshed[0]!.presenceObservedAt;
+    const unchanged = await destination.service.refreshPublishedAgents({ teamId: TEAM, sharedProjectId: SHARED_PROJECT });
+    expect(unchanged[0]!.presenceObservedAt).toBe(observedAt);
+    expect(destination.transport.sent.filter((entry) => entry.kind === 'execution.agents')).toHaveLength(2);
   });
 
   it('pins approval to the destination owner and dispatches once only after fresh known quota', async () => {

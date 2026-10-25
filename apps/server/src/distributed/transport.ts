@@ -239,7 +239,6 @@ export class TransportService {
           .run(user.id, request.teamId, own.device_id, request.deviceId);
       }
       this.lastError = null;
-      this.options.changed?.();
     });
   }
 
@@ -285,7 +284,6 @@ export class TransportService {
         .run(envelope.id, user.id, request.teamId, own.device_id, request.toDeviceId, request.idempotencyKey,
           request.kind, JSON.stringify(envelope), this.now(), envelope.createdAt, envelope.expiresAt);
       await this.flushOutbox(client, user.id, request.teamId, own.device_id);
-      this.options.changed?.();
       return envelope.id;
     });
   }
@@ -315,11 +313,14 @@ export class TransportService {
   sync(): Promise<void> {
     if (this.closed) return Promise.resolve();
     if (this.syncPromise) return this.syncPromise;
+    const before = this.changeSignature();
     this.syncPromise = this.runSync().catch((error: unknown) => {
       this.recordFailure(this.isSignedIn() ? 'The distributed mailbox is temporarily unavailable.' : 'Sign in to the Mingle account to sync devices.');
       if (this.isSignedIn()) this.status = 'offline';
-      this.options.changed?.();
-    }).finally(() => { this.syncPromise = null; });
+    }).finally(() => {
+      this.notifyIfChanged(before);
+      this.syncPromise = null;
+    });
     return this.syncPromise;
   }
 
@@ -341,7 +342,6 @@ export class TransportService {
         this.activeAccountId = user.id;
         this.status = 'unregistered';
         this.lastError = null;
-        this.options.changed?.();
         return;
       }
       for (const local of localDevices) {
@@ -358,8 +358,7 @@ export class TransportService {
       else this.markHealthy();
       // Do not invoke external handlers while the account bridge holds its authenticated-client callback.
       await Promise.resolve();
-      this.options.changed?.();
-    });
+    }, false);
     if (this.handlers.size > 0) await this.deliverPending();
   }
 
@@ -493,7 +492,7 @@ export class TransportService {
             if (!member) throw new HttpError(403, 'The sender is no longer an active team member.');
           }
           return { own, senderRow };
-        });
+        }, false);
         if (own.device_id !== row.to_device_id || !senderRow || senderRow.revoked_at ||
           fingerprintForPublicKeys(senderRow.signing_public_key, senderRow.encryption_public_key) !== senderRow.fingerprint) {
           throw new Error('device-revoked');
@@ -527,7 +526,6 @@ export class TransportService {
         if (!rejected) this.lastError = reason;
       }
     }
-    this.options.changed?.();
   }
 
   private persistIncoming(accountId: string, teamId: string, deviceId: string, row: CloudEnvelopeRow): boolean {
@@ -612,7 +610,8 @@ export class TransportService {
     return row;
   }
 
-  private withAccount<T>(work: (client: SupabaseClient, user: User, keys: DeviceKeyMaterial) => Promise<T>): Promise<T> {
+  private withAccount<T>(work: (client: SupabaseClient, user: User, keys: DeviceKeyMaterial) => Promise<T>, notify = true): Promise<T> {
+    const before = notify ? this.changeSignature() : null;
     return this.options.account.withAuthenticatedClient(async (client, user) => {
       if (!user?.id || user.is_anonymous) throw new HttpError(401, 'A verified Mingle account is required for distributed devices.');
       if (this.activeAccountId && this.activeAccountId !== user.id) this.keyCache.delete(this.activeAccountId);
@@ -626,8 +625,32 @@ export class TransportService {
         if (error instanceof HttpError) throw error;
         this.recordFailure('The authenticated cloud operation could not be completed.');
         throw new HttpError(502, 'The authenticated cloud operation could not be completed.');
-      } finally { this.options.changed?.(); }
+      } finally { if (before !== null) this.notifyIfChanged(before); }
     });
+  }
+
+  /** Compare only durable state that affects the transport snapshot or received-message work. */
+  private changeSignature(): string {
+    const accountId = this.currentAccountId();
+    if (!accountId) return JSON.stringify({ accountId: null, status: 'signed-out', error: null });
+    const devices = (this.db.prepare('SELECT * FROM mingle_transport_devices_cache WHERE account_id = ? ORDER BY team_id,id')
+      .all(accountId) as Record<string, unknown>[]).map((row) => {
+      const { lastSeenAt: _lastSeenAt, ...device } = this.publicDevice(row);
+      return device;
+    });
+    const links = this.db.prepare('SELECT team_id,device_id,peer_device_id,peer_fingerprint,created_at,mutual FROM mingle_transport_links_cache WHERE account_id = ? ORDER BY team_id,device_id,peer_device_id')
+      .all(accountId);
+    const outbox = this.db.prepare(`SELECT id,team_id,to_device_id,kind,created_at,expires_at,status,attempts,error
+      FROM mingle_transport_outbox WHERE account_id = ? ORDER BY created_at DESC,id DESC LIMIT 100`).all(accountId);
+    const inbox = this.db.prepare(`SELECT id,team_id,from_device_id,to_device_id,kind,status,attempts,error,received_at
+      FROM mingle_transport_inbox WHERE account_id = ? ORDER BY received_at DESC,id DESC LIMIT 1000`).all(accountId);
+    const localDevices = this.localDevices(accountId);
+    const snapshot = this.snapshot();
+    return JSON.stringify({ accountId, status: snapshot.status, error: snapshot.error, deviceId: snapshot.deviceId, localDevices, devices, links, outbox, inbox });
+  }
+
+  private notifyIfChanged(before: string): void {
+    if (this.changeSignature() !== before) this.options.changed?.();
   }
 
   private loadKeys(accountId: string): DeviceKeyMaterial {

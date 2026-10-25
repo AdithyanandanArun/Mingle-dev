@@ -188,14 +188,14 @@ function account(cloud: MailboxCloud, id: string) {
   };
 }
 
-function service(cloud: MailboxCloud, user: string, now: () => number = () => cloud.now()) {
+function service(cloud: MailboxCloud, user: string, now: () => number = () => cloud.now(), changed?: () => void) {
   const dataDir = mkdtempSync(path.join(tmpdir(), 'mingle-transport-'));
   const db = new DatabaseSync(':memory:');
   temporaryDirectories.push(dataDir);
   databases.push(db);
   return new TransportService({
     account: account(cloud, user), store: { db }, dataDir,
-    now, retryBaseMs: 100, syncIntervalMs: 60_000,
+    now, retryBaseMs: 100, syncIntervalMs: 60_000, changed,
   });
 }
 
@@ -234,6 +234,34 @@ describe('distributed envelope cryptography', () => {
 });
 
 describe('TransportService authenticated mailbox', () => {
+  it('keeps idle sync quiet and notifies once when an outbox row changes', async () => {
+    const cloud = new MailboxCloud();
+    let notifications = 0;
+    const first = service(cloud, userA, () => cloud.now(), () => { notifications++; });
+    const second = service(cloud, userB);
+    try {
+      const a = await first.register({ teamId, name: 'Laptop' });
+      const b = await second.register({ teamId, name: 'Desktop' });
+      await first.link({ teamId, deviceId: b.id, fingerprint: b.fingerprint });
+      await second.link({ teamId, deviceId: a.id, fingerprint: a.fingerprint });
+      await first.sync();
+      notifications = 0;
+
+      await first.sync();
+      await first.sync();
+      await first.sync();
+      expect(notifications).toBe(0);
+
+      await first.send({ teamId, toDeviceId: b.id, kind: 'collaboration.message', payload: { content: 'new durable message' }, idempotencyKey: 'notify-once' });
+      expect(notifications).toBe(1);
+      await first.sync();
+      expect(notifications).toBe(1);
+    } finally {
+      await first.close();
+      await second.close();
+    }
+  });
+
   it('keeps unrelated uniqueness failures queued instead of claiming successful delivery', async () => {
     const { cloud, first, second, b } = await pairedServices();
     try {
