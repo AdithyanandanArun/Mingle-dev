@@ -73,6 +73,9 @@ function runRank(state: TeamChatMessage['runState']): number {
 export class TeamChatService {
   private readonly unsubscribe: () => void;
   private closed = false;
+  private readonly retryTimer: NodeJS.Timeout;
+  private replyRecovery: Promise<void> | null = null;
+  private readonly replyDeliveries = new Map<string, Promise<void>>();
   private readonly pending = new Set<Promise<unknown>>();
   private readonly agentReplyFlights = new Map<string, { fingerprint: string; promise: Promise<TeamChatMessage> }>();
   private readonly sessionMirrorFlights = new Map<string, { fingerprint: string; promise: Promise<TeamChatMessage | null> }>();
@@ -88,6 +91,8 @@ export class TeamChatService {
   }) {
     this.unsubscribe = options.distributed.transport.onMessage((envelope) => this.onEnvelope(envelope));
     this.now = options.now ?? Date.now;
+    this.retryTimer = setInterval(() => { void this.retryPendingReplies().catch(() => undefined); }, 15_000);
+    this.retryTimer.unref();
   }
 
   private readonly now: () => number;
@@ -412,9 +417,15 @@ export class TeamChatService {
     teamId: string, sharedProjectId: string, kind: string, payload: unknown, idempotencyKey: string,
     localDeviceId?: string | null, preparePeers?: (peerDeviceIds: string[]) => string[], allowPartial = false,
   ): Promise<string[]> {
-    // Refresh reciprocal pins and current device membership before deciding which peers receive a message.
-    await this.options.distributed.transport.sync();
-    const transport = this.options.distributed.transport.snapshot(teamId);
+    // send() refreshes cloud membership and reciprocal pins itself. Only discover peers here
+    // when the local roster is empty; draining the whole inbox on every fan-out adds latency.
+    let transport = this.options.distributed.transport.snapshot(teamId);
+    if (!transport.deviceId || !transport.devices.some(device => device.id !== transport.deviceId
+      && device.revokedAt === null && transport.links.some(link => link.deviceId === transport.deviceId
+        && link.peerDeviceId === device.id && link.mutual))) {
+      await this.options.distributed.transport.sync();
+      transport = this.options.distributed.transport.snapshot(teamId);
+    }
     const ownDeviceId = transport.deviceId;
     if (!ownDeviceId) throw new HttpError(409, 'Register this device with the shared project team before sending team chat.');
     if (localDeviceId && localDeviceId !== ownDeviceId) throw new HttpError(409, 'The registered team device changed while synchronizing. Refresh the team chat and try again.');
@@ -582,11 +593,61 @@ export class TeamChatService {
     await this.deliverAgentMessage(signed);
   }
 
-  private async deliverAgentMessage(message: TeamChatMessage): Promise<void> {
+  /** Replays only completed output delivery; it never routes input or starts an agent. */
+  retryPendingReplies(): Promise<void> {
+    if (this.closed) return Promise.resolve();
+    if (this.replyRecovery) return this.replyRecovery;
+    const work = this.track(this.recoverReplies());
+    this.replyRecovery = work;
+    void work.finally(() => { if (this.replyRecovery === work) this.replyRecovery = null; }).catch(() => undefined);
+    return work;
+  }
+
+  private async recoverReplies(): Promise<void> {
+    const user = this.options.account.snapshot().user;
+    if (!user || this.options.account.snapshot().status !== 'signed-in') return;
+    const rows = this.options.store.db.prepare(`SELECT * FROM team_chat_messages
+      WHERE delivery_state IN ('sending','failed') AND run_state='completed'
+      AND author_device_id IS NOT NULL AND author_signature IS NOT NULL
+      AND json_extract(author_json,'$.kind')='agent' AND json_extract(author_json,'$.ownerAccountId')=?
+      ORDER BY created_at DESC,id DESC LIMIT 32`).all(user.id) as DbRow[];
+    for (const row of rows) {
+      if (this.closed || this.options.account.snapshot().user?.id !== user.id) return;
+      try {
+        const message = this.rowMessage(row);
+        const project = this.options.store.db.prepare(`SELECT local_project_id FROM mingle_project_collaboration_sources
+          WHERE team_id=? AND shared_project_id=? AND owner_id=? UNION ALL
+          SELECT local_project_id FROM mingle_project_collaboration_joins
+          WHERE team_id=? AND shared_project_id=? AND account_id=? LIMIT 1`)
+          .get(message.teamId, message.sharedProjectId, user.id, message.teamId, message.sharedProjectId, user.id) as DbRow | undefined;
+        if (!project || typeof project.local_project_id !== 'string') continue;
+        const { shared } = await this.binding(project.local_project_id);
+        const deviceId = this.options.distributed.transport.snapshot(message.teamId).deviceId;
+        const author = message.author;
+        if (this.closed || this.options.account.snapshot().user?.id !== user.id || deviceId !== message.authorDeviceId
+          || shared.project?.teamId !== message.teamId || shared.project.sharedProjectId !== message.sharedProjectId
+          || !shared.members.some(member => member.accountId === user.id && member.status === 'active')
+          || author.kind !== 'agent' || !shared.agents.some(agent => agent.id === author.agentId
+            && agent.accountId === user.id && agent.deviceId === deviceId)) continue;
+        await this.deliverAgentMessage(message);
+      } catch { /* Keep the signed reply for a later authenticated retry. */ }
+    }
+  }
+
+  private deliverAgentMessage(message: TeamChatMessage): Promise<void> {
+    const existing = this.replyDeliveries.get(message.id);
+    if (existing) return existing;
+    const work = this.track(this.performReplyDelivery(message));
+    this.replyDeliveries.set(message.id, work);
+    void work.finally(() => { if (this.replyDeliveries.get(message.id) === work) this.replyDeliveries.delete(message.id); }).catch(() => undefined);
+    return work;
+  }
+
+  private async performReplyDelivery(message: TeamChatMessage): Promise<void> {
     let deliveryState: TeamChatMessage['deliveryState'] = 'sent';
     try {
       await this.sendToPeers(message.teamId, message.sharedProjectId, 'teamchat.message',
-        TeamChatMessageSchema.parse({ ...message, deliveryState: 'sent' }), `chat:${message.id}:initial`);
+        TeamChatMessageSchema.parse({ ...message, deliveryState: 'sent' }), `chat:${message.id}:initial`, message.authorDeviceId);
     } catch {
       deliveryState = 'failed';
     }
@@ -826,7 +887,8 @@ export class TeamChatService {
       const { localProjectId } = await this.validateRemote(envelope, request.sharedProjectId, []);
       const { shared } = await this.binding(localProjectId);
       if (shared.project?.teamId !== envelope.teamId || shared.project.sharedProjectId !== request.sharedProjectId) throw new HttpError(403, 'The sync request is outside this shared project binding.');
-      if (!this.allowSyncRequest(envelope.teamId, request.sharedProjectId, envelope.fromDeviceId)) throw new HttpError(429, 'This peer requested team-chat sync too frequently.');
+      // A valid redundant history request is consumed; retrying it would poison the durable inbox.
+      if (!this.allowSyncRequest(envelope.teamId, request.sharedProjectId, envelope.fromDeviceId)) return;
       const rows = this.options.store.db.prepare(`SELECT * FROM team_chat_messages WHERE team_id=? AND shared_project_id=?
         AND author_device_id IS NOT NULL AND author_signature IS NOT NULL
         AND (? IS NULL OR created_at > ?) ORDER BY created_at,id LIMIT ?`).all(envelope.teamId, request.sharedProjectId,
@@ -892,6 +954,7 @@ export class TeamChatService {
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
+    clearInterval(this.retryTimer);
     this.unsubscribe();
     this.pendingSyncRequests.clear();
     this.syncRequestRates.clear();

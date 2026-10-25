@@ -132,7 +132,7 @@ function fixture(withAgent = false) {
     distributed: distributed as unknown as DistributedWorkspaceService,
     collaboration: collaboration as unknown as ProjectCollaborationService });
   return {
-    store, project, session, service, outgoing, runtimeCalls: fake.runs,
+    store, project, session, service, outgoing, runtimeCalls: fake.runs, account, collaboration,
     receive: (envelope: any) => {
       if (!receive) throw new Error('No team chat transport listener');
       return receive(envelope);
@@ -344,7 +344,7 @@ it('rate-limits repeated sync requests from the same peer device', async () => {
     const makeRequest = () => ({ id: randomUUID(), teamId: TEAM, fromDeviceId: PEER, toDeviceId: DEVICE,
       kind: 'teamchat.sync.request', payload: { sharedProjectId: SHARED, requestId: randomUUID(), since: null } });
     await f.receive(makeRequest());
-    await expect(f.receive(makeRequest())).rejects.toThrow(/too frequently/);
+    await expect(f.receive(makeRequest())).resolves.toBeUndefined();
     expect(f.outgoing.filter((entry) => entry.kind === 'teamchat.sync.response')).toHaveLength(1);
   } finally { await f.close(); }
 });
@@ -440,4 +440,60 @@ it('persists and fans out a mirrored team-session source message only once', asy
       .get(input.sessionId, 'group-run:run-1')).toEqual({ n: 1 });
     expect(f.outgoing.filter((entry) => entry.kind === 'teamchat.message' && (entry.payload as { id?: string }).id === first?.id)).toHaveLength(1);
   } finally { await f.close(); }
+});
+
+it('recovers saved completed replies after a restart without rerunning the agent, and fences account/revocation changes', async () => {
+  const f = fixture(true);
+  try {
+    f.setPeerAllowed(false);
+    const message = await f.service.postAgentReply(PROJECT, f.session!.id, 'Saved result awaiting delivery', null, 'restart-result-1');
+    expect(f.store.db.prepare('SELECT delivery_state FROM team_chat_messages WHERE id=?').get(message.id)).toEqual({ delivery_state: 'failed' });
+    await f.service.close();
+    f.store.db.prepare("UPDATE team_chat_messages SET delivery_state='sending' WHERE id=?").run(message.id);
+    f.setPeerAllowed(true);
+    const restarted = new TeamChatService({ store: f.store, account: f.account as unknown as AccountService,
+      distributed: { transport: {
+        snapshot: () => ({ deviceId: OTHER_DEVICE }),
+        onMessage: () => () => undefined,
+      }} as unknown as DistributedWorkspaceService,
+      collaboration: f.collaboration as unknown as ProjectCollaborationService });
+    // A different device must never replay output signed by the previous device.
+    try { await restarted.retryPendingReplies(); } finally { await restarted.close(); }
+    expect(f.outgoing).toHaveLength(0);
+    // Reopen the original fixture service identity around the same durable store.
+    const original = f.service as unknown as { options: ConstructorParameters<typeof TeamChatService>[0] };
+    const recovered = new TeamChatService(original.options);
+    try {
+      const snapshot = f.account.snapshot;
+      f.account.snapshot = () => ({ status: 'signed-in', user: { id: OTHER_ACCOUNT, name: 'Sam' } });
+      await recovered.retryPendingReplies();
+      expect(f.outgoing).toHaveLength(0);
+      f.account.snapshot = snapshot;
+      f.setPeerAllowed(false);
+      await recovered.retryPendingReplies();
+      expect(f.outgoing).toHaveLength(0);
+      f.setPeerAllowed(true);
+      await Promise.all([recovered.retryPendingReplies(), recovered.retryPendingReplies()]);
+      expect(f.outgoing).toHaveLength(1);
+      expect(f.outgoing[0]).toMatchObject({ payload: { id: message.id, body: message.body,
+        authorSignature: message.authorSignature }, idempotencyKey: `chat:${message.id}:initial:${PEER}` });
+      expect(f.store.db.prepare('SELECT delivery_state FROM team_chat_messages WHERE id=?').get(message.id)).toEqual({ delivery_state: 'sent' });
+      await recovered.retryPendingReplies();
+      expect(f.outgoing).toHaveLength(1);
+      expect(f.runtimeCalls).toHaveLength(0);
+    } finally { await recovered.close(); }
+  } finally { await f.close(); }
+});
+
+it('delivers replies using known peers without waiting for an unrelated mailbox drain', async () => {
+  const f = fixture(true);
+  let release!: () => void;
+  f.holdTransport(new Promise<void>(resolve => { release = resolve; }));
+  try {
+    await Promise.race([
+      f.service.postAgentReply(PROJECT, f.session!.id, 'Reply reaches known peers', null, 'cached-peer-reply'),
+      new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error('Reply waited for full mailbox sync')), 500)),
+    ]);
+    expect(f.outgoing).toHaveLength(1);
+  } finally { release(); await f.close(); }
 });
