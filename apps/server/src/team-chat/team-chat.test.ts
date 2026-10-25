@@ -497,3 +497,24 @@ it('delivers replies using known peers without waiting for an unrelated mailbox 
     expect(f.outgoing).toHaveLength(1);
   } finally { release(); await f.close(); }
 });
+
+it('advances recovery past newer ineligible replies instead of starving older eligible output', async () => {
+  const f = fixture(true);
+  try {
+    f.setPeerAllowed(false);
+    const saved = await f.service.postAgentReply(PROJECT, f.session!.id, 'An older eligible result', null, 'fair-recovery-result');
+    const author = JSON.stringify({ ...saved.author, agentId: UNKNOWN_AGENT });
+    const insert = f.store.db.prepare(`INSERT INTO team_chat_messages
+      (id,team_id,shared_project_id,author_json,body,mentions_json,reply_to,created_at,delivery_state,run_state,author_device_id,author_signature)
+      VALUES (?,?,?,?,?,'[]',NULL,?,'failed','completed',?,?)`);
+    for (let i = 0; i < 32; i++) insert.run(randomUUID(), TEAM, SHARED, author, 'Unpublished agent result',
+      new Date(Date.now() + 1000 + i).toISOString(), DEVICE, saved.authorSignature!);
+    f.setPeerAllowed(true);
+    await f.service.retryPendingReplies();
+    expect(f.outgoing).toHaveLength(0);
+    await f.service.retryPendingReplies();
+    expect(f.outgoing).toHaveLength(1);
+    expect(f.outgoing[0]!.payload).toMatchObject({ id: saved.id, body: saved.body });
+    expect(f.runtimeCalls).toHaveLength(0);
+  } finally { await f.close(); }
+});

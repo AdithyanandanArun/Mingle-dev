@@ -75,6 +75,7 @@ export class TeamChatService {
   private closed = false;
   private readonly retryTimer: NodeJS.Timeout;
   private replyRecovery: Promise<void> | null = null;
+  private replyRecoveryCursor: { accountId: string; createdAt: string; id: string } | null = null;
   private readonly replyDeliveries = new Map<string, Promise<void>>();
   private readonly pending = new Set<Promise<unknown>>();
   private readonly agentReplyFlights = new Map<string, { fingerprint: string; promise: Promise<TeamChatMessage> }>();
@@ -605,12 +606,19 @@ export class TeamChatService {
 
   private async recoverReplies(): Promise<void> {
     const user = this.options.account.snapshot().user;
-    if (!user || this.options.account.snapshot().status !== 'signed-in') return;
+    if (!user || this.options.account.snapshot().status !== 'signed-in') { this.replyRecoveryCursor = null; return; }
+    const cursor = this.replyRecoveryCursor?.accountId === user.id ? this.replyRecoveryCursor : null;
     const rows = this.options.store.db.prepare(`SELECT * FROM team_chat_messages
       WHERE delivery_state IN ('sending','failed') AND run_state='completed'
       AND author_device_id IS NOT NULL AND author_signature IS NOT NULL
       AND json_extract(author_json,'$.kind')='agent' AND json_extract(author_json,'$.ownerAccountId')=?
-      ORDER BY created_at DESC,id DESC LIMIT 32`).all(user.id) as DbRow[];
+      AND (? IS NULL OR created_at < ? OR (created_at = ? AND id < ?))
+      ORDER BY created_at DESC,id DESC LIMIT 32`).all(user.id, cursor?.createdAt ?? null, cursor?.createdAt ?? null,
+        cursor?.createdAt ?? null, cursor?.id ?? null) as DbRow[];
+    // Advance past skipped rows as well; ineligible newer output must not starve older replies.
+    const last = rows.at(-1);
+    this.replyRecoveryCursor = last && rows.length === 32
+      ? { accountId: user.id, createdAt: String(last.created_at), id: String(last.id) } : null;
     for (const row of rows) {
       if (this.closed || this.options.account.snapshot().user?.id !== user.id) return;
       try {
