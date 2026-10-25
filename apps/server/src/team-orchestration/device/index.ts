@@ -29,7 +29,7 @@ import { TeamMcpProxy } from './mcp-proxy.ts';
 
 type AddRoute = (method: string, path: string, handler: (context: Ctx) => unknown | Promise<unknown>) => unknown;
 type DeviceTransport = DistributedWorkspaceService['transport'];
-type DeviceStore = Pick<Store, 'db' | 'tx' | 'touch' | 'getProject' | 'getSession' | 'listSessions' | 'getRun' | 'listMessages' | 'listRunTools' | 'latestProviderFailure'>;
+type DeviceStore = Pick<Store, 'db' | 'tx' | 'touch' | 'subscribe' | 'getProject' | 'getSession' | 'listSessions' | 'getRun' | 'listMessages' | 'listRunTools' | 'latestProviderFailure'>;
 type DeviceRuntime = Pick<SessionRuntime, 'start' | 'isActive' | 'interrupt' | 'decide'>;
 
 export interface DeviceSideDeps {
@@ -97,6 +97,7 @@ export function createDeviceSide(deps: DeviceSideDeps): {
   const active = new Map<string, ActiveDelivery>();
   const cancelled = new Set<string>();
   const work = new Set<Promise<unknown>>();
+  const runWaiters = new Set<() => void>();
   const lastActivitySentAt = new Map<string, number>();
   const hostDecisions = new Set<string>();
   let closed = false;
@@ -339,7 +340,8 @@ export function createDeviceSide(deps: DeviceSideDeps): {
     if (!localBinding) return;
     if (!await authorizedHost(envelope, localBinding)) return;
     const prior = latestStructure(sharedProjectId);
-    if (prior && parsed.data.settings.version <= prior.settings.version) return;
+    if (prior && parsed.data.settings.version < prior.settings.version) return;
+    if (prior && parsed.data.settings.version === prior.settings.version && JSON.stringify(parsed.data) === JSON.stringify(prior)) return;
     deps.store.tx(() => {
       db.prepare(`INSERT INTO mingle_team_device_structures(shared_project_id,team_id,host_device_id,structure_json,version,received_at)
         VALUES(?,?,?,?,?,?) ON CONFLICT(shared_project_id) DO UPDATE SET team_id=excluded.team_id,host_device_id=excluded.host_device_id,
@@ -377,11 +379,12 @@ export function createDeviceSide(deps: DeviceSideDeps): {
   function saveActivity(sharedProjectId: string, agentId: string, senderDeviceId: string, runId: string | null, entries: TeamAgentActivityEntry[]): void {
     const insert = db.prepare(`INSERT OR IGNORE INTO mingle_team_device_activity
       (shared_project_id,agent_id,sender_device_id,entry_id,run_id,at,entry_json) VALUES(?,?,?,?,?,?,?)`);
-    for (const entry of entries) insert.run(sharedProjectId, agentId, senderDeviceId, entry.id, runId, entry.at, JSON.stringify(entry));
+    let changedRows = 0;
+    for (const entry of entries) changedRows += Number(insert.run(sharedProjectId, agentId, senderDeviceId, entry.id, runId, entry.at, JSON.stringify(entry)).changes);
     const excess = db.prepare(`SELECT seq FROM mingle_team_device_activity WHERE shared_project_id=? AND agent_id=? ORDER BY seq DESC LIMIT -1 OFFSET ?`)
       .all(sharedProjectId, agentId, MAX_MIRRORED_ENTRIES) as Array<{ seq: number }>;
-    if (excess.length) db.prepare(`DELETE FROM mingle_team_device_activity WHERE seq IN (${excess.map(() => '?').join(',')})`).run(...excess.map((row) => row.seq));
-    changed();
+    if (excess.length) changedRows += Number(db.prepare(`DELETE FROM mingle_team_device_activity WHERE seq IN (${excess.map(() => '?').join(',')})`).run(...excess.map((row) => row.seq)).changes);
+    if (changedRows > 0) changed();
   }
 
   async function receiveActivity(envelope: AuthenticatedEnvelope): Promise<void> {
@@ -820,18 +823,29 @@ export function createDeviceSide(deps: DeviceSideDeps): {
 
   function waitForRun(sessionId: string, runId: string): Promise<ReturnType<Store['getRun']> | null> {
     return new Promise((resolve) => {
-      const start = Date.now();
-      const timer = setInterval(() => {
+      let settled = false;
+      let timer: NodeJS.Timeout;
+      let unsubscribeStore: () => void;
+      const finish = (run: ReturnType<Store['getRun']> | null) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        unsubscribeStore();
+        runWaiters.delete(cancel);
+        resolve(run);
+      };
+      const check = () => {
         const run = deps.store.getRun(runId);
-        if (closed || !run || run.status !== 'running' && !deps.runtime.isActive(sessionId)) {
-          clearInterval(timer);
-          resolve(run ?? null);
-        } else if (Date.now() - start > DELIVERY_TIMEOUT_MS) {
-          clearInterval(timer);
-          resolve(null);
-        }
-      }, 250);
+        if (closed || !run || run.status !== 'running') finish(run ?? null);
+      };
+      const cancel = () => finish(null);
+      timer = setTimeout(() => finish(null), DELIVERY_TIMEOUT_MS);
       timer.unref();
+      unsubscribeStore = deps.store.subscribe((event) => {
+        if (event?.sessionId === sessionId && event.type.startsWith('session.run.') && event.payload.runId === runId) check();
+      });
+      runWaiters.add(cancel);
+      check();
     });
   }
 
@@ -950,6 +964,7 @@ export function createDeviceSide(deps: DeviceSideDeps): {
     if (closed) return;
     closed = true;
     unsubscribe();
+    for (const cancel of [...runWaiters]) cancel();
     for (const delivery of active.values()) {
       delivery.controller.abort();
       proxy.closeDelivery(delivery.payload.deliveryId);

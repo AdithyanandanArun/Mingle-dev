@@ -42,11 +42,14 @@ export interface TeamOrchestrationTransport {
 
 export interface TeamOrchestrationGroups {
   get(id: string): import('@mingle/contracts').GroupSnapshot;
+  forSession(sessionId: string): import('@mingle/contracts').GroupSnapshot | undefined;
   createTeamGroup(input: {
-    id: string; projectId: string; title: string; orchestratorSessionId: string;
+    id: string; projectId: string; title: string; orchestratorSessionId: string; mode?: import('@mingle/contracts').GroupMode;
     members: Array<{ sessionId: string; handle: string; role: 'orchestrator' | 'worker' | 'idle'; held: boolean }>;
   }): import('@mingle/contracts').GroupSnapshot;
   syncTeamMembers(groupId: string, members: Array<{ sessionId: string; handle: string; role: 'orchestrator' | 'worker' | 'idle'; held: boolean }>): void;
+  syncTeamRosterMembers(groupId: string, members: Array<{ sessionId: string; handle: string; role: 'orchestrator' | 'worker' | 'idle'; held: boolean }>, managedSessionIds?: string[]): void;
+  addTeamMember(groupId: string, input: { sessionId: string; handle: string }): Promise<import('@mingle/contracts').GroupSnapshot>;
   pumpTeamGroup(groupId: string): void;
   setTeamLeader(groupId: string, sessionId: string | null, options?: { paused?: boolean; pauseReason?: string | null }): void;
   pauseTeamGroup(groupId: string, reason: string): void;
@@ -103,5 +106,6 @@ export interface TeamChatOrchestrationMessage {
 export interface TeamOrchestrationChat {
   setOrchestratedRunState(input: { messageId: string; state: 'running' | 'completed' | 'failed' }): Promise<void>;
   postOrchestratedAgentReply(input: { projectId: string; sourceMessageId: string; agentId: string; content: string }): Promise<void>;
+  mirrorTeamSessionMessage(input: { projectId: string; sessionId: string; sourceMessageId: string; content: string; kind: 'human' | 'agent'; replyTo?: string }): Promise<unknown>;
   postOrchestrationStatus(input: { projectId: string; content: string }): Promise<void>;
 }

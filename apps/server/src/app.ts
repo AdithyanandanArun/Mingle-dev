@@ -178,7 +178,7 @@ export function createApplication(options: ApplicationOptions): MingleApplicatio
   groups.recover();
   const distributed = new DistributedWorkspaceService({ store, account, runtime, providers, recovery, groups, repository, dataDir: config.dataDir });
   const projectCollaboration = new ProjectCollaborationService({ store, account, distributed, workspace, providers, ...options.projectCollaboration });
-  const teamChat = new TeamChatService({ store, account, distributed, runtime, collaboration: projectCollaboration });
+  const teamChat = new TeamChatService({ store, account, distributed, collaboration: projectCollaboration });
   const teamOrchestration = createTeamOrchestration({
     store, runtime, hub, transport: distributed.transport, account, distributed, collaboration: projectCollaboration,
     groups, teamChat, teamMcp, recovery, changed: () => store.touch(),
