@@ -475,8 +475,11 @@ export class TransportService {
         this.wakeSync();
       });
       this.wakeSubscriptions.set(key, { client, channel });
+      let failed = false;
       channel.subscribe((status) => {
-        if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
+        // removeChannel reports CLOSED back through this callback; clean up only once.
+        if ((status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') && !failed) {
+          failed = true;
           this.wakeUnavailable.add(key);
           if (this.wakeSubscriptions.get(key)?.channel === channel) this.wakeSubscriptions.delete(key);
           void client.removeChannel(channel).catch(() => undefined);
@@ -489,20 +492,16 @@ export class TransportService {
   }
 
   private broadcastWake(client: SupabaseClient, deviceId: string): void {
+    // One REST request, without joining the channel: subscribing and removing a channel per message
+    // re-entered removeChannel through the CLOSED status callback and overflowed the stack.
+    let channel: ReturnType<SupabaseClient['channel']> | null = null;
     try {
-      const channel = client.channel(this.wakeChannelName(deviceId), { config: { broadcast: { ack: false } } });
-      channel.subscribe((status) => {
-        if (status !== 'SUBSCRIBED') {
-          void client.removeChannel(channel).catch(() => undefined);
-          return;
-        }
-        void channel.send({ type: 'broadcast', event: 'wake', payload: {} }).then(
-          () => client.removeChannel(channel),
-          () => client.removeChannel(channel),
-        ).catch(() => undefined);
-      });
+      channel = client.channel(this.wakeChannelName(deviceId), { config: { broadcast: { ack: false } } });
+      const sent = channel;
+      void sent.httpSend('wake', {}).catch(() => undefined).finally(() => { void client.removeChannel(sent).catch(() => undefined); });
     } catch {
       // A missing or unavailable Realtime transport silently falls back to mailbox polling.
+      if (channel) void client.removeChannel(channel).catch(() => undefined);
     }
   }
 

@@ -70,10 +70,12 @@ class MailboxCloud {
             let listeners = cloud.wakeListeners.get(name);
             if (!listeners) { listeners = new Set(); cloud.wakeListeners.set(name, listeners); }
             if (listener) listeners.add(listener);
-            channel.unsubscribe = async () => { listeners?.delete(listener!); return 'ok'; };
+            // Like realtime-js, unsubscribing reports CLOSED back through the subscribe callback.
+            channel.unsubscribe = async () => { listeners?.delete(listener!); callback?.('CLOSED'); return 'ok'; };
             callback?.('SUBSCRIBED');
             return channel;
           },
+          async httpSend(event: string, payload: unknown) { return channel.send({ event, payload }); },
           async send(message: { event: string; payload: unknown }) {
             cloud.wakes.push({ channel: name, event: message.event, payload: structuredClone(message.payload) });
             for (const deliver of [...(cloud.wakeListeners.get(name) ?? [])]) deliver(message.payload);
