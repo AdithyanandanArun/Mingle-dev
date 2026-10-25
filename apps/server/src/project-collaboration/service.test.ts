@@ -170,6 +170,10 @@ it('serializes matching joins, resumes after roster failure without duplicate se
     const snapshot = await service.snapshot(project.id);
     assert.equal(snapshot.project?.teamId, TEAM, 'a teammate resolves the invitation-bound local project snapshot');
     assert.deepEqual(snapshot.agents.map((agent) => agent.sessionId).sort(), [preexistingSession.id, ...recovered.sessionIds].sort());
+    for (const agent of snapshot.agents.filter((candidate) => candidate.deviceId === DEVICE)) {
+      assert.equal(agent.id, published.get(agent.sessionId!)?.id, 'published local agents use the execution roster ID while retaining their local session ID');
+      assert.notEqual(agent.id, agent.sessionId);
+    }
     assert.equal(snapshot.agents.some((agent) => agent.sessionId === privateSession.id), false,
       'private local sessions do not appear as shared agents until explicitly published');
     await assert.rejects(service.createInvitation(project.id, { email: 'new@example.test', role: 'member' }),

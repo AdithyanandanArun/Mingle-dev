@@ -182,7 +182,7 @@ export class TeamChatService {
       throw new HttpError(403, 'The signed-in team account or registered device changed before message delivery.');
     }
     const roster = this.teamAgents(shared.agents, accountId, transport.deviceId);
-    const known = new Set(roster.map((agent) => agent.id));
+    const known = new Set(roster.flatMap((agent) => agent.sessionId ? [agent.id, agent.sessionId] : [agent.id]));
     if (message.mentions.some((id) => !known.has(id))) {
       throw new HttpError(400, 'Choose an agent from the current shared-project roster.');
     }
@@ -749,9 +749,9 @@ export class TeamChatService {
         if (!shared.members.some((member) => member.accountId === authorAccountId)) throw new HttpError(403, 'The message author is not in the current shared-project membership.');
         author = { kind: 'human', accountId: authorAccountId, displayName: memberDisplayName(shared.members, authorAccountId) };
       } else {
-        // The publishing device exposes the session ID as its local roster ID; peers expose the
-        // opaque execution-agent ID alongside that same published session ID.
-        const rosterAgent = shared.agents.find((agent) => agent.id === claimedAuthor.agentId || agent.sessionId === claimedAuthor.agentId);
+        // Accept old signed messages that used a local session ID; keep the signed identity intact.
+        const rosterAgent = shared.agents.find((agent) => agent.id === claimedAuthor.agentId)
+          ?? shared.agents.find((agent) => agent.sessionId === claimedAuthor.agentId);
         if (!rosterAgent || !rosterAgent.sessionId || !rosterAgent.provider || !rosterAgent.model ||
           rosterAgent.accountId !== claimedAuthor.ownerAccountId || rosterAgent.deviceId !== message.authorDeviceId) {
           throw new HttpError(403, 'The agent author is not published by this active authoring device.');
@@ -790,7 +790,7 @@ export class TeamChatService {
       try { fingerprint = fingerprintForPublicKeys(String(device.signing_public_key), String(device.encryption_public_key)); }
       catch { throw new HttpError(403, 'The authoring device has invalid registered keys.'); }
       if (fingerprint !== device.fingerprint || !verifyDevicePayload(
-        signingPayload(message, authorDeviceId), message.authorSignature!, String(device.signing_public_key),
+        signingPayload(messages[index]!, authorDeviceId), message.authorSignature!, String(device.signing_public_key),
       )) throw new HttpError(403, 'The message author-device signature is invalid.');
     }
     return normalized;

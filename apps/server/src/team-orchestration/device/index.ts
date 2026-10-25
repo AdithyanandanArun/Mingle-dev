@@ -229,7 +229,9 @@ export function createDeviceSide(deps: DeviceSideDeps): {
 
   async function send(teamId: string, deviceId: string, kind: string, payload: unknown, idempotencyKey: string): Promise<void> {
     await deps.transport.send({ teamId, toDeviceId: deviceId, kind, payload, idempotencyKey: idempotencyKey.slice(0, 200) });
-    await deps.transport.sync();
+    // Incoming mailbox handlers run inside sync(). Waiting for that same sync from here would
+    // deadlock the handler; the durable outbox row is authoritative and the immediate wake is best-effort.
+    void deps.transport.sync().catch(() => undefined);
   }
 
   async function sendToHost(shared: SharedBinding, kind: string, payload: unknown, key: string): Promise<boolean> {
@@ -411,20 +413,23 @@ export function createDeviceSide(deps: DeviceSideDeps): {
     if (!parsed.success) return;
     const shared = await findBindingBySharedProject(envelope.teamId, parsed.data.sharedProjectId);
     if (!shared || envelope.toDeviceId !== deps.transport.snapshot(envelope.teamId).deviceId) return;
-    const rosterAgent = shared.agents.find((agent) => agent.id === parsed.data.agentId && agent.deviceId === envelope.fromDeviceId);
+    const rosterAgent = shared.agents.find((agent) => agent.id === parsed.data.agentId && agent.deviceId === envelope.fromDeviceId)
+      ?? shared.agents.find((agent) => agent.sessionId === parsed.data.agentId && agent.deviceId === envelope.fromDeviceId);
     if (!rosterAgent || !shared.members.some((member) => member.accountId === rosterAgent.accountId)
       || rosterAgent.accountId === deps.account.snapshot().user?.id && envelope.fromDeviceId === deps.transport.snapshot(envelope.teamId).deviceId) return;
     const safeEntries = parsed.data.entries.flatMap((entry) => {
       const safe = TeamAgentActivityEntrySchema.safeParse({ ...entry, text: safeText(entry.text, 8_000), ...(entry.toolName ? { toolName: safeText(entry.toolName, 120) } : {}) });
       return safe.success ? [safe.data] : [];
     });
-    saveActivity(parsed.data.sharedProjectId, parsed.data.agentId, envelope.fromDeviceId, parsed.data.runId, safeEntries);
+    saveActivity(parsed.data.sharedProjectId, rosterAgent.id, envelope.fromDeviceId, parsed.data.runId, safeEntries);
   }
 
   async function teamActivity(projectId: string, agentId: string, before?: string): Promise<TeamAgentActivity> {
     const shared = await binding(projectId);
-    const agent = shared.agents.find((candidate) => candidate.id === agentId);
+    const agent = shared.agents.find((candidate) => candidate.id === agentId)
+      ?? shared.agents.find((candidate) => candidate.sessionId === agentId);
     if (!agent) throw new HttpError(404, 'Team agent not found.');
+    const canonicalAgentId = agent.id;
     const ownDeviceId = deps.transport.snapshot(shared.teamId).deviceId;
     const local = agent.deviceId === ownDeviceId && agent.sessionId !== null;
     if (!local) {
@@ -432,17 +437,17 @@ export function createDeviceSide(deps: DeviceSideDeps): {
       const cursorSeq = before && /^\d+$/.test(before) ? Number(before) : null;
       const rows = db.prepare(`SELECT seq,entry_json FROM mingle_team_device_activity WHERE shared_project_id=? AND agent_id=?
         ${cursorSeq === null ? '' : 'AND seq < ?'} ORDER BY seq DESC LIMIT 101`)
-        .all(...(cursorSeq === null ? [shared.sharedProjectId, agentId] : [shared.sharedProjectId, agentId, cursorSeq])) as Array<{ seq: number; entry_json: string }>;
+        .all(...(cursorSeq === null ? [shared.sharedProjectId, canonicalAgentId] : [shared.sharedProjectId, canonicalAgentId, cursorSeq])) as Array<{ seq: number; entry_json: string }>;
       const hasMore = rows.length > 100;
       const page = rows.slice(0, 100).reverse().map((row) => TeamAgentActivityEntrySchema.parse(JSON.parse(row.entry_json)));
       const last = rows.at(99)?.seq;
-      const latest = db.prepare('SELECT MAX(at) AS at FROM mingle_team_device_activity WHERE shared_project_id=? AND agent_id=?').get(shared.sharedProjectId, agentId) as { at: string | null };
+      const latest = db.prepare('SELECT MAX(at) AS at FROM mingle_team_device_activity WHERE shared_project_id=? AND agent_id=?').get(shared.sharedProjectId, canonicalAgentId) as { at: string | null };
       const latestStatusRow = db.prepare(`SELECT entry_json FROM mingle_team_device_activity WHERE shared_project_id=? AND agent_id=? ORDER BY seq DESC LIMIT 1`)
-        .get(shared.sharedProjectId, agentId) as { entry_json: string } | undefined;
+        .get(shared.sharedProjectId, canonicalAgentId) as { entry_json: string } | undefined;
       const latestStatus = latestStatusRow ? TeamAgentActivityEntrySchema.parse(JSON.parse(latestStatusRow.entry_json)) : null;
       const runIdRow = db.prepare(`SELECT run_id FROM mingle_team_device_activity WHERE shared_project_id=? AND agent_id=? AND run_id IS NOT NULL ORDER BY seq DESC LIMIT 1`)
-        .get(shared.sharedProjectId, agentId) as { run_id: string } | undefined;
-      return { agentId, local: false, state: latestStatus?.kind === 'status' ? mapAgentState(latestStatus.status ?? state) : state,
+        .get(shared.sharedProjectId, canonicalAgentId) as { run_id: string } | undefined;
+      return { agentId: canonicalAgentId, local: false, state: latestStatus?.kind === 'status' ? mapAgentState(latestStatus.status ?? state) : state,
         runId: runIdRow?.run_id ?? null, entries: page,
         nextCursor: hasMore && last !== undefined ? String(last) : null, mirroredAt: latest.at ?? null };
     }
@@ -458,7 +463,7 @@ export function createDeviceSide(deps: DeviceSideDeps): {
     const begin = Math.max(0, start - 100);
     const page = entries.slice(begin, start);
     const latestRun = db.prepare('SELECT id FROM session_runs WHERE session_id=? ORDER BY rowid DESC LIMIT 1').get(session.id) as { id: string } | undefined;
-    return { agentId, local: true, state: mapSessionState(session.status), runId: latestRun?.id ?? null,
+    return { agentId: canonicalAgentId, local: true, state: mapSessionState(session.status), runId: latestRun?.id ?? null,
       entries: page, nextCursor: begin > 0 ? page[0]?.id ?? null : null, mirroredAt: null };
   }
 
@@ -568,7 +573,9 @@ export function createDeviceSide(deps: DeviceSideDeps): {
     const shared = await findBindingBySharedProject(envelope.teamId, payload.sharedProjectId);
     if (!shared || payload.sharedProjectId !== shared.sharedProjectId || !await authorizedHost(envelope, shared)
       || payload.integrationDeviceId !== await hostDeviceId(shared)) return { rejection: 'invalid' };
-    const agent = shared.agents.find((candidate) => candidate.id === payload.agentId && candidate.deviceId === deps.transport.snapshot(shared.teamId).deviceId);
+    const localDeviceId = deps.transport.snapshot(shared.teamId).deviceId;
+    const agent = shared.agents.find((candidate) => candidate.id === payload.agentId && candidate.deviceId === localDeviceId)
+      ?? shared.agents.find((candidate) => candidate.sessionId === payload.agentId && candidate.deviceId === localDeviceId);
     if (!agent || !agent.sessionId) return { rejection: 'agent-unavailable' };
     const accountId = await currentAccountId();
     if (agent.accountId !== accountId) return { rejection: 'agent-unavailable' };
@@ -613,12 +620,22 @@ export function createDeviceSide(deps: DeviceSideDeps): {
       }
       return;
     }
-    const payload = parsed.data;
+    const resolvedBinding = await findBindingBySharedProject(envelope.teamId, parsed.data.sharedProjectId);
+    const ownDeviceId = resolvedBinding ? deps.transport.snapshot(resolvedBinding.teamId).deviceId : null;
+    const localAgent = resolvedBinding && ownDeviceId
+      ? resolvedBinding.agents.find((agent) => agent.id === parsed.data.agentId && agent.deviceId === ownDeviceId)
+        ?? resolvedBinding.agents.find((agent) => agent.sessionId === parsed.data.agentId && agent.deviceId === ownDeviceId)
+      : undefined;
+    const payload = localAgent ? { ...parsed.data, agentId: localAgent.id } : parsed.data;
     const duplicate = db.prepare('SELECT request_json,status,run_id FROM mingle_team_device_deliveries WHERE delivery_id=?').get(payload.deliveryId) as { request_json: string; status: string; run_id: string | null } | undefined;
     if (duplicate) {
       const shared = await findBindingBySharedProject(envelope.teamId, payload.sharedProjectId);
       if (!shared || !await authorizedHost(envelope, shared)) return;
-      if (duplicate.request_json !== JSON.stringify(payload)) {
+      let priorPayload: ReturnType<typeof TeamDeliveryPayloadSchema.safeParse> | null = null;
+      try { priorPayload = TeamDeliveryPayloadSchema.safeParse(JSON.parse(duplicate.request_json)); } catch { /* malformed saved payload rejects below */ }
+      const canonicalPrior = priorPayload?.success && localAgent && priorPayload.data.agentId === localAgent.sessionId
+        ? { ...priorPayload.data, agentId: localAgent.id } : priorPayload?.success ? priorPayload.data : null;
+      if (!canonicalPrior || JSON.stringify(canonicalPrior) !== JSON.stringify(payload)) {
         await sendStatus(envelope.teamId, envelope.fromDeviceId, { sharedProjectId: payload.sharedProjectId,
           deliveryId: payload.deliveryId, agentId: payload.agentId, status: 'rejected', rejection: 'invalid' });
       } else {
@@ -714,8 +731,13 @@ export function createDeviceSide(deps: DeviceSideDeps): {
     let runId: string | null = null;
     let live: ActiveDelivery | null = null;
     try {
+      const ownDeviceId = deps.transport.snapshot(shared.teamId).deviceId;
+      const localAgent = shared.agents.find((candidate) => candidate.id === payload.agentId && candidate.deviceId === ownDeviceId)
+        ?? shared.agents.find((candidate) => candidate.sessionId === payload.agentId && candidate.deviceId === ownDeviceId);
+      if (!localAgent || !localAgent.sessionId || localAgent.sessionId !== sessionId) {
+        throw new HttpError(409, 'The published local agent is no longer available for this delivery.');
+      }
       const isolated = await isolatedWorktree(shared, payload, sessionId);
-      const localAgent = shared.agents.find((candidate) => candidate.id === payload.agentId)!;
       const proxyConnection = await proxy.create({ teamId: shared.teamId, sharedProjectId: shared.sharedProjectId,
         hostDeviceId: (await hostDeviceId(shared))!, deliveryId: payload.deliveryId, agentId: payload.agentId });
       const beforeStart = deliveryStartRejection(payload);
@@ -765,7 +787,7 @@ export function createDeviceSide(deps: DeviceSideDeps): {
         .run(runId, isolated.path, isolated.branch, isolated.baseRevision, ISO(), payload.deliveryId);
       await sendStatus(shared.teamId, (await hostDeviceId(shared))!, { sharedProjectId: shared.sharedProjectId,
         deliveryId: payload.deliveryId, agentId: payload.agentId, status: 'running', runId });
-      await sendActivity(live, 'working');
+      void sendActivity(live, 'working').catch(() => undefined);
       const run = await waitForRun(sessionId, runId);
       if (!run) throw new Error('The team delivery did not reach a terminal provider state before its execution deadline.');
       if (run.status === 'completed') {
@@ -776,10 +798,10 @@ export function createDeviceSide(deps: DeviceSideDeps): {
         const transferFailures = live.artifactFailures.length
           ? `\n\nArtifact transfer failures:\n${live.artifactFailures.map((failure) => `- ${failure}`).join('\n')}` : '';
         const finalText = safeText(`${initialFinalText}${transferFailures}`, 50_000);
-        await sendActivity(live, 'idle');
         db.prepare(`UPDATE mingle_team_device_deliveries SET status='completed',updated_at=? WHERE delivery_id=?`).run(ISO(), payload.deliveryId);
         await sendStatus(shared.teamId, (await hostDeviceId(shared))!, { sharedProjectId: shared.sharedProjectId,
           deliveryId: payload.deliveryId, agentId: payload.agentId, status: 'completed', runId, finalText, artifacts });
+        void sendActivity(live, 'idle').catch(() => undefined);
         try {
           if (finalText && !live.replyPosted) {
             live.replyPosted = true;
@@ -787,13 +809,13 @@ export function createDeviceSide(deps: DeviceSideDeps): {
           }
         } catch { /* The result remains available to the host even if chat delivery is offline. */ }
       } else if (run.status === 'interrupted') {
-        await sendActivity(live, 'paused');
+        void sendActivity(live, 'paused').catch(() => undefined);
         db.prepare(`UPDATE mingle_team_device_deliveries SET status='interrupted',updated_at=? WHERE delivery_id=?`).run(ISO(), payload.deliveryId);
         await sendStatus(shared.teamId, (await hostDeviceId(shared))!, { sharedProjectId: shared.sharedProjectId,
           deliveryId: payload.deliveryId, agentId: payload.agentId, status: 'interrupted', runId });
       } else {
         const failure = failureFor(sessionId, runId);
-        await sendActivity(live, 'failed');
+        void sendActivity(live, 'failed').catch(() => undefined);
         db.prepare(`UPDATE mingle_team_device_deliveries SET status='failed',error=?,updated_at=? WHERE delivery_id=?`)
           .run(safeText(failure.message, 1000), ISO(), payload.deliveryId);
         await sendStatus(shared.teamId, (await hostDeviceId(shared))!, { sharedProjectId: shared.sharedProjectId,
@@ -801,7 +823,7 @@ export function createDeviceSide(deps: DeviceSideDeps): {
       }
     } catch (error) {
       const failure = runId ? failureFor(sessionId, runId) : createFailure(sessionId, null, deps.store.getSession(sessionId)?.provider ?? 'claude', errorMessage(error));
-      if (live) await sendActivity(live, 'failed').catch(() => undefined);
+      if (live) void sendActivity(live, 'failed').catch(() => undefined);
       const changed = db.prepare(`UPDATE mingle_team_device_deliveries SET status='failed',error=?,updated_at=?
         WHERE delivery_id=? AND status IN ('accepted','running','awaiting-approval')`)
         .run(safeText(failure.message, 1000), ISO(), payload.deliveryId);

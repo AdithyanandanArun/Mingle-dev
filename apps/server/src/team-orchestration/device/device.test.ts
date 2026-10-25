@@ -358,6 +358,17 @@ describe('owner-device team orchestration', () => {
     expect(f.exportCalls[0]).toMatchObject({ toDeviceId: HOST_DEVICE, deliveryId: payload.deliveryId, sourceWorktreePath: f.worktree });
     expect(f.chatReplies).toHaveLength(1);
     expect(f.chatReplies[0]).toEqual([f.projectId, AGENT_ID, 'Final result: safe output', payload.requestId, payload.deliveryId]);
+
+    const localSessionId = f.store.listSessions(f.projectId)[0]!.id;
+    const legacyPayload = deliveryPayload({ deliveryId: `delivery-${randomUUID()}`, agentId: localSessionId });
+    await f.deliver(legacyPayload);
+    await waitFor(() => f.sent.some((message) => message.kind === 'teamgroup.delivery.status'
+      && message.payload.deliveryId === legacyPayload.deliveryId && message.payload.status === 'completed'));
+    const savedLegacy = f.store.db.prepare(`SELECT agent_id,request_json FROM mingle_team_device_deliveries WHERE delivery_id=?`)
+      .get(legacyPayload.deliveryId) as { agent_id: string; request_json: string };
+    expect(savedLegacy.agent_id).toBe(AGENT_ID);
+    expect(JSON.parse(savedLegacy.request_json).agentId).toBe(AGENT_ID);
+    expect(f.runtime.startCount).toBe(2);
   });
 
   it('bounds each teammate-triggered run by the saved session, team, and owner-consent policies', async () => {

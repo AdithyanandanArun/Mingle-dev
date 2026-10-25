@@ -34,8 +34,9 @@ function TeamMessage({ message, teamSession, agents, members }: {
   const memberById = new Map(members.map((member) => [member.agentId, member]));
   const agentById = new Map(agents.map((agent) => [agent.id, agent]));
   const toLabel = (agentId: string) => {
-    const agent = agentById.get(agentId);
-    const member = memberById.get(agentId);
+    const agent = agentById.get(agentId) ?? agents.find((candidate) => candidate.sessionId === agentId);
+    const canonicalId = agent?.id ?? agentId;
+    const member = memberById.get(canonicalId);
     return agent ? <AgentIdentity key={agentId} handle={canonicalHandle(agent, member)} identityKey={agentId} provider={member?.provider ?? agent.provider} /> : null;
   };
   const createdAt = <time className="msg__time" dateTime={message.createdAt} title={clockTime(message.createdAt)}>{clockTime(message.createdAt)}</time>;
@@ -48,11 +49,11 @@ function TeamMessage({ message, teamSession, agents, members }: {
   </article>;
 
   const author = message.author;
-  const structureMember = memberById.get(author.agentId);
-  const agent = agentById.get(author.agentId);
+  const agent = agentById.get(author.agentId) ?? agents.find((candidate) => candidate.sessionId === author.agentId);
+  const structureMember = memberById.get(agent?.id ?? author.agentId);
   const role: Speaker['role'] = structureMember?.role === 'orchestrator' ? 'orchestrator' : structureMember?.role === 'idle' ? 'peer' : 'worker';
   const speaker: Speaker = {
-    memberId: author.agentId, sessionId: structureMember?.sessionId ?? teamSession.sessionId,
+    memberId: agent?.id ?? author.agentId, sessionId: structureMember?.sessionId ?? agent?.sessionId ?? teamSession.sessionId,
     handle: canonicalHandle(agent ?? { id: author.agentId, name: author.agentName, accountId: author.ownerAccountId, deviceId: '', projectId: '', sessionId: '', provider: author.provider, model: author.model, state: 'idle', local: false }, structureMember),
     role, removed: false,
   };

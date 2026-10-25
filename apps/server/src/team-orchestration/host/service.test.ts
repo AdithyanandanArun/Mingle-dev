@@ -273,6 +273,52 @@ it('authorizes host changes, enforces optimistic versions, validates broadcasts,
   expect(fx.outgoing.every((entry) => entry.kind !== 'teamgroup.delivery')).toBe(true);
 });
 
+it('lazily migrates legacy local session IDs in host state while preserving assigned handles', async () => {
+  const fx = fixture();
+  const localSession = (id: string, name: string) => fx.store.insertSession({ id, projectId: PROJECT, name,
+    provider: 'claude', model: 'claude-sonnet-5-5', effort: 'high', policy: 'supervised', isolated: false,
+    worktreePath: fx.project.path, branch: null });
+  const leader = localSession('ses_legacy_team_leader', 'Published host leader');
+  const fallback = localSession('ses_legacy_team_fallback', 'Published host fallback');
+  fx.addPublishedAgent({ id: 'agent_host_leader', name: leader.name, accountId: ACCOUNT, deviceId: DEVICE,
+    projectId: PROJECT, sessionId: leader.id, provider: leader.provider, model: leader.model, state: 'idle' });
+  fx.addPublishedAgent({ id: 'agent_host_fallback', name: fallback.name, accountId: ACCOUNT, deviceId: DEVICE,
+    projectId: PROJECT, sessionId: fallback.id, provider: fallback.provider, model: fallback.model, state: 'idle' });
+
+  const enabled = await fx.host.enable(PROJECT, { leaderOrchestration: true, permissionLevel: 'supervised',
+    orchestratorAgentId: 'agent_host_leader', fallbackAgentIds: ['agent_host_fallback'] });
+  const hostRow = fx.store.db.prepare(`SELECT settings_json,leader_history_json FROM mingle_team_host_projects
+    WHERE team_id=? AND shared_project_id=?`).get(TEAM, SHARED) as { settings_json: string; leader_history_json: string };
+  const leaderHandle = (fx.store.db.prepare(`SELECT handle FROM mingle_team_host_roster
+    WHERE team_id=? AND shared_project_id=? AND agent_id=?`).get(TEAM, SHARED, 'agent_host_leader') as { handle: string }).handle;
+  const settings = JSON.parse(hostRow.settings_json);
+  settings.orchestratorAgentId = leader.id;
+  settings.fallbackAgentIds = [fallback.id];
+  fx.store.db.prepare(`UPDATE mingle_team_host_projects SET settings_json=?,leader_history_json=? WHERE team_id=? AND shared_project_id=?`)
+    .run(JSON.stringify(settings), JSON.stringify([{ id: 'leader_old_session_id', at: new Date().toISOString(), fromAgentId: leader.id,
+      toAgentId: fallback.id, reason: 'manual', byAccountId: ACCOUNT }]), TEAM, SHARED);
+  fx.store.db.prepare(`UPDATE mingle_team_host_roster SET agent_id=? WHERE team_id=? AND shared_project_id=? AND agent_id=?`)
+    .run(leader.id, TEAM, SHARED, 'agent_host_leader');
+  fx.store.db.prepare(`UPDATE mingle_team_host_roster SET agent_id=? WHERE team_id=? AND shared_project_id=? AND agent_id=?`)
+    .run(fallback.id, TEAM, SHARED, 'agent_host_fallback');
+  const at = new Date().toISOString();
+  fx.store.db.prepare(`INSERT INTO mingle_team_host_consents(team_id,shared_project_id,agent_id,owner_account_id,owner_device_id,state,
+    permission_level,settings_version,disclaimer_version,accepted_at,updated_at) VALUES(?,?,?,?,?,'granted','supervised',1,?,?,?)`)
+    .run(TEAM, SHARED, leader.id, ACCOUNT, DEVICE, TEAM_CONSENT_DISCLAIMER_VERSION, at, at);
+
+  const migrated = await fx.host.structure(PROJECT);
+  expect(migrated.settings).toMatchObject({ orchestratorAgentId: 'agent_host_leader', fallbackAgentIds: ['agent_host_fallback'], version: enabled.settings?.version });
+  expect(migrated.leaderHistory[0]).toMatchObject({ fromAgentId: 'agent_host_leader', toAgentId: 'agent_host_fallback' });
+  expect(fx.store.db.prepare(`SELECT agent_id,handle FROM mingle_team_host_roster WHERE team_id=? AND shared_project_id=? AND agent_id=?`)
+    .get(TEAM, SHARED, 'agent_host_leader')).toEqual({ agent_id: 'agent_host_leader', handle: leaderHandle });
+  expect(fx.store.db.prepare(`SELECT agent_id FROM mingle_team_host_roster WHERE team_id=? AND shared_project_id=? AND agent_id=?`)
+    .get(TEAM, SHARED, 'agent_host_fallback')).toEqual({ agent_id: 'agent_host_fallback' });
+  expect(fx.store.db.prepare(`SELECT agent_id FROM mingle_team_host_consents WHERE team_id=? AND shared_project_id=? AND agent_id=?`)
+    .get(TEAM, SHARED, 'agent_host_leader')).toEqual({ agent_id: 'agent_host_leader' });
+  expect(fx.store.db.prepare(`SELECT 1 FROM mingle_team_host_roster WHERE team_id=? AND shared_project_id=? AND agent_id=?`)
+    .get(TEAM, SHARED, leader.id)).toBeUndefined();
+});
+
 it('lists teammate agents with consent, online, host-role, and existing-group usability', async () => {
   const fx = fixture();
   const beforeConsent = await fx.host.availableAgents(PROJECT);

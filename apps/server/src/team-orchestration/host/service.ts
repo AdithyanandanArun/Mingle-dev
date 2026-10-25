@@ -146,6 +146,154 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
     return entries.filter((entry): entry is TeamLeaderChange => Boolean(entry && typeof entry === 'object'));
   }
 
+  /** Repairs rows written when this device used local session IDs as published agent IDs. */
+  private migrateLegacyAgentIds(context: ProjectContext): void {
+    if (!context.isHost) return;
+    const row = this.readHost(context.project.teamId, context.project.sharedProjectId);
+    if (!row) return;
+    const idBySession = new Map(context.agents
+      .filter((agent) => agent.deviceId === context.localDeviceId && agent.sessionId && agent.id !== agent.sessionId)
+      .map((agent) => [agent.sessionId!, agent.id] as const));
+    if (!idBySession.size) return;
+
+    let changed = false;
+    const rewrite = (value: unknown): unknown => typeof value === 'string' ? idBySession.get(value) ?? value : value;
+    this.options.store.tx(() => {
+      for (const [sessionId, agentId] of idBySession) {
+        const legacyRoster = this.hostRows.prepare(`SELECT agent_id,handle,role,fallback_rank,removed_at,updated_at
+          FROM mingle_team_host_roster WHERE team_id=? AND shared_project_id=? AND agent_id=?`)
+          .get(context.project.teamId, context.project.sharedProjectId, sessionId) as {
+            handle: string; role: string; fallback_rank: number | null; removed_at: string | null; updated_at: string;
+          } | undefined;
+        if (legacyRoster) {
+          const existing = this.hostRows.prepare(`SELECT agent_id FROM mingle_team_host_roster
+            WHERE team_id=? AND shared_project_id=? AND agent_id=?`)
+            .get(context.project.teamId, context.project.sharedProjectId, agentId);
+          if (existing) {
+            // Both keys identify the same published agent. Keep the handle already assigned to the
+            // legacy row, then merge its role/state onto the canonical row.
+            this.hostRows.prepare(`DELETE FROM mingle_team_host_roster WHERE team_id=? AND shared_project_id=? AND agent_id=?`)
+              .run(context.project.teamId, context.project.sharedProjectId, sessionId);
+            this.hostRows.prepare(`UPDATE mingle_team_host_roster SET handle=?,role=?,fallback_rank=?,removed_at=?,updated_at=?
+              WHERE team_id=? AND shared_project_id=? AND agent_id=?`)
+              .run(legacyRoster.handle, legacyRoster.role, legacyRoster.fallback_rank, legacyRoster.removed_at, legacyRoster.updated_at,
+                context.project.teamId, context.project.sharedProjectId, agentId);
+          } else {
+            this.hostRows.prepare(`UPDATE mingle_team_host_roster SET agent_id=? WHERE team_id=? AND shared_project_id=? AND agent_id=?`)
+              .run(agentId, context.project.teamId, context.project.sharedProjectId, sessionId);
+          }
+          changed = true;
+        }
+
+        const legacyConsent = this.hostRows.prepare(`SELECT * FROM mingle_team_host_consents
+          WHERE team_id=? AND shared_project_id=? AND agent_id=?`)
+          .get(context.project.teamId, context.project.sharedProjectId, sessionId) as {
+            owner_account_id: string; owner_device_id: string; state: string; permission_level: string;
+            settings_version: number; disclaimer_version: string; accepted_at: string; updated_at: string;
+          } | undefined;
+        if (legacyConsent) {
+          const currentConsent = this.hostRows.prepare(`SELECT updated_at FROM mingle_team_host_consents
+            WHERE team_id=? AND shared_project_id=? AND agent_id=?`)
+            .get(context.project.teamId, context.project.sharedProjectId, agentId) as { updated_at?: string } | undefined;
+          if (currentConsent) {
+            if (String(legacyConsent.updated_at) > String(currentConsent.updated_at)) {
+              this.hostRows.prepare(`UPDATE mingle_team_host_consents SET owner_account_id=?,owner_device_id=?,state=?,permission_level=?,
+                settings_version=?,disclaimer_version=?,accepted_at=?,updated_at=? WHERE team_id=? AND shared_project_id=? AND agent_id=?`)
+                .run(legacyConsent.owner_account_id, legacyConsent.owner_device_id, legacyConsent.state, legacyConsent.permission_level,
+                  legacyConsent.settings_version, legacyConsent.disclaimer_version, legacyConsent.accepted_at, legacyConsent.updated_at,
+                  context.project.teamId, context.project.sharedProjectId, agentId);
+            }
+            this.hostRows.prepare(`DELETE FROM mingle_team_host_consents WHERE team_id=? AND shared_project_id=? AND agent_id=?`)
+              .run(context.project.teamId, context.project.sharedProjectId, sessionId);
+          } else {
+            this.hostRows.prepare(`UPDATE mingle_team_host_consents SET agent_id=? WHERE team_id=? AND shared_project_id=? AND agent_id=?`)
+              .run(agentId, context.project.teamId, context.project.sharedProjectId, sessionId);
+          }
+          changed = true;
+        }
+
+        const oldActivity = this.hostRows.prepare(`SELECT seq,shared_project_id,sender_device_id,entry_id,run_id,at,entry_json
+          FROM mingle_team_device_activity WHERE shared_project_id=? AND agent_id=?`)
+          .all(context.project.sharedProjectId, sessionId) as Array<{
+            seq: number; shared_project_id: string; sender_device_id: string; entry_id: string;
+            run_id: string | null; at: string; entry_json: string;
+          }>;
+        for (const activity of oldActivity) {
+          this.hostRows.prepare(`INSERT OR IGNORE INTO mingle_team_device_activity
+            (shared_project_id,agent_id,sender_device_id,entry_id,run_id,at,entry_json) VALUES(?,?,?,?,?,?,?)`)
+            .run(activity.shared_project_id, agentId, activity.sender_device_id, activity.entry_id, activity.run_id, activity.at, activity.entry_json);
+          this.hostRows.prepare('DELETE FROM mingle_team_device_activity WHERE seq=?').run(activity.seq);
+          changed = true;
+        }
+
+        const oldDeliveries = this.hostRows.prepare(`SELECT delivery_id,request_json FROM mingle_team_device_deliveries
+          WHERE shared_project_id=? AND agent_id=?`).all(context.project.sharedProjectId, sessionId) as Array<{ delivery_id: string; request_json: string }>;
+        for (const delivery of oldDeliveries) {
+          const request = safeJson<Row | null>(delivery.request_json, null);
+          const requestJson = request && request.agentId === sessionId ? JSON.stringify({ ...request, agentId }) : delivery.request_json;
+          this.hostRows.prepare(`UPDATE mingle_team_device_deliveries SET agent_id=?,request_json=? WHERE delivery_id=?`)
+            .run(agentId, requestJson, delivery.delivery_id);
+          changed = true;
+        }
+      }
+
+      const current = this.readHost(context.project.teamId, context.project.sharedProjectId);
+      if (current) {
+        const settings = safeJson<Row | null>(current.settings_json, null);
+        if (settings) {
+          const next = { ...settings };
+          let settingsChanged = false;
+          if (typeof next.orchestratorAgentId === 'string') {
+            const mapped = rewrite(next.orchestratorAgentId);
+            if (mapped !== next.orchestratorAgentId) { next.orchestratorAgentId = mapped; settingsChanged = true; }
+          }
+          if (Array.isArray(next.fallbackAgentIds)) {
+            const priorFallbacks = next.fallbackAgentIds as unknown[];
+            const mapped = priorFallbacks.map(rewrite);
+            if (mapped.some((id, index) => id !== priorFallbacks[index])) { next.fallbackAgentIds = mapped; settingsChanged = true; }
+          }
+          if (settingsChanged) {
+            this.hostRows.prepare(`UPDATE mingle_team_host_projects SET settings_json=?,updated_at=? WHERE team_id=? AND shared_project_id=?`)
+              .run(JSON.stringify(next), new Date(this.now()).toISOString(), context.project.teamId, context.project.sharedProjectId);
+            changed = true;
+          }
+        }
+
+        const previousHistory = safeJson<unknown[]>(current.leader_history_json, []);
+        let historyChanged = false;
+        const nextHistory = previousHistory.map((entry) => {
+          if (!entry || typeof entry !== 'object') return entry;
+          const item = entry as Row;
+          const fromAgentId = rewrite(item.fromAgentId);
+          const toAgentId = rewrite(item.toAgentId);
+          if (fromAgentId === item.fromAgentId && toAgentId === item.toAgentId) return entry;
+          historyChanged = true;
+          return { ...item, fromAgentId, toAgentId };
+        });
+        if (historyChanged) {
+          this.hostRows.prepare(`UPDATE mingle_team_host_projects SET leader_history_json=?,updated_at=? WHERE team_id=? AND shared_project_id=?`)
+            .run(JSON.stringify(nextHistory), new Date(this.now()).toISOString(), context.project.teamId, context.project.sharedProjectId);
+          changed = true;
+        }
+      }
+
+      const consentRows = this.hostRows.prepare(`SELECT account_id,device_id,consent_json FROM mingle_team_device_consents
+        WHERE shared_project_id=?`).all(context.project.sharedProjectId) as Array<{ account_id: string; device_id: string; consent_json: string }>;
+      for (const consentRow of consentRows) {
+        const consent = safeJson<Row | null>(consentRow.consent_json, null);
+        if (!consent || !Array.isArray(consent.agentIds)) continue;
+        const priorAgentIds = consent.agentIds as unknown[];
+        const agentIds = priorAgentIds.map(rewrite);
+        if (!agentIds.some((id, index) => id !== priorAgentIds[index])) continue;
+        this.hostRows.prepare(`UPDATE mingle_team_device_consents SET consent_json=?
+          WHERE shared_project_id=? AND account_id=? AND device_id=?`)
+          .run(JSON.stringify({ ...consent, agentIds }), context.project.sharedProjectId, consentRow.account_id, consentRow.device_id);
+        changed = true;
+      }
+    });
+    if (changed) this.options.store.touch();
+  }
+
   private async context(projectId: string): Promise<ProjectContext> {
     const localProject = this.options.store.getProject(projectId);
     if (!localProject) throw new HttpError(404, 'Project not found.');
@@ -172,12 +320,14 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
     const deviceRows = deviceSnapshot.devices;
     const hostDeviceId = sourceDevice ?? this.options.deviceSide?.latestStructure(shared.project.sharedProjectId)?.host?.deviceId ?? '';
     const hostDevice = deviceRows.find((device) => device.id === hostDeviceId);
-    return {
+    const context: ProjectContext = {
       ...shared, project: shared.project, localProjectId: localProject.id, accountId, localDeviceId: deviceSnapshot.deviceId,
       hostDeviceId, hostAccountId: hostDevice?.ownerId ?? leader.accountId,
       hostDisplayName: shared.members.find((candidate) => candidate.accountId === (hostDevice?.ownerId ?? leader.accountId))?.displayName ?? 'Team lead',
       isHost,
     };
+    this.migrateLegacyAgentIds(context);
+    return context;
   }
 
   private mutationKey(context: ProjectContext): string {
@@ -194,7 +344,8 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
 
   private consentFor(context: ProjectContext, agentId: string): TeamConsentState {
     const agent = context.agents.find((candidate) => candidate.id === agentId);
-    if (!agent || agent.deviceId === context.localDeviceId) return 'granted';
+    if (!agent) return 'needs-reconsent';
+    if (agent.deviceId === context.localDeviceId) return 'granted';
     const row = this.hostRows.prepare(`SELECT state,permission_level,settings_version,disclaimer_version,owner_account_id,owner_device_id
       FROM mingle_team_host_consents WHERE team_id=? AND shared_project_id=? AND agent_id=?`)
       .get(context.project.teamId, context.project.sharedProjectId, agentId) as Row | undefined;
@@ -264,12 +415,10 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
         .get(teamId, sharedProjectId, agent.id) as Row | undefined;
       if (previous?.removed_at && !options.restoreRemoved) continue;
       const handle = this.agentHandle(teamId, sharedProjectId, agent, used, context.members, context.agents);
-      const role = (previous?.role === 'idle' || previous?.role === 'worker' || previous?.role === 'orchestrator'
-        ? previous.role : agent.id === settings.orchestratorAgentId ? 'orchestrator' : 'worker') as TeamAgentRole;
-      if (agent.id === settings.orchestratorAgentId && role !== 'orchestrator') this.hostRows.prepare(`UPDATE mingle_team_host_roster SET role='orchestrator',removed_at=NULL,updated_at=?
-        WHERE team_id=? AND shared_project_id=? AND agent_id=?`).run(at, teamId, sharedProjectId, agent.id);
-      else this.hostRows.prepare(`INSERT INTO mingle_team_host_roster(team_id,shared_project_id,agent_id,handle,role,removed_at,updated_at)
-        VALUES(?,?,?,?,?,NULL,?) ON CONFLICT(team_id,shared_project_id,agent_id) DO UPDATE SET handle=excluded.handle,removed_at=NULL,updated_at=excluded.updated_at`)
+      const role: TeamAgentRole = agent.id === settings.orchestratorAgentId ? 'orchestrator' : previous?.role === 'idle' ? 'idle' : 'worker';
+      this.hostRows.prepare(`INSERT INTO mingle_team_host_roster(team_id,shared_project_id,agent_id,handle,role,removed_at,updated_at)
+        VALUES(?,?,?,?,?,NULL,?) ON CONFLICT(team_id,shared_project_id,agent_id) DO UPDATE
+        SET handle=excluded.handle,role=excluded.role,removed_at=NULL,updated_at=excluded.updated_at`)
         .run(teamId, sharedProjectId, agent.id, handle, role, at);
 
       let sessionId = agent.sessionId!;
@@ -303,9 +452,6 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
       }
       const consent = this.consentFor(context, agent.id);
       result.push({ sessionId, handle, role, held: role === 'idle' || (!local && consent !== 'granted') });
-      if (agent.id !== settings.orchestratorAgentId && role === 'orchestrator') {
-        this.hostRows.prepare(`UPDATE mingle_team_host_roster SET role='worker',updated_at=? WHERE team_id=? AND shared_project_id=? AND agent_id=?`).run(at, teamId, sharedProjectId, agent.id);
-      }
     }
     return result;
   }
@@ -442,16 +588,17 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
       if (!groupSnapshot) {
         if (!anchor) throw new HttpError(404, 'Session not found.');
         groupId = `group_${randomUUID().replaceAll('-', '')}`;
-        const localMemberHandle = this.uniqueGroupHandle(anchor.provider, anchor.id, [anchor.provider]);
-        const orchestrator = context.agents.find((candidate) => candidate.sessionId === anchor!.id && candidate.deviceId === context.localDeviceId);
-        const orchestratorAgentId = orchestrator?.id ?? anchor.id;
+        const orchestrator = context.agents.find((candidate) => candidate.sessionId === anchor.id && candidate.deviceId === context.localDeviceId);
+        const orchestratorAgentId = input.mode === 'cowork' ? null : orchestrator?.id ?? null;
         const minimumVersion = Math.max(1, Number(consentRow.settings_version) || 1);
         const settings = TeamOrchestrationSettingsSchema.parse({ leaderOrchestration: true, permissionLevel,
           orchestratorAgentId, fallbackAgentIds: [], version: currentRow ? Math.max(this.settings(currentRow).version + 1, minimumVersion) : minimumVersion,
           updatedAt: new Date(this.now()).toISOString(), updatedByAccountId: context.accountId });
-        const selected = this.syncSessions(context, settings, { agentIds: new Set([agent.id]), restoreRemoved: true });
-        const remoteMember = selected[0];
+        const selected = this.syncSessions(context, settings, { agentIds: new Set([agent.id, ...(orchestrator ? [orchestrator.id] : [])]), restoreRemoved: true });
+        const remoteMember = selected.find((member) => member.handle === this.handleFor(teamId, sharedProjectId, agent.id));
         if (!remoteMember) throw new HttpError(404, `${agent.name} has no usable proxy session.`);
+        const hostMember = orchestrator ? selected.find((member) => member.sessionId === anchor!.id) : undefined;
+        const localMemberHandle = hostMember?.handle ?? this.uniqueGroupHandle(anchor.provider, anchor.id, [anchor.provider]);
         const remoteHandle = this.chooseTeamHandle(agent.id, input.handle, remoteMember.handle, teamId, sharedProjectId, groupId, [localMemberHandle]);
         this.hostRows.prepare(`UPDATE mingle_team_host_roster SET handle=?,updated_at=? WHERE team_id=? AND shared_project_id=? AND agent_id=?`)
           .run(remoteHandle, settings.updatedAt, teamId, sharedProjectId, agent.id);
@@ -474,12 +621,13 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
         const minimumVersion = Math.max(1, Number(consentRow.settings_version) || 1);
         const priorSettings = currentRow?.group_id === groupId ? this.settings(currentRow) : null;
         const nextVersion = currentRow ? Math.max(this.settings(currentRow).version + 1, minimumVersion) : minimumVersion;
+        const orchestratorAgentId = group.mode === 'cowork' ? null : orchestratorAgent?.id ?? null;
         const settings = priorSettings && priorSettings.version >= minimumVersion ? priorSettings
           : TeamOrchestrationSettingsSchema.parse({ ...(priorSettings ?? { leaderOrchestration: true, permissionLevel,
-            orchestratorAgentId: orchestratorAgent?.id ?? orchestratorMember.sessionId, fallbackAgentIds: [] }),
+            orchestratorAgentId, fallbackAgentIds: [] }),
             version: priorSettings ? minimumVersion : nextVersion, updatedAt: new Date(this.now()).toISOString(), updatedByAccountId: context.accountId });
-        const selected = this.syncSessions(context, settings, { agentIds: new Set([agent.id]), restoreRemoved: true });
-        const remoteMember = selected[0];
+        const selected = this.syncSessions(context, settings, { agentIds: new Set([agent.id, ...(orchestratorAgent ? [orchestratorAgent.id] : [])]), restoreRemoved: true });
+        const remoteMember = selected.find((member) => member.handle === this.handleFor(teamId, sharedProjectId, agent.id));
         if (!remoteMember) throw new HttpError(404, `${agent.name} has no usable proxy session.`);
         const existingHandles = groupSnapshot.members.map((member) => member.handle);
         const remoteHandle = this.chooseTeamHandle(agent.id, input.handle, remoteMember.handle, teamId, sharedProjectId, groupId, existingHandles);
@@ -490,11 +638,12 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
         groupSnapshot = await this.options.groups.addTeamMember(groupId, { sessionId: remoteMember.sessionId, handle: remoteHandle });
         if (currentRow) this.saveHostProject(context, groupId, settings, currentRow);
         else this.saveHostProject(context, groupId, settings, null);
+        this.syncTeamRoster(context, groupId, settings);
       }
       const row = this.readHost(teamId, sharedProjectId);
       if (!row || row.group_id !== groupId) throw new HttpError(500, 'The team session could not be saved.');
       await this.broadcastStructure(context, row);
-      return groupSnapshot;
+      return this.options.groups.get(groupId);
     });
   }
 
@@ -573,7 +722,7 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
     const nextOrchestrator = group.members.find((candidate) => !candidate.removedAt && candidate.id === group.group.orchestratorMemberId);
     const context = await this.context(row.local_project_id);
     const nextAgent = nextOrchestrator ? context.agents.find((agent) => agent.sessionId === nextOrchestrator.sessionId && agent.deviceId === context.localDeviceId) : undefined;
-    const nextAgentId = nextOrchestrator ? nextAgent?.id ?? nextOrchestrator.sessionId : null;
+    const nextAgentId = nextOrchestrator ? nextAgent?.id ?? null : null;
     const removedWasLeader = prior.orchestratorAgentId === proxy.agent_id;
     const settings = TeamOrchestrationSettingsSchema.parse({ ...prior,
       orchestratorAgentId: removedWasLeader ? nextAgentId : prior.orchestratorAgentId,
@@ -1539,7 +1688,8 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
     if (!row && !peer) return false;
     if (message.author.kind !== 'human') return 'handled';
     if (!row || !context.isHost || !this.groupOrNull(row.group_id)) return 'handled';
-    const agents = message.mentions.map((id) => context.agents.find((agent) => agent.id === id));
+    const agents = message.mentions.map((id) => context.agents.find((agent) => agent.id === id)
+      ?? context.agents.find((agent) => agent.sessionId === id));
     if (agents.some((agent) => !agent || !this.handleFor(context.project.teamId, context.project.sharedProjectId, agent.id))) {
       throw new HttpError(400, 'A mentioned agent is not part of the active team structure.');
     }

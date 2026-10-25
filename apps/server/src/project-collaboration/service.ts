@@ -457,12 +457,12 @@ export class ProjectCollaborationService {
       if (!collab.binding || !collab.project) return { project: null, members: [], agents: [], invitations: [], email };
       const device = this.options.distributed.transport.snapshot(collab.binding.teamId);
       const roster = await this.options.distributed.execution.snapshot(collab.binding.teamId);
-      const ownPublished = new Set(roster.agents
+      const ownPublished = new Map(roster.agents
         .filter((agent) => agent.sharedProjectId === collab.binding!.sharedProjectId && agent.deviceId === device.deviceId && agent.ownerId === collab.userId)
-        .map((agent) => agent.sessionId));
+        .map((agent) => [agent.sessionId, agent.id] as const));
       const localAgents: ProjectCollaborationAgent[] = this.options.store.listSessions(local.id)
         .filter((session) => ownPublished.has(session.id)).map((session) => ({
-        id: session.id, name: session.name, accountId: collab.userId!, deviceId: device.deviceId ?? '', projectId: local.id,
+        id: ownPublished.get(session.id)!, name: session.name, accountId: collab.userId!, deviceId: device.deviceId ?? '', projectId: local.id,
         sessionId: session.id, provider: session.provider, model: session.model,
         state: session.status === 'error' ? 'error' : session.status,
       }));

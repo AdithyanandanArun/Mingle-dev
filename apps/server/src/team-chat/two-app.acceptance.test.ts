@@ -62,9 +62,15 @@ it('shares imported session history and team messages over HTTP and the encrypte
       token: invitationToken, localProjectId: projects[1], agent: { provider: 'claude', model: 'claude-sonnet-5-5', effort: 'high', policy: 'supervised' },
     });
     expect(join.status, JSON.stringify(join.json)).toBe(200);
+    const teammateCollaboration = await teammate.api('GET', `/api/projects/${projects[1]}/collaboration`);
+    const teammateAgentId = teammateCollaboration.json.agents.find((agent: { sessionId: string }) => agent.sessionId === join.json.sessionId)?.id;
+    expect(teammateAgentId).toMatch(/^agent_/);
+    const additionalSession = await teammate.api('POST', '/api/sessions', { projectId: projects[1], name: 'Second teammate agent',
+      provider: 'claude', model: 'claude-sonnet-5-5', effort: 'high', policy: 'supervised' });
+    expect(additionalSession.status, JSON.stringify(additionalSession.json)).toBe(201);
 
     const consent = await teammate.api('POST', `/api/projects/${projects[1]}/team-consent`, {
-      sessionIds: [join.json.sessionId], permissionLevel: 'supervised', settingsVersion: 1,
+      sessionIds: [join.json.sessionId, additionalSession.json.id], permissionLevel: 'supervised', settingsVersion: 1,
       disclaimerVersion: TEAM_CONSENT_DISCLAIMER_VERSION,
     });
     expect(consent.status, JSON.stringify(consent.json)).toBe(200);
@@ -107,7 +113,7 @@ it('shares imported session history and team messages over HTTP and the encrypte
     expect(leaderHistory.json.messages.map((message: { body: string }) => message.body)).toContain('The new checkout has the shared session history.');
     expect(leaderHistory.json.transport.linkedDeviceCount).toBeGreaterThan(0);
     const agentMessage = await teammate.api('POST', `/api/projects/${projects[1]}/team-chat/messages`, {
-      body: 'Reply using the local fake provider.', mentions: [join.json.sessionId],
+      body: 'Reply using the local fake provider.', mentions: [teammateAgentId],
     });
     expect(agentMessage.status, JSON.stringify(agentMessage.json)).toBe(200);
     await waitFor(() => teammate.app.store.db.prepare('SELECT delivery_state FROM team_chat_messages WHERE id=?').get(agentMessage.json.id)?.delivery_state === 'sent');
@@ -128,12 +134,57 @@ it('shares imported session history and team messages over HTTP and the encrypte
     expect(joinedStructure.json.teamSession).toMatchObject({ title: 'History to share' });
     const hostAgents = await leader.api('GET', `/api/projects/${projects[0]}/team-agents`);
     expect(hostAgents.status, JSON.stringify(hostAgents.json)).toBe(200);
-    expect(hostAgents.json.agents).toContainEqual(expect.objectContaining({
-      agentId: consent.json.agentIds[0], consent: 'granted', groupId: expect.any(String),
-    }));
+    expect(hostAgents.json.agents).toEqual(expect.arrayContaining([
+      expect.objectContaining({ agentId: teammateAgentId, consent: 'granted' }),
+    ]));
 
+    const secondCollaboration = await teammate.api('GET', `/api/projects/${projects[1]}/collaboration`);
+    const secondAgentId = secondCollaboration.json.agents.find((agent: { sessionId: string }) => agent.sessionId === additionalSession.json.id)?.id;
+    expect(secondAgentId).toMatch(/^agent_/);
+    const firstHostAgent = hostAgents.json.agents.find((agent: { agentId: string }) => agent.agentId === teammateAgentId);
+    let teamGroupId = firstHostAgent?.groupId;
+    if (!teamGroupId) {
+      const added = await leader.api('POST', `/api/sessions/${sessionId}/team-agents`, { agentId: teammateAgentId });
+      expect(added.status, JSON.stringify(added.json)).toBe(200);
+      teamGroupId = added.json.group.id;
+    }
+    expect(teamGroupId).toEqual(expect.any(String));
+    const secondAgent = hostAgents.json.agents.find((agent: { agentId: string }) => agent.agentId === secondAgentId);
+    expect(secondAgent).toMatchObject({ consent: 'granted', groupId: null });
+    const addSecondAgent = await leader.api('POST', `/api/groups/${teamGroupId}/team-agents`, { agentId: secondAgentId });
+    expect(addSecondAgent.status, JSON.stringify(addSecondAgent.json)).toBe(200);
+    await teammate.app.distributed.transport.sync();
+    const hostStructure = await leader.api('GET', `/api/projects/${projects[0]}/team-structure`);
+    const memberStructure = await teammate.api('GET', `/api/projects/${projects[1]}/team-structure`);
+    const hostOwnMember = hostStructure.json.members.find((member: { local: boolean }) => member.local);
+    const memberHostMember = memberStructure.json.members.find((member: { agentId: string }) => member.agentId === hostOwnMember?.agentId);
+    expect(hostOwnMember?.handle, JSON.stringify({ host: hostStructure.json.members, member: memberStructure.json.members })).toBeTruthy();
+    expect(memberHostMember?.handle).toBe(hostOwnMember?.handle);
+    expect(memberStructure.json.teamSession).toMatchObject({ title: 'History to share' });
+
+    teammate.fake.script = async (_options, emit) => { emit({ type: 'text', text: 'Remote agent completed the task.' }); };
+    const mentioned = await leader.api('POST', `/api/projects/${projects[0]}/team-chat/messages`, {
+      body: `@${secondAgent.handle} check the shared project.`,
+      mentions: [secondAgentId],
+    });
+    expect(mentioned.status, JSON.stringify(mentioned.json)).toBe(200);
+    await waitFor(() => teammate.fake.runs.some((run) => run.session.id === additionalSession.json.id), 6000, 'member-device fake provider run');
+    expect(teammate.fake.runs.find((run) => run.session.id === additionalSession.json.id)?.prompt).toContain('check the shared project');
+    await waitFor(() => leader.app.groups.get(teamGroupId).deliveries.some((delivery) => delivery.status === 'completed'), 6000, 'host group delivery completion');
+    const proxySessionId = (leader.app.store.db.prepare(`SELECT session_id FROM mingle_team_proxy_sessions
+      WHERE team_id=? AND shared_project_id=? AND agent_id=?`).get(join.json.teamId, join.json.sharedProjectId, secondAgentId) as { session_id: string }).session_id;
+    await waitFor(() => leader.app.store.listMessages(proxySessionId).some((message) => message.role === 'assistant' && message.content.includes('Remote agent completed the task.')),
+      6000, 'final reply in the host proxy session');
+    await waitFor(async () => {
+      await leader.app.distributed.transport.sync();
+      const transcript = await leader.api('GET', `/api/projects/${projects[0]}/team-chat?limit=20`);
+      return transcript.json.messages.find((message: { author: { kind: string; agentId?: string }; body: string }) =>
+        message.author.kind === 'agent' && message.author.agentId === secondAgentId && message.body.includes('Remote agent completed the task.'));
+    }, 6000, 'signed teammate reply in the host transcript');
+
+    const latestStructure = await leader.api('GET', `/api/projects/${projects[0]}/team-structure`);
     const fullAccess = await leader.api('PATCH', `/api/projects/${projects[0]}/team-orchestration`, {
-      expectedVersion: joinedStructure.json.settings.version, permissionLevel: 'full-access',
+      expectedVersion: latestStructure.json.settings.version, permissionLevel: 'full-access',
     });
     expect(fullAccess.status, JSON.stringify(fullAccess.json)).toBe(200);
     await teammate.app.distributed.transport.sync();
