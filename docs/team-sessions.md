@@ -42,3 +42,9 @@ Group-composer user messages are mirrored after local acceptance, using `(source
 
 - Background loops must not emit `state.changed` unless durable, user-visible state actually changed. An idle app with a registered device emits no `state.changed` at all.
 - Sending a message must not wait on cloud or network round trips. Transport sync, fan-out and team routing happen after the HTTP response.
+
+## Live updates
+
+Mailbox delivery remains durable and authoritative in the encrypted envelope tables. When Supabase Realtime is available, senders also broadcast an empty wake hint on the recipient's per-device channel; the recipient immediately pulls its authenticated mailbox. The hint contains no message, token or account data and uses public Realtime broadcast, so it requires no table publication or database migration. Realtime failures are silent and the 3-second mailbox polling loop remains the fallback.
+
+Host roster/agent, settings, consent and session-structure mutations, plus member-device structure/consent updates, emit project-scoped workspace events. The web client refreshes the team structure and teammate-agent choices only for those events. Team-chat persistence and run-state changes emit a separate project-scoped event that refreshes the shared transcript and agent bubble; the transcript keeps a slow polling fallback for missed events.

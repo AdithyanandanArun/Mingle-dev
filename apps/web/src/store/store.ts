@@ -5,6 +5,7 @@ import { api, errorMessage } from '../lib/api';
 import { terminalBus } from './terminalBus';
 import { resolveTab, useBrowserStore } from './browser';
 import { activeMembers, findGroupForSession, groupChildSessionIds } from '../lib/groups';
+import { dispatchTeamUpdate } from '../lib/team-live-updates';
 
 export type View = 'workspace' | 'tasks' | 'activity' | 'map' | 'team-structure' | 'settings';
 export type SettingsSection = 'account' | 'general' | 'project' | 'agents' | 'team' | 'providers' | 'browser' | 'appearance';
@@ -337,9 +338,7 @@ export const useMingle = create<MingleState>((set, get) => {
         }
         scheduleRefresh();
         window.dispatchEvent(new Event('mingle:state-changed'));
-        if (incoming?.type === 'team.session.updated') {
-          window.dispatchEvent(new CustomEvent('mingle:team-session-updated', { detail: { projectId: incoming.projectId } }));
-        }
+        if (incoming) dispatchTeamUpdate(incoming);
         break;
       }
       case 'session.delta': {

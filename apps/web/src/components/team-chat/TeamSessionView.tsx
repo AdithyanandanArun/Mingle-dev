@@ -12,6 +12,7 @@ import { Markdown } from '../Markdown';
 import { TeamConsentBanner } from '../team-orchestration/settings/TeamConsentBanner';
 import { Popover } from '../git/Popover';
 import { GitBar } from '../git/GitBar';
+import { subscribeToTeamUpdates } from '../../lib/team-live-updates';
 import { useTeamStructure } from '../../lib/team-structure-context';
 import './team-session.css';
 
@@ -206,9 +207,11 @@ export function TeamSessionView({ projectId, teamSession, structure }: {
   const follows = useRef(true);
   const olderHeight = useRef<number | null>(null);
   const refreshInFlight = useRef(false);
+  const refreshAgain = useRef(false);
 
   const refresh = useCallback(async (signal?: AbortSignal) => {
-    if (refreshInFlight.current || signal?.aborted) return;
+    if (signal?.aborted) return;
+    if (refreshInFlight.current) { refreshAgain.current = true; return; }
     refreshInFlight.current = true;
     try {
       const latest = await api.projectTeamChat(projectId, { limit: 100 }, signal);
@@ -221,17 +224,26 @@ export function TeamSessionView({ projectId, teamSession, structure }: {
         return { ...latest, messages, hasMore: current.hasMore || latest.hasMore, nextBefore: latest.nextBefore ?? current.nextBefore };
       });
       setError(null);
-    } finally { refreshInFlight.current = false; }
+    } finally {
+      refreshInFlight.current = false;
+      if (refreshAgain.current && !signal?.aborted) {
+        refreshAgain.current = false;
+        window.setTimeout(() => { void refresh(signal).catch(() => undefined); }, 0);
+      }
+    }
   }, [projectId]);
 
   useEffect(() => {
     const controller = new AbortController();
     setSnapshot(null); setLoading(true); setError(null);
     void refresh(controller.signal).catch((cause) => { if (!controller.signal.aborted) setError(errorMessage(cause)); }).finally(() => { if (!controller.signal.aborted) setLoading(false); });
-    const timer = window.setInterval(() => { if (document.visibilityState === 'visible') void refresh(controller.signal).catch(() => undefined); }, 15_000);
+    const unsubscribe = subscribeToTeamUpdates(projectId, () => {
+      void refresh(controller.signal).catch((cause) => { if (!controller.signal.aborted) setError(errorMessage(cause)); });
+    });
+    const timer = window.setInterval(() => { if (document.visibilityState === 'visible') void refresh(controller.signal).catch(() => undefined); }, 60_000);
     const visibility = () => { if (document.visibilityState === 'visible') void refresh(controller.signal).catch(() => undefined); };
     document.addEventListener('visibilitychange', visibility);
-    return () => { controller.abort(); window.clearInterval(timer); document.removeEventListener('visibilitychange', visibility); };
+    return () => { controller.abort(); unsubscribe(); window.clearInterval(timer); document.removeEventListener('visibilitychange', visibility); };
   }, [refresh]);
 
   const messages = snapshot?.messages ?? [];

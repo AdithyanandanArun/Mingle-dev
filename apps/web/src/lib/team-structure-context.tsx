@@ -2,6 +2,7 @@ import { createContext, useCallback, useContext, useEffect, useLayoutEffect, use
 import type { TeamStructureSnapshot } from '@mingle/contracts';
 import { api, errorMessage } from './api';
 import { teamSessionsApi } from './team-sessions';
+import { subscribeToTeamUpdates } from './team-live-updates';
 import { useMingle } from '../store/store';
 
 interface TeamStructureContextValue {
@@ -78,13 +79,10 @@ export function TeamStructureProvider({ projectId, children }: { projectId: stri
   }, [connection, projectId]);
 
   useEffect(() => {
-    const onTeamSessionUpdated = (event: Event) => {
-      const changedProjectId = (event as CustomEvent<{ projectId?: string | null }>).detail?.projectId;
-      if (changedProjectId !== projectId) return;
+    if (!projectId) return;
+    return subscribeToTeamUpdates(projectId, () => {
       void refresh().catch((cause) => { setError(errorMessage(cause)); setErrorProjectId(projectId); });
-    };
-    window.addEventListener('mingle:team-session-updated', onTeamSessionUpdated);
-    return () => window.removeEventListener('mingle:team-session-updated', onTeamSessionUpdated);
+    }, { kinds: ['structure'] });
   }, [projectId, refresh]);
 
   // A team session is a remote selection rather than a local Bootstrap session.

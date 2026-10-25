@@ -4,6 +4,7 @@ import type { AgentConfiguration, GroupMember, GroupMode, GroupSnapshot, Provide
 import { useMingle } from '../../store/store';
 import { api, errorMessage } from '../../lib/api';
 import { teamSessionsApi } from '../../lib/team-sessions';
+import { subscribeToTeamUpdates } from '../../lib/team-live-updates';
 import { useTeamStructure } from '../../lib/team-structure-context';
 import { shortPath } from '../../lib/format';
 import { teamAgentDisplayName, teamAgentMetadata } from '../../lib/team-agent-display';
@@ -128,6 +129,11 @@ export function AddAgentDialog({ sessionId }: { sessionId: string }) {
     void loadTeamAgents(controller.signal);
     return () => controller.abort();
   }, [loadTeamAgents]);
+
+  useEffect(() => {
+    if (!projectId) return;
+    return subscribeToTeamUpdates(projectId, () => { void loadTeamAgents(); }, { kinds: ['structure'] });
+  }, [loadTeamAgents, projectId]);
 
   // Another open window may convert or change this conversation while this dialog is open.
   useEffect(() => {
