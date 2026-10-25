@@ -88,15 +88,14 @@ it('shares imported session history and team messages over HTTP and the encrypte
       body: 'Reply using the local fake provider.', mentions: [join.json.sessionId],
     });
     expect(agentMessage.status, JSON.stringify(agentMessage.json)).toBe(200);
-    await waitFor(() => teammate.fake.runs.length === 1
-      && teammate.app.store.db.prepare('SELECT run_state FROM team_chat_messages WHERE id=?').get(agentMessage.json.id)?.run_state === 'completed');
-    expect(teammate.fake.runs).toHaveLength(1);
+    await waitFor(() => teammate.app.store.db.prepare('SELECT delivery_state FROM team_chat_messages WHERE id=?').get(agentMessage.json.id)?.delivery_state === 'sent');
+    expect(teammate.fake.runs).toHaveLength(0);
     await leader.app.distributed.transport.sync();
     const agentReply = await leader.api('GET', `/api/projects/${projects[0]}/team-chat?limit=20`);
-    expect(agentReply.json.messages.some((message: { author: { kind: string }; body: string }) => message.author.kind === 'agent' && message.body === 'ok'),
+    expect(agentReply.json.messages.some((message: { author: { kind: string }; body: string }) => message.author.kind === 'human' && message.body === 'Reply using the local fake provider.'),
       JSON.stringify(agentReply.json.messages)).toBe(true);
     expect(leader.fake.runs).toHaveLength(0);
-    expect(teammate.fake.runs.every((options) => options.prompt.includes('Reply using the local fake provider.'))).toBe(true);
+    expect(teammate.app.store.db.prepare('SELECT run_state FROM team_chat_messages WHERE id=?').get(agentMessage.json.id)?.run_state).toBeNull();
   } finally {
     while (apps.length) await apps.pop()!.cleanup();
     vi.restoreAllMocks();

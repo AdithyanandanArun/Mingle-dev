@@ -71,12 +71,13 @@ function fixture(options: { deviceId?: string; role?: 'leader' | 'admin' | 'memb
   };
   let receive: ((envelope: any) => Promise<void>) | null = null;
   let localDeviceId = options.deviceId ?? DEVICE;
+  let ownerOnline = true;
   let delayedAuthorization: Promise<void> | null = null;
   const transport = {
     snapshot: () => ({ deviceId: localDeviceId, status: 'ready', error: null,
       devices: [
         { id: DEVICE, teamId: TEAM, ownerId: ACCOUNT, name: 'Host device', fingerprint: 'host-fingerprint', signingPublicKey: '', encryptionPublicKey: '', lastSeenAt: new Date().toISOString(), revokedAt: null, createdAt: new Date().toISOString(), status: 'online' },
-        { id: OWNER_DEVICE, teamId: TEAM, ownerId: OWNER, name: 'Owner device', fingerprint: 'owner-fingerprint', signingPublicKey: '', encryptionPublicKey: '', lastSeenAt: new Date().toISOString(), revokedAt: null, createdAt: new Date().toISOString(), status: 'online' },
+        { id: OWNER_DEVICE, teamId: TEAM, ownerId: OWNER, name: 'Owner device', fingerprint: 'owner-fingerprint', signingPublicKey: '', encryptionPublicKey: '', lastSeenAt: new Date().toISOString(), revokedAt: null, createdAt: new Date().toISOString(), status: ownerOnline ? 'online' : 'offline' },
       ],
       links: [
         { teamId: TEAM, deviceId: DEVICE, peerDeviceId: OWNER_DEVICE, peerFingerprint: 'owner-fingerprint', createdAt: new Date().toISOString(), mutual: true },
@@ -119,10 +120,10 @@ function fixture(options: { deviceId?: string; role?: 'leader' | 'admin' | 'memb
   const finished: Array<{ sessionId: string; runId: string; outcome: string }> = [];
   const enqueued: Array<{ content: string; recipients?: string[]; clientMessageId: string }> = [];
   const groupService = {
-    createTeamGroup(input: { id: string; projectId: string; title: string; orchestratorSessionId: string; members: Array<{ sessionId: string; handle: string; role: 'orchestrator' | 'worker' | 'idle'; held: boolean }> }) {
+    createTeamGroup(input: { id: string; projectId: string; title: string; orchestratorSessionId: string; mode?: 'cowork' | 'orchestrated' | 'current-leads'; members: Array<{ sessionId: string; handle: string; role: 'orchestrator' | 'worker' | 'idle'; held: boolean }> }) {
       const members = input.members.map((member) => ({ id: `member-${member.sessionId}`, groupId: input.id, sessionId: member.sessionId,
         handle: member.handle, role: member.role === 'orchestrator' ? 'orchestrator' as const : 'worker' as const, held: member.held, joinedAt: new Date().toISOString(), removedAt: null }));
-      group = { group: { id: input.id, projectId: input.projectId, title: input.title, anchorSessionId: input.orchestratorSessionId, mode: 'orchestrated',
+      group = { group: { id: input.id, projectId: input.projectId, title: input.title, anchorSessionId: input.orchestratorSessionId, mode: input.mode ?? 'orchestrated',
         orchestratorMemberId: members.find((member) => member.sessionId === input.orchestratorSessionId)?.id ?? null, paused: false, pauseReason: null, maxParallel: 2, maxTurns: 80, maxHops: 6, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() },
         members, deliveries: [], requests: [], messages: [], assignments: [] };
       return group;
@@ -133,6 +134,25 @@ function fixture(options: { deviceId?: string; role?: 'leader' | 'admin' | 'memb
       group.members = members.map((member) => ({ id: `member-${member.sessionId}`, groupId: group!.group.id, sessionId: member.sessionId,
         handle: member.handle, role: member.role === 'orchestrator' ? 'orchestrator' as const : 'worker' as const, held: member.held, joinedAt: new Date().toISOString(), removedAt: null }));
       group.group.orchestratorMemberId = group.members.find((member) => member.role === 'orchestrator')?.id ?? null;
+    },
+    syncTeamRosterMembers(_groupId: string, members: Array<{ sessionId: string; handle: string; role: 'orchestrator' | 'worker' | 'idle'; held: boolean }>, managedSessionIds: string[] = []) {
+      if (failNextSync) { failNextSync = false; throw new Error('Scheduler rejected this team structure.'); }
+      if (!group) return;
+      const wanted = new Set(members.map((member) => member.sessionId));
+      for (const member of members) {
+        const current = group.members.find((candidate) => candidate.sessionId === member.sessionId && !candidate.removedAt);
+        if (current) Object.assign(current, { handle: member.handle, role: member.role === 'orchestrator' ? 'orchestrator' : group.group.mode === 'cowork' ? 'peer' : 'worker', held: member.held });
+        else group.members.push({ id: `member-${member.sessionId}`, groupId: group.group.id, sessionId: member.sessionId,
+          handle: member.handle, role: member.role === 'orchestrator' ? 'orchestrator' : 'worker', held: member.held, joinedAt: new Date().toISOString(), removedAt: null });
+      }
+      for (const current of group.members) if (managedSessionIds.includes(current.sessionId) && !wanted.has(current.sessionId) && !current.removedAt) current.removedAt = new Date().toISOString();
+    },
+    forSession(sessionId: string) { return group?.members.some((member) => member.sessionId === sessionId && !member.removedAt) ? group : undefined; },
+    async addTeamMember(_groupId: string, input: { sessionId: string; handle: string }) {
+      if (!group) throw new Error('No group');
+      group.members.push({ id: `member-${input.sessionId}`, groupId: group.group.id, sessionId: input.sessionId,
+        handle: input.handle, role: group.group.mode === 'cowork' ? 'peer' : 'worker', held: false, joinedAt: new Date().toISOString(), removedAt: null });
+      return group;
     },
     get() { if (!group) throw new Error('No group'); return group; },
     setTeamLeader(_groupId: string, sessionId: string | null, options: { paused?: boolean } = {}) {
@@ -164,7 +184,8 @@ function fixture(options: { deviceId?: string; role?: 'leader' | 'admin' | 'memb
     deliveryTimeoutMs: options.deliveryTimeoutMs ?? 60_000, now: options.now });
   const fx = {
     store, project, local, host, outgoing, finished, enqueued, artifactImports, group: () => group, setRole(value: typeof role) { role = value; },
-     setDevice(deviceId: string) { localDeviceId = deviceId; },
+      setDevice(deviceId: string) { localDeviceId = deviceId; },
+      setOwnerOnline(value: boolean) { ownerOnline = value; },
      failNextSync() { failNextSync = true; },
      pumpCount() { return pumpCount; },
      delayAuthorization(gate: Promise<void>) { delayedAuthorization = gate; },
@@ -172,7 +193,15 @@ function fixture(options: { deviceId?: string; role?: 'leader' | 'admin' | 'memb
       if (!receive) throw new Error('No team orchestration transport handler');
       return receive({ id: randomUUID(), teamId: TEAM, fromDeviceId, toDeviceId: options.deviceId ?? DEVICE, kind, payload });
     },
-    async close() { await host.close(); store.db.close(); },
+     async close() { await host.close(); store.db.close(); },
+     setGroup(snapshot: GroupSnapshot) { group = snapshot; },
+     removeGroupMember(memberId: string) {
+       if (!group) return;
+       const member = group.members.find((candidate) => candidate.id === memberId);
+       if (!member) return;
+       member.removedAt = new Date().toISOString();
+       store.recordEvent({ projectId: PROJECT, type: 'group.member.removed', summary: 'Agent removed', payload: { groupId: group.group.id, memberId } });
+     },
   };
   fixtures.push(fx);
   return fx;
@@ -181,11 +210,18 @@ function fixture(options: { deviceId?: string; role?: 'leader' | 'admin' | 'memb
 const enableInput = (orchestratorAgentId = LOCAL_AGENT) => ({ leaderOrchestration: true, permissionLevel: 'supervised', orchestratorAgentId,
   fallbackAgentIds: orchestratorAgentId === LOCAL_AGENT ? [] : [LOCAL_AGENT] });
 
-async function grantRemote(fx: ReturnType<typeof fixture>): Promise<void> {
+async function grantRemote(fx: ReturnType<typeof fixture>, settingsVersion = 1): Promise<void> {
   await fx.incoming('teamgroup.consent', {
-    sharedProjectId: SHARED, agentIds: [REMOTE_AGENT], permissionLevel: 'supervised', settingsVersion: 1,
+    sharedProjectId: SHARED, agentIds: [REMOTE_AGENT], permissionLevel: 'supervised', settingsVersion,
     disclaimerVersion: TEAM_CONSENT_DISCLAIMER_VERSION, state: 'granted', at: new Date().toISOString(),
   });
+}
+
+function seedRemoteConsent(fx: ReturnType<typeof fixture>): void {
+  const at = new Date().toISOString();
+  fx.store.db.prepare(`INSERT INTO mingle_team_host_consents(team_id,shared_project_id,agent_id,owner_account_id,owner_device_id,state,
+    permission_level,settings_version,disclaimer_version,accepted_at,updated_at) VALUES(?,?,?,?,?,'granted','supervised',1,?,?,?)`)
+    .run(TEAM, SHARED, REMOTE_AGENT, OWNER, OWNER_DEVICE, TEAM_CONSENT_DISCLAIMER_VERSION, at, at);
 }
 
 it('authorizes host changes, enforces optimistic versions, validates broadcasts, and routes chat without starting inference', async () => {
@@ -213,6 +249,124 @@ it('authorizes host changes, enforces optimistic versions, validates broadcasts,
   });
   expect(fx.enqueued.at(-1)?.recipients).toEqual(['codex1']);
   expect(fx.outgoing.every((entry) => entry.kind !== 'teamgroup.delivery')).toBe(true);
+});
+
+it('lists teammate agents with consent, online, host-role, and existing-group usability', async () => {
+  const fx = fixture();
+  const beforeConsent = await fx.host.availableAgents(PROJECT);
+  expect(beforeConsent.agents[0]).toMatchObject({ agentId: REMOTE_AGENT, online: true, consent: 'none', usable: false,
+    unusableReason: 'The agent owner has not granted team consent.', groupId: null });
+  seedRemoteConsent(fx);
+  const usable = await fx.host.availableAgents(PROJECT);
+  expect(usable).toMatchObject({ teamId: TEAM, sharedProjectId: SHARED, canAdd: true, permissionLevel: null });
+  expect(usable.agents[0]).toMatchObject({ agentId: REMOTE_AGENT, ownerDisplayName: 'Owner Sam', deviceName: 'Owner device', consent: 'granted', usable: true });
+  fx.setOwnerOnline(false);
+  expect((await fx.host.availableAgents(PROJECT)).agents[0]).toMatchObject({ online: false, usable: false, unusableReason: expect.stringContaining('offline') });
+  fx.setOwnerOnline(true);
+  fx.setRole('member');
+  const readOnly = await fx.host.availableAgents(PROJECT);
+  expect(readOnly).toMatchObject({ canAdd: false, reason: expect.stringContaining('team lead') });
+  expect(readOnly.agents[0]).toMatchObject({ usable: false, unusableReason: expect.stringContaining('team lead') });
+});
+
+it('converts one session into its team group, creates a remote proxy member, and routes it to the owner device', async () => {
+  const fx = fixture();
+  await grantRemote(fx, 7);
+  const group = await fx.host.addAgentToSession(LOCAL_AGENT, { agentId: REMOTE_AGENT });
+  const proxySessionId = (fx.store.db.prepare('SELECT session_id FROM mingle_team_proxy_sessions WHERE agent_id=?').get(REMOTE_AGENT) as { session_id: string }).session_id;
+  expect(group.group).toMatchObject({ id: expect.stringMatching(/^group_/), title: 'Local Claude', mode: 'orchestrated', anchorSessionId: LOCAL_AGENT });
+  expect(group.members).toContainEqual(expect.objectContaining({ sessionId: LOCAL_AGENT, role: 'orchestrator' }));
+  expect(group.members).toContainEqual(expect.objectContaining({ sessionId: proxySessionId, handle: 'codex1' }));
+  expect(fx.store.db.prepare('SELECT group_id FROM mingle_team_host_projects WHERE team_id=? AND shared_project_id=?').get(TEAM, SHARED))
+    .toEqual({ group_id: group.group.id });
+  const mirrors: unknown[] = [];
+  fx.host.setTeamChat({ mirrorTeamSessionMessage: async (input: { projectId: string; sessionId: string; sourceMessageId: string; content: string; kind: 'human' | 'agent'; replyTo?: string }) => { mirrors.push(input); } } as any);
+  fx.group()!.messages.push({ id: 'host-group-user-message', seq: 1, groupId: group.group.id, senderMemberId: null,
+    recipientMemberIds: [], kind: 'user', content: 'Lead message from the group composer', requestId: 'request-1', replyToId: null,
+    sourceMessageId: null, sourceRunId: null, createdAt: new Date().toISOString() });
+  fx.store.recordEvent({ projectId: PROJECT, type: 'group.message.sent', summary: 'Group message sent', payload: { groupId: group.group.id, messageId: 'host-group-user-message' } });
+  await waitFor(() => mirrors.length === 1);
+  expect(mirrors[0]).toMatchObject({ sessionId: LOCAL_AGENT, sourceMessageId: 'host-group-user-message', kind: 'human' });
+  fx.store.recordEvent({ projectId: PROJECT, type: 'group.message.sent', summary: 'Team-chat routed message', payload: { groupId: group.group.id, messageId: 'host-group-user-message', source: 'teamchat' } });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(mirrors).toHaveLength(1);
+  const structure = await fx.host.structure(PROJECT);
+  expect(structure.settings?.version).toBe(7);
+  expect(structure.teamSession).toEqual({ groupId: group.group.id, sessionId: LOCAL_AGENT, title: 'Local Claude' });
+  expect(await fx.host.availableAgents(PROJECT)).toMatchObject({ agents: [expect.objectContaining({ usable: false, groupId: group.group.id })] });
+  expect(fx.outgoing.filter((entry) => entry.kind === 'teamgroup.structure').at(-1)?.payload).toMatchObject({
+    teamSession: { groupId: group.group.id, sessionId: LOCAL_AGENT, title: 'Local Claude' },
+  });
+  const routed = await fx.host.routeTeamChatMessage(PROJECT, { id: 'member-chat', teamId: TEAM, sharedProjectId: SHARED,
+    body: 'Please check this', mentions: [REMOTE_AGENT], author: { kind: 'human', accountId: OWNER, displayName: 'Owner Sam' } });
+  expect(routed).toBe('routed');
+  expect(fx.enqueued.at(-1)?.recipients).toEqual(['codex1']);
+  const live = fx.group()!;
+  const remoteMember = live.members.find((member) => member.sessionId === proxySessionId)!;
+  const deliveryId = 'converted-group-delivery';
+  const requestId = 'converted-group-request';
+  const runId = 'converted-proxy-run';
+  live.deliveries.push({ id: deliveryId, groupId: live.group.id, requestId, messageId: 'converted-message', memberId: remoteMember.id,
+    status: 'running', runId, hop: 0, error: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), kind: 'request' });
+  const userMessage = fx.store.insertMessage({ sessionId: proxySessionId, role: 'user', content: 'Check the change', runId, kind: 'group-delivery' });
+  const proxySession = fx.store.getSession(proxySessionId)!;
+  fx.store.insertRun({ id: runId, sessionId: proxySessionId, userMessageId: userMessage.id, provider: proxySession.provider, model: proxySession.model,
+    startedAt: new Date().toISOString() });
+  fx.host.start({ session: proxySession, runId, content: 'Check the change', options: { groupDeliveryId: deliveryId },
+    context: { groupId: live.group.id, memberId: remoteMember.id, requestId, deliveryId, hop: 0, instructions: 'Team instructions' } });
+  await waitFor(() => fx.outgoing.find((entry) => entry.kind === 'teamgroup.delivery' && (entry.payload as { deliveryId?: string }).deliveryId === deliveryId));
+  expect(fx.outgoing.find((entry) => entry.kind === 'teamgroup.delivery')).toMatchObject({ toDeviceId: OWNER_DEVICE });
+});
+
+it('adds a teammate agent to an existing ordinary group and blocks a second team session', async () => {
+  const fx = fixture();
+  seedRemoteConsent(fx);
+  const second = fx.store.insertSession({ id: 'local-worker', projectId: PROJECT, name: 'Local worker', provider: 'claude', model: 'claude-sonnet-5-5',
+    effort: 'high', policy: 'supervised', isolated: false, worktreePath: fx.project.path, branch: null });
+  const existing: GroupSnapshot = { group: { id: 'group_existing', projectId: PROJECT, title: 'Existing discussion', anchorSessionId: LOCAL_AGENT,
+    mode: 'orchestrated', orchestratorMemberId: 'member-lead', paused: false, pauseReason: null, maxParallel: 2, maxTurns: 80, maxHops: 6,
+    createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }, members: [
+      { id: 'member-lead', groupId: 'group_existing', sessionId: LOCAL_AGENT, handle: 'claude1', role: 'orchestrator', held: false, joinedAt: new Date().toISOString(), removedAt: null },
+      { id: 'member-worker', groupId: 'group_existing', sessionId: second.id, handle: 'claude2', role: 'worker', held: false, joinedAt: new Date().toISOString(), removedAt: null },
+    ], messages: [], requests: [], deliveries: [], assignments: [] };
+  fx.setGroup(existing);
+  const group = await fx.host.addAgentToGroup('group_existing', { agentId: REMOTE_AGENT });
+  expect(group.members.map((member) => member.sessionId)).toContain('local-worker');
+  expect(group.members.some((member) => member.sessionId.startsWith('proxy_'))).toBe(true);
+  const other = fx.store.insertSession({ id: 'another-local-session', projectId: PROJECT, name: 'Another session', provider: 'codex', model: 'gpt-6-codex',
+    effort: 'high', policy: 'supervised', isolated: false, worktreePath: fx.project.path, branch: null });
+  await expect(fx.host.addAgentToSession(other.id, { agentId: REMOTE_AGENT })).rejects.toMatchObject({ status: 409, message: expect.stringContaining('Existing discussion') });
+});
+
+it('requires the host lead/admin and clears team-session metadata when the last proxy member is removed', async () => {
+  const denied = fixture({ role: 'member' });
+  seedRemoteConsent(denied);
+  await expect(denied.host.addAgentToSession(LOCAL_AGENT, { agentId: REMOTE_AGENT })).rejects.toMatchObject({ status: 403 });
+
+  const fx = fixture();
+  seedRemoteConsent(fx);
+  const group = await fx.host.addAgentToSession(LOCAL_AGENT, { agentId: REMOTE_AGENT });
+  const remote = group.members.find((member) => member.sessionId.startsWith('proxy_'))!;
+  fx.removeGroupMember(remote.id);
+  await waitFor(() => fx.store.db.prepare('SELECT removed_at FROM mingle_team_host_roster WHERE agent_id=?').get(REMOTE_AGENT)
+    && (fx.store.db.prepare('SELECT removed_at FROM mingle_team_host_roster WHERE agent_id=?').get(REMOTE_AGENT) as { removed_at: string | null }).removed_at !== null);
+  expect((await fx.host.structure(PROJECT)).teamSession).toBeNull();
+});
+
+it('returns 404 for an unknown published agent and 409 for an agent without consent', async () => {
+  const fx = fixture();
+  await expect(fx.host.addAgentToSession(LOCAL_AGENT, { agentId: 'not-published' })).rejects.toMatchObject({ status: 404 });
+  await expect(fx.host.addAgentToSession(LOCAL_AGENT, { agentId: REMOTE_AGENT })).rejects.toMatchObject({ status: 409, message: expect.stringContaining('consent') });
+});
+
+it('routes untagged member messages through the existing group mode even when legacy leader orchestration is off', async () => {
+  const fx = fixture();
+  await fx.host.enable(PROJECT, enableInput());
+  await fx.host.update(PROJECT, { expectedVersion: 1, leaderOrchestration: false });
+  const result = await fx.host.routeTeamChatMessage(PROJECT, { id: 'member-untagged', teamId: TEAM, sharedProjectId: SHARED,
+    body: 'Use the group mode', mentions: [], author: { kind: 'human', accountId: OWNER, displayName: 'Owner Sam' } });
+  expect(result).toBe('routed');
+  expect(fx.enqueued.at(-1)?.recipients).toBeUndefined();
 });
 
 it('pumps queued team work when renewed owner consent makes a remote member eligible', async () => {

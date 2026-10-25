@@ -58,6 +58,7 @@ class FakeRuntime {
         const at = new Date().toISOString();
         this.store.finishRun(runId, 'failed', 1, at);
         this.store.updateSession(sessionId, { status: 'error', error: 'The provider reports an exhausted quota.' });
+        this.store.recordEvent({ projectId: session.projectId, sessionId, type: 'session.run.failed', summary: 'Fake provider failed', payload: { runId } });
         this.store.insertProviderFailure(sessionId, runId, { id: `failure-${runId}`, sessionId, runId, actor: 'worker',
           kind: 'quota_exhausted', provider: session.provider, retryable: true, safeToRetry: false, outcomeUnknown: false,
           dispatchState: 'dispatched', continuationSafety: 'unsafe', message: 'Quota exhausted on the local provider.', occurredAt: at }, at);
@@ -73,6 +74,7 @@ class FakeRuntime {
     const runId = this.active.get(sessionId);
     if (!runId) return false;
     this.store.finishRun(runId, 'interrupted', 0);
+    this.store.recordEvent({ projectId: this.store.getSession(sessionId)?.projectId ?? null, sessionId, type: 'session.run.interrupted', summary: 'Fake provider interrupted', payload: { runId } });
     this.active.delete(sessionId);
     return true;
   }
@@ -94,6 +96,7 @@ class FakeRuntime {
     options.onActivity?.({ type: 'text', text: 'Final result: safe output' } satisfies AdapterEvent);
     this.store.insertMessage({ sessionId, role: 'assistant', content: 'Final result: safe output', runId });
     this.store.finishRun(runId, 'completed', 3);
+    this.store.recordEvent({ projectId: session.projectId, sessionId, type: 'session.run.completed', summary: 'Fake provider completed', payload: { runId } });
     this.active.delete(sessionId);
   }
 }
@@ -243,7 +246,7 @@ function structure(version: number, permissionLevel: 'supervised' | 'full-access
       updatedAt: new Date().toISOString(), updatedByAccountId: LEAD },
     disclaimerVersion: TEAM_CONSENT_DISCLAIMER_VERSION,
     members: [{ agentId: AGENT_ID, handle: 'worker', role: 'worker', fallbackRank: null, ownerAccountId: ACCOUNT, deviceId: OWN_DEVICE, state: 'idle', currentTask: null }],
-    leaderHistory: [], needsLeader: false,
+    leaderHistory: [], needsLeader: false, teamSession: { groupId: 'group-shared-session', sessionId: 'session-lead', title: 'Shared session' },
   };
 }
 
@@ -256,6 +259,9 @@ describe('owner-device team orchestration', () => {
   it('creates consent, publishes selected sessions, honours pause/revoke locally and marks consent for re-acceptance', async () => {
     const f = await fixture();
     await sendStructure(f);
+    expect(f.side.latestStructure(SHARED)?.teamSession).toEqual({ groupId: 'group-shared-session', sessionId: 'session-lead', title: 'Shared session' });
+    await sendStructure(f, { ...structure(1), teamSession: { groupId: 'group-updated', sessionId: 'session-lead', title: 'Renamed session' } });
+    expect(f.side.latestStructure(SHARED)?.teamSession).toEqual({ groupId: 'group-updated', sessionId: 'session-lead', title: 'Renamed session' });
     const accepted = await f.setConsent();
     expect(accepted).toMatchObject({ state: 'granted', permissionLevel: 'supervised', agentIds: [AGENT_ID], hostSync: 'sent' });
     expect(f.sent.some((message) => message.kind === 'teamgroup.consent' && message.toDeviceId === HOST_DEVICE)).toBe(true);

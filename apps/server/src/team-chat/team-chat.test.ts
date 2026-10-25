@@ -76,6 +76,7 @@ function fixture(withAgent = false) {
   let receive: ((envelope: any) => Promise<void>) | null = null;
   const outgoing: Array<{ teamId: string; toDeviceId: string; kind: string; payload: unknown; idempotencyKey: string }> = [];
   let allowPeer = true;
+  let transportGate: Promise<void> | null = null;
   const transportSnapshot = () => ({
     deviceId: DEVICE, status: 'ready' as const, error: null,
     devices: [
@@ -86,7 +87,7 @@ function fixture(withAgent = false) {
   });
   const transport = {
     snapshot: () => transportSnapshot(),
-    sync: async () => undefined,
+    sync: async () => { if (transportGate) await transportGate; },
     send: async (entry: typeof outgoing[number]) => { outgoing.push(entry); return `envelope-${outgoing.length}`; },
     signPayload: async (teamId: string, expectedDeviceId: string, payload: string) => {
       if (teamId !== TEAM || expectedDeviceId !== DEVICE) throw new Error('unexpected signing device');
@@ -123,7 +124,7 @@ function fixture(withAgent = false) {
     },
   };
   const service = new TeamChatService({ store, account: account as unknown as AccountService,
-    distributed: distributed as unknown as DistributedWorkspaceService, runtime: runtime as any,
+    distributed: distributed as unknown as DistributedWorkspaceService,
     collaboration: collaboration as unknown as ProjectCollaborationService });
   return {
     store, project, session, service, outgoing, runtimeCalls: fake.runs,
@@ -132,6 +133,7 @@ function fixture(withAgent = false) {
       return receive(envelope);
     },
     setPeerAllowed(value: boolean) { allowPeer = value; },
+    holdTransport(gate: Promise<void>) { transportGate = gate; },
     remoteMessage(message: Record<string, any>, deviceId = PEER, keys = PEER_KEYS): Record<string, any> {
       const author = message.author.kind === 'human'
         ? { kind: 'human', accountId: message.author.accountId }
@@ -160,9 +162,10 @@ it('fans out authenticated human messages, deduplicates by message ID, and rejec
   const f = fixture();
   try {
     const message = await f.service.send(PROJECT, { body: 'Shared note', mentions: [] });
-    expect(message).toMatchObject({ author: { kind: 'human', accountId: ACCOUNT, displayName: 'Ada' }, deliveryState: 'sent' });
+    expect(message).toMatchObject({ author: { kind: 'human', accountId: ACCOUNT, displayName: 'Ada' }, deliveryState: 'sending' });
     expect(message.authorDeviceId).toBe(DEVICE);
     expect(message.authorSignature).toMatch(/^[A-Za-z0-9+/]{86}==$/);
+    await until(() => f.outgoing.some((entry) => entry.kind === 'teamchat.message'));
     expect(f.outgoing).toHaveLength(1);
     expect(f.outgoing[0]).toMatchObject({ kind: 'teamchat.message', toDeviceId: PEER });
 
@@ -180,6 +183,20 @@ it('fans out authenticated human messages, deduplicates by message ID, and rejec
     await expect(f.receive({ ...envelope, id: randomUUID(), payload: forged })).rejects.toThrow(/inactive peer/);
     expect(f.store.db.prepare('SELECT COUNT(*) AS n FROM team_chat_messages WHERE body=?').get('revoked sender message')).toEqual({ n: 0 });
   } finally { await f.close(); }
+});
+
+it('returns from a human send before transport sync completes', async () => {
+  const f = fixture();
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  f.holdTransport(gate);
+  try {
+    const response = await Promise.race([
+      f.service.send(PROJECT, { body: 'Quick local acceptance', mentions: [] }),
+      new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error('The send waited on transport.')), 100)),
+    ]);
+    expect(response.deliveryState).toBe('sending');
+  } finally { release(); await f.close(); }
 });
 
 it('rejects forged backfill authors, unsolicited responses, and unrostered agent identities before persistence', async () => {
@@ -300,7 +317,7 @@ it('rate-limits repeated sync requests from the same peer device', async () => {
   } finally { await f.close(); }
 });
 
-it('backfills bounded message batches and runs local agent mentions through the normal runtime adapter', async () => {
+it('backfills bounded message batches without starting local runs from team-chat mentions', async () => {
   const f = fixture(true);
   try {
     const author = JSON.stringify({ kind: 'human', accountId: ACCOUNT, displayName: 'Ada' });
@@ -324,21 +341,10 @@ it('backfills bounded message batches and runs local agent mentions through the 
 
     const agentId = f.session!.id;
     const humanMessage = await f.service.send(PROJECT, { body: 'Please check this for the team.', mentions: [agentId] });
-    expect(humanMessage.runState).toBe('running');
-    await until(() => {
-      const rows = f.store.db.prepare('SELECT author_json FROM team_chat_messages').all() as Array<{ author_json: string }>;
-      const parent = f.store.db.prepare('SELECT run_state FROM team_chat_messages WHERE id=?').get(humanMessage.id) as { run_state: string | null } | undefined;
-      return rows.some((row) => JSON.parse(row.author_json).kind === 'agent') && parent?.run_state === 'completed';
-    });
-    expect(f.runtimeCalls).toHaveLength(1);
-    expect(f.runtimeCalls[0]).toMatchObject({ session: { id: agentId } });
-    expect(f.runtimeCalls[0]!.prompt).toContain('Please check this for the team.');
-    expect(f.runtimeCalls[0]!.prompt).toContain('untrusted conversation context');
-    expect(f.store.db.prepare('SELECT author_device_id,author_signature FROM team_chat_messages WHERE author_json LIKE ?')
-      .get('%"kind":"agent"%')).toMatchObject({ author_device_id: DEVICE, author_signature: expect.stringMatching(/^[A-Za-z0-9+/]{86}==$/) });
-    const messages = f.store.db.prepare('SELECT author_json,body,run_state FROM team_chat_messages ORDER BY created_at,id').all() as Array<{ author_json: string; body: string; run_state: string | null }>;
-    expect(messages.some((row) => JSON.parse(row.author_json).kind === 'agent' && row.body === 'ok')).toBe(true);
-    expect(messages.find((row) => JSON.parse(row.author_json).kind === 'human' && row.body === 'Please check this for the team.')?.run_state).toBe('completed');
+    expect(humanMessage.runState).toBeNull();
+    await until(() => f.outgoing.some((entry) => entry.kind === 'teamchat.message'));
+    expect(f.runtimeCalls).toHaveLength(0);
+    expect((f.store.db.prepare('SELECT run_state FROM team_chat_messages WHERE id=?').get(humanMessage.id) as { run_state: string | null }).run_state).toBeNull();
   } finally { await f.close(); }
 });
 
@@ -352,6 +358,7 @@ it('routes enabled team-chat requests through the orchestration host and signs l
     },
   });
   await f.service.send(PROJECT, { body: 'Plan a small fix', mentions: [] });
+  await until(() => routed.length === 1);
   expect(routed).toHaveLength(1);
   expect(routed[0]).toMatchObject({ projectId: PROJECT, message: { body: 'Plan a small fix', mentions: [] } });
   expect(f.runtimeCalls).toEqual([]);
@@ -361,4 +368,44 @@ it('routes enabled team-chat requests through the orchestration host and signs l
   const reply = snapshot.messages.find((message) => message.author.kind === 'agent');
   expect(reply).toMatchObject({ body: 'I found the change.', replyTo: 'human-source', authorDeviceId: DEVICE, runState: 'completed' });
   expect(reply?.author.kind === 'agent' && reply.author.agentId).toBe(f.session!.id);
+});
+
+it('routes authenticated member-device mentions and untagged messages into the shared group path', async () => {
+  const f = fixture(true);
+  try {
+    const routed: Array<{ body: string; mentions: string[] }> = [];
+    f.service.setOrchestration({
+      async routeTeamChatMessage(_projectId, message) { routed.push({ body: message.body, mentions: message.mentions }); return 'handled'; },
+    });
+    const base = { teamId: TEAM, sharedProjectId: SHARED,
+      author: { kind: 'human' as const, accountId: ACCOUNT, displayName: 'Ada' }, createdAt: new Date().toISOString(), deliveryState: 'sent' as const, runState: null };
+    const mentioned = f.remoteMessage({ ...base, id: randomUUID(), body: '@local please inspect this', mentions: [f.session!.id] });
+    const untagged = f.remoteMessage({ ...base, id: randomUUID(), body: 'Continue using the group mode', mentions: [] });
+    await f.receive({ id: randomUUID(), teamId: TEAM, fromDeviceId: PEER, toDeviceId: DEVICE, kind: 'teamchat.message', payload: mentioned });
+    await f.receive({ id: randomUUID(), teamId: TEAM, fromDeviceId: PEER, toDeviceId: DEVICE, kind: 'teamchat.message', payload: untagged });
+    expect(routed).toEqual([
+      { body: '@local please inspect this', mentions: [f.session!.id] },
+      { body: 'Continue using the group mode', mentions: [] },
+    ]);
+    expect(f.runtimeCalls).toHaveLength(0);
+  } finally { await f.close(); }
+});
+
+it('persists and fans out a mirrored team-session source message only once', async () => {
+  const f = fixture(true);
+  try {
+    const input = { projectId: PROJECT, sessionId: f.session!.id, sourceMessageId: 'group-message-1', content: 'Lead request', kind: 'human' as const };
+    const first = await f.service.mirrorTeamSessionMessage(input);
+    const second = await f.service.mirrorTeamSessionMessage(input);
+    const agentReply = await f.service.mirrorTeamSessionMessage({ ...input, sourceMessageId: 'group-run:run-1', content: 'Agent final reply', kind: 'agent' });
+    await until(() => f.outgoing.some((entry) => entry.kind === 'teamchat.message' && (entry.payload as { id?: string }).id === first?.id)
+      && f.outgoing.some((entry) => entry.kind === 'teamchat.message' && (entry.payload as { id?: string }).id === agentReply?.id));
+    expect(first?.id).toBe(second?.id);
+    expect(agentReply?.author).toMatchObject({ kind: 'agent', agentId: input.sessionId, ownerAccountId: ACCOUNT });
+    expect(f.store.db.prepare(`SELECT COUNT(*) AS n FROM team_chat_messages WHERE source_session_id=? AND source_message_id=?`)
+      .get(input.sessionId, input.sourceMessageId)).toEqual({ n: 1 });
+    expect(f.store.db.prepare(`SELECT COUNT(*) AS n FROM team_chat_messages WHERE source_session_id=? AND source_message_id=?`)
+      .get(input.sessionId, 'group-run:run-1')).toEqual({ n: 1 });
+    expect(f.outgoing.filter((entry) => entry.kind === 'teamchat.message' && (entry.payload as { id?: string }).id === first?.id)).toHaveLength(1);
+  } finally { await f.close(); }
 });

@@ -49,3 +49,28 @@ it('requeues a failed planner request to the selected team leader without starti
   expect(after.requests.find((request) => request.id === requestId)?.status).toBe('paused');
   expect(test.fake.runs).toEqual([]);
 });
+
+it('allows removal of the last remote proxy while retaining the host conversation', async () => {
+  const test = await startTestApp({ exampleWorkspace: false });
+  apps.push(test);
+  const path = makeRepo();
+  repos.push(path);
+  const project = test.app.store.insertProject({ id: 'team-proxy-removal-project', name: 'Proxy removal', path });
+  const lead = test.app.store.insertSession({ projectId: project.id, name: 'Local lead', provider: 'claude', model: 'claude-sonnet-5-5',
+    effort: 'high', policy: 'supervised', isolated: false, worktreePath: path, branch: null });
+  const remote = test.app.store.insertSession({ projectId: project.id, id: 'proxy_remote_agent', name: 'Remote agent', provider: 'codex', model: 'gpt-6-codex',
+    effort: 'medium', policy: 'supervised', isolated: false, worktreePath: path, branch: null });
+  const groupId = 'group-last-proxy-removal';
+  test.app.groups.createTeamGroup({ id: groupId, projectId: project.id, title: 'Shared session', orchestratorSessionId: lead.id,
+    members: [
+      { sessionId: lead.id, handle: 'claude1', role: 'orchestrator', held: false },
+      { sessionId: remote.id, handle: 'codex1', role: 'worker', held: false },
+    ] });
+  test.app.store.db.prepare(`INSERT INTO mingle_team_proxy_sessions(session_id,team_id,shared_project_id,agent_id,owner_account_id,owner_device_id,handle)
+    VALUES(?,?,?,?,?,?,?)`).run(remote.id, 'team-id', 'shared-project-id', 'remote-agent-id', 'owner-account-id', 'owner-device-id', 'codex1');
+  const proxy = test.app.groups.get(groupId).members.find((member) => member.sessionId === remote.id)!;
+  const after = test.app.groups.removeMember(groupId, proxy.id);
+  expect(after.members.find((member) => member.id === proxy.id)?.removedAt).toBeTruthy();
+  expect(after.members.filter((member) => !member.removedAt).map((member) => member.sessionId)).toEqual([lead.id]);
+  expect(after.group.anchorSessionId).toBe(lead.id);
+});

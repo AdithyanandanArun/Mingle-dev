@@ -16,6 +16,21 @@ This replaces the team chat panel as the user-facing surface. The cross-device m
    - the host routes it into the group exactly like the lead typing in the session: @mentions go to the mentioned agents, and untagged messages follow the group's mode.
 6. **Same rules as local.** Every group mode a local multi-agent session supports also works with teammates' agents. The group-wide permission level and the owner's consent still bound every remote run, as in `docs/team-orchestration.md`.
 
+## HTTP details
+
+- `GET /api/projects/:projectId/team-agents` returns `TeamAvailableAgentsSnapshot`. An unshared project returns null team identifiers and an empty agent list. The host lead/admin can add; other viewers receive `canAdd: false` and a plain-language `reason`. Unavailable teammates remain listed with `usable: false`, `unusableReason`, consent/online state and, when applicable, their existing `groupId`.
+- `POST /api/sessions/:id/team-agents` creates a normal `group_*` group with the selected session as its orchestrator, then adds the proxy. `POST /api/groups/:id/team-agents` adds the proxy to an existing group. Both accept `AddTeamAgentSchema` and return `GroupSnapshot`; the optional mode applies only while converting a single session and defaults to `orchestrated`.
+- Both add routes require an active lead/admin on the host device (`403`). An unknown agent returns `404`; offline, consent, active-work, duplicate membership and a second team session return `409`. The second-session error includes the current session title. Consent and the group permission level are rechecked at every remote dispatch.
+- A team session is exposed in structure snapshots only while the host group has at least one active teammate proxy. Removing the last proxy through `DELETE /api/groups/:id/members/:memberId` removes its roster entry and broadcasts the cleared `teamSession`; the remaining local group stays available.
+
+## Implementation notes
+
+The host stores the ordinary group ID in `mingle_team_host_projects.group_id`; new session IDs use the normal `group_*` namespace. Existing `teamgrp_*` rows remain readable. Team proxy rows remain unique per `(team, shared project, agent)`, so one proxy session per published agent is reused if the agent is removed and later re-added. Group-member identity/history is still per group.
+
+Owner consent may arrive before the first host team session exists. The host validates and stores that consent against the shared project/device roster; the implicit first add starts at a settings version no lower than the accepted consent version and uses `supervised` permission by default.
+
+Group-composer user messages are mirrored after local acceptance, using `(source_session_id, source_message_id)` for transcript deduplication. Local group-agent final replies use the run ID as their mirror source; remote agents publish from their owner device with the existing device signature. Member-device team-chat messages are authenticated and queued to the same group routing path, with `@mentions` mapped to group handles and untagged messages using that group's mode. Team-chat delivery and routing run after the HTTP response.
+
 ## Performance rules
 
 - Background loops must not emit `state.changed` unless durable, user-visible state actually changed. An idle app with a registered device emits no `state.changed` at all.
