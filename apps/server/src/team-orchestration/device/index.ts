@@ -616,7 +616,6 @@ export function createDeviceSide(deps: DeviceSideDeps): {
     }
     try {
       await send(teamId, toDeviceId, 'teamgroup.delivery.status', payload, statusIdempotencyKey(payload));
-      await deps.transport.sync();
     } catch (error) {
       if (!terminal) throw error;
       scheduleTerminalStatusRetry(teamId, toDeviceId, payload);
@@ -638,7 +637,6 @@ export function createDeviceSide(deps: DeviceSideDeps): {
   async function sendStatusPayload(teamId: string, toDeviceId: string, payload: ReturnType<typeof TeamDeliveryStatusPayloadSchema.parse>): Promise<void> {
     try {
       await send(teamId, toDeviceId, 'teamgroup.delivery.status', payload, statusIdempotencyKey(payload));
-      await deps.transport.sync();
       const timer = terminalStatusRetries.get(payload.deliveryId);
       if (timer) clearTimeout(timer);
       terminalStatusRetries.delete(payload.deliveryId);
