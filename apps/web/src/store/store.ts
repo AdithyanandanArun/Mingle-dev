@@ -337,6 +337,9 @@ export const useMingle = create<MingleState>((set, get) => {
         }
         scheduleRefresh();
         window.dispatchEvent(new Event('mingle:state-changed'));
+        if (incoming?.type === 'team.session.updated') {
+          window.dispatchEvent(new CustomEvent('mingle:team-session-updated', { detail: { projectId: incoming.projectId } }));
+        }
         break;
       }
       case 'session.delta': {

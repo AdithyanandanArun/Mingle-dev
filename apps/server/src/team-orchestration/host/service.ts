@@ -91,6 +91,8 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
         if (event.payload.source !== 'teamchat') this.track(Promise.resolve().then(() => this.mirrorGroupHumanMessage(event.payload.groupId as string, event.payload.messageId as string)));
       } else if (event.type === 'group.member.removed' && typeof event.payload.groupId === 'string' && typeof event.payload.memberId === 'string') {
         this.track(Promise.resolve().then(() => this.onGroupMemberRemoved(event.payload.groupId as string, event.payload.memberId as string)));
+      } else if (event.type === 'group.archived' && typeof event.payload.groupId === 'string') {
+        this.track(Promise.resolve().then(() => this.onGroupArchived(event.payload.groupId as string)));
       }
     });
     this.recoverProxyDeliveries();
@@ -128,6 +130,14 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
     const parsed = TeamOrchestrationSettingsSchema.safeParse(safeJson(row.settings_json, null));
     if (!parsed.success) throw new HttpError(500, 'Saved team orchestration settings are invalid.');
     return parsed.data;
+  }
+
+  private groupOrNull(groupId: string): import('@mingle/contracts').GroupSnapshot | null {
+    try { return this.options.groups.get(groupId); }
+    catch (error) {
+      if (error instanceof HttpError && error.status === 404) return null;
+      throw error;
+    }
   }
 
   private history(row: HostRow): TeamLeaderChange[] {
@@ -358,7 +368,7 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
         usable: unusableReason === null, unusableReason, groupId,
       };
     });
-    const group = hostRow ? this.options.groups.get(hostRow.group_id) : null;
+    const group = hostRow ? this.groupOrNull(hostRow.group_id) : null;
     const teamSession = hostRow && group && this.hasTeammateMembers(group.group.id)
       ? { groupId: group.group.id, sessionId: group.group.anchorSessionId, title: group.group.title } satisfies TeamSessionRef
       : hostRow ? null : peerStructure?.teamSession ?? null;
@@ -408,7 +418,7 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
       let anchor = anchorSessionId ? this.options.store.getSession(anchorSessionId) : undefined;
       let groupSnapshot = groupId ? this.options.groups.get(groupId) : undefined;
       if (requestedGroupId && (!groupSnapshot || groupSnapshot.group.projectId !== projectId)) throw new HttpError(404, 'Group not found in this shared project.');
-      const currentTeam = currentRow ? this.options.groups.get(currentRow.group_id) : undefined;
+      const currentTeam = currentRow ? this.groupOrNull(currentRow.group_id) : null;
       const currentTeammates = currentTeam ? currentTeam.members.filter((member) => !member.removedAt && this.isProxySession(member.sessionId)) : [];
       if (currentRow && currentTeammates.length && currentRow.group_id !== groupId) {
         throw new HttpError(409, `The team session is already “${currentTeam!.group.title}”. Remove its teammate agents before adding one to another group.`);
@@ -521,8 +531,8 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
   }
 
   private hasTeammateMembers(groupId: string): boolean {
-    const group = this.options.groups.get(groupId);
-    return group.members.some((member) => !member.removedAt && this.isProxySession(member.sessionId));
+    const group = this.groupOrNull(groupId);
+    return Boolean(group?.members.some((member) => !member.removedAt && this.isProxySession(member.sessionId)));
   }
 
   private async mirrorGroupHumanMessage(groupId: string, messageId: string): Promise<void> {
@@ -562,6 +572,36 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
     if (needsLeader) this.options.groups.pauseTeamGroup(groupId, 'The team orchestrator was removed. Choose a new leader.');
     const freshRow = this.readHost(proxy.team_id, proxy.shared_project_id);
     if (freshRow) await this.broadcastStructure(context, freshRow);
+    if (!this.hasTeammateMembers(groupId)) {
+      this.options.store.recordEvent({ projectId: context.localProjectId, type: 'team.session.updated',
+        summary: 'Shared team session updated', payload: { teamSession: null } });
+    }
+  }
+
+  private async onGroupArchived(groupId: string): Promise<void> {
+    const row = this.hostRows.prepare('SELECT * FROM mingle_team_host_projects WHERE group_id=?').get(groupId) as HostRow | undefined;
+    if (!row) return;
+    const prior = this.settings(row);
+    const at = new Date(this.now()).toISOString();
+    const settings = TeamOrchestrationSettingsSchema.parse({ ...prior, orchestratorAgentId: null, fallbackAgentIds: [],
+      version: prior.version + 1, updatedAt: at, updatedByAccountId: row.owner_account_id });
+    this.options.store.tx(() => {
+      this.hostRows.prepare(`UPDATE mingle_team_host_roster SET removed_at=?,updated_at=?
+        WHERE team_id=? AND shared_project_id=? AND removed_at IS NULL`).run(at, at, row.team_id, row.shared_project_id);
+      this.hostRows.prepare(`UPDATE mingle_team_host_projects SET settings_json=?,needs_leader=1,updated_at=?
+        WHERE team_id=? AND shared_project_id=? AND group_id=?`)
+        .run(JSON.stringify(settings), at, row.team_id, row.shared_project_id, groupId);
+    });
+    try {
+      const context = await this.context(row.local_project_id);
+      const freshRow = this.readHost(row.team_id, row.shared_project_id);
+      if (freshRow) await this.broadcastStructure(context, freshRow);
+    } finally {
+      this.hostRows.prepare('DELETE FROM mingle_team_host_projects WHERE team_id=? AND shared_project_id=? AND group_id=?')
+        .run(row.team_id, row.shared_project_id, groupId);
+      this.options.store.recordEvent({ projectId: row.local_project_id, type: 'team.session.updated',
+        summary: 'Shared team session updated', payload: { teamSession: null } });
+    }
   }
 
   private syncTeamRoster(context: ProjectContext, groupId: string, settings: TeamOrchestrationSettings): Array<{ sessionId: string; handle: string; role: 'orchestrator' | 'worker' | 'idle'; held: boolean }> {
@@ -782,7 +822,8 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
     const payload = peerPayload ? StructureSchema.parse(peerPayload) : null;
     const settings = ownRow ? this.settings(ownRow) : payload?.settings ?? null;
     const row = ownRow;
-    if (row && settings && !this.options.groups.get(row.group_id).deliveries.some((delivery) => delivery.status === 'running')) {
+    const group = row ? this.groupOrNull(row.group_id) : null;
+    if (row && settings && group && !group.deliveries.some((delivery) => delivery.status === 'running')) {
       this.options.store.tx(() => this.syncTeamRoster(context, row.group_id, settings));
     }
     const hostId = ownRow?.host_device_id ?? payload?.host?.deviceId ?? context.hostDeviceId;
@@ -793,7 +834,6 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
       WHERE team_id=? AND shared_project_id=? AND removed_at IS NULL`).all(context.project.teamId, context.project.sharedProjectId) as Array<{ agent_id: string; handle: string; role: TeamAgentRole; fallback_rank: number | null }>
       : [];
     const roleRows = new Map(rows.map((member) => [member.agent_id, member]));
-    const group = row ? this.options.groups.get(row.group_id) : null;
     const members: TeamStructureMember[] = [];
     const localDeviceId = this.options.transport.snapshot(context.project.teamId).deviceId;
     for (const agent of context.agents) {
@@ -909,10 +949,14 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
     const host = this.readHost(proxy.team_id, proxy.shared_project_id);
     if (!host) throw new HttpError(409, 'Team orchestration is no longer enabled.');
     const settings = this.settings(host);
-    const consent = this.hostRows.prepare(`SELECT state,permission_level FROM mingle_team_host_consents WHERE team_id=? AND shared_project_id=? AND agent_id=?`)
+    const consent = this.hostRows.prepare(`SELECT state,permission_level,disclaimer_version,owner_account_id,owner_device_id
+      FROM mingle_team_host_consents WHERE team_id=? AND shared_project_id=? AND agent_id=?`)
       .get(proxy.team_id, proxy.shared_project_id, proxy.agent_id) as Row | undefined;
     const currentConsent = consent && consent.state === 'granted' && TeamPermissionLevelSchema.safeParse(consent.permission_level).success
-      && rankPermission(TeamPermissionLevelSchema.parse(consent.permission_level)) >= rankPermission(settings.permissionLevel);
+      && rankPermission(TeamPermissionLevelSchema.parse(consent.permission_level)) >= rankPermission(settings.permissionLevel)
+      && consent.disclaimer_version === TEAM_CONSENT_DISCLAIMER_VERSION
+      && String(consent.owner_account_id) === proxy.owner_account_id
+      && String(consent.owner_device_id) === proxy.owner_device_id;
     if (!currentConsent) throw new HttpError(403, 'The remote agent has not granted current consent.');
     if (!this.isOnline(proxy.team_id, proxy.owner_device_id)) throw new HttpError(503, 'The remote agent device is offline.');
     const context = input.context;

@@ -233,7 +233,7 @@ export function AddAgentDialog({ sessionId }: { sessionId: string }) {
     try {
       const snapshot = group
         ? await teamSessionsApi.addToGroup(group.group.id, { agentId })
-        : await teamSessionsApi.addToSession(sessionId, { agentId });
+        : await teamSessionsApi.addToSession(sessionId, { agentId, mode: mode ?? 'orchestrated' });
       const store = useMingle.getState();
       store.applyGroup(snapshot);
       await store.refreshNow();

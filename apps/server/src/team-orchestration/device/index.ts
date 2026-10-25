@@ -29,7 +29,7 @@ import { TeamMcpProxy } from './mcp-proxy.ts';
 
 type AddRoute = (method: string, path: string, handler: (context: Ctx) => unknown | Promise<unknown>) => unknown;
 type DeviceTransport = DistributedWorkspaceService['transport'];
-type DeviceStore = Pick<Store, 'db' | 'tx' | 'touch' | 'subscribe' | 'getProject' | 'getSession' | 'listSessions' | 'getRun' | 'listMessages' | 'listRunTools' | 'latestProviderFailure'>;
+type DeviceStore = Pick<Store, 'db' | 'tx' | 'touch' | 'subscribe' | 'recordEvent' | 'getProject' | 'getSession' | 'listSessions' | 'getRun' | 'listMessages' | 'listRunTools' | 'latestProviderFailure'>;
 type DeviceRuntime = Pick<SessionRuntime, 'start' | 'isActive' | 'interrupt' | 'decide'>;
 
 export interface DeviceSideDeps {
@@ -362,7 +362,11 @@ export function createDeviceSide(deps: DeviceSideDeps): {
         }
       }
     });
-    changed();
+    const sessionChanged = JSON.stringify(prior?.teamSession ?? null) !== JSON.stringify(parsed.data.teamSession ?? null);
+    if (sessionChanged) {
+      deps.store.recordEvent({ projectId: localBinding.projectId, type: 'team.session.updated', summary: 'Shared team session updated',
+        payload: { teamSession: parsed.data.teamSession ?? null } });
+    } else changed();
   }
 
   async function findBindingBySharedProject(teamId: string, sharedProjectId: string): Promise<SharedBinding | null> {

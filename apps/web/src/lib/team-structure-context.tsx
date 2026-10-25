@@ -77,6 +77,16 @@ export function TeamStructureProvider({ projectId, children }: { projectId: stri
     return () => controller.abort();
   }, [connection, projectId]);
 
+  useEffect(() => {
+    const onTeamSessionUpdated = (event: Event) => {
+      const changedProjectId = (event as CustomEvent<{ projectId?: string | null }>).detail?.projectId;
+      if (changedProjectId !== projectId) return;
+      void refresh().catch((cause) => { setError(errorMessage(cause)); setErrorProjectId(projectId); });
+    };
+    window.addEventListener('mingle:team-session-updated', onTeamSessionUpdated);
+    return () => window.removeEventListener('mingle:team-session-updated', onTeamSessionUpdated);
+  }, [projectId, refresh]);
+
   // A team session is a remote selection rather than a local Bootstrap session.
   // Restore that navigation after a normal bootstrap refresh resolves selections.
   useLayoutEffect(() => {

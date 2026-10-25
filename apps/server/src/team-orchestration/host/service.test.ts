@@ -10,6 +10,7 @@ import {
 import { openDatabase } from '../../db.ts';
 import { Store } from '../../store.ts';
 import { makeRepo, waitFor } from '../../test-utils.ts';
+import { HttpError } from '../../util.ts';
 import { TeamOrchestrationHost } from './service.ts';
 
 const ACCOUNT = '10000000-0000-4000-8000-000000000001';
@@ -154,7 +155,7 @@ function fixture(options: { deviceId?: string; role?: 'leader' | 'admin' | 'memb
         handle: input.handle, role: group.group.mode === 'cowork' ? 'peer' : 'worker', held: false, joinedAt: new Date().toISOString(), removedAt: null });
       return group;
     },
-    get() { if (!group) throw new Error('No group'); return group; },
+    get() { if (!group) throw new HttpError(404, 'No group'); return group; },
     setTeamLeader(_groupId: string, sessionId: string | null, options: { paused?: boolean } = {}) {
       if (!group) return;
       group.group.orchestratorMemberId = sessionId ? group.members.find((member) => member.sessionId === sessionId)?.id ?? null : null;
@@ -184,24 +185,30 @@ function fixture(options: { deviceId?: string; role?: 'leader' | 'admin' | 'memb
     deliveryTimeoutMs: options.deliveryTimeoutMs ?? 60_000, now: options.now });
   const fx = {
     store, project, local, host, outgoing, finished, enqueued, artifactImports, group: () => group, setRole(value: typeof role) { role = value; },
-      setDevice(deviceId: string) { localDeviceId = deviceId; },
-      setOwnerOnline(value: boolean) { ownerOnline = value; },
-     failNextSync() { failNextSync = true; },
-     pumpCount() { return pumpCount; },
-     delayAuthorization(gate: Promise<void>) { delayedAuthorization = gate; },
-     async incoming(kind: string, payload: unknown, fromDeviceId = OWNER_DEVICE) {
+    setDevice(deviceId: string) { localDeviceId = deviceId; },
+    setOwnerOnline(value: boolean) { ownerOnline = value; },
+    failNextSync() { failNextSync = true; },
+    pumpCount() { return pumpCount; },
+    delayAuthorization(gate: Promise<void>) { delayedAuthorization = gate; },
+    async incoming(kind: string, payload: unknown, fromDeviceId = OWNER_DEVICE) {
       if (!receive) throw new Error('No team orchestration transport handler');
       return receive({ id: randomUUID(), teamId: TEAM, fromDeviceId, toDeviceId: options.deviceId ?? DEVICE, kind, payload });
     },
-     async close() { await host.close(); store.db.close(); },
-     setGroup(snapshot: GroupSnapshot) { group = snapshot; },
-     removeGroupMember(memberId: string) {
+    async close() { await host.close(); store.db.close(); },
+    setGroup(snapshot: GroupSnapshot) { group = snapshot; },
+    removeGroupMember(memberId: string) {
        if (!group) return;
        const member = group.members.find((candidate) => candidate.id === memberId);
        if (!member) return;
        member.removedAt = new Date().toISOString();
-       store.recordEvent({ projectId: PROJECT, type: 'group.member.removed', summary: 'Agent removed', payload: { groupId: group.group.id, memberId } });
-     },
+      store.recordEvent({ projectId: PROJECT, type: 'group.member.removed', summary: 'Agent removed', payload: { groupId: group.group.id, memberId } });
+    },
+    archiveGroup() {
+      if (!group) return;
+      const groupId = group.group.id;
+      group = null;
+      store.recordEvent({ projectId: PROJECT, type: 'group.archived', summary: 'Group archived', payload: { groupId } });
+    },
   };
   fixtures.push(fx);
   return fx;
@@ -318,6 +325,15 @@ it('converts one session into its team group, creates a remote proxy member, and
   expect(fx.outgoing.find((entry) => entry.kind === 'teamgroup.delivery')).toMatchObject({ toDeviceId: OWNER_DEVICE });
 });
 
+it('uses the selected group mode when a teammate agent converts a single session', async () => {
+  const fx = fixture();
+  seedRemoteConsent(fx);
+  const group = await fx.host.addAgentToSession(LOCAL_AGENT, { agentId: REMOTE_AGENT, mode: 'cowork' });
+  expect(group.group.mode).toBe('cowork');
+  expect(group.group.orchestratorMemberId).toBeNull();
+  expect(group.members.every((member) => member.role === 'peer')).toBe(true);
+});
+
 it('adds a teammate agent to an existing ordinary group and blocks a second team session', async () => {
   const fx = fixture();
   seedRemoteConsent(fx);
@@ -351,6 +367,37 @@ it('requires the host lead/admin and clears team-session metadata when the last 
   await waitFor(() => fx.store.db.prepare('SELECT removed_at FROM mingle_team_host_roster WHERE agent_id=?').get(REMOTE_AGENT)
     && (fx.store.db.prepare('SELECT removed_at FROM mingle_team_host_roster WHERE agent_id=?').get(REMOTE_AGENT) as { removed_at: string | null }).removed_at !== null);
   expect((await fx.host.structure(PROJECT)).teamSession).toBeNull();
+});
+
+it('clears and broadcasts the team session when its group is deleted', async () => {
+  const fx = fixture();
+  seedRemoteConsent(fx);
+  const group = await fx.host.addAgentToSession(LOCAL_AGENT, { agentId: REMOTE_AGENT });
+  expect((await fx.host.structure(PROJECT)).teamSession?.groupId).toBe(group.group.id);
+
+  fx.archiveGroup();
+  await waitFor(() => fx.store.db.prepare('SELECT group_id FROM mingle_team_host_projects WHERE team_id=? AND shared_project_id=?')
+    .get(TEAM, SHARED) === undefined);
+
+  expect(fx.outgoing.filter((entry) => entry.kind === 'teamgroup.structure').at(-1)?.payload).toMatchObject({ teamSession: null, members: [] });
+  expect((await fx.host.structure(PROJECT)).teamSession).toBeNull();
+});
+
+it('rejects remote dispatch when consent identity or disclaimer no longer matches the proxy owner', async () => {
+  const fx = fixture();
+  await fx.host.enable(PROJECT, enableInput(REMOTE_AGENT));
+  await grantRemote(fx);
+  const proxySessionId = String((fx.store.db.prepare('SELECT session_id FROM mingle_team_proxy_sessions WHERE agent_id=?')
+    .get(REMOTE_AGENT) as { session_id: string }).session_id);
+  const proxySession = fx.store.getSession(proxySessionId)!;
+  const dispatch = () => fx.host.start({ session: proxySession, runId: 'stale-consent-run', content: 'no dispatch', options: {} as any });
+
+  fx.store.db.prepare(`UPDATE mingle_team_host_consents SET owner_device_id=? WHERE team_id=? AND shared_project_id=? AND agent_id=?`)
+    .run(DEVICE, TEAM, SHARED, REMOTE_AGENT);
+  expect(() => dispatch()).toThrow(/current consent/i);
+  fx.store.db.prepare(`UPDATE mingle_team_host_consents SET owner_device_id=?,disclaimer_version=? WHERE team_id=? AND shared_project_id=? AND agent_id=?`)
+    .run(OWNER_DEVICE, 'outdated-disclaimer', TEAM, SHARED, REMOTE_AGENT);
+  expect(() => dispatch()).toThrow(/current consent/i);
 });
 
 it('returns 404 for an unknown published agent and 409 for an agent without consent', async () => {
