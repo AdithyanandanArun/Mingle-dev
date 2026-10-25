@@ -1,0 +1,131 @@
+name: Publish desktop release
+
+# Publishes a stable GitHub release from already-built, already-checked packaging runs.
+# The release tag must already exist and point at the commit both runs built.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release version (x.y.z); the tag is v<version>
+        required: true
+        type: string
+      linux_run_id:
+        description: Successful "Build desktop packages" run ID
+        required: true
+        type: string
+      windows_run_id:
+        description: Successful "Build Windows desktop installer" run ID
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: write
+
+concurrency:
+  group: publish-release-${{ inputs.version }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    env:
+      GH_TOKEN: ${{ github.token }}
+      VERSION: ${{ inputs.version }}
+      LINUX_RUN: ${{ inputs.linux_run_id }}
+      WINDOWS_RUN: ${{ inputs.windows_run_id }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate version, tag and source runs
+        shell: bash
+        run: |
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          tag="v$VERSION"
+          echo "RELEASE_TAG=$tag" >> "$GITHUB_ENV"
+          test -s "docs/releases/$tag.md"
+          tagged_sha=$(gh api "repos/$GITHUB_REPOSITORY/commits/$tag" --jq .sha)
+          for platform in linux windows; do
+            if test "$platform" = linux; then
+              run_id="$LINUX_RUN"; native_job=linux; build_step='Run pnpm package:deb'
+            else
+              run_id="$WINDOWS_RUN"; native_job=windows-x64; build_step='Run pnpm package:windows'
+            fi
+            [[ "$run_id" =~ ^[0-9]+$ ]]
+            gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id" > run.json
+            test "$(jq -r .conclusion run.json)" = success
+            test "$(jq -r .head_repository.full_name run.json)" = "$GITHUB_REPOSITORY"
+            test "$(jq -r .head_sha run.json)" = "$tagged_sha"
+            gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/jobs" > native-jobs.json
+            EXPECTED_JOB="$native_job" BUILD_STEP="$build_step" python3 - <<'PY'
+          import json, os
+          jobs = [job for job in json.load(open('native-jobs.json'))['jobs'] if job['name'] == os.environ['EXPECTED_JOB']]
+          assert len(jobs) == 1, 'Expected exactly one native build job'
+          steps = jobs[0].get('steps', [])
+          assert steps and all(step['status'] == 'completed' and step['conclusion'] in ('success', 'skipped') for step in steps), 'Native checks are incomplete or failed'
+          by_name = {step['name']: step for step in steps}
+          for required in (os.environ['BUILD_STEP'], 'Run actions/upload-artifact@v4', 'Complete job'):
+              assert by_name.get(required, {}).get('conclusion') == 'success', f'Required native check did not pass: {required}'
+          print('Native build, installer checks and artifact upload passed.')
+          PY
+          done
+      - uses: actions/download-artifact@v4
+        with:
+          name: mingle-linux-x64
+          run-id: ${{ inputs.linux_run_id }}
+          github-token: ${{ github.token }}
+          path: linux
+      - uses: actions/download-artifact@v4
+        with:
+          name: mingle-windows-x64
+          run-id: ${{ inputs.windows_run_id }}
+          github-token: ${{ github.token }}
+          path: windows
+      - name: Verify packages
+        shell: bash
+        run: |
+          deb="linux/mingle_${VERSION}_amd64.deb"
+          tarball="linux/mingle-${VERSION}-linux-x64.tar.gz"
+          exe="windows/mingle-${VERSION}-win32-x64-setup.exe"
+          for file in "$deb" "$tarball" "$exe"; do test -s "$file"; test -s "$file.sha256"; done
+          (cd linux && sha256sum -c "$(basename "$deb").sha256" "$(basename "$tarball").sha256")
+          (cd windows && sha256sum -c "$(basename "$exe").sha256")
+          test "$(dpkg-deb --field "$deb" Version)" = "$VERSION"
+          tar -xOzf "$tarball" "mingle-${VERSION}-linux-x64/resources/build-info.json" | jq -e --arg v "$VERSION" '.version == $v'
+          file "$exe" | grep -q 'PE32'
+          printf '%s\n' "$deb" "$deb.sha256" "$tarball" "$tarball.sha256" "$exe" "$exe.sha256" > assets.txt
+      - name: Publish or verify the release
+        shell: bash
+        run: |
+          mapfile -t assets < assets.txt
+          if ! gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --draft \
+              --title "Mingle $VERSION" --notes-file "docs/releases/$RELEASE_TAG.md"
+          fi
+          gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft > state.json
+          if test "$(jq -r .isDraft state.json)" = true; then
+            gh release upload "$RELEASE_TAG" "${assets[@]}" --repo "$GITHUB_REPOSITORY" --clobber
+          fi
+          # Published releases are verified on retries without replacing their assets.
+          gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json tagName,isDraft,isPrerelease,assets > release.json
+          python3 - release.json "$RELEASE_TAG" "${assets[@]}" <<'PY'
+          import hashlib, json, pathlib, sys
+          release = json.loads(pathlib.Path(sys.argv[1]).read_text())
+          assert release['tagName'] == sys.argv[2], 'Release tag changed'
+          assert release['isPrerelease'] is False, 'Expected a stable release'
+          files = [pathlib.Path(name) for name in sys.argv[3:]]
+          assets = release['assets']
+          assert {asset['name'] for asset in assets} == {file.name for file in files}, 'Release asset names differ'
+          by_name = {asset['name']: asset for asset in assets}
+          for file in files:
+              asset = by_name[file.name]
+              assert asset['state'] == 'uploaded', f'Incomplete upload: {file.name}'
+              assert asset['size'] == file.stat().st_size, f'Size mismatch: {file.name}'
+              with file.open('rb') as stream:
+                  digest = 'sha256:' + hashlib.file_digest(stream, 'sha256').hexdigest()
+              assert asset.get('digest') == digest, f'SHA-256 mismatch: {file.name}'
+              print(f'Verified release asset: {file.name} ({digest})')
+          PY
+          if test "$(jq -r .isDraft release.json)" = true; then
+            gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false --prerelease=false --latest
+          fi
+          echo "Published: https://github.com/$GITHUB_REPOSITORY/releases/tag/$RELEASE_TAG" >> "$GITHUB_STEP_SUMMARY"
