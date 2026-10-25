@@ -13,6 +13,7 @@ import { GitBar } from './git/GitBar';
 import { appendContextReference } from './MessageContextControls';
 import { TeamSessionView } from './team-chat/TeamSessionView';
 import { useTeamStructure } from '../lib/team-structure-context';
+import { TeamConsentBanner } from './team-orchestration/settings/TeamConsentBanner';
 
 const EMPTY_RUNS: SessionRun[] = [];
 const EMPTY_TOOL_CALLS: ToolCall[] = [];
@@ -55,6 +56,13 @@ export function SessionPane() {
     return <TeamSessionView key={remoteTeamSession.sessionId} projectId={project.id} teamSession={remoteTeamSession} structure={teamStructure.snapshot} />;
   }
   return <SingleSessionPane />;
+}
+
+/** On a teammate's device, sharing consent stays reachable from every session, before any shared team session exists. */
+function TeammateConsentBanner({ projectId }: { projectId: string }) {
+  const structure = useTeamStructure().snapshot;
+  if (structure?.projectId !== projectId || structure.host.isThisDevice) return null;
+  return <TeamConsentBanner projectId={projectId} />;
 }
 
 function SingleSessionPane() {
@@ -142,6 +150,7 @@ function SingleSessionPane() {
   if (!session) {
     return (
       <div className="chat chat--projectonly">
+        {project ? <TeammateConsentBanner projectId={project.id} /> : null}
         <EmptyState title={hasSessions ? 'Select a session' : 'No sessions yet'} action={<Button variant="primary" busy={creatingSession} disabled={creatingSession} onClick={() => void useMingle.getState().createSession()}>New session</Button>}>
           {hasSessions ? 'Choose a session from the sidebar.' : 'Start a session to work in this project.'}
         </EmptyState>
@@ -152,6 +161,7 @@ function SingleSessionPane() {
 
   return (
     <div className="chat">
+      {project ? <TeammateConsentBanner projectId={project.id} /> : null}
       <div className="chat__history">
       <div
         className="chat__scroll" ref={scroller} role="log" aria-live="polite" aria-label={`Conversation with ${session.name}`}

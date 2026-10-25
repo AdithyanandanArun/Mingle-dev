@@ -264,7 +264,7 @@ it('lists teammate agents with consent, online, host-role, and existing-group us
   const fx = fixture();
   const beforeConsent = await fx.host.availableAgents(PROJECT);
   expect(beforeConsent.agents[0]).toMatchObject({ agentId: REMOTE_AGENT, online: true, consent: 'none', usable: false,
-    unusableReason: 'The agent owner has not granted team consent.', groupId: null });
+    unusableReason: expect.stringContaining('Team mode is off'), groupId: null });
   seedRemoteConsent(fx);
   const usable = await fx.host.availableAgents(PROJECT);
   expect(usable).toMatchObject({ teamId: TEAM, sharedProjectId: SHARED, canAdd: true, permissionLevel: null });
@@ -371,18 +371,24 @@ it('requires the host lead/admin and clears team-session metadata when the last 
   expect((await fx.host.structure(PROJECT)).teamSession).toBeNull();
 });
 
-it('clears and broadcasts the team session when its group is deleted', async () => {
+it('clears and broadcasts the team session when its group is deleted, keeping team mode and consent', async () => {
   const fx = fixture();
   seedRemoteConsent(fx);
   const group = await fx.host.addAgentToSession(LOCAL_AGENT, { agentId: REMOTE_AGENT });
   expect((await fx.host.structure(PROJECT)).teamSession?.groupId).toBe(group.group.id);
 
   fx.archiveGroup();
-  await waitFor(() => fx.store.db.prepare('SELECT group_id FROM mingle_team_host_projects WHERE team_id=? AND shared_project_id=?')
-    .get(TEAM, SHARED) === undefined);
+  await waitFor(() => fx.outgoing.some((entry) => entry.kind === 'teamgroup.structure'
+    && (entry.payload as { teamSession?: unknown }).teamSession === null));
 
   expect(fx.outgoing.filter((entry) => entry.kind === 'teamgroup.structure').at(-1)?.payload).toMatchObject({ teamSession: null, members: [] });
-  expect((await fx.host.structure(PROJECT)).teamSession).toBeNull();
+  const structure = await fx.host.structure(PROJECT);
+  expect(structure).toMatchObject({ enabled: true, teamSession: null });
+  expect((await fx.host.availableAgents(PROJECT)).agents[0]).toMatchObject({ consent: 'granted', usable: true });
+
+  const next = await fx.host.addAgentToSession(LOCAL_AGENT, { agentId: REMOTE_AGENT });
+  expect(next.group.id).not.toBe(group.group.id);
+  expect((await fx.host.structure(PROJECT)).teamSession?.groupId).toBe(next.group.id);
 });
 
 it('rejects remote dispatch when consent identity or disclaimer no longer matches the proxy owner', async () => {

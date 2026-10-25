@@ -355,6 +355,8 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
       const groupTitle = existingGroup?.group.title;
       let unusableReason: string | null = null;
       if (!canAdd) unusableReason = reason;
+      // Owners can only consent to enabled team settings, so a disabled project has to be enabled before any consent can arrive.
+      else if (!hostRow && consent !== 'granted') unusableReason = 'Team mode is off for this project. Turn it on under Share project, then ask the owner to share their agents.';
       else if (consent !== 'granted') unusableReason = consent === 'none' ? 'The agent owner has not granted team consent.'
         : consent === 'paused' ? 'The agent owner has paused this agent.'
           : consent === 'revoked' ? 'The agent owner revoked consent for this agent.'
@@ -592,13 +594,12 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
         WHERE team_id=? AND shared_project_id=? AND group_id=?`)
         .run(JSON.stringify(settings), at, row.team_id, row.shared_project_id, groupId);
     });
+    // Team mode and owners' consent outlive the deleted session; the next teammate agent added starts a new team session.
     try {
       const context = await this.context(row.local_project_id);
       const freshRow = this.readHost(row.team_id, row.shared_project_id);
       if (freshRow) await this.broadcastStructure(context, freshRow);
     } finally {
-      this.hostRows.prepare('DELETE FROM mingle_team_host_projects WHERE team_id=? AND shared_project_id=? AND group_id=?')
-        .run(row.team_id, row.shared_project_id, groupId);
       this.options.store.recordEvent({ projectId: row.local_project_id, type: 'team.session.updated',
         summary: 'Shared team session updated', payload: { teamSession: null } });
     }
