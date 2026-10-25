@@ -10,7 +10,7 @@ import { POLICY_DESCRIPTION, POLICY_LABEL } from '../../lib/groups';
 import { createIdempotencyKey, distributedApi } from '../distributed/api';
 import { Badge, Button, InlineError, Modal, ProviderMark, StatusDot } from '../ui';
 import { projectCollaborationApi, CollaborationApiError, recordText, type CollaborationRecord, type InvitationPreview, type ProjectCollaborationSnapshot } from './api';
-import { resolveJoinCloneParent } from './join-flow';
+import { joinSuccessCopy, resolveJoinCloneParent } from './join-flow';
 import { TeamConsentSheet } from '../team-orchestration/settings/TeamConsentSheet';
 import { TeamOrchestrationSettings } from '../team-orchestration/settings/TeamOrchestrationSettings';
 import '../../styles/project-collaboration.css';
@@ -735,7 +735,7 @@ export function ProjectInviteJoinDialog({ token, onClose, onOpenAccountSettings,
         onAccepted={() => { setConsentSkipped(false); setStep('success'); }}
       /> : null}
 
-      {step === 'success' && joinResult ? <div className="pc-state-card pc-state-card--success"><Check size={19} /><div><h3>You’re in</h3><p>{consentSkipped ? 'Your agents remain private until you choose to share them later.' : `${joinResult.sessionIds.length} idle agent${joinResult.sessionIds.length === 1 ? '' : 's'} are ready.`} No model run has started. The shared team session opens when one is available.</p><Button variant="primary" size="sm" onClick={() => { onJoined?.(joinResult); onClose(); }}>Open project</Button></div></div> : null}
+      {step === 'success' && joinResult ? <div className="pc-state-card pc-state-card--success"><Check size={19} /><div><h3>You’re in</h3><p>{joinSuccessCopy(joinResult.sessionIds.length, consentSkipped)}</p><Button variant="primary" size="sm" onClick={() => { onJoined?.(joinResult); onClose(); }}>Open project</Button></div></div> : null}
     </div>
   </Modal>;
 }

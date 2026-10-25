@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { resolveJoinCloneParent } from './join-flow.ts';
+import { joinSuccessCopy, resolveJoinCloneParent } from './join-flow.ts';
 
 test('resolves the typed repository parent path instead of reusing the last Browse result', async () => {
   const calls = [];
@@ -18,4 +18,10 @@ test('rejects an unusable typed parent before attempting the clone', async () =>
   await assert.rejects(resolveJoinCloneParent('/home/member/not-a-folder', async () => ({
     path: '/home/member/not-a-folder', displayPath: '/home/member/not-a-folder', canSelect: false, canCreateWithin: false,
   })), /existing folder/i);
+});
+
+test('uses matching singular and plural join success copy with the Add agents next step', () => {
+  assert.equal(joinSuccessCopy(1, false), '1 idle agent is ready. The project lead can now add your agent from Add agents. No model run has started.');
+  assert.equal(joinSuccessCopy(2, false), '2 idle agents are ready. The project lead can now add your agents from Add agents. No model run has started.');
+  assert.match(joinSuccessCopy(1, true), /remain private/);
 });

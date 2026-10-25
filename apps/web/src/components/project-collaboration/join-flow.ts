@@ -12,3 +12,11 @@ export async function resolveJoinCloneParent(path: string, lookup: DirectoryLook
   }
   return listing;
 }
+
+export function joinSuccessCopy(agentCount: number, consentSkipped: boolean): string {
+  if (consentSkipped) return 'Your agents remain private until you choose to share them later. No model run has started.';
+  const count = Math.max(0, Math.floor(agentCount));
+  const noun = count === 1 ? 'agent' : 'agents';
+  const verb = count === 1 ? 'is' : 'are';
+  return `${count} idle ${noun} ${verb} ready. The project lead can now add your ${noun} from Add agents. No model run has started.`;
+}
