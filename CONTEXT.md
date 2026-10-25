@@ -89,7 +89,7 @@ The app is version **0.0.1**. Linux/Windows packaging stages Electron, a checksu
 | Local Arch installation | Updated package installed; the running app reports secure storage available via GNOME Keyring. [Evidence](docs/account-storage-acceptance.md). |
 | Distributed acceptance | [Recorded local, browser and live evidence](docs/distributed-acceptance.md), with fixtures and remaining live gates identified. |
 
-The [temporary prerelease](https://github.com/AdithyanandanArun/Mingle-dev/releases/tag/temporary-downloads-20261024-keyring) contains `.deb`, `.exe` and checksum files. It was published for downloads and may be removed after the owner's confirmation. Do not delete it merely to clear old failed workflow history. Windows signing, automatic updates and public AUR publication remain unfinished. macOS distribution is unverified.
+The stable [0.0.1 release](https://github.com/AdithyanandanArun/Mingle-dev/releases/tag/v0.0.1) contains `.deb`, `.exe`, `.tar.gz` and checksum files, published by `.github/workflows/publish-release.yml` from verified packaging runs. Earlier temporary prereleases remain until the owner removes them. Windows signing, automatic updates and public AUR publication remain unfinished. macOS distribution is unverified.
 
 Earlier red publication runs are historical failures. The last failure used an API lookup that did not find the draft after upload. The corrected workflow uses draft-aware inspection. Publication reruns verify an existing prerelease without overwriting its assets; mismatches fail. Creating the tag/draft is an owner step. See [desktop distribution](docs/desktop-distribution.md).
 

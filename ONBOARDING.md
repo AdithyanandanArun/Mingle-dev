@@ -4,7 +4,7 @@ Start here to use Mingle or set up a development checkout. For the project's cur
 
 ## Install the desktop app
 
-Download a package from [GitHub releases](https://github.com/AdithyanandanArun/Mingle-dev/releases). The [temporary download prerelease](https://github.com/AdithyanandanArun/Mingle-dev/releases/tag/temporary-downloads-20261024-keyring) contains a Debian/Ubuntu amd64 `.deb`, a Windows x64 setup `.exe`, and their SHA-256 files. Temporary downloads may be removed after use; they do not expire automatically.
+Download a package from [GitHub releases](https://github.com/AdithyanandanArun/Mingle-dev/releases). The [0.0.1 release](https://github.com/AdithyanandanArun/Mingle-dev/releases/tag/v0.0.1) contains a Debian/Ubuntu amd64 `.deb`, a Windows x64 setup `.exe`, a Linux x64 `.tar.gz`, and their SHA-256 files.
 
 - Debian/Ubuntu: install the downloaded package with `sudo apt install ./mingle_0.0.1_amd64.deb`.
 - Windows: run `mingle-0.0.1-win32-x64-setup.exe`. Installation is per-user. The installer is unsigned, so Windows may show an unknown-publisher prompt.
