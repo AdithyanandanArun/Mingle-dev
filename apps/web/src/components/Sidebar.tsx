@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { Activity, ArrowDownToLine, ChevronsUpDown, FolderOpen, FolderPlus, FolderMinus, Kanban, LayoutPanelLeft, MoreHorizontal, Network, Search, Settings, SquarePen, Loader2, Pin } from 'lucide-react';
+import { Activity, ArrowDownToLine, ChevronsUpDown, FolderOpen, FolderPlus, FolderMinus, Kanban, LayoutPanelLeft, MoreHorizontal, Network, Search, Settings, SquarePen, Loader2, Pin, Users } from 'lucide-react';
 import type { Project, Session } from '@mingle/contracts';
 import { useMingle, useProject, type View } from '../store/store';
 import { copyText } from '../lib/clipboard';
@@ -10,7 +10,6 @@ import { DialogMotionContext, IconButton, Menu, MenuItem, MenuLabel, MenuSeparat
 import { activeMembers, findGroupForSession, groupChildSessionIds, groupSessionStatus } from '../lib/groups';
 import { RemoveProjectDialog } from './RemoveProjectDialog';
 import { useRetainedPresence } from '../lib/motion';
-import { TeamChatEntry } from './team-chat/TeamChatEntry';
 
 const VIEWS: { view: View; label: string; icon: typeof Kanban }[] = [
   { view: 'tasks', label: 'Tasks', icon: Kanban }, { view: 'activity', label: 'Activity', icon: Activity }, { view: 'map', label: 'Agent map', icon: Network }, { view: 'team-structure', label: 'Team structure', icon: Network },
@@ -25,12 +24,13 @@ const GROUPS: { id: string; label: string; match: (session: Session) => boolean 
 export function Sidebar() {
   const boot = useMingle((state) => state.boot);
   const project = useProject();
+  const teamInfo = useMingle((state) => project ? state.teamSessionsByProject[project.id] : undefined);
   const view = useMingle((state) => state.view);
   const sidebarOpen = useMingle((state) => state.sidebarOpen);
   const activeSessionId = useMingle((state) => state.activeProjectId ? state.sessionByProject[state.activeProjectId] : undefined);
   const connection = useMingle((state) => state.connection);
   const creatingSession = useMingle((state) => state.creatingSession);
-  const { setView, selectSession, selectProject, openDialog, createSession } = useMingle.getState();
+  const { setView, selectSession, selectProject, openDialog, createSession, openTeamSession } = useMingle.getState();
   const [menu, setMenu] = useState<{ sessionId: string; x: number; y: number; returnFocus: HTMLElement } | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
   const { value: retainedMenu, present: menuPresent, closing: menuClosing, key: menuKey } = useRetainedPresence(menuOpen ? menu : null, 160);
@@ -48,6 +48,7 @@ export function Sidebar() {
     const updatedAt = memberSessions.reduce((latest, item) => item.updatedAt > latest ? item.updatedAt : latest, session.updatedAt);
     return { ...session, status: groupSessionStatus(group, boot?.sessions ?? []), unread: memberSessions.some((item) => item.unread), updatedAt };
   });
+  const remoteTeamSession = teamInfo && !teamInfo.hostIsThisDevice ? teamInfo.teamSession : null;
   const connectionLabel = connection === 'online' ? 'Connected' : connection === 'connecting' ? 'Connecting' : 'Disconnected';
 
   const target = sessions.find((session) => session.id === retainedMenu?.sessionId);
@@ -111,10 +112,9 @@ export function Sidebar() {
         {project ? <><MenuSeparator /><MenuItem icon={<FolderMinus size={14} />} disabled={connection !== 'online'} onSelect={() => setRemovingProject(project)}>Remove project…</MenuItem></> : null}
       </Menu>
     </div>
-    <div className="team-chat-entry-slot"><TeamChatEntry /></div>
     <div className="sidebar__sessions">
       <div className="session-scroll" role="list" aria-label="Sessions">
-        {!sessions.length ? <p className="sidebar__empty">No sessions yet.</p> : null}
+        {!sessions.length && !remoteTeamSession ? <p className="sidebar__empty">No sessions yet.</p> : null}
         {GROUPS.map((group) => {
           const items = sessions.filter((session) => group.match(session) && (group.id === 'pinned' || !session.pinned)).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
           if (!items.length) return null;
@@ -148,6 +148,15 @@ export function Sidebar() {
             </div>)}
           </div>;
         })}
+        {remoteTeamSession ? <div className="sgroup" role="group" aria-label="Team session">
+          <div className="sgroup__label">Team session</div>
+          <div role="listitem" className="sitem-row" data-session-id={remoteTeamSession.sessionId}>
+            <button type="button" className={cx('sitem', remoteTeamSession.sessionId === activeSessionId && view === 'workspace' && 'is-active')} onClick={() => openTeamSession(project!.id, remoteTeamSession.sessionId)} aria-current={remoteTeamSession.sessionId === activeSessionId && view === 'workspace' ? 'true' : undefined} aria-label={`${remoteTeamSession.title}, shared team session`} title={`${remoteTeamSession.title} · Shared with team`}>
+              <span className="sitem__text"><span className="sitem__meta"><span>Shared with team</span><span><Users size={11} aria-hidden="true" /></span></span><strong><span>{remoteTeamSession.title}</span></strong></span>
+              <span className="sitem__state"><span className="team-session-row__mark" aria-label="Team session">Team</span></span>
+            </button>
+          </div>
+        </div> : null}
       </div>
     </div>
     {retainedMenu && menuPresent ? <ContextMenu key={menuKey} x={retainedMenu.x} y={retainedMenu.y} items={menuItems} returnFocus={retainedMenu.returnFocus} open={menuOpen} closing={menuClosing} onClose={closeMenu} /> : null}

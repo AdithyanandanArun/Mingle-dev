@@ -17,6 +17,8 @@ import { AddAgentDialog } from './components/group/AddAgentDialog';
 import { GroupModeDialog, MemberSettingsDialog } from './components/group/GroupDialogs';
 import { BrowserPopout } from './components/browser/BrowserPopout';
 import { ProjectInviteJoinDialog, ProjectTeammatesDialog } from './components/project-collaboration/ProjectCollaboration';
+import { TeamStructureProvider } from './lib/team-structure-context';
+import { teamSessionsApi } from './lib/team-sessions';
 
 declare global {
   interface Window {
@@ -101,6 +103,7 @@ export function App() {
   const view = useMingle((s) => s.view);
   const theme = useMingle((s) => s.boot?.settings.theme ?? 'dark');
   const sidebarOpen = useMingle((s) => s.sidebarOpen);
+  const activeProjectId = useMingle((s) => s.activeProjectId);
   const previousView = useRef(view);
   const [activeInvitation, setActiveInvitation] = useState<ActiveInvitation | null>(null);
   const [joinSuspended, setJoinSuspended] = useState(false);
@@ -182,7 +185,22 @@ export function App() {
   const browserPopoutId = new URLSearchParams(window.location.search).get('browserPopout');
   if (browserPopoutId) return <BrowserPopout sessionId={browserPopoutId} />;
 
+  const openJoinedProject = async (projectId: string) => {
+    const store = useMingle.getState();
+    await store.refreshNow();
+    try {
+      const structure = await teamSessionsApi.structure(projectId);
+      store.setTeamSessionInfo(projectId, structure.teamSession ?? null, structure.host.isThisDevice);
+      if (!structure.host.isThisDevice && structure.teamSession) {
+        store.openTeamSession(projectId, structure.teamSession.sessionId);
+        return;
+      }
+    } catch { /* Opening the project is still useful if team structure is not available yet. */ }
+    store.selectProject(projectId);
+  };
+
   return (
+    <TeamStructureProvider projectId={activeProjectId}>
     <div className={cx('app', `view-${view}`)}>
       <a className="skip" href="#main">Skip to content</a>
       <Sidebar />
@@ -209,9 +227,10 @@ export function App() {
         onClose={() => { setJoinSuspended(false); setActiveInvitation(null); }}
         onOpenAccountSettings={() => { setJoinSuspended(true); useMingle.getState().openSettings({ section: 'account' }); }}
         onOpenProviderSettings={() => { setJoinSuspended(true); useMingle.getState().openSettings({ section: 'providers' }); }}
-        onJoined={(result) => useMingle.getState().openTeamChat(result.projectId)}
+        onJoined={(result) => { void openJoinedProject(result.projectId); }}
       /> : null}
       <Toasts />
     </div>
+    </TeamStructureProvider>
   );
 }

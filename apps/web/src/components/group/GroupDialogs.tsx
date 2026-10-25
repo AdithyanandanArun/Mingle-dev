@@ -12,6 +12,7 @@ import { SelectMenu } from '../SelectMenu';
 import { ConfigFields } from './ConfigFields';
 import { Roster, type RosterEntry } from './AddAgentDialog';
 import type { AutonomyMode, GroupRecoveryPolicy } from '../../lib/api';
+import { useTeamStructure } from '../../lib/team-structure-context';
 
 const MODES: GroupMode[] = ['cowork', 'orchestrated', 'current-leads'];
 const AUTONOMY_OPTIONS = [
@@ -85,6 +86,7 @@ export function GroupModeDialog({ groupId }: { groupId: string }) {
   const sessions = useMingle((s) => s.boot?.sessions);
   const providers = useMingle((s) => s.boot?.providers);
   const snapshot = useMingle((s) => s.boot?.groups?.find((g) => g.group.id === groupId));
+  const teamStructure = useTeamStructure();
   const resilientGroup = snapshot?.group;
   const idBase = useId();
   const members = useMemo(() => (snapshot ? activeMembers(snapshot) : []), [snapshot]);
@@ -180,11 +182,13 @@ export function GroupModeDialog({ groupId }: { groupId: string }) {
 
   const roster: RosterEntry[] = members.map((member) => {
     const session = sessions.find((s) => s.id === member.sessionId);
+    const teamMember = teamStructure.snapshot?.members.find((candidate) => candidate.agentId === member.id || candidate.sessionId === member.sessionId || candidate.handle === member.handle);
     return {
       key: member.id, handle: member.handle, role: !needsLead ? 'peer' : member.id === leadId ? 'orchestrator' : 'worker',
       note: member.role === (!needsLead ? 'peer' : member.id === leadId ? 'orchestrator' : 'worker') ? 'Unchanged' : `Was ${ROLE_LABEL[member.role].toLowerCase()}`,
-      provider: session?.provider, model: session?.model ?? '', effort: session?.effort ?? '', policy: session?.policy ?? 'supervised', serviceTier: session?.serviceTier ?? 'standard',
+      provider: teamMember?.provider ?? session?.provider, model: teamMember?.model ?? session?.model ?? '', effort: teamMember?.effort ?? session?.effort ?? '', policy: session?.policy ?? 'supervised', serviceTier: session?.serviceTier ?? 'standard',
       workspace: session ? (session.isolated ? 'Isolated worktree' : 'Project folder') : 'Unknown workspace',
+      ...(teamMember && !teamMember.local ? { badge: `on ${teamMember.deviceName} · ${teamMember.ownerDisplayName}` } : {}),
     };
   });
   const routing = routingSummary(mode, roster.map((entry) => ({ handle: entry.handle, role: entry.role })));

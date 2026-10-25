@@ -1,5 +1,5 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState, type TransitionEvent } from 'react';
-import type { Approval, GroupMember, GroupSnapshot, ProviderInfo, Session, SessionRun } from '@mingle/contracts';
+import type { Approval, GroupMember, GroupSnapshot, ProviderInfo, Session, SessionRun, TeamAgentState, TeamStructureMember } from '@mingle/contracts';
 import { configSummary, ROLE_LABEL } from '../../lib/groups';
 import { memberPresence } from '../../lib/groupPresence';
 import { formatElapsed } from '../../lib/activity';
@@ -11,6 +11,10 @@ const ACTIVITY_STATE = {
   working: 'working', approval: 'awaiting-approval', queued: 'queued', paused: 'paused', error: 'failed',
   interrupted: 'paused', idle: 'idle', unavailable: 'offline', offline: 'offline',
 } as const;
+const TEAM_STATE_LABEL: Record<TeamAgentState, string> = {
+  idle: 'Idle', queued: 'Queued', working: 'Working', 'awaiting-approval': 'Awaiting approval',
+  'quota-exhausted': 'Quota exhausted', offline: 'Offline', paused: 'Paused', failed: 'Failed',
+};
 
 function useElapsed(startedAt: string | null, active: boolean): string | null {
   const [now, setNow] = useState(() => Date.now());
@@ -27,14 +31,17 @@ function useElapsed(startedAt: string | null, active: boolean): string | null {
 }
 
 function PresenceRow({
-  snapshot, member, session, runs, approvals, connection, providers, onOpen,
+  snapshot, member, session, runs, approvals, connection, providers, onOpen, teamMember,
 }: {
   snapshot: GroupSnapshot; member: GroupMember; session: Session | undefined; runs: readonly SessionRun[];
   approvals: readonly Approval[]; connection: 'online' | 'connecting' | 'offline'; providers: readonly ProviderInfo[];
   onOpen: (agent: ActivityAgent) => void;
+  teamMember?: TeamStructureMember;
 }) {
   const presence = memberPresence({ snapshot, member, session, runs, approvals, connection });
-  const elapsed = useElapsed(presence.startedAt, presence.working);
+  const isWorking = presence.working;
+  const currentLabel = presence.label;
+  const elapsed = useElapsed(presence.startedAt, isWorking);
   const summary = session ? configSummary({ model: session.model, effort: session.effort, policy: session.policy, serviceTier: session.serviceTier ?? 'standard' }, providers, session.provider) : null;
   const currentTask = useMingle((state) => {
     const delivery = snapshot.deliveries.filter((item) => item.memberId === member.id && (item.status === 'queued' || item.status === 'running'))
@@ -44,34 +51,58 @@ function PresenceRow({
   });
   const activityState = member.failure?.kind === 'quota_exhausted' ? 'quota-exhausted' : ACTIVITY_STATE[presence.state];
   const open = () => onOpen({
-    agentId: member.id, handle: member.handle, name: session?.name ?? member.handle, provider: session?.provider ?? null,
-    model: session?.model ?? 'Model not reported', local: true, ownerDisplayName: 'You', deviceName: 'this device',
+    agentId: teamMember?.agentId ?? member.id, handle: member.handle, name: teamMember?.name ?? session?.name ?? member.handle, provider: teamMember?.provider ?? session?.provider ?? null,
+    model: teamMember?.model ?? session?.model ?? 'Model not reported', local: teamMember?.local ?? true, ownerDisplayName: teamMember?.ownerDisplayName ?? 'You', deviceName: teamMember?.deviceName ?? 'this device',
     role: member.role === 'peer' ? 'worker' : member.role, state: activityState,
-    currentTask, sessionId: member.sessionId, failureMessage: member.failure?.message ?? null,
+    currentTask: teamMember?.currentTask ?? currentTask, sessionId: teamMember?.sessionId ?? member.sessionId, failureMessage: teamMember?.failure?.message ?? member.failure?.message ?? null,
   });
   return (
     <li className={`agent-presence__row is-${presence.state}`}>
-      <button type="button" className="agent-presence__open" onClick={open} aria-label={`Open @${member.handle} conversation, ${presence.label}`}>
+      <button type="button" className="agent-presence__open" onClick={open} aria-label={`Open @${member.handle} conversation, ${currentLabel}`}>
         <div className="agent-presence__identity" title={ROLE_LABEL[member.role]}>
-          <AgentIdentity handle={member.handle} identityKey={member.sessionId} provider={session?.provider} />
-          <span className="agent-presence__state" title={`${presence.label}${elapsed ? ` · ${elapsed}` : ''}`} aria-label={`${presence.label}${elapsed ? `, elapsed ${elapsed}` : ''}`}>
-            <span className={presence.working ? 'activity-shimmer' : undefined}>{presence.label}</span>
+          <AgentIdentity handle={member.handle} identityKey={teamMember?.agentId ?? member.sessionId} provider={teamMember?.provider ?? session?.provider} />
+          <span className="agent-presence__state" title={`${currentLabel}${elapsed ? ` · ${elapsed}` : ''}`} aria-label={`${currentLabel}${elapsed ? `, elapsed ${elapsed}` : ''}`}>
+            <span className={isWorking ? 'activity-shimmer' : undefined}>{currentLabel}</span>
             {elapsed ? <time className="agent-presence__elapsed" dateTime={presence.startedAt ?? undefined} aria-live="off">{elapsed}</time> : null}
           </span>
         </div>
+        {teamMember && !teamMember.local ? <small className="agent-presence__device">on {teamMember.deviceName} · {teamMember.ownerDisplayName}</small> : null}
         {summary && session ? <small className="agent-presence__model" title={`${summary.model} · ${summary.detail}`}>{summary.model} · {summary.detail.split(' · ')[0]}</small> : null}
-        {presence.detail ? <small className="agent-presence__detail" title={presence.detail}>{presence.detail}</small> : null}
+        {teamMember && !summary ? <small className="agent-presence__model">{teamMember.model}{teamMember.effort ? ` · ${teamMember.effort} effort` : ''}</small> : null}
+        {(teamMember?.currentTask ?? presence.detail) ? <small className="agent-presence__detail" title={teamMember?.currentTask ?? presence.detail ?? undefined}>{teamMember?.currentTask ?? presence.detail}</small> : null}
       </button>
     </li>
   );
 }
 
+function TeamPresenceRow({ member, state = member.state, onOpen }: { member: TeamStructureMember; state?: TeamAgentState; onOpen: (agent: ActivityAgent) => void }) {
+  const open = () => onOpen({
+    agentId: member.agentId, handle: member.handle, name: member.name, provider: member.provider, model: member.model,
+    local: member.local, ownerDisplayName: member.ownerDisplayName, deviceName: member.deviceName, role: member.role,
+    state, currentTask: member.currentTask, sessionId: member.sessionId, failureMessage: member.failure?.message ?? null,
+  });
+  return <li className={`agent-presence__row is-${state}`}>
+    <button type="button" className="agent-presence__open" onClick={open} aria-label={`Open @${member.handle} conversation, ${TEAM_STATE_LABEL[state]}`}>
+      <div className="agent-presence__identity" title={member.role}>
+        <AgentIdentity handle={member.handle} identityKey={member.agentId} provider={member.provider} role={member.role === 'orchestrator' ? 'Orchestrator' : undefined} />
+        <span className="agent-presence__state"><span className={state === 'working' ? 'activity-shimmer' : undefined}>{TEAM_STATE_LABEL[state]}</span></span>
+      </div>
+      {!member.local ? <small className="agent-presence__device">on {member.deviceName} · {member.ownerDisplayName}</small> : null}
+      <small className="agent-presence__model">{member.model}{member.effort ? ` · ${member.effort} effort` : ''}</small>
+      {member.currentTask ? <small className="agent-presence__detail" title={member.currentTask}>{member.currentTask}</small> : null}
+    </button>
+  </li>;
+}
+
 export function AgentPresenceRail({
-  snapshot, members, sessions, runs, approvals, connection, providers, hidden = false,
+  snapshot, members, sessions, runs, approvals, connection, providers, hidden = false, teamMembers = [], teamStates = {}, projectId,
 }: {
-  snapshot: GroupSnapshot; members: readonly GroupMember[]; sessions: readonly Session[]; runs: readonly SessionRun[];
+  snapshot: GroupSnapshot | null; members: readonly GroupMember[]; sessions: readonly Session[]; runs: readonly SessionRun[];
   approvals: readonly Approval[]; connection: 'online' | 'connecting' | 'offline'; providers: readonly ProviderInfo[];
   hidden?: boolean;
+  teamMembers?: readonly TeamStructureMember[];
+  teamStates?: Readonly<Record<string, TeamAgentState>>;
+  projectId?: string;
 }) {
   const panel = useRef<HTMLElement>(null);
   const head = useRef<HTMLElement>(null);
@@ -82,19 +113,26 @@ export function AgentPresenceRail({
   const resizeVersion = useRef(0);
   const [expanded, setExpanded] = useState(true);
   const [selectedAgent, setSelectedAgent] = useState<ActivityAgent | null>(null);
-  const presence = members.map((member) => memberPresence({
+  const presence = snapshot ? members.map((member) => memberPresence({
     snapshot, member, session: sessions.find((session) => session.id === member.sessionId), runs, approvals, connection,
-  }));
+  })) : teamMembers.map((member) => {
+    const state = teamStates[member.agentId] ?? member.state;
+    return {
+      working: state === 'working', queuedCount: state === 'queued' ? 1 : 0,
+      state: state === 'awaiting-approval' ? 'approval' : state === 'failed' ? 'error' : state,
+      label: TEAM_STATE_LABEL[state], startedAt: null, detail: member.currentTask,
+    };
+  });
   const workingCount = presence.filter((state) => state.working).length;
   const queuedCount = presence.reduce((total, state) => total + state.queuedCount, 0);
-  const needsApproval = presence.some((state) => state.state === 'approval');
-  const otherState = presence.find((state) => ['error', 'unavailable', 'paused', 'interrupted'].includes(state.state));
+  const needsApproval = presence.some((state) => state.state === 'approval' || state.state === 'awaiting-approval');
+  const otherState = presence.find((state) => ['error', 'unavailable', 'paused', 'interrupted', 'offline', 'failed', 'quota-exhausted'].includes(state.state));
   const activity = needsApproval ? 'Needs approval'
     : workingCount ? `${workingCount} working${queuedCount ? ` · ${queuedCount} queued` : ''}`
       : queuedCount ? `${queuedCount} queued`
-        : otherState?.label ?? (members.length ? 'All idle' : 'No agents');
+        : otherState?.label ?? (presence.length ? 'All idle' : 'No agents');
   const caption = connection === 'connecting' ? 'Reconnecting' : connection === 'offline' ? 'Offline'
-    : expanded ? members.length : activity;
+    : expanded ? (snapshot ? members.length : teamMembers.length) : activity;
 
   useEffect(() => () => {
     resizeVersion.current++;
@@ -181,12 +219,13 @@ export function AgentPresenceRail({
         </button>
       </header>
       <ul ref={list} className="agent-presence__list" id={listId} aria-hidden={!expanded} inert={!expanded}>
-        {members.map((member) => (
-          <PresenceRow key={member.id} snapshot={snapshot} member={member} session={sessions.find((item) => item.id === member.sessionId)} runs={runs} approvals={approvals} connection={connection} providers={providers} onOpen={setSelectedAgent} />
-        ))}
+        {snapshot ? members.map((member) => {
+          const teamMember = teamMembers.find((candidate) => candidate.agentId === member.id || candidate.sessionId === member.sessionId || candidate.handle === member.handle);
+          return <PresenceRow key={member.id} snapshot={snapshot} member={member} session={sessions.find((item) => item.id === member.sessionId)} runs={runs} approvals={approvals} connection={connection} providers={providers} onOpen={setSelectedAgent} teamMember={teamMember} />;
+        }) : teamMembers.map((member) => <TeamPresenceRow key={member.agentId} member={member} state={teamStates[member.agentId]} onOpen={setSelectedAgent} />)}
       </ul>
     </aside>
-    {selectedAgent ? <AgentActivityDrawer key={`${selectedAgent.agentId}:${selectedAgent.sessionId ?? ''}`} projectId={snapshot.group.projectId} agent={selectedAgent} onClose={() => setSelectedAgent(null)} /> : null}
+    {selectedAgent ? <AgentActivityDrawer key={`${selectedAgent.agentId}:${selectedAgent.sessionId ?? ''}`} projectId={snapshot?.group.projectId ?? projectId ?? ''} agent={selectedAgent} onClose={() => setSelectedAgent(null)} /> : null}
     </>
   );
 }

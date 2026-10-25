@@ -38,6 +38,7 @@
 .header__title .crumbs { flex: 1; }
 .header__primary, .header__team-row { display: contents; }
 .header__example { flex: none; height: 18px; padding-inline: 7px; color: var(--fg-2); font-weight: 500; letter-spacing: 0; }
+.header__shared-team { flex: none; color: var(--fg-3); font-size: var(--text-2xs); white-space: nowrap; }
 .header--team { gap: 10px; }
 .header__team { display: flex; align-items: center; gap: 6px; flex: none; min-width: 0; }
 .team-control { display: inline-flex; align-items: center; gap: 6px; min-width: 0; max-width: min(390px, 34vw); height: 30px; padding: 0 7px; border: 1px solid transparent; border-radius: var(--radius-sm); background: transparent; color: var(--fg-1); text-align: left; cursor: pointer; }
@@ -49,6 +50,9 @@
 .team-control__state[data-state='paused'], .team-control__state[data-state='waiting'] { color: var(--warn); }
 .team-control__state[data-state='offline'], .team-control__state[data-state='error'] { color: var(--err); }
 .team-control__action { flex: none; }
+.team-control--remote { cursor: default; }
+.team-control--remote:hover { border-color: transparent; background: transparent; color: var(--fg-1); }
+.team-session-row__mark { color: var(--fg-3); font-size: var(--text-2xs); }
 @media (max-width: 680px) { .crumbs__project { max-width: 120px; } .header { padding-left: 10px; } }
 @media (max-width: 600px) {
   .header--team {

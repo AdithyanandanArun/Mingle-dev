@@ -1,35 +1,30 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useState } from 'react';
 import { AlertTriangle, Pause, Play, ShieldCheck, UserRoundMinus } from 'lucide-react';
 import type { TeamStructureSnapshot } from '@mingle/contracts';
 import { Button } from '../../ui';
 import { TeamOrchestrationApiError, teamOrchestrationApi } from './api';
 import { TeamConsentSheet } from './TeamConsentSheet';
+import { useTeamStructure } from '../../../lib/team-structure-context';
 import './team-orchestration-settings.css';
 
 export function TeamConsentBanner({ projectId }: { projectId: string }) {
-  const [snapshot, setSnapshot] = useState<TeamStructureSnapshot | null>(null);
+  const teamStructure = useTeamStructure();
+  const snapshot: TeamStructureSnapshot | null = teamStructure.snapshot?.projectId === projectId ? teamStructure.snapshot : null;
   const [sheetOpen, setSheetOpen] = useState(false);
-  const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
 
-  const refresh = useCallback(async (signal?: AbortSignal) => {
+  const refresh = useCallback(async () => {
     try {
-      const next = await teamOrchestrationApi.structure(projectId, signal);
-      if (signal?.aborted) return;
-      setSnapshot(next);
+      const next = await teamStructure.refresh();
+      if (!next) throw new Error('Team consent status is unavailable.');
       setError('');
+      return next;
     } catch (cause) {
-      if (!signal?.aborted) setError(cause instanceof Error ? cause.message : 'Team consent status is unavailable.');
-    } finally { if (!signal?.aborted) setLoading(false); }
-  }, [projectId]);
-
-  useEffect(() => {
-    const controller = new AbortController();
-    void refresh(controller.signal);
-    const timer = window.setInterval(() => { if (document.visibilityState === 'visible') void refresh(controller.signal); }, 15_000);
-    return () => { controller.abort(); window.clearInterval(timer); };
-  }, [refresh]);
+      setError(cause instanceof Error ? cause.message : 'Team consent status is unavailable.');
+      throw cause;
+    }
+  }, [teamStructure.refresh]);
 
   const changeConsent = async (state: 'granted' | 'paused' | 'revoked') => {
     if (busy) return;
@@ -41,14 +36,14 @@ export function TeamConsentBanner({ projectId }: { projectId: string }) {
       await refresh();
     } catch (cause) {
       if (cause instanceof TeamOrchestrationApiError && cause.status === 409) {
-        await refresh();
+        await refresh().catch(() => null);
         setError('Team settings changed elsewhere. Review the latest consent status before trying again.');
       } else setError(cause instanceof Error ? cause.message : 'Could not update team consent.');
     } finally { setBusy(false); }
   };
 
-  if (loading && !snapshot) return null;
-  if (error && !snapshot) return <div className="team-consent-banner team-consent-banner--error" role="status"><AlertTriangle size={14} /><span>Could not load team consent status.</span><Button size="sm" variant="ghost" onClick={() => { setLoading(true); void refresh(); }}>Retry</Button></div>;
+  if (teamStructure.loading && !snapshot) return null;
+  if ((error || teamStructure.error) && !snapshot) return <div className="team-consent-banner team-consent-banner--error" role="status"><AlertTriangle size={14} /><span>Could not load team consent status.</span><Button size="sm" variant="ghost" onClick={() => { void refresh().catch(() => null); }}>Retry</Button></div>;
   if (!snapshot?.enabled || !snapshot.settings) return null;
 
   const consent = snapshot.myConsent;
@@ -68,6 +63,6 @@ export function TeamConsentBanner({ projectId }: { projectId: string }) {
           : <Button size="sm" disabled={busy} busy={busy} onClick={() => void changeConsent('paused')}><Pause size={13} />Pause my agents</Button>}
       {consent && consent.state !== 'revoked' ? <Button size="sm" variant="ghost" disabled={busy} aria-label="Leave and revoke shared agent access" onClick={() => void changeConsent('revoked')}><UserRoundMinus size={13} />Leave (revoke)</Button> : null}
     </section>
-    {sheetOpen ? <TeamConsentSheet projectId={projectId} onClose={() => setSheetOpen(false)} onAccepted={() => { setSheetOpen(false); void refresh(); }} /> : null}
+    {sheetOpen ? <TeamConsentSheet projectId={projectId} onClose={() => setSheetOpen(false)} onAccepted={() => { setSheetOpen(false); void refresh().catch(() => null); }} /> : null}
   </>;
 }

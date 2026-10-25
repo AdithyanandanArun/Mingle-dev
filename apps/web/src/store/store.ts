@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { mergeTextDelta } from '@mingle/contracts/stream';
-import type { Approval, Bootstrap, GroupSnapshot, Message, MessageContextRef, Project, ServerEvent, ClientEvent, Session, Task, WorkspaceEvent } from '@mingle/contracts';
+import type { Approval, Bootstrap, GroupSnapshot, Message, MessageContextRef, Project, ServerEvent, ClientEvent, Session, Task, TeamSessionRef, WorkspaceEvent } from '@mingle/contracts';
 import { api, errorMessage } from '../lib/api';
 import { terminalBus } from './terminalBus';
 import { resolveTab, useBrowserStore } from './browser';
@@ -45,7 +45,7 @@ export interface TerminalState {
 
 const LS = 'relay.ui.v2';
 interface Persisted {
-  activeProjectId?: string; sessionByProject?: Record<string, string>; view?: View; contextTab?: ContextTab;
+  activeProjectId?: string; sessionByProject?: Record<string, string>; selectedTeamSessionByProject?: Record<string, string>; view?: View; contextTab?: ContextTab;
   contextOpen?: boolean; terminalOpen?: boolean; terminalHeight?: number; scope?: Scope;
 }
 /** The Preview tab became the shared Browser tab; keep a saved selection pointing at it. */
@@ -74,7 +74,8 @@ interface MingleState {
   nextRetryAt: number | null;
 
   activeProjectId: string | null;
-  teamChatProjectId: string | null;
+  teamSessionsByProject: Record<string, { teamSession: TeamSessionRef | null; hostIsThisDevice: boolean }>;
+  selectedTeamSessionByProject: Record<string, string>;
   sessionByProject: Record<string, string>;
   view: View;
   settingsReturnView: Exclude<View, 'settings'>;
@@ -119,8 +120,9 @@ interface MingleState {
   openDialog(d: Dialog): void;
   closeDialog(): void;
   selectProject(id: string): void;
-  openTeamChat(projectId: string): void;
-  closeTeamChat(): void;
+  setTeamSessionInfo(projectId: string, teamSession: TeamSessionRef | null, hostIsThisDevice: boolean): void;
+  restoreTeamSessionSelection(projectId: string, sessionId: string): void;
+  openTeamSession(projectId: string, sessionId: string): void;
   selectSession(id: string): void;
   createSession(): Promise<void>;
   organizeSession(id: string, changes: Partial<Pick<Session, 'pinned' | 'unread'>>): Promise<void>;
@@ -271,7 +273,7 @@ export const useMingle = create<MingleState>((set, get) => {
   const savePersisted = (): void => {
     const s = get();
     const data: Persisted = {
-      activeProjectId: s.activeProjectId ?? undefined, sessionByProject: s.sessionByProject, view: s.view, contextTab: s.contextTab,
+      activeProjectId: s.activeProjectId ?? undefined, sessionByProject: s.sessionByProject, selectedTeamSessionByProject: s.selectedTeamSessionByProject, view: s.view, contextTab: s.contextTab,
       contextOpen: s.contextOpen, terminalOpen: s.terminalOpen, terminalHeight: s.terminalHeight, scope: s.scope,
     };
     try {
@@ -478,7 +480,8 @@ export const useMingle = create<MingleState>((set, get) => {
     nextRetryAt: null,
 
     activeProjectId: persisted.activeProjectId ?? null,
-    teamChatProjectId: null,
+    teamSessionsByProject: {},
+    selectedTeamSessionByProject: persisted.selectedTeamSessionByProject ?? {},
     sessionByProject: persisted.sessionByProject ?? {},
     view: persisted.view ?? 'workspace',
     settingsReturnView: 'workspace',
@@ -576,13 +579,13 @@ export const useMingle = create<MingleState>((set, get) => {
 
     setView: (view) => {
       if (view === 'settings') { get().openSettings(); return; }
-      patch({ view, sidebarOpen: false, dialog: null, teamChatProjectId: null });
+      patch({ view, sidebarOpen: false, dialog: null });
     },
     openSettings(options) {
       const view = get().view;
       patch({ view: 'settings', settingsReturnView: view === 'settings' ? get().settingsReturnView : view,
         settingsSection: options?.section ?? 'general', settingsProjectId: options?.projectId ?? get().activeProjectId,
-        settingsTeamTab: options?.teamTab ?? 'people', teamChatProjectId: null,
+        settingsTeamTab: options?.teamTab ?? 'people',
         dialog: null, sidebarOpen: false });
       window.requestAnimationFrame(() => document.getElementById('settings-title')?.focus());
     },
@@ -600,24 +603,56 @@ export const useMingle = create<MingleState>((set, get) => {
     setGroupActionBusy: (groupActionBusyId) => set({ groupActionBusyId }),
 
     selectProject(id) {
-      const { boot, sessionByProject } = get();
+      const { boot, sessionByProject, teamSessionsByProject, selectedTeamSessionByProject } = get();
       if (!boot?.projects.some((p) => p.id === id)) return;
       const children = groupChildSessionIds(boot.groups);
       const sessions = boot.sessions.filter((s) => s.projectId === id && !children.has(s.id));
       const remembered = sessionByProject[id];
+      const teamInfo = teamSessionsByProject[id];
+      const remoteTeamSessionId = teamInfo && !teamInfo.hostIsThisDevice
+        && teamInfo.teamSession?.sessionId === selectedTeamSessionByProject[id]
+        ? teamInfo.teamSession.sessionId : null;
       const pick = sessions.find((s) => s.id === remembered) ?? sessions[0];
       patch({
-        activeProjectId: id, settingsProjectId: id, centerTab: 'session', sidebarOpen: false, teamChatProjectId: null,
-        sessionByProject: pick ? { ...sessionByProject, [id]: pick.id } : sessionByProject,
+        activeProjectId: id, settingsProjectId: id, centerTab: 'session', sidebarOpen: false,
+        sessionByProject: remoteTeamSessionId ? { ...sessionByProject, [id]: remoteTeamSessionId } : pick ? { ...sessionByProject, [id]: pick.id } : sessionByProject,
       });
-      if (pick?.unread && get().view === 'workspace') void get().organizeSession(pick.id, { unread: false }).catch(() => {});
+      if (!remoteTeamSessionId && pick?.unread && get().view === 'workspace') void get().organizeSession(pick.id, { unread: false }).catch(() => {});
     },
-    openTeamChat(projectId) {
+    setTeamSessionInfo(projectId, teamSession, hostIsThisDevice) {
+      set((state) => {
+        const old = state.teamSessionsByProject[projectId];
+        if (old?.teamSession?.sessionId === teamSession?.sessionId && old?.teamSession?.groupId === teamSession?.groupId && old?.teamSession?.title === teamSession?.title && old?.hostIsThisDevice === hostIsThisDevice) return {};
+        const selected = { ...state.selectedTeamSessionByProject };
+        if (!teamSession || hostIsThisDevice) {
+          if (selected[projectId] === old?.teamSession?.sessionId) delete selected[projectId];
+        } else {
+          if (selected[projectId] && selected[projectId] !== teamSession.sessionId) delete selected[projectId];
+          if (state.sessionByProject[projectId] === teamSession.sessionId) selected[projectId] = teamSession.sessionId;
+        }
+        return {
+          teamSessionsByProject: { ...state.teamSessionsByProject, [projectId]: { teamSession, hostIsThisDevice } },
+          selectedTeamSessionByProject: selected,
+        };
+      });
+    },
+    restoreTeamSessionSelection(projectId, sessionId) {
+      const state = get();
+      if (state.activeProjectId !== projectId || state.selectedTeamSessionByProject[projectId] !== sessionId || state.sessionByProject[projectId] === sessionId) return;
+      patch({ sessionByProject: { ...state.sessionByProject, [projectId]: sessionId } });
+    },
+    openTeamSession(projectId, sessionId) {
       const project = get().boot?.projects.find((item) => item.id === projectId);
       if (!project) return;
-      patch({ activeProjectId: projectId, settingsProjectId: projectId, view: 'workspace', teamChatProjectId: projectId, sidebarOpen: false, dialog: null });
+      const current = get();
+      const ref = current.teamSessionsByProject[projectId]?.teamSession;
+      if (!ref || ref.sessionId !== sessionId) return;
+      patch({
+        activeProjectId: projectId, settingsProjectId: projectId, view: 'workspace', centerTab: 'session', sidebarOpen: false, dialog: null,
+        sessionByProject: { ...current.sessionByProject, [projectId]: sessionId },
+        selectedTeamSessionByProject: { ...current.selectedTeamSessionByProject, [projectId]: sessionId },
+      });
     },
-    closeTeamChat() { patch({ teamChatProjectId: null }); },
     selectSession(id) {
       const boot = get().boot;
       // Choosing any member of a group opens the group through its anchor session.
@@ -626,7 +661,8 @@ export const useMingle = create<MingleState>((set, get) => {
       if (!boot || !s) return;
       patch({
         activeProjectId: s.projectId, sessionByProject: { ...get().sessionByProject, [s.projectId]: s.id },
-        view: 'workspace', centerTab: 'session', sidebarOpen: false, teamChatProjectId: null,
+        selectedTeamSessionByProject: Object.fromEntries(Object.entries(get().selectedTeamSessionByProject).filter(([projectId]) => projectId !== s.projectId)),
+        view: 'workspace', centerTab: 'session', sidebarOpen: false,
       });
       const toRead = group ? activeMembers(group).map((member) => boot.sessions.find((x) => x.id === member.sessionId)).filter((x): x is Session => Boolean(x?.unread)) : s.unread ? [s] : [];
       for (const session of toRead) void get().organizeSession(session.id, { unread: false }).catch(() => {});

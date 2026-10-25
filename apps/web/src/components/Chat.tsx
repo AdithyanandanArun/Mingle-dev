@@ -11,6 +11,8 @@ import { RunActivity } from './RunActivity';
 import { RunChanges } from './RunChanges';
 import { GitBar } from './git/GitBar';
 import { appendContextReference } from './MessageContextControls';
+import { TeamSessionView } from './team-chat/TeamSessionView';
+import { useTeamStructure } from '../lib/team-structure-context';
 
 const EMPTY_RUNS: SessionRun[] = [];
 const EMPTY_TOOL_CALLS: ToolCall[] = [];
@@ -43,7 +45,16 @@ function useSessionMessages(session: Session | undefined): DisplayMessage[] {
 /** A converted session opens as its group's shared conversation; everything else stays a single session. */
 export function SessionPane() {
   const group = useActiveGroup();
-  return group ? <GroupConversation key={group.group.id} snapshot={group} /> : <SingleSessionPane />;
+  const project = useProject();
+  const selectedSessionId = useMingle((state) => project ? state.sessionByProject[project.id] : undefined);
+  const teamInfo = useMingle((state) => project ? state.teamSessionsByProject[project.id] : undefined);
+  const teamStructure = useTeamStructure();
+  const remoteTeamSession = teamInfo && !teamInfo.hostIsThisDevice ? teamInfo.teamSession : null;
+  if (group) return <GroupConversation key={group.group.id} snapshot={group} />;
+  if (project && remoteTeamSession && selectedSessionId === remoteTeamSession.sessionId) {
+    return <TeamSessionView key={remoteTeamSession.sessionId} projectId={project.id} teamSession={remoteTeamSession} structure={teamStructure.snapshot} />;
+  }
+  return <SingleSessionPane />;
 }
 
 function SingleSessionPane() {

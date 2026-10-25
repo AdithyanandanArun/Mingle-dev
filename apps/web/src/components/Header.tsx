@@ -8,6 +8,7 @@ import { activeMembers, isBusy } from '../lib/groups';
 import { stopGroup } from '../lib/groupActions';
 import { GroupControl } from './group/GroupControl';
 import { cx } from '../lib/format';
+import { useTeamStructure } from '../lib/team-structure-context';
 
 const TITLES = { workspace: 'Workspace', tasks: 'Tasks', activity: 'Activity', map: 'Agent map', 'team-structure': 'Team structure', settings: 'Settings' } as const;
 const EMPTY_SESSIONS: Session[] = [];
@@ -17,6 +18,9 @@ export function Header() {
   const project = useProject();
   const session = useActiveSession();
   const group = useActiveGroup();
+  const teamStructure = useTeamStructure().snapshot;
+  const teamInfo = useMingle((s) => project ? s.teamSessionsByProject[project.id] : undefined);
+  const selectedSessionId = useMingle((s) => project ? s.sessionByProject[project.id] : undefined);
   const sessions = useMingle((s) => s.boot?.sessions ?? EMPTY_SESSIONS);
   const connection = useMingle((s) => s.connection);
   const contextOpen = useMingle((s) => s.contextOpen);
@@ -28,6 +32,9 @@ export function Header() {
   const { openDialog, toggleContext, toggleTerminal, setSidebarOpen } = useMingle.getState();
   const [stopping, setStopping] = useState(false);
   const hasActiveRun = isBusy(session);
+  const remoteTeamSession = teamInfo && !teamInfo.hostIsThisDevice ? teamInfo.teamSession : null;
+  const activeTeamSession = remoteTeamSession && selectedSessionId === remoteTeamSession.sessionId;
+  const sharedHostGroup = group && teamInfo?.hostIsThisDevice && teamInfo.teamSession?.groupId === group.group.id;
 
   const interrupt = async () => {
     if (!session) return;
@@ -53,20 +60,24 @@ export function Header() {
   </header>;
 
   return (
-    <header className={cx('header', view === 'workspace' && group && 'header--team')}>
+    <header className={cx('header', view === 'workspace' && (group || activeTeamSession) && 'header--team')}>
       <div className="header__primary">
         <IconButton label="Open sidebar" className="header__burger" onClick={() => setSidebarOpen(true)}><MenuIcon size={16} /></IconButton>
         <div className="header__title">
           <div className="crumbs" aria-label="Current view">
             <span className="crumbs__project" title={project?.name}>{project?.name ?? 'No project'}</span>
             <span className="crumbs__sep" aria-hidden="true">/</span>
-            <span className="crumbs__current" title={session ? [session.name, session.branch].filter(Boolean).join(' · ') : undefined}>{view === 'workspace' ? session?.name ?? 'Workspace' : TITLES[view]}</span>
+            <span className="crumbs__current" title={session ? [session.name, session.branch].filter(Boolean).join(' · ') : activeTeamSession ? remoteTeamSession.title : undefined}>{view === 'workspace' ? session?.name ?? (activeTeamSession ? remoteTeamSession.title : 'Workspace') : TITLES[view]}</span>
           </div>
           {view === 'workspace' && project?.isExample ? <span className="header__example badge" role="note" aria-label="Example workspace. Messages start real runs with your configured provider." title="Example workspace. Messages start real runs with your configured provider.">Example</span> : null}
+          {view === 'workspace' && sharedHostGroup ? <span className="header__shared-team" role="note">Shared with team</span> : null}
         </div>
       </div>
       <div className="header__team-row">
         {view === 'workspace' && group ? <GroupControl key={group.group.id} snapshot={group} /> : null}
+        {view === 'workspace' && activeTeamSession ? <div className="header__team"><div className="team-control team-control--remote" aria-label={`${teamStructure?.members.length ?? 'Team'} agents in shared session`} title="Shared team session">
+          <Users size={14} aria-hidden="true" /><span className="team-control__count">{teamStructure?.members.length ?? '—'}<span> agents</span></span>
+        </div></div> : null}
         <div className="header__actions">
           {view === 'workspace' && session && !group && hasActiveRun ? (
             <Button size="sm" variant="danger" busy={stopping} onClick={interrupt}><Square size={11} fill="currentColor" /> Interrupt</Button>
@@ -77,10 +88,10 @@ export function Header() {
           {view === 'workspace' ? (
             <>
               <Button size="sm" variant="secondary" disabled={!project || project.isExample || connection !== 'online'} why={!project ? 'Open a project first' : project.isExample ? 'Choose a Git project to invite teammates' : connection !== 'online' ? 'Reconnect to the server first' : undefined} onClick={() => project && openDialog({ kind: 'project-collaboration', projectId: project.id })}><Users size={14} /> Add teammates</Button>
-              {!group ? <Button size="sm" variant="secondary" disabled={!session || connection !== 'online'} why={!session ? 'Select a session first' : connection !== 'online' ? 'Reconnect to the server first' : undefined} onClick={() => session && openDialog({ kind: 'add-agent', sessionId: session.id })}><UserPlus size={14} /> Add agent</Button> : null}
+              {!group && !activeTeamSession ? <Button size="sm" variant="secondary" disabled={!session || connection !== 'online'} why={!session ? 'Select a session first' : connection !== 'online' ? 'Reconnect to the server first' : undefined} onClick={() => session && openDialog({ kind: 'add-agent', sessionId: session.id })}><UserPlus size={14} /> Add agent</Button> : null}
               <IconButton label={terminalOpen ? 'Hide terminal' : 'Show terminal'} active={terminalOpen} onClick={() => toggleTerminal()}><SquareTerminal size={16} /></IconButton>
               <IconButton label={contextOpen ? 'Hide context pane' : 'Show context pane'} active={contextOpen} onClick={() => toggleContext()}><PanelRight size={16} /></IconButton>
-              <Menu
+              {activeTeamSession ? null : <Menu
                 align="end" width={200}
                 trigger={(p) => <IconButton label="Session actions" disabled={!session} why="No session selected" {...p}><MoreHorizontal size={16} /></IconButton>}
               >
@@ -96,7 +107,7 @@ export function Header() {
                 {group
                   ? <MenuItem danger icon={<Trash2 size={14} />} disabled={!online} why="Reconnect to the server first" onSelect={() => openDialog({ kind: 'delete-group', groupId: group.group.id })}>Delete group…</MenuItem>
                   : <MenuItem danger icon={<Trash2 size={14} />} disabled={!online} why="Reconnect to the server first" onSelect={() => session && openDialog({ kind: 'delete-session', sessionId: session.id })}>Delete session…</MenuItem>}
-              </Menu>
+              </Menu>}
             </>
           ) : null}
         </div>

@@ -1,8 +1,10 @@
-import { Fragment, useEffect, useId, useMemo, useRef, useState } from 'react';
+import { Fragment, useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { AlertTriangle, Pause, Play } from 'lucide-react';
-import type { AgentConfiguration, GroupMember, GroupMode, GroupSnapshot, ProviderInfo, Session } from '@mingle/contracts';
+import type { AgentConfiguration, GroupMember, GroupMode, GroupSnapshot, ProviderInfo, Session, TeamAvailableAgentsSnapshot } from '@mingle/contracts';
 import { useMingle } from '../../store/store';
 import { api, errorMessage } from '../../lib/api';
+import { teamSessionsApi } from '../../lib/team-sessions';
+import { useTeamStructure } from '../../lib/team-structure-context';
 import { shortPath } from '../../lib/format';
 import {
   MODE_EXPLANATION, MODE_FLOW, MODE_LABEL, MODE_TAGLINE, ROLE_LABEL, activeMembers, allHandles, configSummary, defaultConfigFor, effortLabel, initialWorkerConfig,
@@ -30,9 +32,9 @@ export function Roster({ entries, providers }: { entries: RosterEntry[]; provide
         const availability = entry.provider ? providerAvailability(providers, entry.provider) : null;
         return (
           <li key={entry.key} className="roster__row">
-            <div className="roster__who">
-              <AgentIdentity handle={entry.handle || 'Orchestrator'} identityKey={entry.key} provider={entry.provider} role={ROLE_LABEL[entry.role]} prefix={Boolean(entry.handle)} />
-              {entry.badge ? <span className="roster__badge">{entry.badge}</span> : null}
+              <div className="roster__who">
+                <AgentIdentity handle={entry.handle || 'Orchestrator'} identityKey={entry.key} provider={entry.provider} role={ROLE_LABEL[entry.role]} prefix={Boolean(entry.handle)} />
+                {entry.badge ? <span className="roster__badge">{entry.badge}</span> : null}
               <small>{entry.note}</small>
             </div>
             <div className="roster__detail">
@@ -74,6 +76,8 @@ export function AddAgentDialog({ sessionId }: { sessionId: string }) {
     [boot?.groups, sessionId],
   );
   const project = boot?.projects.find((item) => item.id === session?.projectId);
+  const projectId = project?.id;
+  const teamStructure = useTeamStructure();
   const joining = Boolean(group);
   const idBase = useId();
   const motionRoot = useRef<HTMLDivElement>(null);
@@ -93,7 +97,34 @@ export function AddAgentDialog({ sessionId }: { sessionId: string }) {
   const [adjustOrchestrator, setAdjustOrchestrator] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [teamAgents, setTeamAgents] = useState<TeamAvailableAgentsSnapshot | null>(null);
+  const [teamAgentsLoading, setTeamAgentsLoading] = useState(false);
+  const [teamAgentsError, setTeamAgentsError] = useState<string | null>(null);
+  const [teamAgentBusyId, setTeamAgentBusyId] = useState<string | null>(null);
   const motion = useDiagramMotion(motionRoot, mode);
+
+  const loadTeamAgents = useCallback(async (signal?: AbortSignal) => {
+    if (!projectId || connection !== 'online') return;
+    setTeamAgentsLoading(true);
+    setTeamAgentsError(null);
+    try {
+      const collaboration = await api.projectCollaboration(projectId, signal);
+      if (signal?.aborted) return;
+      if (!collaboration.project) { setTeamAgents(null); return; }
+      setTeamAgents(await teamSessionsApi.availableAgents(projectId, signal));
+    } catch (cause) {
+      if (!signal?.aborted) setTeamAgentsError(errorMessage(cause));
+    } finally {
+      if (!signal?.aborted) setTeamAgentsLoading(false);
+    }
+  }, [connection, projectId]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    setTeamAgents(null);
+    void loadTeamAgents(controller.signal);
+    return () => controller.abort();
+  }, [loadTeamAgents]);
 
   // Another open window may convert or change this conversation while this dialog is open.
   useEffect(() => {
@@ -132,10 +163,12 @@ export function AddAgentDialog({ sessionId }: { sessionId: string }) {
   if (group) {
     const existing = activeMembers(group).map<RosterEntry>((member) => {
       const memberSession = boot?.sessions.find((item) => item.id === member.sessionId);
+      const teamMember = teamStructure.snapshot?.members.find((candidate) => candidate.agentId === member.id || candidate.sessionId === member.sessionId || candidate.handle === member.handle);
       return {
         key: member.id, handle: member.handle, role: member.role, note: 'Existing conversation', provider: memberSession?.provider,
         model: memberSession?.model ?? '', effort: memberSession?.effort ?? '', policy: memberSession?.policy ?? 'supervised', serviceTier: memberSession?.serviceTier ?? 'standard',
         workspace: memberSession ? workspaceOf(memberSession) : 'Unknown workspace',
+        ...(teamMember && !teamMember.local ? { badge: `on ${teamMember.deviceName} · ${teamMember.ownerDisplayName}`, provider: teamMember.provider, model: teamMember.model, effort: teamMember.effort ?? '' } : {}),
       };
     });
     roster = [...existing, newEntry];
@@ -189,6 +222,27 @@ export function AddAgentDialog({ sessionId }: { sessionId: string }) {
     } finally {
       setBusy(false);
     }
+  };
+
+  const addTeammateAgent = async (agentId: string) => {
+    if (!teamAgents?.canAdd || teamAgents.agents.find((agent) => agent.agentId === agentId)?.usable !== true || teamAgentBusyId) return;
+    setTeamAgentBusyId(agentId);
+    setError(null);
+    try {
+      const snapshot = group
+        ? await teamSessionsApi.addToGroup(group.group.id, { agentId })
+        : await teamSessionsApi.addToSession(sessionId, { agentId });
+      const store = useMingle.getState();
+      store.applyGroup(snapshot);
+      await store.refreshNow();
+      await teamStructure.refresh().catch(() => null);
+      store.toast('success', `Added teammate agent to ${snapshot.group.title || 'the team session'}.`);
+      store.closeDialog();
+      store.selectSession(snapshot.group.anchorSessionId);
+      window.requestAnimationFrame(() => document.getElementById(`composer-${snapshot.group.anchorSessionId}`)?.focus());
+    } catch (cause) {
+      setError(errorMessage(cause));
+    } finally { setTeamAgentBusyId(null); }
   };
 
   const title = joining ? 'Add agent' : step === 'mode' ? 'Add agent' : `Add agent · ${mode ? TITLES[mode] : ''}`;
@@ -294,6 +348,28 @@ export function AddAgentDialog({ sessionId }: { sessionId: string }) {
                   description={isolated ? 'The agent edits its own Git worktree and branch, created when it is added. The project folder is untouched.' : `The agent edits the shared project folder${project ? ` (${shortPath(project.path)})` : ''}, so concurrent edits can collide with other agents.`} />
               </div>
             </section>
+            {teamAgents || teamAgentsLoading || teamAgentsError ? <section className="team-agents-section" aria-labelledby={`${idBase}-team-agents`}>
+              <div className="team-agents-section__heading"><div><h3 className="gd-h" id={`${idBase}-team-agents`}>Teammates’ agents</h3><p className="field__hint">Add an agent that runs on its owner’s computer. It joins this conversation just like a local agent.</p></div>
+                {teamAgentsError ? <button type="button" className="link-btn" onClick={() => void loadTeamAgents()}>Retry</button> : null}
+              </div>
+              {teamAgentsLoading && !teamAgents ? <p className="field__hint" role="status">Loading available agents…</p> : null}
+              {teamAgentsError ? <InlineError>{teamAgentsError}</InlineError> : null}
+              {teamAgents?.canAdd === false ? <p className="team-agents-section__reason" role="note">{teamAgents.reason ?? 'You cannot add teammate agents from this device.'}</p> : null}
+              {teamAgents && !teamAgents.agents.length ? <p className="field__hint">No teammates’ agents are available yet.</p> : null}
+              {teamAgents?.agents.length ? <ul className="roster team-agent-roster" aria-label="Teammates’ agents">
+                {teamAgents.agents.map((remote) => {
+                  const disabledReason = !teamAgents.canAdd ? teamAgents.reason ?? 'You cannot add teammate agents from this device.' : !remote.usable ? remote.unusableReason ?? 'This agent cannot be added right now.' : undefined;
+                  const unavailable = Boolean(disabledReason || teamAgentBusyId);
+                  return <li className="roster__row team-agent-row" key={remote.agentId}>
+                    <div className="roster__who"><AgentIdentity handle={remote.handle} identityKey={remote.agentId} provider={remote.provider} /><small>{remote.ownerDisplayName} · {remote.deviceName}</small></div>
+                    <div className="roster__detail"><span>{providerName(remote.provider)} · {remote.model} · {remote.effort ?? 'effort not reported'}</span>{disabledReason ? <small className="roster__warn">{disabledReason}</small> : null}</div>
+                    <div className="team-agent-row__action"><span className={`team-agent-online${remote.online ? ' is-online' : ''}`}><i aria-hidden="true" />{remote.online ? 'Online' : 'Offline'}</span>
+                      <Button size="sm" disabled={unavailable} why={disabledReason ?? (teamAgentBusyId ? 'Adding another teammate agent…' : undefined)} busy={teamAgentBusyId === remote.agentId} onClick={() => void addTeammateAgent(remote.agentId)}>Add</Button>
+                    </div>
+                  </li>;
+                })}
+              </ul> : null}
+            </section> : null}
             {error ? <InlineError>{error}</InlineError> : null}
             {blocker && !error && connection === 'online' && !handleError ? <p className="field__hint" role="status">{blocker}</p> : null}
           </div>

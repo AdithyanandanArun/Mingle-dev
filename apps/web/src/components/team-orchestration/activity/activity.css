@@ -1,46 +1,4 @@
-/* Team agent presence and private, read-only conversation drawer. */
-.agent-presence__open { display: grid; width: 100%; min-width: 0; gap: 3px; padding: 0; border: 0; background: transparent; color: inherit; text-align: left; cursor: pointer; }
-.agent-presence__open:hover .agent-identity__name { color: var(--fg-0); }
-.agent-presence__open:focus-visible { outline: 2px solid var(--blue-line); outline-offset: 3px; border-radius: 4px; }
-
-.team-presence { position: fixed; z-index: 12010; right: 18px; bottom: 82px; display: flex; width: min(292px, calc(100vw - 24px)); max-height: min(440px, calc(100dvh - 110px)); flex-direction: column; overflow: hidden; border: 1px solid var(--line-strong); border-radius: 12px; background: color-mix(in srgb, var(--bg-raised) 97%, transparent); color: var(--fg-0); box-shadow: var(--shadow-pop); animation: fade-up var(--motion-ui) var(--ease-out) both; }
-.team-presence.is-collapsed { width: min(286px, calc(100vw - 24px)); }
-.team-presence__head { min-height: 42px; flex: none; }
-.team-presence__toggle { display: flex; align-items: center; gap: 9px; width: 100%; min-height: 42px; padding: 0 11px; border: 0; background: transparent; color: inherit; text-align: left; cursor: pointer; }
-.team-presence__toggle:hover { background: var(--bg-hover); }
-.team-presence__toggle:focus-visible, .team-presence__agent:focus-visible { outline: 2px solid var(--blue-line); outline-offset: -2px; }
-.team-presence__title { display: inline-flex; align-items: center; gap: 7px; flex: none; color: var(--fg-1); font-size: var(--text-xs); font-weight: 650; }
-.team-presence__title svg { color: var(--info); }
-.team-presence__summary { min-width: 0; margin-left: auto; overflow: hidden; color: var(--fg-2); font-size: var(--text-2xs); text-overflow: ellipsis; white-space: nowrap; }
-.team-presence__toggle > svg:last-child { flex: none; color: var(--fg-2); }
-.team-presence__content { display: flex; min-height: 0; flex-direction: column; border-top: 1px solid var(--line-soft); }
-.team-presence__list { display: grid; min-height: 0; margin: 0; padding: 3px 9px 8px; overflow-y: auto; list-style: none; }
-.team-presence__row { border-bottom: 1px solid var(--line-soft); }
-.team-presence__row:last-child { border-bottom: 0; }
-.team-presence__agent { display: grid; width: 100%; gap: 4px; padding: 8px 3px; border: 0; border-radius: 5px; background: transparent; color: inherit; text-align: left; cursor: pointer; }
-.team-presence__agent:hover { background: var(--bg-hover); }
-.team-presence__agent-main { display: flex; align-items: center; gap: 6px; min-width: 0; }
-.team-presence__agent-main > .agent-identity { min-width: 0; overflow: hidden; }
-.team-presence__agent-main .agent-identity__name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.team-presence__crown { flex: none; color: var(--warn); }
-.team-presence__crown-space { width: 13px; flex: none; }
-.team-presence__state { display: inline-flex; align-items: center; gap: 5px; flex: none; margin-left: auto; color: var(--fg-1); font-size: var(--text-2xs); white-space: nowrap; }
-.team-presence__state i { width: 6px; height: 6px; border-radius: 50%; background: var(--fg-3); }
-.team-presence__row.is-working .team-presence__state i { background: var(--info); animation: pulse 1.4s ease-in-out infinite; }
-.team-presence__row.is-queued .team-presence__state i, .team-presence__row.is-awaiting-approval .team-presence__state i, .team-presence__row.is-quota-exhausted .team-presence__state i { background: var(--warn); }
-.team-presence__row.is-failed .team-presence__state i { background: var(--err); }
-.team-presence__row.is-idle { opacity: .68; }
-.team-presence__row.is-offline .team-presence__state, .team-presence__row.is-paused .team-presence__state { color: var(--fg-2); }
-.team-presence__meta { display: grid; gap: 2px; padding-left: 19px; color: var(--fg-2); font-size: var(--text-2xs); }
-.team-presence__meta > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.team-presence__role { color: var(--fg-1); font-weight: 600; }
-.team-presence__task { color: var(--fg-1); }
-.team-presence__failure { display: block; padding-left: 19px; overflow: hidden; color: var(--err); font-size: var(--text-2xs); text-overflow: ellipsis; white-space: nowrap; }
-.team-presence__notice, .team-presence__error { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 7px 9px 0; padding: 7px 8px; border-radius: var(--radius-xs); background: var(--warn-soft); color: var(--warn); font-size: var(--text-2xs); line-height: 1.4; }
-.team-presence__error { background: var(--err-soft); color: var(--err); }
-.team-presence__error span { min-width: 0; overflow-wrap: anywhere; }
-.team-presence__error button { display: grid; place-items: center; flex: none; width: 24px; height: 24px; border: 0; border-radius: 5px; background: transparent; color: inherit; cursor: pointer; }
-.team-presence__empty { display: flex; align-items: center; justify-content: center; gap: 8px; padding: 18px 12px; color: var(--fg-2); font-size: var(--text-xs); text-align: center; }
+/* Private, read-only conversation drawer for an agent. */
 
 .agent-activity__veil { position: fixed; z-index: 13000; inset: 0; display: flex; justify-content: flex-end; background: color-mix(in srgb, var(--bg-overlay) 66%, transparent); animation: fade-up var(--motion-overlay) var(--ease-standard) both; }
 .agent-activity { --agent-activity-width: min(540px, 100vw); display: flex; width: var(--agent-activity-width); height: 100%; min-height: 0; flex-direction: column; overflow: hidden; border-left: 1px solid var(--line-strong); background: var(--bg-panel); color: var(--fg-0); box-shadow: var(--shadow-pop); animation: slide-in var(--motion-ui) var(--ease-out) both; outline: none; }
@@ -97,14 +55,12 @@
 .agent-activity__local-log > .working { min-height: 30px; }
 
 @media (max-width: 600px) {
-  .team-presence { right: 10px; bottom: 72px; width: min(282px, calc(100vw - 20px)); }
-  .team-presence.is-collapsed { width: min(274px, calc(100vw - 20px)); }
   .agent-activity { --agent-activity-width: 100vw; border-left: 0; }
   .agent-activity__head { gap: 7px; padding-left: 11px; }
   .agent-activity__state { max-width: 112px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .agent-activity__timeline, .agent-activity__local-log { padding: 12px 11px 20px; }
 }
 @media (prefers-reduced-motion: reduce) {
-  .team-presence, .agent-activity__veil, .agent-activity { animation: none; }
-  .team-presence__row.is-working .team-presence__state i, .agent-activity__state.is-working i { animation: none; }
+  .agent-activity__veil, .agent-activity { animation: none; }
+  .agent-activity__state.is-working i { animation: none; }
 }

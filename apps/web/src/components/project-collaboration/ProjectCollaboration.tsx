@@ -711,7 +711,7 @@ export function ProjectInviteJoinDialog({ token, onClose, onOpenAccountSettings,
         onAccepted={() => { setConsentSkipped(false); setStep('success'); }}
       /> : null}
 
-      {step === 'success' && joinResult ? <div className="pc-state-card pc-state-card--success"><Check size={19} /><div><h3>You’re in</h3><p>{consentSkipped ? 'Your agents remain private until you choose to share them later.' : `${joinResult.sessionIds.length} idle agent${joinResult.sessionIds.length === 1 ? '' : 's'} are ready.`} No model run has started. Your project and first session are selected in the workspace.</p><Button variant="primary" size="sm" onClick={() => { onJoined?.(joinResult); onClose(); }}>Open team chat</Button></div></div> : null}
+      {step === 'success' && joinResult ? <div className="pc-state-card pc-state-card--success"><Check size={19} /><div><h3>You’re in</h3><p>{consentSkipped ? 'Your agents remain private until you choose to share them later.' : `${joinResult.sessionIds.length} idle agent${joinResult.sessionIds.length === 1 ? '' : 's'} are ready.`} No model run has started. The shared team session opens when one is available.</p><Button variant="primary" size="sm" onClick={() => { onJoined?.(joinResult); onClose(); }}>Open project</Button></div></div> : null}
     </div>
   </Modal>;
 }

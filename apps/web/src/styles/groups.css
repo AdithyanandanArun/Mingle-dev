@@ -14,10 +14,14 @@
 .agent-presence.is-collapsed { width: min(190px, calc(100% - 24px)); height: 38px; }
 .agent-presence__row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 3px 8px; min-width: 0; padding: 7px 1px; border-bottom: 1px solid var(--line-soft); }
 .agent-presence__row:last-child { border-bottom: 0; }
+.agent-presence__open { display: grid; width: 100%; gap: 3px; padding: 0; border: 0; background: transparent; color: inherit; text-align: left; cursor: pointer; }
+.agent-presence__open:hover .agent-identity__name { color: var(--fg-0); }
+.agent-presence__open:focus-visible { outline: 2px solid var(--blue-strong); outline-offset: 2px; border-radius: 4px; }
 .agent-presence__identity { display: flex; grid-column: 1; grid-row: 1; align-items: baseline; justify-content: flex-start; gap: 7px; min-width: 0; }
 .agent-presence__identity .agent-identity { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .agent-presence__identity .agent-identity__name { overflow: hidden; text-overflow: ellipsis; }
 .agent-presence__model, .agent-presence__detail { grid-column: 1 / -1; overflow: hidden; color: var(--fg-2); font-size: var(--text-2xs); text-overflow: ellipsis; white-space: nowrap; }
+.agent-presence__device { grid-column: 1 / -1; overflow: hidden; color: var(--blue-strong); font-size: var(--text-2xs); text-overflow: ellipsis; white-space: nowrap; }
 .agent-presence__state { display: flex; grid-column: 2; grid-row: 1; align-items: center; gap: 6px; min-width: 0; color: var(--fg-1); font-size: var(--text-xs); }
 .agent-presence__state > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .agent-presence__row.is-offline .agent-presence__state, .agent-presence__row.is-unavailable .agent-presence__state { color: var(--fg-2); }
@@ -148,6 +152,18 @@
 .roster__who > .agent-identity strong { font-size: var(--text-xs); }
 .roster__who small, .roster__detail small { color: var(--fg-2); font-size: var(--text-2xs); }
 .roster__badge { width: fit-content; padding: 2px 5px; border-radius: 999px; background: var(--blue-soft); color: var(--blue-strong); font-size: var(--text-2xs); }
+.team-agents-section { display: grid; gap: 9px; padding-top: 14px; border-top: 1px solid var(--line-soft); }
+.team-agents-section__heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.team-agents-section__heading .gd-h { margin-bottom: 4px; }
+.team-agents-section__heading .field__hint { margin: 0; }
+.team-agents-section__reason { margin: 0; padding: 8px 10px; border-left: 2px solid var(--warn); background: var(--bg-panel); color: var(--fg-2); font-size: var(--text-xs); line-height: 1.5; }
+.team-agent-roster { margin-top: 2px; }
+.team-agent-row { align-items: center; }
+.team-agent-row__action { display: flex; align-items: flex-end; justify-content: center; gap: 7px; }
+.team-agent-online { display: inline-flex; align-items: center; gap: 5px; color: var(--fg-2); font-size: var(--text-2xs); white-space: nowrap; }
+.team-agent-online i { width: 6px; height: 6px; border-radius: 50%; background: var(--fg-3); }
+.team-agent-online.is-online { color: var(--fg-1); }
+.team-agent-online.is-online i { background: var(--ok); }
 .roster__warn { color: var(--warn) !important; }
 .gm-list { display: grid; gap: 6px; margin: 0; padding: 0; border: 0; }
 .gm-option { display: flex; gap: 9px; align-items: flex-start; padding: 9px; border: 1px solid var(--line); border-radius: var(--radius-sm); cursor: pointer; }
@@ -225,6 +241,7 @@
 @media (max-width: 560px) {
   .roster__row { grid-template-columns: 1fr 1fr; }
   .roster__who { grid-row: span 2; }
+  .team-agent-row__action { grid-column: 2; justify-content: flex-start; align-items: center; }
   .group-limit-grid, .cfg__grid { grid-template-columns: 1fr; }
   .gm-head { flex-direction: column; }
   .gm-motion { align-self: flex-start; }
