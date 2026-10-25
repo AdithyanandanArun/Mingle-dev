@@ -186,7 +186,7 @@ function fixture(options: { deviceId?: string; role?: 'leader' | 'admin' | 'memb
     collaboration: collaboration as any, groups: groupService as any, teamMcp: teamMcp as any, recovery: recovery as any,
     deliveryTimeoutMs: options.deliveryTimeoutMs ?? 60_000, now: options.now });
   const fx = {
-    store, project, local, host, outgoing, finished, enqueued, artifactImports, group: () => group, setRole(value: typeof role) { role = value; },
+    store, project, local, host, outgoing, finished, enqueued, artifactImports, agents, group: () => group, setRole(value: typeof role) { role = value; },
     setDevice(deviceId: string) { localDeviceId = deviceId; },
     setOwnerOnline(value: boolean) { ownerOnline = value; },
     failNextSync() { failNextSync = true; },
@@ -256,7 +256,7 @@ it('authorizes host changes, enforces optimistic versions, validates broadcasts,
     id: 'chat-mentioned', teamId: TEAM, sharedProjectId: SHARED, body: 'Check this', mentions: [REMOTE_AGENT],
     author: { kind: 'human', accountId: ACCOUNT, displayName: 'Lead Ada' },
   });
-  expect(fx.enqueued.at(-1)?.recipients).toEqual(['codex1']);
+  expect(fx.enqueued.at(-1)?.recipients).toEqual(['owner']);
   expect(fx.outgoing.every((entry) => entry.kind !== 'teamgroup.delivery')).toBe(true);
 });
 
@@ -268,7 +268,7 @@ it('lists teammate agents with consent, online, host-role, and existing-group us
   seedRemoteConsent(fx);
   const usable = await fx.host.availableAgents(PROJECT);
   expect(usable).toMatchObject({ teamId: TEAM, sharedProjectId: SHARED, canAdd: true, permissionLevel: null });
-  expect(usable.agents[0]).toMatchObject({ agentId: REMOTE_AGENT, ownerDisplayName: 'Owner Sam', deviceName: 'Owner device', consent: 'granted', usable: true });
+  expect(usable.agents[0]).toMatchObject({ agentId: REMOTE_AGENT, handle: 'owner', ownerDisplayName: 'Owner Sam', deviceName: 'Owner device', consent: 'granted', usable: true });
   fx.setOwnerOnline(false);
   expect((await fx.host.availableAgents(PROJECT)).agents[0]).toMatchObject({ online: false, usable: false, unusableReason: expect.stringContaining('offline') });
   fx.setOwnerOnline(true);
@@ -278,6 +278,16 @@ it('lists teammate agents with consent, online, host-role, and existing-group us
   expect(readOnly.agents[0]).toMatchObject({ usable: false, unusableReason: expect.stringContaining('team lead') });
 });
 
+it('uses owner-name handles with provider and numeric suffixes when an owner has multiple agents', async () => {
+  const fx = fixture();
+  fx.agents.push({ id: 'remote-agent-two', name: 'Remote Codex 2', accountId: OWNER, deviceId: OWNER_DEVICE,
+    projectId: PROJECT, sessionId: 'owner-session-remote-two', provider: 'codex', model: 'gpt-6-codex', state: 'idle' });
+
+  const snapshot = await fx.host.availableAgents(PROJECT);
+
+  expect(snapshot.agents.map((agent) => agent.handle)).toEqual(['owner-codex', 'owner-2']);
+});
+
 it('converts one session into its team group, creates a remote proxy member, and routes it to the owner device', async () => {
   const fx = fixture();
   await grantRemote(fx, 7);
@@ -285,7 +295,7 @@ it('converts one session into its team group, creates a remote proxy member, and
   const proxySessionId = (fx.store.db.prepare('SELECT session_id FROM mingle_team_proxy_sessions WHERE agent_id=?').get(REMOTE_AGENT) as { session_id: string }).session_id;
   expect(group.group).toMatchObject({ id: expect.stringMatching(/^group_/), title: 'Local Claude', mode: 'orchestrated', anchorSessionId: LOCAL_AGENT });
   expect(group.members).toContainEqual(expect.objectContaining({ sessionId: LOCAL_AGENT, role: 'orchestrator' }));
-  expect(group.members).toContainEqual(expect.objectContaining({ sessionId: proxySessionId, handle: 'codex1' }));
+  expect(group.members).toContainEqual(expect.objectContaining({ sessionId: proxySessionId, handle: 'owner' }));
   expect(fx.store.db.prepare('SELECT group_id FROM mingle_team_host_projects WHERE team_id=? AND shared_project_id=?').get(TEAM, SHARED))
     .toEqual({ group_id: group.group.id });
   const mirrors: unknown[] = [];
@@ -309,7 +319,7 @@ it('converts one session into its team group, creates a remote proxy member, and
   const routed = await fx.host.routeTeamChatMessage(PROJECT, { id: 'member-chat', teamId: TEAM, sharedProjectId: SHARED,
     body: 'Please check this', mentions: [REMOTE_AGENT], author: { kind: 'human', accountId: OWNER, displayName: 'Owner Sam' } });
   expect(routed).toBe('routed');
-  expect(fx.enqueued.at(-1)?.recipients).toEqual(['codex1']);
+  expect(fx.enqueued.at(-1)?.recipients).toEqual(['owner']);
   const live = fx.group()!;
   const remoteMember = live.members.find((member) => member.sessionId === proxySessionId)!;
   const deliveryId = 'converted-group-delivery';

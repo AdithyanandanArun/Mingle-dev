@@ -3,6 +3,7 @@ import type { Approval, GroupMember, GroupSnapshot, ProviderInfo, Session, Sessi
 import { configSummary, ROLE_LABEL } from '../../lib/groups';
 import { memberPresence } from '../../lib/groupPresence';
 import { formatElapsed } from '../../lib/activity';
+import { teamAgentDisplayName, teamAgentMetadata } from '../../lib/team-agent-display';
 import { useMingle } from '../../store/store';
 import { AgentIdentity } from './AgentIdentity';
 import { AgentActivityDrawer, type ActivityAgent } from '../team-orchestration/activity/AgentActivityDrawer';
@@ -50,8 +51,10 @@ function PresenceRow({
     return assignment ? state.boot?.tasks.find((task) => task.id === assignment.taskId)?.title ?? null : null;
   });
   const activityState = member.failure?.kind === 'quota_exhausted' ? 'quota-exhausted' : ACTIVITY_STATE[presence.state];
+  const teamName = teamMember ? teamAgentDisplayName(teamMember.name, teamMember.ownerDisplayName, teamMember.provider) : null;
+  const displayName = teamName ?? (session ? teamAgentDisplayName(session.name, 'Teammate', session.provider) : member.handle);
   const open = () => onOpen({
-    agentId: teamMember?.agentId ?? member.id, handle: member.handle, name: teamMember?.name ?? session?.name ?? member.handle, provider: teamMember?.provider ?? session?.provider ?? null,
+    agentId: teamMember?.agentId ?? member.id, handle: member.handle, name: displayName, provider: teamMember?.provider ?? session?.provider ?? null,
     model: teamMember?.model ?? session?.model ?? 'Model not reported', local: teamMember?.local ?? true, ownerDisplayName: teamMember?.ownerDisplayName ?? 'You', deviceName: teamMember?.deviceName ?? 'this device',
     role: member.role === 'peer' ? 'worker' : member.role, state: activityState,
     currentTask: teamMember?.currentTask ?? currentTask, sessionId: teamMember?.sessionId ?? member.sessionId, failureMessage: teamMember?.failure?.message ?? member.failure?.message ?? null,
@@ -66,7 +69,7 @@ function PresenceRow({
             {elapsed ? <time className="agent-presence__elapsed" dateTime={presence.startedAt ?? undefined} aria-live="off">{elapsed}</time> : null}
           </span>
         </div>
-        {teamMember && !teamMember.local ? <small className="agent-presence__device">on {teamMember.deviceName} · {teamMember.ownerDisplayName}</small> : null}
+        {teamMember && !teamMember.local ? <><small className="agent-presence__device">{teamName}</small><small className="agent-presence__device">{teamAgentMetadata({ ownerDisplayName: teamMember.ownerDisplayName, provider: teamMember.provider, model: teamMember.model, deviceName: teamMember.deviceName })}</small></> : null}
         {summary && session ? <small className="agent-presence__model" title={`${summary.model} · ${summary.detail}`}>{summary.model} · {summary.detail.split(' · ')[0]}</small> : null}
         {teamMember && !summary ? <small className="agent-presence__model">{teamMember.model}{teamMember.effort ? ` · ${teamMember.effort} effort` : ''}</small> : null}
         {(teamMember?.currentTask ?? presence.detail) ? <small className="agent-presence__detail" title={teamMember?.currentTask ?? presence.detail ?? undefined}>{teamMember?.currentTask ?? presence.detail}</small> : null}
@@ -76,8 +79,9 @@ function PresenceRow({
 }
 
 function TeamPresenceRow({ member, state = member.state, onOpen }: { member: TeamStructureMember; state?: TeamAgentState; onOpen: (agent: ActivityAgent) => void }) {
+  const displayName = teamAgentDisplayName(member.name, member.ownerDisplayName, member.provider);
   const open = () => onOpen({
-    agentId: member.agentId, handle: member.handle, name: member.name, provider: member.provider, model: member.model,
+    agentId: member.agentId, handle: member.handle, name: displayName, provider: member.provider, model: member.model,
     local: member.local, ownerDisplayName: member.ownerDisplayName, deviceName: member.deviceName, role: member.role,
     state, currentTask: member.currentTask, sessionId: member.sessionId, failureMessage: member.failure?.message ?? null,
   });
@@ -87,7 +91,7 @@ function TeamPresenceRow({ member, state = member.state, onOpen }: { member: Tea
         <AgentIdentity handle={member.handle} identityKey={member.agentId} provider={member.provider} role={member.role === 'orchestrator' ? 'Orchestrator' : undefined} />
         <span className="agent-presence__state"><span className={state === 'working' ? 'activity-shimmer' : undefined}>{TEAM_STATE_LABEL[state]}</span></span>
       </div>
-      {!member.local ? <small className="agent-presence__device">on {member.deviceName} · {member.ownerDisplayName}</small> : null}
+      {!member.local ? <><small className="agent-presence__device">{displayName}</small><small className="agent-presence__device">{teamAgentMetadata({ ownerDisplayName: member.ownerDisplayName, provider: member.provider, model: member.model, deviceName: member.deviceName })}</small></> : null}
       <small className="agent-presence__model">{member.model}{member.effort ? ` · ${member.effort} effort` : ''}</small>
       {member.currentTask ? <small className="agent-presence__detail" title={member.currentTask}>{member.currentTask}</small> : null}
     </button>

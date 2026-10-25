@@ -6,6 +6,7 @@ import { api, errorMessage } from '../../lib/api';
 import { teamSessionsApi } from '../../lib/team-sessions';
 import { useTeamStructure } from '../../lib/team-structure-context';
 import { shortPath } from '../../lib/format';
+import { teamAgentDisplayName, teamAgentMetadata } from '../../lib/team-agent-display';
 import {
   MODE_EXPLANATION, MODE_FLOW, MODE_LABEL, MODE_TAGLINE, ROLE_LABEL, activeMembers, allHandles, configSummary, defaultConfigFor, effortLabel, initialWorkerConfig,
   isBusy, normalizeConfig, policyLabel, providerAvailability, providerName, routingSummary, sameConfig, sessionConfig, suggestHandle, tierLabel, validateHandle,
@@ -351,7 +352,7 @@ export function AddAgentDialog({ sessionId }: { sessionId: string }) {
               </div>
             </section>
             {sharedProject && (teamAgents || teamAgentsLoading || teamAgentsError) ? <section className="team-agents-section" aria-labelledby={`${idBase}-team-agents`}>
-              <div className="team-agents-section__heading"><div><h3 className="gd-h" id={`${idBase}-team-agents`}>Teammates’ agents</h3><p className="field__hint">Add an agent that runs on its owner’s computer. It joins this conversation just like a local agent.</p></div>
+              <div className="team-agents-section__heading"><div><h3 className="gd-h" id={`${idBase}-team-agents`}>Teammates’ agents</h3><p className="field__hint">Add an agent that runs on its owner’s computer. It joins this conversation just like a local agent. Runs from teammates follow the team permission level.</p></div>
                 {teamAgentsError ? <button type="button" className="link-btn" onClick={() => void loadTeamAgents()}>Retry</button> : null}
               </div>
               {teamAgentsLoading && !teamAgents ? <p className="field__hint" role="status">Loading available agents…</p> : null}
@@ -362,9 +363,10 @@ export function AddAgentDialog({ sessionId }: { sessionId: string }) {
                 {teamAgents.agents.map((remote) => {
                   const disabledReason = !teamAgents.canAdd ? teamAgents.reason ?? 'You cannot add teammate agents from this device.' : !remote.usable ? remote.unusableReason ?? 'This agent cannot be added right now.' : undefined;
                   const unavailable = Boolean(disabledReason || teamAgentBusyId);
+                  const displayName = teamAgentDisplayName(remote.name, remote.ownerDisplayName, remote.provider);
                   return <li className="roster__row team-agent-row" key={remote.agentId}>
-                    <div className="roster__who"><AgentIdentity handle={remote.handle} identityKey={remote.agentId} provider={remote.provider} /><small>{remote.ownerDisplayName} · {remote.deviceName}</small></div>
-                    <div className="roster__detail"><span>{providerName(remote.provider)} · {remote.model} · {remote.effort ?? 'effort not reported'}</span>{disabledReason ? <small className="roster__warn">{disabledReason}</small> : null}</div>
+                    <div className="roster__who"><AgentIdentity handle={remote.handle} identityKey={remote.agentId} provider={remote.provider} /><small>{displayName}</small><small>{teamAgentMetadata({ ownerDisplayName: remote.ownerDisplayName, provider: remote.provider, model: remote.model, deviceName: remote.deviceName })}</small></div>
+                    <div className="roster__detail"><span>{remote.effort ?? 'Effort not reported'}</span>{disabledReason ? <small className="roster__warn">{disabledReason}</small> : null}</div>
                     <div className="team-agent-row__action"><span className={`team-agent-online${remote.online ? ' is-online' : ''}`}><i aria-hidden="true" />{remote.online ? 'Online' : 'Offline'}</span>
                       <Button size="sm" disabled={unavailable} why={disabledReason ?? (teamAgentBusyId ? 'Adding another teammate agent…' : undefined)} busy={teamAgentBusyId === remote.agentId} onClick={() => void addTeammateAgent(remote.agentId)}>Add</Button>
                     </div>

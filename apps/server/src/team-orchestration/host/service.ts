@@ -213,17 +213,31 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
     return this.options.transport.snapshot(teamId).devices.some((device) => device.id === deviceId && device.status === 'online' && !device.revokedAt);
   }
 
-  private agentHandle(teamId: string, sharedProjectId: string, agent: ProjectContext['agents'][number], used: Set<string>): string {
+  private agentHandle(teamId: string, sharedProjectId: string, agent: ProjectContext['agents'][number], used: Set<string>,
+    members: ProjectCollaborationSnapshot['members'], agents: ProjectCollaborationSnapshot['agents']): string {
     const prior = this.hostRows.prepare(`SELECT handle FROM mingle_team_host_roster WHERE team_id=? AND shared_project_id=? AND agent_id=?`)
       .get(teamId, sharedProjectId, agent.id) as { handle?: string } | undefined;
     if (prior?.handle) { used.add(prior.handle); return prior.handle; }
-    const provider = (agent.provider ?? 'agent').toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 16) || 'agent';
-    for (let number = 1; number <= 999; number++) {
-      const handle = `${provider}${number}`.slice(0, 32);
-      if (used.has(handle)) continue;
-      const collision = this.hostRows.prepare(`SELECT 1 AS found FROM mingle_team_host_roster WHERE team_id=? AND shared_project_id=? AND handle=?`)
-        .get(teamId, sharedProjectId, handle);
-      if (!collision) { used.add(handle); return handle; }
+    const provider = (agent.provider ?? 'agent').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 8) || 'agent';
+    const member = members.find((candidate) => candidate.accountId === agent.accountId);
+    const displayName = member?.displayName?.trim() || member?.email?.split('@')[0]?.trim() || 'agent';
+    let owner = displayName.split(/\s+/)[0]!.normalize('NFKD').replace(/[\u0300-\u036f]/g, '')
+      .toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 22);
+    if (!owner) owner = 'agent';
+    if (!/^[a-z]/.test(owner)) owner = `agent-${owner}`.slice(0, 22);
+    if (owner.length < 2) owner = 'agent';
+    const ownedAgentCount = agents.filter((candidate) => candidate.accountId === agent.accountId).length;
+    const exists = (handle: string) => used.has(handle) || Boolean(this.hostRows.prepare(`SELECT 1 AS found FROM mingle_team_host_roster WHERE team_id=? AND shared_project_id=? AND handle=?`)
+      .get(teamId, sharedProjectId, handle));
+    if (ownedAgentCount <= 1 && !exists(owner)) {
+      used.add(owner);
+      return owner;
+    }
+    const providerHandle = `${owner.slice(0, 23)}-${provider}`.slice(0, 32);
+    if (!exists(providerHandle)) { used.add(providerHandle); return providerHandle; }
+    for (let number = 2; number <= 999; number++) {
+      const handle = `${owner.slice(0, 28)}-${number}`;
+      if (!exists(handle)) { used.add(handle); return handle; }
     }
     throw new HttpError(409, `No unique team handle is available for ${agent.name}.`);
   }
@@ -248,7 +262,7 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
       const previous = this.hostRows.prepare(`SELECT role,removed_at FROM mingle_team_host_roster WHERE team_id=? AND shared_project_id=? AND agent_id=?`)
         .get(teamId, sharedProjectId, agent.id) as Row | undefined;
       if (previous?.removed_at && !options.restoreRemoved) continue;
-      const handle = this.agentHandle(teamId, sharedProjectId, agent, used);
+      const handle = this.agentHandle(teamId, sharedProjectId, agent, used, context.members, context.agents);
       const role = (previous?.role === 'idle' || previous?.role === 'worker' || previous?.role === 'orchestrator'
         ? previous.role : agent.id === settings.orchestratorAgentId ? 'orchestrator' : 'worker') as TeamAgentRole;
       if (agent.id === settings.orchestratorAgentId && role !== 'orchestrator') this.hostRows.prepare(`UPDATE mingle_team_host_roster SET role='orchestrator',removed_at=NULL,updated_at=?
@@ -339,7 +353,7 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
       const device = transport.devices.find((candidate) => candidate.id === agent.deviceId);
       const online = Boolean(device && device.status === 'online' && !device.revokedAt);
       let handle = roleByAgent.get(agent.id);
-      if (!handle) handle = this.agentHandle(teamId, sharedProjectId, agent, usedHandles);
+      if (!handle) handle = this.agentHandle(teamId, sharedProjectId, agent, usedHandles, shared.members, shared.agents);
       else usedHandles.add(handle);
       let consent: TeamConsentState | 'none' = 'none';
       const consentRow = this.hostRows.prepare(`SELECT state FROM mingle_team_host_consents WHERE team_id=? AND shared_project_id=? AND agent_id=?`)

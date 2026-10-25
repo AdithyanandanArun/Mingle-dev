@@ -483,7 +483,6 @@ export class RemoteExecutionService {
         const session = this.localSession(sessionId);
         if (session.projectId !== binding.localProjectId) throw conflict('Every published session must belong to the bound local project.');
         if (!EXECUTABLE_PROVIDERS.has(session.provider)) throw conflict('Only explicit Claude, Codex, or OpenCode sessions can be published for remote execution.');
-        if (session.policy !== 'supervised') throw conflict('Remote execution requires a supervised session so native tools remain owner-gated. Select a supervised session; Mingle will not change its saved policy.');
         const grouped = this.groupIdForSession(session.id);
         const existing = this.get(`SELECT id FROM mingle_remote_agents WHERE team_id = ? AND shared_project_id = ? AND device_id = ? AND session_id = ?`,
           parsed.teamId, parsed.sharedProjectId, identity.deviceId, session.id);
@@ -547,7 +546,6 @@ export class RemoteExecutionService {
           changed = this.run('UPDATE mingle_remote_agents SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL', at, String(row.id)) > 0 || changed;
           continue;
         }
-        if (session.policy !== 'supervised') throw conflict('Remote execution requires a supervised session so native tools remain owner-gated. Select a supervised session; Mingle will not change its saved policy.');
         const active = this.options.runtime.isActive(session.id) || ['running', 'waiting'].includes(session.status);
         const presence: RemotePresence = active ? 'busy' : 'idle';
         const groupId = this.groupIdForSession(session.id);
@@ -786,7 +784,6 @@ export class RemoteExecutionService {
         request.agentId, request.teamId, request.sharedProjectId, identity.ownerId, identity.deviceId);
       if (!agentRow || String(agentRow.session_id) !== request.targetSessionId) throw conflict('The destination agent was unpublished or changed before approval.');
       const session = this.localSession(request.targetSessionId);
-      if (session.policy !== 'supervised') throw conflict('Remote execution requires a supervised session so native tools remain owner-gated. Select a supervised session; Mingle will not change its saved policy.');
       if (session.projectId !== binding.localProjectId || configDigest(session) !== request.targetConfigDigest || request.targetConfigDigest !== String(agentRow.config_digest)) {
         throw conflict('The destination session configuration changed after this request was created. Publish it again and request fresh approval.');
       }
@@ -831,7 +828,7 @@ export class RemoteExecutionService {
       await this.assertMember(client, request.teamId, identity.ownerId);
       await this.assertLinkedDevices(client, request.teamId, identity.deviceId, request.sourceDeviceId);
       const currentSession = this.localSession(session.id);
-      if (currentSession.model !== session.model || currentSession.provider !== session.provider || currentSession.policy !== 'supervised' || currentSession.worktreePath !== session.worktreePath) throw conflict('The destination session changed while validating recovery. Review the request again.');
+      if (currentSession.model !== session.model || currentSession.provider !== session.provider || currentSession.policy !== session.policy || currentSession.worktreePath !== session.worktreePath) throw conflict('The destination session changed while validating recovery. Review the request again.');
       const prompt = this.destinationPrompt(request);
 
       // Consume the approval and reserve dispatch atomically before the only call to runtime.start().

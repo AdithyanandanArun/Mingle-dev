@@ -11,7 +11,7 @@ import {
   TeamStructurePayloadSchema, TeamAgentActivityEntrySchema, UpdateTeamConsentSchema,
 } from '@mingle/contracts';
 import type {
-  ProviderFailure, TeamAgentActivity, TeamAgentActivityEntry, TeamConsent, TeamConsentState,
+  Policy, ProviderFailure, TeamAgentActivity, TeamAgentActivityEntry, TeamConsent, TeamConsentState,
   TeamDeliveryPayload, TeamPermissionLevel, TeamStructurePayload,
 } from '@mingle/contracts';
 import { ProviderFailureSchema } from '@mingle/contracts';
@@ -83,6 +83,10 @@ const MAX_ACTIVITY_TEXT = 8_000;
 const DELIVERY_TIMEOUT_MS = 24 * 60 * 60_000;
 const ISO = () => new Date().toISOString();
 const permissionRank = (value: TeamPermissionLevel) => value === 'supervised' ? 0 : 1;
+const policyRank: Record<Policy, number> = { supervised: 0, balanced: 1, auto: 2, 'full-access': 3 };
+function mostRestrictivePolicy(...policies: Policy[]): Policy {
+  return policies.reduce((strictest, policy) => policyRank[policy] < policyRank[strictest] ? policy : strictest);
+}
 const identifier = (value: unknown): value is string => typeof value === 'string' && value.length > 0 && value.length <= 200;
 const safeText = (value: unknown, max: number) => redactSecrets(typeof value === 'string' ? value : String(value ?? '')).replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, ' ').slice(0, max);
 
@@ -717,12 +721,16 @@ export function createDeviceSide(deps: DeviceSideDeps): {
         }
         return;
       }
+      const consent = localConsent(payload.sharedProjectId);
+      const session = deps.store.getSession(sessionId);
+      if (!consent || consent.state !== 'granted' || !session) throw new HttpError(409, 'The local agent consent or session changed before execution.');
+      const runPolicy = mostRestrictivePolicy(session.policy, payload.permissionLevel, consent.permissionLevel);
       const controller = new AbortController();
       const requestEntry = TeamAgentActivityEntrySchema.parse({ id: randomUUID(), runId: null, at: ISO(), kind: 'request',
         text: safeText(payload.content, 8_000) });
       try {
         runId = deps.runtime.start(sessionId, payload.content, {
-          teamRun: true, teamMcp: proxyConnection, runPolicy: payload.permissionLevel,
+          teamRun: true, teamMcp: proxyConnection, runPolicy,
           worktree: { path: isolated.path, branch: isolated.branch ?? '' },
           taskId: payload.taskId,
           userMessage: { content: payload.content, kind: 'team-delivery' },

@@ -30,6 +30,12 @@ The host stores the ordinary group ID in `mingle_team_host_projects.group_id`; n
 
 Owner consent may arrive before the first host team session exists. The host validates and stores that consent against the shared project/device roster; the implicit first add starts at a settings version no lower than the accepted consent version and uses `supervised` permission by default.
 
+## Session policy and names
+
+Any local Claude, Codex, or OpenCode session can be published regardless of its saved policy; publishing never edits that policy. A remote team delivery applies the most restrictive policy among the owner's saved session policy, the project's team permission level, and the owner's consent permission. Policy restrictiveness is ordered `supervised`, `balanced`, `auto`, `full-access`. Thus a supervised team runs even a Full access session as Supervised; a Full access team with Full access consent uses the session's own policy. This is a per-run override only.
+
+During invitation join, the owner selects a policy for each created agent, defaulting to Supervised. New sessions use the owner's display-name first word plus provider (for example, `Aavani's Codex`, then `Aavani's Codex 2`). Join retries use persisted session IDs; the older `Teammate agent <12 hex>` session names remain a migration fallback. Host team handles use the owner's first name as a lowercase ASCII slug, adding a provider suffix and then a number when needed. Existing assigned handles remain stable.
+
 Group-composer user messages are mirrored after local acceptance, using `(source_session_id, source_message_id)` for transcript deduplication. Local group-agent final replies use the run ID as their mirror source; remote agents publish from their owner device with the existing device signature. Member-device team-chat messages are authenticated and queued to the same group routing path, with `@mentions` mapped to group handles and untagged messages using that group's mode. Team-chat delivery and routing run after the HTTP response.
 
 ## Performance rules

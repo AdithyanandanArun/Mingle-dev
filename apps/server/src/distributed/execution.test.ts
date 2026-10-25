@@ -234,6 +234,17 @@ describe('RemoteExecutionService', () => {
     expect(destination.transport.sent.filter((entry) => entry.kind === 'execution.agents')).toHaveLength(2);
   });
 
+  it('publishes a full-access session without changing its saved policy', async () => {
+    const destination = createFixture({ deviceId: DEVICE_B, peerId: DEVICE_A, ownerId: OWNER_B, projectId: 'project_full_publish', sessionId: 'session_full_publish', sessionName: 'Full access', provider: 'claude' });
+    destination.db.prepare("UPDATE sessions SET policy = 'full-access' WHERE id = 'session_full_publish'").run();
+    await destination.service.bindProject({ teamId: TEAM, sharedProjectId: SHARED_PROJECT, localProjectId: 'project_full_publish' });
+
+    const [agent] = await destination.service.publishAgents({ teamId: TEAM, sharedProjectId: SHARED_PROJECT, sessionIds: ['session_full_publish'] });
+
+    expect(agent).toMatchObject({ sessionId: 'session_full_publish', policy: 'full-access' });
+    expect(destination.db.prepare("SELECT policy FROM sessions WHERE id = 'session_full_publish'").get()).toEqual({ policy: 'full-access' });
+  });
+
   it('leaves an archived published session out of the snapshot until refresh revokes it', async () => {
     const destination = createFixture({ deviceId: DEVICE_B, peerId: DEVICE_A, ownerId: OWNER_B, projectId: 'project_archived', sessionId: 'session_archived', sessionName: 'Archived', provider: 'opencode' });
     await destination.service.bindProject({ teamId: TEAM, sharedProjectId: SHARED_PROJECT, localProjectId: 'project_archived' });
@@ -248,10 +259,12 @@ describe('RemoteExecutionService', () => {
   it('pins approval to the destination owner and dispatches once only after fresh known quota', async () => {
     const source = createFixture({ deviceId: DEVICE_A, peerId: DEVICE_B, ownerId: OWNER_A, projectId: 'project_a2', sessionId: 'session_a2', sessionName: 'Source', provider: 'codex', seedFailure: true });
     const destination = createFixture({ deviceId: DEVICE_B, peerId: DEVICE_A, ownerId: OWNER_B, projectId: 'project_b2', sessionId: 'session_b2', sessionName: 'Destination', provider: 'claude' });
+    destination.db.prepare("UPDATE sessions SET policy = 'full-access' WHERE id = 'session_b2'").run();
     destination.quota = { state: 'available', observedAt: now() };
     await destination.service.bindProject({ teamId: TEAM, sharedProjectId: SHARED_PROJECT, localProjectId: 'project_b2' });
     await destination.service.publishAgents({ teamId: TEAM, sharedProjectId: SHARED_PROJECT, sessionIds: ['session_b2'] });
     const agentPayload = destination.transport.sent.find((entry) => entry.kind === 'execution.agents')!.payload;
+    expect(agentPayload).toMatchObject({ agents: [expect.objectContaining({ policy: 'full-access' })] });
     await source.service.bindProject({ teamId: TEAM, sharedProjectId: SHARED_PROJECT, localProjectId: 'project_a2' });
     await source.service.onEnvelope(envelope(DEVICE_B, DEVICE_A, 'execution.agents', agentPayload));
     source.alternativeState = 'provider-unavailable';
@@ -267,10 +280,7 @@ describe('RemoteExecutionService', () => {
     await expect(destination.service.onEnvelope(envelope(DEVICE_A, DEVICE_B, 'execution.approval', { requestId: request.id }))).rejects.toThrow(/owner-local/i);
     destination.db.prepare("UPDATE sessions SET model = 'changed-after-request' WHERE id = 'session_b2'").run();
     await expect(destination.service.decide({ requestId: request.id, expectedDigest: request.digest, decision: 'approved', allowProviderSpend: true })).rejects.toThrow(/configuration changed/i);
-    destination.db.prepare("UPDATE sessions SET model = 'claude-test-model', policy = 'full-access' WHERE id = 'session_b2'").run();
-    await expect(destination.service.decide({ requestId: request.id, expectedDigest: request.digest, decision: 'approved', allowProviderSpend: true }))
-      .rejects.toThrow(/requires a supervised session/i);
-    destination.db.prepare("UPDATE sessions SET policy = 'supervised' WHERE id = 'session_b2'").run();
+    destination.db.prepare("UPDATE sessions SET model = 'claude-test-model' WHERE id = 'session_b2'").run();
     destination.quota = { state: 'unknown', observedAt: null };
     await expect(destination.service.decide({ requestId: request.id, expectedDigest: request.digest, decision: 'approved', allowProviderSpend: true })).rejects.toThrow(/unknown/i);
     expect(destination.runCalls).toHaveLength(0);

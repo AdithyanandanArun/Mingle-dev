@@ -352,6 +352,30 @@ describe('owner-device team orchestration', () => {
     expect(f.chatReplies[0]).toEqual([f.projectId, AGENT_ID, 'Final result: safe output', payload.requestId, payload.deliveryId]);
   });
 
+  it('bounds each teammate-triggered run by the saved session, team, and owner-consent policies', async () => {
+    const f = await fixture();
+    const sessionId = f.store.listSessions(f.projectId)[0]!.id;
+    f.store.db.prepare("UPDATE sessions SET policy = 'full-access' WHERE id = ?").run(sessionId);
+    await sendStructure(f, structure(1, 'supervised'));
+    await f.setConsent('supervised', 1);
+
+    const supervisedDelivery = deliveryPayload({ deliveryId: `delivery-${randomUUID()}`, permissionLevel: 'supervised', settingsVersion: 1 });
+    await f.deliver(supervisedDelivery);
+    await waitFor(() => f.sent.some((message) => message.payload.deliveryId === supervisedDelivery.deliveryId && message.payload.status === 'completed'));
+    const supervisedRun = [...f.runtime.optionsByRun.entries()].find(([runId]) => f.store.getRun(runId)?.sessionId === sessionId);
+    expect(supervisedRun?.[1]).toMatchObject({ runPolicy: 'supervised' });
+    expect(f.store.getSession(sessionId)?.policy).toBe('full-access');
+
+    await sendStructure(f, structure(2, 'full-access'));
+    await f.setConsent('full-access', 2);
+    const fullAccessDelivery = deliveryPayload({ deliveryId: `delivery-${randomUUID()}`, permissionLevel: 'full-access', settingsVersion: 2 });
+    await f.deliver(fullAccessDelivery);
+    await waitFor(() => f.sent.some((message) => message.payload.deliveryId === fullAccessDelivery.deliveryId && message.payload.status === 'completed'));
+    const startedRuns = [...f.runtime.optionsByRun.values()];
+    expect(startedRuns.map((options) => options.runPolicy)).toEqual(['supervised', 'full-access']);
+    expect(f.store.getSession(sessionId)?.policy).toBe('full-access');
+  });
+
   it('imports delivery input artifacts into the owner repository before starting the provider run', async () => {
     const f = await fixture();
     await sendStructure(f);

@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { EffortSchema } from './provider-config';
+import { EffortSchema, PolicySchema } from './provider-config';
 
 export const ProjectCollaborationRoleSchema = z.enum(['member', 'admin']);
 export type ProjectCollaborationRole = z.infer<typeof ProjectCollaborationRoleSchema>;
@@ -25,7 +25,7 @@ const ProjectInvitationJoinAgentSchema = z.object({
   provider: ProjectInvitationAgentProviderSchema,
   model: z.string().trim().min(1).max(150),
   effort: EffortSchema,
-  policy: z.literal('supervised'),
+  policy: PolicySchema,
 }).strict();
 
 export const JoinProjectInvitationSchema = z.object({

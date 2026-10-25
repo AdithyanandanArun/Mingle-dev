@@ -280,12 +280,10 @@ describe('distributed two-device execution integration', () => {
     expect(sourceRuntime.starts).toHaveLength(0);
 
     destination.store.db.prepare("UPDATE sessions SET policy = 'full-access' WHERE id = ?").run(destination.sessionId);
-    await expect(destinationService.publishAgents({ teamId: TEAM, sharedProjectId: SHARED_PROJECT, sessionIds: [destination.sessionId] }))
-      .rejects.toThrow(/supervised/i);
-    destination.store.db.prepare("UPDATE sessions SET policy = 'supervised' WHERE id = ?").run(destination.sessionId);
     const [agent] = await destinationService.publishAgents({ teamId: TEAM, sharedProjectId: SHARED_PROJECT, sessionIds: [destination.sessionId] });
     await bus.deliverAll();
     expect(agent).toBeDefined();
+    expect(agent?.policy).toBe('full-access');
     expect((await sourceService.snapshot(TEAM)).agents.some((item) => item.id === agent!.id && item.ownerId === OWNER_B)).toBe(true);
 
     const taskId = recordSafeProviderFailure(source);
@@ -340,14 +338,6 @@ describe('distributed two-device execution integration', () => {
       ...requestEnvelope, id: 'peer-forged-approval', kind: 'execution.approval',
       payload: { requestId: request.id, decision: 'approved', digest: request.digest },
     })).rejects.toThrow(/owner-local|never accepted/i);
-
-    destination.store.db.prepare("UPDATE sessions SET policy = 'full-access' WHERE id = ?").run(destination.sessionId);
-    await expect(destinationService.decide({
-      requestId: request.id, expectedDigest: request.digest, decision: 'approved', allowProviderSpend: true,
-      allowUnverifiedQuota: false, shareProgress: false,
-    })).rejects.toThrow(/supervised/i);
-    expect(destinationRuntime.starts).toHaveLength(0);
-    destination.store.db.prepare("UPDATE sessions SET policy = 'supervised' WHERE id = ?").run(destination.sessionId);
 
     await expect(sourceServiceWithFailure.decide({
       requestId: request.id, expectedDigest: request.digest, decision: 'approved', allowProviderSpend: true,

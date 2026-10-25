@@ -44,6 +44,8 @@ it('serializes matching joins, resumes after roster failure without duplicate se
   const project = store.insertProject({ name: 'Shared project', path: repo });
   store.updateSettings({ defaultIsolated: false });
   const fakeProviders = new FakeProviders();
+  fakeProviders.detectProviders = async () => [{ id: 'claude', name: 'Claude', available: true, version: 'fake', executable: '/fake/claude', reason: null,
+    policies: ['supervised', 'balanced', 'auto', 'full-access'], models: [{ id: 'claude-sonnet-5-5', name: 'Sonnet', policies: ['supervised', 'balanced', 'auto', 'full-access'] }] }];
   const providers = new ProviderService(fakeProviders, () => store.getSettings(), () => undefined);
   const workspace = new WorkspaceService(store, dataDir, { isActive: () => false }, () => providers.cached());
   const preexistingSession = await workspace.createSession({ projectId: project.id, name: 'Existing published agent',
@@ -136,7 +138,7 @@ it('serializes matching joins, resumes after roster failure without duplicate se
     const firstInput = { token: TOKENS.first, localProjectId: project.id,
       agents: [
         { provider: 'claude' as const, model: 'claude-sonnet-5-5', effort: 'medium', policy: 'supervised' as const },
-        { provider: 'claude' as const, model: 'claude-sonnet-5-5', effort: 'high', policy: 'supervised' as const },
+        { provider: 'claude' as const, model: 'claude-sonnet-5-5', effort: 'high', policy: 'full-access' as const },
       ] };
     const [first, duplicate] = await Promise.allSettled([
       service.joinInvitation(firstInput), service.joinInvitation(firstInput),
@@ -153,6 +155,9 @@ it('serializes matching joins, resumes after roster failure without duplicate se
     assert.equal(recovered.sessionIds.length, 2);
     assert.equal(store.getSession(recovered.sessionIds[0]!)?.effort, 'medium');
     assert.equal(store.getSession(recovered.sessionIds[1]!)?.effort, 'high');
+    assert.equal(store.getSession(recovered.sessionIds[0]!)?.name, "Invitee's Claude");
+    assert.equal(store.getSession(recovered.sessionIds[1]!)?.name, "Invitee's Claude 2");
+    assert.equal(store.getSession(recovered.sessionIds[1]!)?.policy, 'full-access');
 
     const secondInput = { ...firstInput, token: TOKENS.second };
     const second = await service.joinInvitation(secondInput);

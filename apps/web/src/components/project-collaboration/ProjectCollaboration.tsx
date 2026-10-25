@@ -1,9 +1,12 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import { ArrowLeft, ArrowUpRight, Check, ChevronRight, CircleAlert, FolderOpen, GitBranch, Mail, Plus, RefreshCw, Users, X } from 'lucide-react';
-import type { AccountState, DirectoryListing, Project, ProjectInvitationJoinResult, Provider, ProviderInfo, ProviderModel, Session } from '@mingle/contracts';
+import type { AccountState, DirectoryListing, Policy, Project, ProjectInvitationJoinResult, Provider, ProviderInfo, ProviderModel, Session } from '@mingle/contracts';
 import { api, errorMessage } from '../../lib/api';
 import { useMingle } from '../../store/store';
 import { copyText } from '../../lib/clipboard';
+import { teamAgentDisplayName } from '../../lib/team-agent-display';
+import { PROVIDER_NAMES } from '../../lib/providers';
+import { POLICY_DESCRIPTION, POLICY_LABEL } from '../../lib/groups';
 import { createIdempotencyKey, distributedApi } from '../distributed/api';
 import { Badge, Button, InlineError, Modal, ProviderMark, StatusDot } from '../ui';
 import { projectCollaborationApi, CollaborationApiError, recordText, type CollaborationRecord, type InvitationPreview, type ProjectCollaborationSnapshot } from './api';
@@ -15,6 +18,7 @@ import '../../styles/project-collaboration.css';
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const INVITATION_TOKEN_PATTERN = /^[A-Za-z0-9_-]{43,128}$/;
 const JOIN_PROVIDERS: Provider[] = ['codex', 'claude', 'opencode'];
+const JOIN_POLICIES: Policy[] = ['supervised', 'balanced', 'auto', 'full-access'];
 
 function errorStatus(cause: unknown): number {
   return cause instanceof CollaborationApiError ? cause.status : 0;
@@ -33,6 +37,11 @@ function supervisedModels(info: ProviderInfo | undefined): ProviderModel[] {
   });
 }
 
+function policyChoices(info: ProviderInfo | undefined, model: ProviderModel | undefined): Policy[] {
+  const policies = model?.policies ?? info?.policies;
+  return JOIN_POLICIES.filter((policy) => policies ? policies.includes(policy) : policy === 'supervised');
+}
+
 /** Use native catalog choices when reported; otherwise mirror the runtime's documented defaults. */
 function reasoningChoices(info: ProviderInfo, model: ProviderModel): NonNullable<ProviderModel['reasoningEfforts']> {
   if (model.reasoningEfforts?.length) return model.reasoningEfforts;
@@ -45,6 +54,10 @@ function reasoningChoices(info: ProviderInfo, model: ProviderModel): NonNullable
 
 function localSessionLabel(session: Session): string {
   return `${session.provider[0]!.toUpperCase()}${session.provider.slice(1)} · ${session.model}`;
+}
+
+function publishableSession(session: Session): boolean {
+  return JOIN_PROVIDERS.includes(session.provider);
 }
 
 export function ProjectTeammatesDialog({ project, onClose }: { project: Project; onClose: () => void }) {
@@ -107,6 +120,9 @@ export function ProjectTeammatesDialog({ project, onClose }: { project: Project;
     const agentId = recordText(agent, ['id', 'agentId', 'sharedAgentId'], `team-agent-${index}`);
     return agentId === selectedAgentId;
   });
+  const selectedRemoteProvider = selectedRemote ? recordText(selectedRemote, ['provider'], 'Teammate') : 'Teammate';
+  const selectedRemoteOwner = selectedRemote ? recordText(memberMap.get(recordText(selectedRemote, ['accountId'])), ['displayName', 'email'], 'Owner not reported') : 'Owner not reported';
+  const selectedRemoteName = selectedRemote ? teamAgentDisplayName(recordText(selectedRemote, ['name', 'agentName', 'sessionName'], `${selectedRemoteProvider} agent`), selectedRemoteOwner, selectedRemoteProvider) : '';
   const emailStatus = snapshot?.email;
 
   const sendInvite = async (event: FormEvent) => {
@@ -135,8 +151,8 @@ export function ProjectTeammatesDialog({ project, onClose }: { project: Project;
     setSharing(true);
     setError(null);
     try {
-      await distributedApi.publishAgents({ teamId: snapshot.project.teamId, sharedProjectId: snapshot.project.sharedProjectId, sessionIds: selectedLocalIds.filter((id) => localAgents.some((session) => session.id === id && session.policy === 'supervised')) });
-      setSharedAction('Your selected Supervised local agents are now reflected in the shared project roster.');
+      await distributedApi.publishAgents({ teamId: snapshot.project.teamId, sharedProjectId: snapshot.project.sharedProjectId, sessionIds: selectedLocalIds.filter((id) => localAgents.some((session) => session.id === id && publishableSession(session))) });
+      setSharedAction('Your selected local agents are now reflected in the shared project roster.');
       setLocalSelection(null);
       await refresh();
     } catch (cause) { setError(errorMessage(cause)); }
@@ -209,7 +225,7 @@ export function ProjectTeammatesDialog({ project, onClose }: { project: Project;
       {snapshot?.project ? <TeamOrchestrationSettings projectId={project.id} /> : null}
       <div className="pc-agent-list" role="list" aria-label="Local and teammate agents">
         {localAgents.map((session) => <div className="pc-agent-row" role="listitem" key={`local-${session.id}`}>
-          <input type="checkbox" aria-label={`Share ${session.name} with this project`} checked={selectedLocalIds.includes(session.id)} disabled={!snapshot?.project || !canManageRoster || session.policy !== 'supervised'} title={session.policy !== 'supervised' ? 'Only Supervised local agents can be shared.' : undefined} onChange={(event) => setLocalSelection((current) => {
+          <input type="checkbox" aria-label={`Share ${session.name} with this project`} checked={selectedLocalIds.includes(session.id)} disabled={!snapshot?.project || !canManageRoster || !publishableSession(session)} title={!publishableSession(session) ? 'This provider cannot be shared for remote execution.' : undefined} onChange={(event) => setLocalSelection((current) => {
             const selected = current ?? sharedLocalIds;
             return event.target.checked ? [...new Set([...selected, session.id])] : selected.filter((id) => id !== session.id);
           })} />
@@ -225,19 +241,20 @@ export function ProjectTeammatesDialog({ project, onClose }: { project: Project;
           const model = recordText(agent, ['model'], 'Model not reported');
           const device = recordText(agent, ['deviceName', 'deviceId'], 'Device not reported');
           const ownerName = recordText(member, ['displayName', 'email'], accountId || 'Owner not reported');
-          const name = recordText(agent, ['name', 'agentName', 'sessionName'], `${provider} agent`);
+          const rawName = recordText(agent, ['name', 'agentName', 'sessionName'], `${provider} agent`);
+          const name = teamAgentDisplayName(rawName, ownerName, provider);
           const state = recordText(agent, ['state'], 'State not reported');
           const selected = selectedAgentId === id;
           return <div className={`pc-agent-row pc-agent-row--remote${selected ? ' is-selected' : ''}`} role="listitem" key={`remote-${id}`}>
             <button type="button" className="pc-agent-select" aria-pressed={selected} onClick={() => setSelectedAgentId(selected ? null : id)}>
-              <span className="pc-team-avatar" aria-hidden="true">{name.charAt(0).toUpperCase()}</span><span className="pc-agent-copy"><strong>{name}</strong><small>{ownerName} · {provider} · {model} · {device}</small></span><Badge tone={/busy|running/i.test(state) ? 'info' : 'neutral'}>{state}</Badge><Badge>Team</Badge>
+              <span className="pc-team-avatar" aria-hidden="true">{name.charAt(0).toUpperCase()}</span><span className="pc-agent-copy"><strong>{name}</strong><small>{ownerName} · {PROVIDER_NAMES[provider as Provider] ?? provider} · {model} · {device}</small></span><Badge tone={/busy|running/i.test(state) ? 'info' : 'neutral'}>{state}</Badge><Badge>Team</Badge>
             </button>
           </div>;
         })}
         {!localAgents.length && !remoteAgents.length && snapshot?.project ? <p className="pc-empty">No agents have been shared for this project yet. Existing local sessions remain private until you explicitly publish them.</p> : null}
       </div>
-      {snapshot?.project && localAgents.length ? <div className="pc-roster-actions"><span>{selectedLocalIds.length} local agents selected · only Supervised sessions can be shared</span><Button size="sm" disabled={!canManageRoster || sharing || selectedLocalIds.length === 0 && sharedLocalIds.length === 0} busy={sharing} onClick={() => void updatePublishedAgents()}>Update shared agents</Button></div> : null}
-      {selectedRemote ? <div className="pc-owner-note"><strong>{recordText(selectedRemote, ['name', 'agentName', 'sessionName'], `${recordText(selectedRemote, ['provider'], 'Teammate')} agent`)} · {recordText(selectedRemote, ['state'], 'State not reported')}</strong><span>Owner {recordText(memberMap.get(recordText(selectedRemote, ['accountId'])), ['displayName', 'email'], 'not reported')} · device {recordText(selectedRemote, ['deviceId'], 'not reported')} · {recordText(selectedRemote, ['provider'], 'Provider not reported')} · {recordText(selectedRemote, ['model'], 'Model not reported')} · owner retains model, permission, stop and spend control.</span><Button size="sm" onClick={openTeamWorkspace}>Open recovery controls <ArrowUpRight size={13} /></Button></div> : null}
+      {snapshot?.project && localAgents.length ? <div className="pc-roster-actions"><span>{selectedLocalIds.filter((id) => localAgents.some((session) => session.id === id && publishableSession(session))).length} local agents selected · runs from teammates follow the team permission level</span><Button size="sm" disabled={!canManageRoster || sharing || selectedLocalIds.length === 0 && sharedLocalIds.length === 0} busy={sharing} onClick={() => void updatePublishedAgents()}>Update shared agents</Button></div> : null}
+      {selectedRemote ? <div className="pc-owner-note"><strong>{selectedRemoteName} · {recordText(selectedRemote, ['state'], 'State not reported')}</strong><span>Owner {selectedRemoteOwner} · device {recordText(selectedRemote, ['deviceId'], 'not reported')} · {PROVIDER_NAMES[selectedRemoteProvider as Provider] ?? selectedRemoteProvider} · {recordText(selectedRemote, ['model'], 'Model not reported')} · owner retains model, permission, stop and spend control.</span><Button size="sm" onClick={openTeamWorkspace}>Open recovery controls <ArrowUpRight size={13} /></Button></div> : null}
       {snapshot?.project ? <div className="pc-shared-actions">
         <form className="pc-shared-note" onSubmit={(event) => void shareNote(event)}><label className="pc-field"><span>Share a project note</span><textarea value={note} onChange={(event) => { setNote(event.target.value); if (sharedAction && sharedAction !== 'sending-note') setSharedAction(null); }} placeholder="A decision, update or question for the team…" maxLength={5000} /></label><Button type="submit" size="sm" disabled={!note.trim() || sharedAction === 'sending-note'} busy={sharedAction === 'sending-note'}>Share note</Button></form>
         <form className="pc-share-task" onSubmit={(event) => void shareTask(event)}><label className="pc-field"><span>Share a project task</span><select aria-label="Task to share" value={taskId} onChange={(event) => setTaskId(event.target.value)}><option value="">Choose a task…</option>{shareableTasks.map((task) => <option key={task.id} value={task.id}>{task.title}</option>)}</select></label><Button type="submit" size="sm" disabled={!taskId || sharedAction === 'sharing-task'} busy={sharedAction === 'sharing-task'}>Share task</Button></form>
@@ -285,7 +302,7 @@ function classifyPreviewError(cause: unknown, account: AccountState | null): Inv
 
 type JoinStep = 'invite' | 'workspace' | 'agents' | 'consent' | 'success';
 type JoinSource = 'clone' | 'project' | 'folder';
-type JoinAgentDraft = { id: number; provider: Provider | ''; model: string; effort: string };
+type JoinAgentDraft = { id: number; provider: Provider | ''; model: string; effort: string; policy: Policy };
 
 function preferredEffort(info: ProviderInfo, model: ProviderModel): string {
   const choices = reasoningChoices(info, model);
@@ -431,7 +448,7 @@ export function ProjectInviteJoinDialog({ token, onClose, onOpenAccountSettings,
       if (!current.length) {
         const first = eligibleProviders[0]!;
         const model = supervisedModels(first)[0]!;
-        return [{ id: nextAgentId.current++, provider: first.id as Provider, model: model.id, effort: preferredEffort(first, model) }];
+        return [{ id: nextAgentId.current++, provider: first.id as Provider, model: model.id, effort: preferredEffort(first, model), policy: 'supervised' }];
       }
       return current.map((draft) => {
         const provider = eligibleProviders.find((item) => item.id === draft.provider) ?? eligibleProviders[0]!;
@@ -439,7 +456,9 @@ export function ProjectInviteJoinDialog({ token, onClose, onOpenAccountSettings,
         const model = models.find((item) => item.id === draft.model) ?? models[0]!;
         const efforts = reasoningChoices(provider, model);
         const effort = efforts.find((item) => item.id === draft.effort)?.id ?? preferredEffort(provider, model);
-        return { ...draft, provider: provider.id as Provider, model: model.id, effort };
+        const policies = policyChoices(provider, model);
+        const policy = policies.includes(draft.policy) ? draft.policy : policies.includes('supervised') ? 'supervised' : policies[0]!;
+        return { ...draft, provider: provider.id as Provider, model: model.id, effort, policy };
       });
     });
   }, [eligibleProviders]);
@@ -465,14 +484,15 @@ export function ProjectInviteJoinDialog({ token, onClose, onOpenAccountSettings,
     const model = provider && supervisedModels(provider)[0];
     if (!provider || !model) return;
     setAgentDrafts((current) => current.map((draft, draftIndex) => draftIndex === index
-      ? { ...draft, provider: provider.id as Provider, model: model.id, effort: preferredEffort(provider, model) }
+      ? { ...draft, provider: provider.id as Provider, model: model.id, effort: preferredEffort(provider, model), policy: policyChoices(provider, model).includes(draft.policy) ? draft.policy : 'supervised' }
       : draft));
   };
 
   const agentRowsValid = agentDrafts.length > 0 && agentDrafts.length <= 4 && agentDrafts.every((draft) => {
     const provider = eligibleProviders.find((item) => item.id === draft.provider);
     const model = supervisedModels(provider).find((item) => item.id === draft.model);
-    return Boolean(provider && model && reasoningChoices(provider, model).some((choice) => choice.id === draft.effort));
+    return Boolean(provider && model && reasoningChoices(provider, model).some((choice) => choice.id === draft.effort)
+      && policyChoices(provider, model).includes(draft.policy));
   });
   const canJoin = inviteState === 'ready' && Boolean(preview && signedIn && emailMatches && selectedProject && agentRowsValid && !joining && !workspaceBusy);
 
@@ -531,7 +551,7 @@ export function ProjectInviteJoinDialog({ token, onClose, onOpenAccountSettings,
       const result = await projectCollaborationApi.join({
         token,
         localProjectId: selectedProject.id,
-        agents: agentDrafts.map((draft) => ({ provider: draft.provider as 'codex' | 'claude' | 'opencode', model: draft.model, effort: draft.effort, policy: 'supervised' as const })),
+        agents: agentDrafts.map((draft) => ({ provider: draft.provider as 'codex' | 'claude' | 'opencode', model: draft.model, effort: draft.effort, policy: draft.policy })),
       });
       await useMingle.getState().refreshNow();
       if (result.projectId) useMingle.getState().selectProject(result.projectId);
@@ -676,31 +696,37 @@ export function ProjectInviteJoinDialog({ token, onClose, onOpenAccountSettings,
           const models = supervisedModels(info);
           const model = models.find((candidate) => candidate.id === draft.model);
           const efforts = info && model ? reasoningChoices(info, model) : [];
+          const policies = info && model ? policyChoices(info, model) : [];
           return <fieldset className="pc-agent-card" key={draft.id}><legend>Agent {index + 1}</legend>
             <div className="pc-agent-config">
               <label className="pc-field"><span>Provider</span><select value={draft.provider} onChange={(event) => setAgentProvider(index, event.target.value)}>{eligibleProviders.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
               <label className="pc-field"><span>Model</span><select value={model?.id ?? ''} onChange={(event) => {
                 const next = models.find((item) => item.id === event.target.value);
                 if (!next) return;
-                setAgentDrafts((current) => current.map((entry, rowIndex) => rowIndex === index ? { ...entry, model: next.id, effort: preferredEffort(info!, next) } : entry));
+                setAgentDrafts((current) => current.map((entry, rowIndex) => {
+                  if (rowIndex !== index) return entry;
+                  const policies = policyChoices(info, next);
+                  return { ...entry, model: next.id, effort: preferredEffort(info!, next), policy: policies.includes(entry.policy) ? entry.policy : 'supervised' };
+                }));
               }}>{models.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
               <label className="pc-field"><span>Reasoning effort</span><select value={draft.effort} onChange={(event) => setAgentDrafts((current) => current.map((entry, rowIndex) => rowIndex === index ? { ...entry, effort: event.target.value } : entry))}>{efforts.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}</select></label>
+              <label className="pc-field"><span>Permissions</span><select value={draft.policy} onChange={(event) => setAgentDrafts((current) => current.map((entry, rowIndex) => rowIndex === index ? { ...entry, policy: event.target.value as Policy } : entry))}>{policies.map((policy) => <option key={policy} value={policy} title={POLICY_DESCRIPTION[policy]}>{POLICY_LABEL[policy]}</option>)}</select></label>
             </div>
             {model && !model.reasoningEfforts ? <small className="pc-workspace-note">This model did not report effort choices; these are Mingle’s documented local runtime defaults.</small> : null}
-            <div className="pc-agent-card-footer"><span><Check size={13} /> Supervised · asks before file or command actions</span>{agentDrafts.length > 1 ? <Button type="button" size="sm" variant="ghost" onClick={() => setAgentDrafts((current) => current.filter((item) => item.id !== draft.id))}><X size={13} />Remove</Button> : null}</div>
+            <div className="pc-agent-card-footer"><span><Check size={13} /> {POLICY_LABEL[draft.policy]} · {POLICY_DESCRIPTION[draft.policy]}</span>{agentDrafts.length > 1 ? <Button type="button" size="sm" variant="ghost" onClick={() => setAgentDrafts((current) => current.filter((item) => item.id !== draft.id))}><X size={13} />Remove</Button> : null}</div>
           </fieldset>;
         })}
         {eligibleProviders.length && agentDrafts.length < 4 ? <Button type="button" size="sm" variant="ghost" className="pc-add-agent" onClick={() => {
           const provider = eligibleProviders[0]!;
           const model = supervisedModels(provider)[0]!;
-          setAgentDrafts((current) => [...current, { id: nextAgentId.current++, provider: provider.id as Provider, model: model.id, effort: preferredEffort(provider, model) }]);
+          setAgentDrafts((current) => [...current, { id: nextAgentId.current++, provider: provider.id as Provider, model: model.id, effort: preferredEffort(provider, model), policy: 'supervised' }]);
         }}><Plus size={14} />Add another agent</Button> : null}
         {error ? <InlineError>{error}</InlineError> : null}
         {joinResult && joining ? <p className="pc-loading" role="status">Project joined. Waiting briefly for the team settings to arrive…</p> : null}
         <div className="pc-join-actions"><Button type="button" variant="ghost" disabled={joining} onClick={() => { setError(null); setStep('workspace'); }}><ArrowLeft size={14} />Back</Button>
           <Button type="button" variant="primary" disabled={!canJoin} busy={joining} onClick={() => void joinProject()}>Join project</Button>
         </div>
-        <p className="pc-no-run-note">The leader can see these Supervised agents in the shared project roster. Provider credentials stay on this device.</p>
+        <p className="pc-no-run-note">The leader can see these agents in the shared project roster. Runs from teammates follow the team permission level. Provider credentials stay on this device.</p>
       </section> : null}
 
       {step === 'consent' && joinResult ? <TeamConsentSheet
