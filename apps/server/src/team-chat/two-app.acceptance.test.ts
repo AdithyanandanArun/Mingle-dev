@@ -79,6 +79,14 @@ it('shares imported session history and team messages over HTTP and the encrypte
 
     const sent = await teammate.api('POST', `/api/projects/${projects[1]}/team-chat/messages`, { body: 'The new checkout has the shared session history.', mentions: [] });
     expect(sent.status, JSON.stringify(sent.json)).toBe(200);
+    // Sends return before fan-out; wait until the teammate has queued the envelope, then exchange mailboxes.
+    for (let attempt = 0; attempt < 100; attempt++) {
+      const own = await teammate.api('GET', `/api/projects/${projects[1]}/team-chat?limit=20`);
+      const state = own.json.messages.find((message: { id: string }) => message.id === sent.json.id)?.deliveryState;
+      if (state && state !== 'sending') { expect(state).toBe('sent'); break; }
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    await teammate.app.distributed.transport.sync();
     await leader.app.distributed.transport.sync();
     const leaderHistory = await leader.api('GET', `/api/projects/${projects[0]}/team-chat?limit=20`);
     expect(leaderHistory.status, JSON.stringify(leaderHistory.json)).toBe(200);
