@@ -1,8 +1,8 @@
 pkgbase = mingle-bin
 	pkgdesc = Local development workspace for independent coding-agent sessions
-	pkgver = 0.1.0
+	pkgver = 0.0.1
 	pkgrel = 1
-	url = https://github.com/AdithyanandanArun/Agent_Orch_App
+	url = https://github.com/AdithyanandanArun/Mingle-dev
 	arch = x86_64
 	license = unknown
 	depends = alsa-lib
@@ -38,7 +38,7 @@ pkgbase = mingle-bin
 	replaces = relay-workspace-bin
 	options = !strip
 	options = !debug
-	source = mingle-0.1.0-linux-x64.tar.gz::https://github.com/AdithyanandanArun/Agent_Orch_App/releases/download/v0.1.0/mingle-0.1.0-linux-x64.tar.gz
+	source = mingle-0.0.1-linux-x64.tar.gz::https://github.com/AdithyanandanArun/Mingle-dev/releases/download/v0.0.1/mingle-0.0.1-linux-x64.tar.gz
 	sha256sums = a7e5cb3db47d821108940f6fcbdd125c3c2adb7d48de30297acfc8e2da5362c5
 
 pkgname = mingle-bin

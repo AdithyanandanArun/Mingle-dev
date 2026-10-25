@@ -185,7 +185,7 @@ export function createClaudeAdapter(deps: ClaudeAdapterDeps = {}): AgentAdapter 
         settingSources: ['project'],
         settings: { disableAllHooks: true, fastMode: session.serviceTier === 'fast' },
         ...(selectedSkillName ? { skills: [selectedSkillName] } : {}),
-        env: { ...childEnv, CLAUDE_AGENT_SDK_CLIENT_APP: 'relay/0.1.0' },
+        env: { ...childEnv, CLAUDE_AGENT_SDK_CLIENT_APP: 'mingle/0.0.1' },
         stderr: (data: string) => stderr.push(data),
         ...(session.providerSessionId ? { resume: session.providerSessionId } : {}),
         ...(Object.keys(mcpServers).length ? { mcpServers } : {}),
@@ -282,7 +282,7 @@ export function createClaudeAdapter(deps: ClaudeAdapterDeps = {}): AgentAdapter 
         includePartialMessages: true, abortController: controller, pathToClaudeCodeExecutable: resolved.executable.path,
         systemPrompt: { type: 'preset', preset: 'claude_code', snapshot: false },
         settingSources: ['project'], settings: { disableAllHooks: true, fastMode: session.serviceTier === 'fast' },
-        env: { ...childEnv, CLAUDE_AGENT_SDK_CLIENT_APP: 'mingle/0.1.0' },
+        env: { ...childEnv, CLAUDE_AGENT_SDK_CLIENT_APP: 'mingle/0.0.1' },
         stderr: () => undefined, resume: session.providerSessionId,
         ...(Object.keys(mcpServers).length ? { mcpServers } : {}),
       };

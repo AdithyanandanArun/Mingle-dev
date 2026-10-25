@@ -11,7 +11,7 @@ import { runProbe, shutdownChild, type ChildLike } from '../process.js';
 import { OpencodeConnection, type AcpCloseInfo } from './rpc.js';
 
 export type OpencodeSpawn = (file: string, args: string[], options: Parameters<typeof spawn>[2]) => ChildLike;
-export const OPENCODE_CLIENT_INFO = { name: 'mingle', title: 'Mingle', version: '0.1.0' } as const;
+export const OPENCODE_CLIENT_INFO = { name: 'mingle', title: 'Mingle', version: '0.0.1' } as const;
 const SESSION_TIMEOUT = 60_000;
 /** Native OpenCode session identifiers; used for metadata sessions, adapter sessions and the argv of `session delete`. */
 export const SESSION_ID = /^ses_[A-Za-z0-9]{8,64}$/;

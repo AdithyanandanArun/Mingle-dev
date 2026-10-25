@@ -67,7 +67,7 @@ export async function getCodexCatalog(session: Session, settings: AppSettings): 
       onIssue: (message) => result.warnings.push(truncate(redactSecrets(message), 300)),
     });
     await conn.request('initialize', {
-      clientInfo: { name: 'mingle', title: 'Mingle', version: '0.1.0' },
+      clientInfo: { name: 'mingle', title: 'Mingle', version: '0.0.1' },
       capabilities: { experimentalApi: false, optOutNotificationMethods: [] },
     }, CATALOG_TIMEOUT_MS);
     conn.notify('initialized', {});

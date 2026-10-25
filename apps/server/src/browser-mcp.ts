@@ -76,7 +76,7 @@ export class BrowserMcpBridge {
 
   private tools(binding: Binding, requestSignal: AbortSignal): McpServer {
     const ensureRequest = () => { this.ensure(binding); if (requestSignal.aborted) throw new Error('This browser request was cancelled'); };
-    const server = new McpServer({ name: 'mingle-browser', version: '0.1.0' }, {
+    const server = new McpServer({ name: 'mingle-browser', version: '0.0.1' }, {
       instructions: 'These tools operate Mingle’s collaborative browser. The user sees the same tabs. Start with browser_status, then browser_open or browser_snapshot. Use snapshot refs or role/name targets; ambiguous targets fail. Human control pauses agent writes: ask the user to release control, never bypass it. Existing-browser connections are made by the user in Mingle. Never extract cookies or credentials. Use browser_evaluate only for page JavaScript. Browser actions must follow the user’s task and authorization.',
     });
     const output = (value: unknown) => ({ content: [{ type: 'text' as const, text: truncate(redactSecrets(JSON.stringify(value) ?? 'null'), 64_000) }] });

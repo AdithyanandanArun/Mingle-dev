@@ -167,7 +167,7 @@ export async function startAntigravity(path: string, companion: string, options:
   options.signal?.addEventListener('abort', onAbort, { once: true });
   if (options.signal?.aborted) onAbort();
   try {
-    const init: unknown = await conn.request('initialize', { protocolVersion: 1, clientInfo: { name: 'mingle', version: '0.1.0' }, clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false } }, options.timeoutMs ?? 12_000);
+    const init: unknown = await conn.request('initialize', { protocolVersion: 1, clientInfo: { name: 'mingle', version: '0.0.1' }, clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false } }, options.timeoutMs ?? 12_000);
     if (options.signal?.aborted) throw abortError();
     if (!isRecord(init) || init.protocolVersion !== 1 || !isRecord(init.agentInfo) || init.agentInfo.name !== 'antigravity-acp' || typeof init.agentInfo.version !== 'string' || !isRecord(init.agentCapabilities)) throw new Error('The selected executable did not identify itself as a compatible Google Antigravity ACP runtime.');
     return { child, conn, stderr, version: init.agentInfo.version, capabilities: init.agentCapabilities, close: async () => { options.signal?.removeEventListener('abort', onAbort); await close(); } };

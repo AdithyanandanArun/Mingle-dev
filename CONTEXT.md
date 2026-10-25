@@ -78,7 +78,7 @@ Electron uses OS-protected key material and authenticated encrypted account stor
 
 ## Desktop builds and GitHub evidence
 
-The app is version **0.1.0**. Linux/Windows packaging stages Electron, a checksum-pinned official Node runtime, the web UI and backend. Provider tools remain separate. Package creation and publication are distinct actions.
+The app is version **0.0.1**. Linux/Windows packaging stages Electron, a checksum-pinned official Node runtime, the web UI and backend. Provider tools remain separate. Package creation and publication are distinct actions.
 
 | Check | Recorded result and evidence |
 | --- | --- |

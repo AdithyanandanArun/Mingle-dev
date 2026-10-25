@@ -1,12 +1,12 @@
 pkgname=mingle-bin
-pkgver=0.1.0
+pkgver=0.0.1
 pkgrel=1
 pkgdesc='Local development workspace for independent coding-agent sessions'
 provides=('relay-workspace-bin')
 conflicts=('relay-workspace-bin')
 replaces=('relay-workspace-bin')
 arch=('x86_64')
-url='https://github.com/AdithyanandanArun/Agent_Orch_App'
+url='https://github.com/AdithyanandanArun/Mingle-dev'
 license=('unknown')
 depends=(
   'alsa-lib'
@@ -44,7 +44,7 @@ _archive="mingle-${pkgver}-linux-x64.tar.gz"
 if [[ -f "${_archive}" ]]; then
   source=("${_archive}")
 else
-  source=("${_archive}::https://github.com/AdithyanandanArun/Agent_Orch_App/releases/download/v${pkgver}/mingle-${pkgver}-linux-x64.tar.gz")
+  source=("${_archive}::https://github.com/AdithyanandanArun/Mingle-dev/releases/download/v${pkgver}/mingle-${pkgver}-linux-x64.tar.gz")
 fi
 sha256sums=('a7e5cb3db47d821108940f6fcbdd125c3c2adb7d48de30297acfc8e2da5362c5')
 

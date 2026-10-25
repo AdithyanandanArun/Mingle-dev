@@ -19,7 +19,7 @@ const MAX_TEXT_BYTES = 2 * 1024 * 1024;
 const MAX_MESSAGE_BYTES = 20 * 1024;
 const MAX_PAGES = 8;
 const READ_BUDGET_MS = 20_000;
-const CLIENT_INFO = { name: 'mingle', title: 'Mingle', version: '0.1.0' };
+const CLIENT_INFO = { name: 'mingle', title: 'Mingle', version: '0.0.1' };
 
 interface RpcRuntime {
   conn: JsonRpcConnection;

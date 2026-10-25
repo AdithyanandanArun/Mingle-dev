@@ -116,7 +116,7 @@ export class TeamMcpBridge {
   }
 
   private tools(binding: Binding, requestSignal: AbortSignal): McpServer {
-    const server = new McpServer({ name: 'mingle-team', version: '0.1.0' }, { instructions: INSTRUCTIONS });
+    const server = new McpServer({ name: 'mingle-team', version: '0.0.1' }, { instructions: INSTRUCTIONS });
     const output = (value: unknown) => ({ content: [{ type: 'text' as const, text: truncate(redactSecrets(JSON.stringify(value) ?? 'null'), OUTPUT_LIMIT) }] });
     const register = (name: string, description: string, shape: z.ZodRawShape, hints: { readOnly: boolean; idempotent: boolean },
       operation: (args: Record<string, unknown>) => Promise<unknown> | unknown) => {

@@ -33,7 +33,7 @@ async function queryWithoutPrompt(settings: AppSettings, cwd: string, model = se
     pathToClaudeCodeExecutable: resolved.executable.path,
     settingSources: ['project'],
     settings: { disableAllHooks: true },
-    env: { ...claudeEnvironment(process.env), CLAUDE_AGENT_SDK_CLIENT_APP: 'relay/0.1.0' },
+    env: { ...claudeEnvironment(process.env), CLAUDE_AGENT_SDK_CLIENT_APP: 'mingle/0.0.1' },
   };
   const activeQuery = query({ prompt: holdOpenWithoutPrompt(abortController.signal), options });
   return {

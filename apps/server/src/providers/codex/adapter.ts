@@ -54,7 +54,7 @@ export const CODEX_OPT_OUT_NOTIFICATIONS = [
   'mcpServer/startupStatus/updated', 'mcpServer/event/stream/notification',
 ];
 
-export const CODEX_CLIENT_INFO = { name: 'mingle', title: 'Mingle', version: '0.1.0' };
+export const CODEX_CLIENT_INFO = { name: 'mingle', title: 'Mingle', version: '0.0.1' };
 
 const defaultSpawn: SpawnFn = (file, args, options) => spawn(file, args, options) as unknown as ChildLike;
 

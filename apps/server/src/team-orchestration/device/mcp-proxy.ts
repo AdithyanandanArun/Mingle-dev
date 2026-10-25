@@ -145,7 +145,7 @@ export class TeamMcpProxy {
   }
 
   private serverFor(binding: ProxyBinding, signal: AbortSignal): McpServer {
-    const server = new McpServer({ name: 'mingle-team-proxy', version: '0.1.0' });
+    const server = new McpServer({ name: 'mingle-team-proxy', version: '0.0.1' });
     const output = (value: unknown, isError = false) => ({
       content: [{ type: 'text' as const, text: truncate(redactSecrets(JSON.stringify(value) ?? 'null'), MAX_OUTPUT_CHARS) }],
       ...(isError ? { isError: true } : {}),
