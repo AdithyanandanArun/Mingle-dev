@@ -281,6 +281,28 @@ it('does not notify listeners during repeated idle syncs for a registered device
   expect(notifications).toBe(0);
 });
 
+it('lets a message handler request a sync without deadlocking the sync that delivers it', async () => {
+  const cloud = new MailboxCloud();
+  const { first, second, b } = await pairedServices(cloud);
+  const handled: string[] = [];
+  // Team chat routing sends status to peers, which syncs first; that used to wait on the delivering sync forever.
+  const unsubscribe = second.onMessage(async (message) => { await second.sync(); handled.push(message.kind); });
+  try {
+    await first.send({ teamId, toDeviceId: b.id, kind: 'collaboration.message', payload: { content: 'route me' }, idempotencyKey: 'handler-sync' });
+    await Promise.race([second.sync(), new Promise((_, reject) => setTimeout(() => reject(new Error('sync deadlocked')), 3_000))]);
+    expect(handled).toEqual(['collaboration.message']);
+    await first.send({ teamId, toDeviceId: b.id, kind: 'collaboration.message', payload: { content: 'and the next one' }, idempotencyKey: 'handler-sync-2' });
+    await vi.waitFor(async () => {
+      await Promise.race([second.sync(), new Promise((_, reject) => setTimeout(() => reject(new Error('later sync blocked')), 3_000))]);
+      expect(handled).toEqual(['collaboration.message', 'collaboration.message']);
+    }, { timeout: 5_000 });
+  } finally {
+    unsubscribe();
+    await first.close();
+    await second.close();
+  }
+});
+
 it('uses a payload-free Realtime wake to pull a newly delivered mailbox message immediately', async () => {
   const cloud = new MailboxCloud(true);
   const { first, second, b } = await pairedServices(cloud);

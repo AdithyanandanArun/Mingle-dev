@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash, randomUUID } from 'node:crypto';
 import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
@@ -89,6 +90,8 @@ export class TransportService {
   private lastError: string | null = null;
   private lastSyncAt: number | null = null;
   private syncPromise: Promise<void> | null = null;
+  /** Marks work started by an inbound message handler, which runs inside the current sync. */
+  private readonly handlerScope = new AsyncLocalStorage<true>();
   private syncAgain = false;
   private timer: NodeJS.Timeout | null = null;
   private readonly wakeSubscriptions = new Map<string, { client: SupabaseClient; channel: ReturnType<SupabaseClient['channel']> }>();
@@ -329,6 +332,11 @@ export class TransportService {
   /** Pulls all teams registered by the active account, refreshes trust/presence, then drains durable inbox work. */
   sync(): Promise<void> {
     if (this.closed) return Promise.resolve();
+    if (this.syncPromise && this.handlerScope.getStore()) {
+      // A handler (or work it started) waiting for the sync that is delivering it would never finish.
+      this.syncAgain = true;
+      return Promise.resolve();
+    }
     if (this.syncPromise) return this.syncPromise;
     const before = this.changeSignature();
     this.syncPromise = this.runSync().catch((error: unknown) => {
@@ -589,7 +597,7 @@ export class TransportService {
         const claim = this.db.prepare(`UPDATE mingle_transport_inbox SET status = 'dispatching' WHERE account_id = ? AND team_id = ? AND id = ? AND status = 'pending'`)
           .run(accountId, row.team_id, row.id);
         if (claim.changes !== 1) continue;
-        for (const handler of this.handlers) await handler(message);
+        for (const handler of this.handlers) await this.handlerScope.run(true, () => handler(message));
         this.db.prepare(`UPDATE mingle_transport_inbox SET status = 'handled', attempts = attempts + 1, next_attempt_at = 0, error = NULL WHERE account_id = ? AND team_id = ? AND id = ? AND status = 'dispatching'`)
           .run(accountId, row.team_id, row.id);
       } catch (error) {
