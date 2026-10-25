@@ -1,5 +1,5 @@
 import { afterEach, expect, it, vi } from 'vitest';
-import { dispatchTeamUpdate, subscribeToTeamUpdates } from './team-live-updates.ts';
+import { dispatchTeamUpdate, subscribeToTeamUpdates } from './team-live-updates';
 
 afterEach(() => vi.useRealTimers());
 

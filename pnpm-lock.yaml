@@ -118,6 +118,9 @@ importers:
       vite:
         specifier: ^7.2.0
         version: 7.3.7(@types/node@24.19.2)(tsx@4.23.15)
+      vitest:
+        specifier: ^4.1.12
+        version: 4.1.12(@opentelemetry/api@1.9.1)(@types/node@24.19.2)(vite@7.3.7(@types/node@24.19.2)(tsx@4.23.15))
 
   packages/contracts:
     dependencies:
