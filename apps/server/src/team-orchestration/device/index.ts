@@ -249,7 +249,7 @@ export function createDeviceSide(deps: DeviceSideDeps): {
     const deviceId = deps.transport.snapshot(shared.teamId).deviceId;
     if (!deviceId) throw new HttpError(409, 'Register this device with the shared project before contributing agents.');
     const structure = latestStructure(shared.sharedProjectId);
-    if (structure && (input.permissionLevel !== structure.settings.permissionLevel || input.settingsVersion !== structure.settings.version)) {
+    if (structure && input.settingsVersion !== structure.settings.version) {
       throw new HttpError(409, 'Team settings changed. Review the current permission level and settings version before accepting consent.');
     }
     const sessions = input.sessionIds.map((sessionId) => {

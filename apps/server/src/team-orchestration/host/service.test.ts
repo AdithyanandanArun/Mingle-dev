@@ -265,7 +265,7 @@ it('lists teammate agents with consent, online, host-role, and existing-group us
   const fx = fixture();
   const beforeConsent = await fx.host.availableAgents(PROJECT);
   expect(beforeConsent.agents[0]).toMatchObject({ agentId: REMOTE_AGENT, online: true, consent: 'none', usable: false,
-    unusableReason: expect.stringContaining('Team mode is off'), groupId: null });
+    unusableReason: expect.stringContaining('has not granted team consent'), groupId: null });
   seedRemoteConsent(fx);
   const usable = await fx.host.availableAgents(PROJECT);
   expect(usable).toMatchObject({ teamId: TEAM, sharedProjectId: SHARED, canAdd: true, permissionLevel: null });

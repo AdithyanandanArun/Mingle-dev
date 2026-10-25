@@ -63,6 +63,19 @@ it('shares imported session history and team messages over HTTP and the encrypte
     });
     expect(join.status, JSON.stringify(join.json)).toBe(200);
 
+    const consent = await teammate.api('POST', `/api/projects/${projects[1]}/team-consent`, {
+      sessionIds: [join.json.sessionId], permissionLevel: 'supervised', settingsVersion: 1,
+      disclaimerVersion: TEAM_CONSENT_DISCLAIMER_VERSION,
+    });
+    expect(consent.status, JSON.stringify(consent.json)).toBe(200);
+    await leader.app.distributed.transport.sync();
+    const hostAgentsBeforeAdd = await leader.api('GET', `/api/projects/${projects[0]}/team-agents`);
+    expect(hostAgentsBeforeAdd.status, JSON.stringify(hostAgentsBeforeAdd.json)).toBe(200);
+    expect(hostAgentsBeforeAdd.json.agents).toContainEqual(expect.objectContaining({
+      agentId: consent.json.agentIds[0], consent: 'granted', usable: true, groupId: null,
+    }));
+    expect(hostAgentsBeforeAdd.json.teamSession).toBeNull();
+
     const invalidMessage = await teammate.api('POST', `/api/projects/${projects[1]}/team-chat/messages`, { body: 'x'.repeat(20_001), mentions: [], unexpected: true });
     expect(invalidMessage.status).toBe(400);
 
@@ -106,28 +119,13 @@ it('shares imported session history and team messages over HTTP and the encrypte
     expect(leader.fake.runs).toHaveLength(0);
     expect(teammate.app.store.db.prepare('SELECT run_state FROM team_chat_messages WHERE id=?').get(agentMessage.json.id)?.run_state).toBeNull();
 
-    const publishedHostAgent = await leader.api('POST', '/api/distributed/agents/publish', {
-      teamId: join.json.teamId, sharedProjectId: join.json.sharedProjectId, sessionIds: [sessionId],
-    });
-    expect(publishedHostAgent.status, JSON.stringify(publishedHostAgent.json)).toBe(200);
-    await leader.app.distributed.transport.sync();
-    await teammate.app.distributed.transport.sync();
-    await leader.app.distributed.transport.sync();
-    const enabled = await leader.api('POST', `/api/projects/${projects[0]}/team-orchestration/enable`, {
-      leaderOrchestration: true, permissionLevel: 'supervised', orchestratorAgentId: sessionId, fallbackAgentIds: [],
-    });
-    expect(enabled.status, JSON.stringify(enabled.json)).toBe(200);
+    const added = await leader.api('POST', `/api/sessions/${sessionId}/team-agents`, { agentId: consent.json.agentIds[0] });
+    expect(added.status, JSON.stringify(added.json)).toBe(200);
+    expect(added.json.members.some((member: { sessionId: string }) => member.sessionId.startsWith('proxy_'))).toBe(true);
     await teammate.app.distributed.transport.sync();
     const joinedStructure = await teammate.api('GET', `/api/projects/${projects[1]}/team-structure`);
     expect(joinedStructure.status, JSON.stringify(joinedStructure.json)).toBe(200);
-    expect(joinedStructure.json.teamSession).toMatchObject({ title: 'Team chat acceptance team' });
-
-    const consent = await teammate.api('POST', `/api/projects/${projects[1]}/team-consent`, {
-      sessionIds: [join.json.sessionId], permissionLevel: 'supervised', settingsVersion: joinedStructure.json.settings.version,
-      disclaimerVersion: TEAM_CONSENT_DISCLAIMER_VERSION,
-    });
-    expect(consent.status, JSON.stringify(consent.json)).toBe(200);
-    await leader.app.distributed.transport.sync();
+    expect(joinedStructure.json.teamSession).toMatchObject({ title: 'History to share' });
     const hostAgents = await leader.api('GET', `/api/projects/${projects[0]}/team-agents`);
     expect(hostAgents.status, JSON.stringify(hostAgents.json)).toBe(200);
     expect(hostAgents.json.agents).toContainEqual(expect.objectContaining({

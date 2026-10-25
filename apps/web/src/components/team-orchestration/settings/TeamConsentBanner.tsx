@@ -44,12 +44,13 @@ export function TeamConsentBanner({ projectId }: { projectId: string }) {
 
   if (teamStructure.loading && !snapshot) return null;
   if ((error || teamStructure.error) && !snapshot) return <div className="team-consent-banner team-consent-banner--error" role="status"><AlertTriangle size={14} /><span>Could not load team consent status.</span><Button size="sm" variant="ghost" onClick={() => { void refresh().catch(() => null); }}>Retry</Button></div>;
-  if (!snapshot?.enabled || !snapshot.settings) return null;
+  if (!snapshot) return null;
 
   const consent = snapshot.myConsent;
   const needsConsent = !consent || consent.state === 'needs-reconsent';
   const openSheet = () => setSheetOpen(true);
-  const level = snapshot.settings.permissionLevel === 'supervised' ? 'Supervised' : 'Full access';
+  const permissionLevel = snapshot.settings?.permissionLevel ?? consent?.permissionLevel ?? 'supervised';
+  const level = permissionLevel === 'supervised' ? 'Supervised' : 'Full access';
 
   return <>
     <section className={`team-consent-banner${needsConsent ? ' is-action-needed' : ''}`} aria-label="Team agent sharing status">

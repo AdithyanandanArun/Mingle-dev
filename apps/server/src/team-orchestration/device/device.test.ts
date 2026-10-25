@@ -294,10 +294,13 @@ describe('owner-device team orchestration', () => {
     expect(f.side.latestStructure(SHARED)).toBeNull();
   });
 
-  it('rejects a stale consent version and permission escalation when accepting against current structure', async () => {
+  it('rejects stale consent settings versions but lets owners choose a maximum permission level', async () => {
     const f = await fixture();
     await sendStructure(f, structure(2, 'full-access'));
     await expect(f.setConsent('supervised', 1)).rejects.toThrow(/settings changed/i);
+    await expect(f.setConsent('supervised', 2)).resolves.toMatchObject({
+      state: 'granted', permissionLevel: 'supervised', settingsVersion: 2,
+    });
   });
 
   it('applies the delivery rejection matrix without starting provider work', async () => {

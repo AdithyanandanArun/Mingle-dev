@@ -369,8 +369,6 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
       const groupTitle = existingGroup?.group.title;
       let unusableReason: string | null = null;
       if (!canAdd) unusableReason = reason;
-      // Owners can only consent to enabled team settings, so a disabled project has to be enabled before any consent can arrive.
-      else if (!hostRow && consent !== 'granted') unusableReason = 'Team mode is off for this project. Turn it on under Share project, then ask the owner to share their agents.';
       else if (consent !== 'granted') unusableReason = consent === 'none' ? 'The agent owner has not granted team consent.'
         : consent === 'paused' ? 'The agent owner has paused this agent.'
           : consent === 'revoked' ? 'The agent owner revoked consent for this agent.'

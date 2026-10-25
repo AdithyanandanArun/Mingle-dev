@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { AlertTriangle, Check, RefreshCw, ShieldCheck } from 'lucide-react';
 import { TEAM_CONSENT_DISCLAIMER, TEAM_CONSENT_DISCLAIMER_VERSION } from '@mingle/contracts';
-import type { TeamStructureSnapshot } from '@mingle/contracts';
+import type { TeamPermissionLevel, TeamStructureSnapshot } from '@mingle/contracts';
 import { useMingle } from '../../../store/store';
 import { Button, Modal, ProviderMark, StatusDot } from '../../ui';
 import { TeamOrchestrationApiError, teamOrchestrationApi } from './api';
@@ -19,11 +19,11 @@ export function TeamConsentSheet({ projectId, initialSelectedSessionIds, onClose
   const sessions = useMemo(() => (allSessions ?? []).filter((session) => session.projectId === projectId), [allSessions, projectId]);
   const [snapshot, setSnapshot] = useState<TeamStructureSnapshot | null>(null);
   const [selectedSessionIds, setSelectedSessionIds] = useState<string[]>([]);
+  const [permissionLevel, setPermissionLevel] = useState<TeamPermissionLevel>('supervised');
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const initialized = useRef(false);
-  const permissionLevel = snapshot?.settings?.permissionLevel ?? 'supervised';
   const validSelectedSessionIds = selectedSessionIds.filter((id) => sessions.some((session) => session.id === id));
 
   const refresh = async (signal?: AbortSignal) => {
@@ -59,14 +59,14 @@ export function TeamConsentSheet({ projectId, initialSelectedSessionIds, onClose
   };
 
   const accept = async () => {
-    if (!snapshot?.settings || !validSelectedSessionIds.length || validSelectedSessionIds.length > 8 || saving) return;
+    if (!snapshot || !validSelectedSessionIds.length || validSelectedSessionIds.length > 8 || saving) return;
     setSaving(true);
     setError('');
     try {
       await teamOrchestrationApi.acceptConsent(projectId, {
         sessionIds: validSelectedSessionIds,
         permissionLevel,
-        settingsVersion: snapshot.settings.version,
+        settingsVersion: snapshot.settings?.version ?? 1,
         disclaimerVersion: TEAM_CONSENT_DISCLAIMER_VERSION,
       });
       await refresh();
@@ -84,8 +84,15 @@ export function TeamConsentSheet({ projectId, initialSelectedSessionIds, onClose
     <header className="team-consent__heading"><span><ShieldCheck size={18} /></span><div><h3>Share your agents with the team</h3><p>Choose which local project agents teammates may send work to.</p></div></header>
     {loading && !snapshot ? <p className="team-consent__status" role="status">Loading the current team settings…</p> : null}
     {error ? <p className="team-consent__error" role="alert"><AlertTriangle size={14} />{error}</p> : null}
-    {snapshot?.settings ? <>
-      <p className="team-consent__level"><strong>Group permission level:</strong> {permissionLevel === 'supervised' ? 'Supervised' : 'Full access'} <span>· settings version {snapshot.settings.version}</span></p>
+    {snapshot ? <>
+      <label className="team-consent__level"><strong>Maximum permission level you allow</strong>
+        <select value={permissionLevel} disabled={loading || saving} onChange={(event) => setPermissionLevel(event.target.value as TeamPermissionLevel)}>
+          <option value="supervised">Supervised (default)</option>
+          <option value="full-access">Full access</option>
+        </select>
+        <span>{snapshot.settings ? `Current team setting: ${snapshot.settings.permissionLevel === 'supervised' ? 'Supervised' : 'Full access'} · settings version ${snapshot.settings.version}`
+          : 'The project lead can add your agents to a session after you agree.'}</span>
+      </label>
       <fieldset className="team-consent__agents" disabled={loading || saving}>
         <legend>Your local agents in this project</legend>
         {sessions.map((session) => {
@@ -107,9 +114,9 @@ export function TeamConsentSheet({ projectId, initialSelectedSessionIds, onClose
       </section>
       <div className="team-consent__actions">
         <Button size="sm" variant="ghost" disabled={saving} onClick={onClose}>Skip for now</Button>
-        <Button size="sm" variant="primary" disabled={loading || saving || validSelectedSessionIds.length === 0 || !snapshot.settings} busy={saving} onClick={() => void accept()}><Check size={14} />I agree — add my agents</Button>
+        <Button size="sm" variant="primary" disabled={loading || saving || validSelectedSessionIds.length === 0} busy={saving} onClick={() => void accept()}><Check size={14} />I agree — share selected agents</Button>
       </div>
-    </> : !loading && snapshot ? <p className="team-consent__error" role="status">This project does not currently have team orchestration enabled.</p> : null}
+    </> : null}
     <div className="team-consent__refresh"><Button size="sm" variant="ghost" disabled={loading || saving} onClick={() => void refresh()}><RefreshCw size={12} />Refresh team settings</Button></div>
   </div>;
 

@@ -10,7 +10,6 @@ import { POLICY_DESCRIPTION, POLICY_LABEL } from '../../lib/groups';
 import { createIdempotencyKey, distributedApi } from '../distributed/api';
 import { Badge, Button, InlineError, Modal, ProviderMark, StatusDot } from '../ui';
 import { projectCollaborationApi, CollaborationApiError, recordText, type CollaborationRecord, type InvitationPreview, type ProjectCollaborationSnapshot } from './api';
-import { teamOrchestrationApi } from '../team-orchestration/settings/api';
 import { TeamConsentSheet } from '../team-orchestration/settings/TeamConsentSheet';
 import { TeamOrchestrationSettings } from '../team-orchestration/settings/TeamOrchestrationSettings';
 import '../../styles/project-collaboration.css';
@@ -559,18 +558,7 @@ export function ProjectInviteJoinDialog({ token, onClose, onOpenAccountSettings,
       if (firstSessionId) useMingle.getState().selectSession(firstSessionId);
       const normalizedResult = { ...result, sessionIds: result.sessionIds?.length ? result.sessionIds : [result.sessionId] };
       setJoinResult(normalizedResult);
-      let teamEnabled = false;
-      const projectId = result.projectId || selectedProject.id;
-      const deadline = Date.now() + 20_000;
-      do {
-        try {
-          const structure = await teamOrchestrationApi.structure(projectId);
-          if (structure.enabled && structure.settings) { teamEnabled = true; break; }
-        } catch { /* team structure is broadcast asynchronously; a normal join remains successful if it is not ready */ }
-        if (Date.now() >= deadline) break;
-        await new Promise((resolve) => window.setTimeout(resolve, 1500));
-      } while (Date.now() < deadline);
-      setStep(teamEnabled ? 'consent' : 'success');
+      setStep('consent');
     } catch (cause) {
       const state = classifyPreviewError(cause, account);
       if (state === 'unavailable' || state === 'expired' || state === 'revoked' || state === 'wrong-account') {
@@ -722,7 +710,6 @@ export function ProjectInviteJoinDialog({ token, onClose, onOpenAccountSettings,
           setAgentDrafts((current) => [...current, { id: nextAgentId.current++, provider: provider.id as Provider, model: model.id, effort: preferredEffort(provider, model), policy: 'supervised' }]);
         }}><Plus size={14} />Add another agent</Button> : null}
         {error ? <InlineError>{error}</InlineError> : null}
-        {joinResult && joining ? <p className="pc-loading" role="status">Project joined. Waiting briefly for the team settings to arrive…</p> : null}
         <div className="pc-join-actions"><Button type="button" variant="ghost" disabled={joining} onClick={() => { setError(null); setStep('workspace'); }}><ArrowLeft size={14} />Back</Button>
           <Button type="button" variant="primary" disabled={!canJoin} busy={joining} onClick={() => void joinProject()}>Join project</Button>
         </div>
