@@ -302,6 +302,20 @@ export class TransportService {
     });
   }
 
+  /** Signs a locally accepted message using the already-verified account snapshot and local device key. */
+  signPayloadLocal(teamId: string, expectedDeviceId: string, payload: string): string {
+    if (typeof payload !== 'string' || Buffer.byteLength(payload, 'utf8') > MAX_DISTRIBUTED_PAYLOAD_BYTES) {
+      throw new HttpError(413, 'The device-signed payload exceeds the distributed payload limit.');
+    }
+    const accountId = this.currentAccountId();
+    if (!accountId) throw new HttpError(401, 'Sign in to the Mingle account before sending team chat.');
+    const own = this.requireLocalDevice(accountId, teamId);
+    if (own.registered !== 1 || own.device_id !== expectedDeviceId) {
+      throw new HttpError(409, 'The registered team device changed before signing.');
+    }
+    return signDevicePayload(payload, this.loadKeys(accountId));
+  }
+
   onMessage(handler: TransportMessageHandler): () => void {
     if (this.closed) throw new Error('Transport service is closed.');
     this.handlers.add(handler);

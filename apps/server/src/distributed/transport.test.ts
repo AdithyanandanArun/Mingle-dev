@@ -188,14 +188,14 @@ function account(cloud: MailboxCloud, id: string) {
   };
 }
 
-function service(cloud: MailboxCloud, user: string, now: () => number = () => cloud.now(), changed?: () => void) {
+function service(cloud: MailboxCloud, user: string, now: () => number = () => cloud.now(), changed?: () => void, syncIntervalMs = 60_000) {
   const dataDir = mkdtempSync(path.join(tmpdir(), 'mingle-transport-'));
   const db = new DatabaseSync(':memory:');
   temporaryDirectories.push(dataDir);
   databases.push(db);
   return new TransportService({
     account: account(cloud, user), store: { db }, dataDir,
-    now, retryBaseMs: 100, syncIntervalMs: 60_000, changed,
+    now, retryBaseMs: 100, syncIntervalMs, changed,
   });
 }
 
@@ -231,6 +231,18 @@ describe('distributed envelope cryptography', () => {
     expect(() => openEnvelope({ envelope: { ...envelope, toDeviceId: userA }, recipient, senderSigningPublicKey: sender.signingPublicKeyDer, senderEncryptionPublicKey: sender.encryptionPublicKeyDer })).toThrow();
     expect(() => openEnvelope({ envelope: { ...envelope, signature: Buffer.alloc(64).toString('base64') }, recipient, senderSigningPublicKey: sender.signingPublicKeyDer, senderEncryptionPublicKey: sender.encryptionPublicKeyDer })).toThrow(/signature/);
   });
+});
+
+it('does not notify listeners during repeated idle syncs for a registered device', async () => {
+  const cloud = new MailboxCloud();
+  let notifications = 0;
+  const transport = service(cloud, userA, Date.now, () => { notifications++; }, 1_000);
+  await transport.register({ teamId, name: 'Idle laptop' });
+  notifications = 0;
+  transport.start();
+  await new Promise((resolve) => setTimeout(resolve, 2_200));
+  await transport.close();
+  expect(notifications).toBe(0);
 });
 
 describe('TransportService authenticated mailbox', () => {

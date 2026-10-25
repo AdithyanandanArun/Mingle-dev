@@ -115,6 +115,77 @@ export class TeamChatService {
     return { localProject: project, shared };
   }
 
+  /** Resolves only persisted local authority so accepting a message never waits for cloud verification. */
+  private localSendContext(projectId: string): {
+    teamId: string; sharedProjectId: string; accountId: string; displayName: string; deviceId: string;
+  } {
+    const user = this.options.account.snapshot().user;
+    if (!user?.id || this.options.account.snapshot().status !== 'signed-in') {
+      throw new HttpError(401, 'Sign in to the Mingle account before sending team chat.');
+    }
+    if (!this.options.store.getProject(projectId)) throw notFound('Project not found.');
+
+    const source = this.options.store.db.prepare(`SELECT owner_id,team_id,shared_project_id,leader_device_id
+      FROM mingle_project_collaboration_sources WHERE local_project_id=?`).get(projectId) as DbRow | undefined;
+    let teamId: string | null = null;
+    let sharedProjectId: string | null = null;
+    let expectedDeviceId: string | null = null;
+    if (source) {
+      if (String(source.owner_id) !== user.id) throw new HttpError(403, 'This shared project belongs to another Mingle account.');
+      teamId = String(source.team_id);
+      sharedProjectId = String(source.shared_project_id);
+      expectedDeviceId = typeof source.leader_device_id === 'string' ? source.leader_device_id : null;
+    } else {
+      const joins = this.options.store.db.prepare(`SELECT team_id,shared_project_id,device_id FROM mingle_project_collaboration_joins
+        WHERE local_project_id=? AND account_id=? ORDER BY created_at DESC`).all(projectId, user.id) as DbRow[];
+      for (const row of joins) {
+        const candidateTeamId = String(row.team_id);
+        const deviceId = this.options.distributed.transport.snapshot(candidateTeamId).deviceId;
+        if (!deviceId || deviceId !== row.device_id) continue;
+        teamId = candidateTeamId;
+        sharedProjectId = String(row.shared_project_id);
+        expectedDeviceId = deviceId;
+        break;
+      }
+    }
+    if (!teamId || !sharedProjectId) throw new HttpError(409, 'Bind this project to a shared team before sending team chat.');
+    const deviceId = this.options.distributed.transport.snapshot(teamId).deviceId;
+    if (!deviceId || (expectedDeviceId && expectedDeviceId !== deviceId)) {
+      throw new HttpError(409, 'Register this device with the shared project team before sending team chat.');
+    }
+    return { teamId, sharedProjectId, accountId: user.id,
+      displayName: user.name?.trim().slice(0, 120) || `Teammate ${user.id.slice(0, 8)}`, deviceId };
+  }
+
+  private async validateLocalHumanMessage(projectId: string, message: TeamChatMessage): Promise<void> {
+    const { shared } = await this.binding(projectId);
+    const project = shared.project!;
+    if (project.teamId !== message.teamId || project.sharedProjectId !== message.sharedProjectId) {
+      throw new HttpError(409, 'The project team changed before the message could be delivered.');
+    }
+    const [accountId, transport] = await Promise.all([
+      this.options.account.withAuthenticatedClient(async (_client, user) => user.id),
+      Promise.resolve(this.options.distributed.transport.snapshot(project.teamId)),
+    ]);
+    if (message.author.kind !== 'human' || message.author.accountId !== accountId || !transport.deviceId
+      || message.authorDeviceId !== transport.deviceId) {
+      throw new HttpError(403, 'The signed-in team account or registered device changed before message delivery.');
+    }
+    const roster = this.teamAgents(shared.agents, accountId, transport.deviceId);
+    const known = new Set(roster.map((agent) => agent.id));
+    if (message.mentions.some((id) => !known.has(id))) {
+      throw new HttpError(400, 'Choose an agent from the current shared-project roster.');
+    }
+  }
+
+  private setDeliveryState(messageId: string, state: TeamChatMessage['deliveryState']): void {
+    const row = this.options.store.db.prepare('SELECT delivery_state FROM team_chat_messages WHERE id=?').get(messageId) as { delivery_state: string } | undefined;
+    if (row && row.delivery_state !== state) {
+      this.options.store.db.prepare('UPDATE team_chat_messages SET delivery_state=? WHERE id=?').run(state, messageId);
+      this.options.store.touch();
+    }
+  }
+
   private rowMessage(row: DbRow): TeamChatMessage {
     return TeamChatMessageSchema.parse({
       id: row.id, teamId: row.team_id, sharedProjectId: row.shared_project_id,
@@ -360,27 +431,22 @@ export class TeamChatService {
 
   async send(projectId: string, rawInput: unknown): Promise<TeamChatMessage> {
     const input = SendTeamChatMessageSchema.parse(rawInput);
-    const { shared } = await this.binding(projectId);
-    const project = shared.project!;
-    const [accountId, transport] = await Promise.all([
-      this.options.account.withAuthenticatedClient(async (_client, user) => user.id),
-      Promise.resolve(this.options.distributed.transport.snapshot(project.teamId)),
-    ]);
-    const roster = this.teamAgents(shared.agents, accountId, transport.deviceId);
-    const byId = new Map(roster.map((agent) => [agent.id, agent]));
-    for (const id of input.mentions) if (!byId.has(id)) throw new HttpError(400, 'Choose an agent from the current shared-project roster.');
+    const context = this.localSendContext(projectId);
     if (input.replyTo) {
       const reply = this.options.store.db.prepare('SELECT id FROM team_chat_messages WHERE id=? AND team_id=? AND shared_project_id=?')
-        .get(input.replyTo, project.teamId, project.sharedProjectId);
+        .get(input.replyTo, context.teamId, context.sharedProjectId);
       if (!reply) throw new HttpError(400, 'The message being replied to is not in this team chat.');
     }
-    const author = await this.localAuthor(shared.members);
     const unsignedMessage = TeamChatMessageSchema.parse({
-      id: randomUUID(), teamId: project.teamId, sharedProjectId: project.sharedProjectId, author,
+      id: randomUUID(), teamId: context.teamId, sharedProjectId: context.sharedProjectId,
+      author: { kind: 'human', accountId: context.accountId, displayName: context.displayName },
       body: redactSecrets(input.body), mentions: input.mentions, ...(input.replyTo ? { replyTo: input.replyTo } : {}),
       createdAt: nowIso(), deliveryState: 'sending', runState: null,
     });
-    const message = await this.signMessage(unsignedMessage);
+    const signature = this.options.distributed.transport.signPayloadLocal
+      ? this.options.distributed.transport.signPayloadLocal(context.teamId, context.deviceId, signingPayload(unsignedMessage, context.deviceId))
+      : await this.signMessage(unsignedMessage);
+    const message = TeamChatMessageSchema.parse({ ...unsignedMessage, authorDeviceId: context.deviceId, authorSignature: signature });
     this.persist(message, 'sending');
     const response = { ...message, deliveryState: 'sending' as const };
     void this.track(this.dispatchHumanMessage(projectId, response)).catch(() => undefined);
@@ -388,24 +454,29 @@ export class TeamChatService {
   }
 
   private async dispatchHumanMessage(projectId: string, message: TeamChatMessage): Promise<void> {
+    try { await this.validateLocalHumanMessage(projectId, message); }
+    catch {
+      this.setDeliveryState(message.id, 'failed');
+      return;
+    }
     let deliveryState: TeamChatMessage['deliveryState'] = 'sent';
     try {
       await this.sendToPeers(message.teamId, message.sharedProjectId, 'teamchat.message',
         TeamChatMessageSchema.parse({ ...message, deliveryState: 'sent' }), `chat:${message.id}:initial`);
     } catch { deliveryState = 'failed'; }
-    const prior = this.options.store.db.prepare('SELECT delivery_state FROM team_chat_messages WHERE id=?').get(message.id) as { delivery_state: string } | undefined;
-    if (prior && prior.delivery_state !== deliveryState) {
-      this.options.store.db.prepare('UPDATE team_chat_messages SET delivery_state=? WHERE id=?').run(deliveryState, message.id);
-      this.options.store.touch();
-    }
+    this.setDeliveryState(message.id, deliveryState);
     if (message.author.kind !== 'human' || !this.orchestration) return;
-    const routing = await this.orchestration.routeTeamChatMessage(projectId, {
-      id: message.id, teamId: message.teamId, sharedProjectId: message.sharedProjectId,
-      body: message.body, mentions: message.mentions, author: message.author,
-    });
-    if (routing === 'routed') {
-      const row = this.options.store.db.prepare('SELECT * FROM team_chat_messages WHERE id=?').get(message.id) as DbRow | undefined;
-      if (row) await this.updateAndFanOut({ ...this.rowMessage(row), runState: 'running' });
+    try {
+      const routing = await this.orchestration.routeTeamChatMessage(projectId, {
+        id: message.id, teamId: message.teamId, sharedProjectId: message.sharedProjectId,
+        body: message.body, mentions: message.mentions, author: message.author,
+      });
+      if (routing === 'routed') {
+        const row = this.options.store.db.prepare('SELECT * FROM team_chat_messages WHERE id=?').get(message.id) as DbRow | undefined;
+        if (row) await this.updateAndFanOut({ ...this.rowMessage(row), runState: 'running' });
+      }
+    } catch {
+      await this.updateAndFanOut({ ...message, runState: 'failed' }).catch(() => undefined);
     }
   }
 

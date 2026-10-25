@@ -69,9 +69,9 @@ function fixture(withAgent = false) {
   const store = new Store(openDatabase(':memory:'));
   const projectPath = makeRepo();
   const project = store.insertProject({ id: PROJECT, name: 'Shared', path: projectPath });
-  store.db.exec(`CREATE TABLE mingle_project_collaboration_sources (local_project_id TEXT,owner_id TEXT,team_id TEXT,shared_project_id TEXT);
+  store.db.exec(`CREATE TABLE mingle_project_collaboration_sources (local_project_id TEXT,owner_id TEXT,team_id TEXT,shared_project_id TEXT,leader_device_id TEXT);
     CREATE TABLE mingle_project_collaboration_joins (local_project_id TEXT,account_id TEXT,team_id TEXT,shared_project_id TEXT,device_id TEXT);
-    INSERT INTO mingle_project_collaboration_sources VALUES ('${PROJECT}','${ACCOUNT}','${TEAM}','${SHARED}');`);
+    INSERT INTO mingle_project_collaboration_sources VALUES ('${PROJECT}','${ACCOUNT}','${TEAM}','${SHARED}','${DEVICE}');`);
   const session = withAgent ? store.insertSession({ projectId: project.id, name: 'Local agent', provider: 'claude', model: 'claude-sonnet-5-5', effort: 'high', policy: 'supervised', isolated: false, worktreePath: projectPath, branch: null }) : null;
   let receive: ((envelope: any) => Promise<void>) | null = null;
   const outgoing: Array<{ teamId: string; toDeviceId: string; kind: string; payload: unknown; idempotencyKey: string }> = [];
@@ -89,6 +89,10 @@ function fixture(withAgent = false) {
     snapshot: () => transportSnapshot(),
     sync: async () => { if (transportGate) await transportGate; },
     send: async (entry: typeof outgoing[number]) => { outgoing.push(entry); return `envelope-${outgoing.length}`; },
+    signPayloadLocal: (teamId: string, expectedDeviceId: string, payload: string) => {
+      if (teamId !== TEAM || expectedDeviceId !== DEVICE) throw new Error('unexpected signing device');
+      return signDevicePayload(payload, DEVICE_KEYS);
+    },
     signPayload: async (teamId: string, expectedDeviceId: string, payload: string) => {
       if (teamId !== TEAM || expectedDeviceId !== DEVICE) throw new Error('unexpected signing device');
       return signDevicePayload(payload, DEVICE_KEYS);
@@ -113,6 +117,7 @@ function fixture(withAgent = false) {
     },
   };
   const account = {
+    snapshot() { return { status: 'signed-in', user: { id: ACCOUNT, name: 'Ada' } }; },
     async withAuthenticatedClient<T>(work: (client: SupabaseClient, user: User) => Promise<T>) {
       return work(cloudClient(), { id: ACCOUNT, email: 'ada@example.test', aud: 'authenticated', created_at: '2026-01-01T00:00:00Z', app_metadata: {}, user_metadata: { full_name: 'Ada' } } as unknown as User);
     },
@@ -196,6 +201,33 @@ it('returns from a human send before transport sync completes', async () => {
       new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error('The send waited on transport.')), 100)),
     ]);
     expect(response.deliveryState).toBe('sending');
+  } finally { release(); await f.close(); }
+});
+
+it('accepts a team-chat message without waiting for account, collaboration, or mailbox network work', async () => {
+  const f = fixture();
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const options = (f.service as unknown as { options: {
+    account: AccountService; collaboration: ProjectCollaborationService;
+  } }).options;
+  const authenticated = options.account.withAuthenticatedClient.bind(options.account);
+  const snapshot = options.collaboration.snapshot.bind(options.collaboration);
+  options.account.withAuthenticatedClient = (async <T>(work: (client: SupabaseClient, user: User) => Promise<T>) => {
+    await gate;
+    return authenticated(work);
+  }) as AccountService['withAuthenticatedClient'];
+  options.collaboration.snapshot = (async (projectId: string) => {
+    await gate;
+    return snapshot(projectId);
+  }) as ProjectCollaborationService['snapshot'];
+  try {
+    const accepted = await Promise.race([
+      f.service.send(PROJECT, { body: 'Accepted locally first', mentions: [] }),
+      new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error('The team-chat send waited for network work.')), 100)),
+    ]);
+    expect(accepted.deliveryState).toBe('sending');
+    expect(f.store.db.prepare('SELECT body FROM team_chat_messages WHERE id=?').get(accepted.id)).toEqual({ body: 'Accepted locally first' });
   } finally { release(); await f.close(); }
 });
 
