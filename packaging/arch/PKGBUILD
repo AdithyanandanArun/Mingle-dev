@@ -46,7 +46,7 @@ if [[ -f "${_archive}" ]]; then
 else
   source=("${_archive}::https://github.com/AdithyanandanArun/Mingle-dev/releases/download/v${pkgver}/mingle-${pkgver}-linux-x64.tar.gz")
 fi
-sha256sums=('a7e5cb3db47d821108940f6fcbdd125c3c2adb7d48de30297acfc8e2da5362c5')
+sha256sums=('3a838862db7c572eabc19f204a7bd99b46a7f21609b76ce24102017a0f8b1d7d')
 
 package() {
   local _release="${srcdir}/mingle-${pkgver}-linux-x64"
