@@ -25,7 +25,7 @@ const AGENT_ID = 'agent_local';
 interface Sent { teamId: string; toDeviceId: string; kind: string; payload: any; idempotencyKey: string; sentAt?: number }
 interface Fixture {
   store: Store; side: ReturnType<typeof createDeviceSide>; routes: Array<{ method: string; path: string; handler: (ctx: any) => unknown }>;
-  projectId: string; root: string; repo: string; worktree: string; sent: Sent[]; roster: any[]; handler: ((envelope: any) => Promise<void>) | null;
+  projectId: string; root: string; repo: string; worktree: string; worktreeRoot: string; sent: Sent[]; roster: any[]; handler: ((envelope: any) => Promise<void>) | null;
   runtime: FakeRuntime; exportCalls: any[]; importCalls: any[]; executionOrder: string[]; chatReplies: any[]; members: any[]; setConsent(permission?: 'supervised' | 'full-access', settingsVersion?: number): Promise<any>;
   failTerminalStatusSends(count: number): void;
   holdImports(gate: Promise<void>): void;
@@ -136,6 +136,8 @@ async function fixture(): Promise<Fixture> {
   const root = sharedRoot;
   const repo = sharedRepo;
   const worktree = sharedWorktree;
+  const worktreeRoot = mkdtempSync(path.join(os.tmpdir(), 'mingle-team-delivery-data-'));
+  roots.push(worktreeRoot);
   const store = new Store(openDatabase(':memory:'));
   const project = store.insertProject({ name: 'Shared workspace', path: repo });
   const session = store.insertSession({ projectId: project.id, name: 'Local agent', provider: 'claude', model: 'claude-sonnet-5-5', effort: 'high', policy: 'supervised', isolated: true, worktreePath: worktree, branch: 'agent-worker' });
@@ -215,12 +217,13 @@ async function fixture(): Promise<Fixture> {
   let side!: ReturnType<typeof createDeviceSide>;
   const startSide = () => {
     side = createDeviceSide({ store, runtime: runtime as any, transport, account, distributed, collaboration, teamChat: teamChat as any,
+      deliveryWorktreeRoot: worktreeRoot,
       activityThrottleMs: 15, toolTimeoutMs: 30, heartbeatIntervalMs: 15, terminalStatusRetryMs: 15 });
     side.routes((method, route, routeHandler) => routes.push({ method, path: route, handler: routeHandler }));
   };
   startSide();
   const result: Fixture = {
-    store, get side() { return side; }, routes, projectId: project.id, root, repo, worktree, sent, roster, get handler() { return handler; }, runtime, exportCalls, importCalls, executionOrder, chatReplies, members,
+    store, get side() { return side; }, routes, projectId: project.id, root, repo, worktree, worktreeRoot, sent, roster, get handler() { return handler; }, runtime, exportCalls, importCalls, executionOrder, chatReplies, members,
     failTerminalStatusSends(count) { terminalStatusFailures = count; },
     holdImports(gate) { importGate = gate; },
     async restartSide() { await side.close(); routes.length = 0; startSide(); },
@@ -373,7 +376,10 @@ describe('owner-device team orchestration', () => {
     const deliveryWorktree = f.runtime.optionsByRun.get(completed.runId)?.worktree?.path;
     expect(deliveryWorktree).toEqual(expect.any(String));
     expect(deliveryWorktree).not.toBe(f.worktree);
+    expect(deliveryWorktree.startsWith(f.worktreeRoot)).toBe(true);
     expect(runGit(deliveryWorktree, 'rev-parse', 'HEAD').trim()).toBe(f.exportCalls[0].revision);
+    expect(f.store.db.prepare('SELECT worktree_path,branch FROM mingle_team_device_deliveries WHERE delivery_id=?').get(payload.deliveryId))
+      .toMatchObject({ worktree_path: deliveryWorktree, branch: expect.stringMatching(/^mingle\/team-agent\//) });
     expect(f.exportCalls[0]).toMatchObject({ toDeviceId: HOST_DEVICE, deliveryId: payload.deliveryId, sourceWorktreePath: deliveryWorktree });
     expect(f.chatReplies).toHaveLength(1);
     expect(f.chatReplies[0]).toEqual([f.projectId, AGENT_ID, 'Final result: safe output', payload.requestId, payload.deliveryId]);
@@ -428,6 +434,90 @@ describe('owner-device team orchestration', () => {
     expect(() => readFileSync(path.join(worktreePath, '.env'))).not.toThrow();
     expect(runGit(worktreePath, 'rev-parse', '--verify', 'HEAD').trim()).toBe(completed.artifacts[0]!.revision);
     expect(f.runtime.startCount).toBe(1);
+  });
+
+  it('refuses the complete artifact history when a protected file appears only in an intermediate commit', async () => {
+    const f = await fixture();
+    await sendStructure(f);
+    await f.setConsent();
+    f.runtime.commitChanges = false;
+    f.runtime.writeDefaultArtifact = false;
+    f.runtime.onWorktree = (worktreePath) => {
+      const commit = (message: string) => runGit(worktreePath, '-c', 'user.name=Worker', '-c', 'user.email=worker@example.invalid', 'commit', '-m', message);
+      writeFileSync(path.join(worktreePath, 'styles.css'), 'body{color:#222}\n');
+      runGit(worktreePath, 'add', 'styles.css');
+      commit('safe style');
+      writeFileSync(path.join(worktreePath, '.env'), 'PRIVATE_VALUE=do-not-transfer\n');
+      runGit(worktreePath, 'add', '.env');
+      commit('temporary secret');
+      rmSync(path.join(worktreePath, '.env'));
+      runGit(worktreePath, 'add', '-u', '.env');
+      commit('remove secret');
+      writeFileSync(path.join(worktreePath, 'index.html'), '<title>safe later commit</title>\n');
+      runGit(worktreePath, 'add', 'index.html');
+      commit('safe later change');
+    };
+    const payload = deliveryPayload({ deliveryId: `delivery-${randomUUID()}` });
+    await f.deliver(payload);
+    await waitFor(() => f.sent.some((message) => message.payload?.deliveryId === payload.deliveryId && message.payload?.status === 'completed'));
+
+    const completed = f.sent.find((message) => message.payload?.deliveryId === payload.deliveryId && message.payload?.status === 'completed')!.payload;
+    expect(f.exportCalls).toHaveLength(0);
+    expect(completed.artifacts).toEqual([]);
+    expect(completed.finalText).toContain('protected path change(s)');
+    const row = f.store.db.prepare('SELECT worktree_path,branch FROM mingle_team_device_deliveries WHERE delivery_id=?').get(payload.deliveryId) as { worktree_path: string; branch: string };
+    expect(runGit(row.worktree_path, 'show', '--pretty=format:', '--name-only', 'HEAD')).toContain('index.html');
+    expect(runGit(row.worktree_path, 'rev-parse', '--verify', 'HEAD').trim()).not.toBe(runGit(f.repo, 'rev-parse', '--verify', 'HEAD').trim());
+  });
+
+  it('filters dirty out-of-scope paths from snapshots while preserving them in the retained delivery worktree', async () => {
+    const f = await fixture();
+    await sendStructure(f);
+    await f.setConsent();
+    f.runtime.commitChanges = false;
+    f.runtime.writeDefaultArtifact = false;
+    f.runtime.onWorktree = (worktreePath) => {
+      writeFileSync(path.join(worktreePath, 'styles.css'), 'body{font-family:system-ui}\n');
+      writeFileSync(path.join(worktreePath, 'README.md'), '# out of scope edit\n');
+    };
+    const payload = deliveryPayload({ deliveryId: `delivery-${randomUUID()}`, scope: ['styles.css'] });
+    await f.deliver(payload);
+    await waitFor(() => f.sent.some((message) => message.payload?.deliveryId === payload.deliveryId && message.payload?.status === 'completed'));
+
+    const completed = f.sent.find((message) => message.payload?.deliveryId === payload.deliveryId && message.payload?.status === 'completed')!.payload;
+    expect(completed.artifacts).toHaveLength(1);
+    expect(completed.finalText).toContain('out-of-scope path(s) were left');
+    const worktreePath = f.exportCalls[0]!.sourceWorktreePath as string;
+    expect(runGit(worktreePath, 'show', '--pretty=format:', '--name-only', completed.artifacts[0]!.revision).split('\n').filter(Boolean))
+      .toEqual(['styles.css']);
+    expect(readFileSync(path.join(worktreePath, 'README.md'), 'utf8')).toBe('# out of scope edit\n');
+  });
+
+  it('refuses manually committed out-of-scope paths and retains their commits for recovery', async () => {
+    const f = await fixture();
+    await sendStructure(f);
+    await f.setConsent();
+    f.runtime.commitChanges = false;
+    f.runtime.writeDefaultArtifact = false;
+    f.runtime.onWorktree = (worktreePath) => {
+      writeFileSync(path.join(worktreePath, 'styles.css'), 'body{font-family:system-ui}\n');
+      runGit(worktreePath, 'add', 'styles.css');
+      runGit(worktreePath, 'commit', '-m', 'in-scope style');
+      writeFileSync(path.join(worktreePath, 'README.md'), '# manually committed outside scope\n');
+      runGit(worktreePath, 'add', 'README.md');
+      runGit(worktreePath, 'commit', '-m', 'out-of-scope readme');
+    };
+    const payload = deliveryPayload({ deliveryId: `delivery-${randomUUID()}`, scope: ['styles.css'] });
+    await f.deliver(payload);
+    await waitFor(() => f.sent.some((message) => message.payload?.deliveryId === payload.deliveryId && message.payload?.status === 'completed'));
+
+    const completed = f.sent.find((message) => message.payload?.deliveryId === payload.deliveryId && message.payload?.status === 'completed')!.payload;
+    expect(f.exportCalls).toHaveLength(0);
+    expect(completed.artifacts).toEqual([]);
+    expect(completed.finalText).toContain('committed path change(s) outside the assigned scope');
+    const row = f.store.db.prepare('SELECT worktree_path FROM mingle_team_device_deliveries WHERE delivery_id=?').get(payload.deliveryId) as { worktree_path: string };
+    expect(runGit(row.worktree_path, 'rev-parse', '--verify', 'HEAD').trim()).not.toBe(runGit(f.repo, 'rev-parse', '--verify', 'HEAD').trim());
+    expect(runGit(row.worktree_path, 'status', '--porcelain=v1')).toBe('');
   });
 
   it('heartbeats during a long owner-side run and stops heartbeating after completion', async () => {

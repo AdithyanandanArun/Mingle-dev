@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -109,6 +109,51 @@ describe('GitSyncService', () => {
       .resolves.toMatchObject({ beforeRevision: originalDestinationHead, revision: sourceHead, integrated: true });
     expect(readFileSync(path.join(destination.root, 'team-output.txt'), 'utf8')).toBe('committed team output\n');
     expect(importRunGit(destination.root, ['rev-parse', 'HEAD']).trim()).toBe(sourceHead);
+  });
+
+  it('rejects committed protected history on export and again before receiver import', async () => {
+    const { parent, source, destination } = prepareClones();
+    const baseRevision = importRunGit(source.root, ['rev-parse', 'HEAD']).trim();
+    writeFileSync(path.join(source.root, 'safe-before.txt'), 'safe before secret\n');
+    importRunGit(source.root, ['add', 'safe-before.txt']);
+    importRunGit(source.root, ['commit', '-q', '-m', 'safe before']);
+    writeFileSync(path.join(source.root, '.env'), 'PRIVATE_VALUE=never-transfer\n');
+    importRunGit(source.root, ['add', '.env']);
+    importRunGit(source.root, ['commit', '-q', '-m', 'temporary secret']);
+    rmSync(path.join(source.root, '.env'));
+    importRunGit(source.root, ['add', '-u', '.env']);
+    importRunGit(source.root, ['commit', '-q', '-m', 'remove secret']);
+    writeFileSync(path.join(source.root, 'safe-after.txt'), 'safe after secret\n');
+    importRunGit(source.root, ['add', 'safe-after.txt']);
+    importRunGit(source.root, ['commit', '-q', '-m', 'safe after']);
+    const revision = importRunGit(source.root, ['rev-parse', 'HEAD']).trim();
+    const pair = await bindPair(source, destination);
+
+    await expect(pair.sourceService.exportTeamArtifact({ teamId: pair.teamId, sharedProjectId: pair.sharedProjectId,
+      sourceWorktreePath: source.root, revision, baseRevision, toDeviceId: destination.deviceFor(pair.teamId),
+      deliveryId: 'delivery-protected-history' })).rejects.toThrow(/protected path change.*no artifact was transferred/i);
+    expect(source.messages.filter((message) => message.kind.startsWith('git.team-artifact.'))).toHaveLength(0);
+
+    const bundlePath = path.join(parent, 'malicious-history.bundle');
+    importRunGit(source.root, ['bundle', 'create', bundlePath, 'refs/heads/main', `^${baseRevision}`]);
+    const bundle = readFileSync(bundlePath);
+    const transferId = 'a'.repeat(64);
+    const deliveryId = 'delivery-receiver-protected-history';
+    const offer = { transferId, sharedProjectId: pair.sharedProjectId, deliveryId, revision, baseRevision,
+      path: 'safe-after.txt', bundleSha256: createHash('sha256').update(bundle).digest('hex'), bundleSizeBytes: bundle.length,
+      chunkCount: Math.ceil(bundle.length / (128 * 1024)) };
+    await pair.destinationService.onEnvelope(envelope({ teamId: pair.teamId, fromDeviceId: source.deviceFor(pair.teamId),
+      toDeviceId: destination.deviceFor(pair.teamId), kind: 'git.team-artifact.offer', payload: offer }));
+    for (let index = 0; index < offer.chunkCount; index++) {
+      const chunk = bundle.subarray(index * 128 * 1024, Math.min(bundle.length, (index + 1) * 128 * 1024));
+      await pair.destinationService.onEnvelope(envelope({ teamId: pair.teamId, fromDeviceId: source.deviceFor(pair.teamId),
+        toDeviceId: destination.deviceFor(pair.teamId), kind: 'git.team-artifact.chunk',
+        payload: { transferId, index, chunkCount: offer.chunkCount, data: chunk.toString('base64') } }));
+    }
+    const artifact = { revision, transferId, path: 'safe-after.txt' };
+    await expect(pair.destinationService.importTeamArtifact({ teamId: pair.teamId, sharedProjectId: pair.sharedProjectId,
+      deliveryId, artifact, sourceDeviceId: source.deviceFor(pair.teamId) })).rejects.toThrow(/protected path change.*no artifact was transferred/i);
+    expect(importRunGit(destination.root, ['for-each-ref', '--format=%(refname)', 'refs/mingle/team'])).toBe('');
   });
 
   it('keeps a verified artifact in its isolated ref when the host workspace has diverged', async () => {

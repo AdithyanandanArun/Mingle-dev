@@ -12,6 +12,7 @@ import {
 import type { DistributedDeviceEnvelope, GitIntegrationRequestInput, GitRequestSnapshot, GitSyncSnapshot as GitSyncSnapshotType, GitTransferRequestInput } from '../../../../packages/contracts/src/remote-git.ts';
 import { conflict, errorMessage, nowIso } from '../util.ts';
 import { redactSecrets } from '../providers/common.ts';
+import { isDeniedName } from '../paths.ts';
 import {
   bindProject, BUNDLE_CHUNK_BYTES, currentUser, dbOf,
   ensureCommonTables, fingerprintRepository, insertAudit, MAX_BUNDLE_BYTES, parseJson, resolveProjectBinding,
@@ -56,6 +57,31 @@ interface GitRequestRow {
 interface TransferOfferPayload {
   requestId: string; sharedProjectId: string; sourceHead: string; baseHead: string | null; branch: string | null;
   bundleSha256: string; bundleSizeBytes: number; chunkCount: number;
+}
+
+const MAX_TEAM_ARTIFACT_HISTORY_COMMITS = 10_000;
+
+async function assertTeamArtifactHistorySafe(repository: DistributedServiceOptions['repository'], root: string,
+  revision: string, baseRevision: string | null): Promise<void> {
+  if (baseRevision) {
+    const ancestor = await repositoryGit(repository, root, ['merge-base', '--is-ancestor', baseRevision, revision],
+      { allowFailure: true, maxOutputBytes: 4096 });
+    if (ancestor.code !== 0) throw conflict('The team artifact base must be an ancestor of its revision.');
+  }
+  const range = baseRevision ? `${baseRevision}..${revision}` : revision;
+  const count = Number(line((await repositoryGit(repository, root, ['rev-list', '--count', range], { maxOutputBytes: 4096 })).stdout));
+  if (!Number.isSafeInteger(count) || count > MAX_TEAM_ARTIFACT_HISTORY_COMMITS) {
+    throw conflict(`Team artifact history exceeds the ${MAX_TEAM_ARTIFACT_HISTORY_COMMITS}-commit safety limit.`);
+  }
+  if (count === 0) return;
+  const changes = await repositoryGit(repository, root,
+    ['log', '--format=', '--name-only', '--no-renames', '--root', '-m', '-z', range],
+    { timeoutMs: 60_000, maxOutputBytes: 8 * 1024 * 1024 });
+  const protectedPaths = [...new Set(changes.stdout.toString('utf8').split('\0').filter(Boolean))]
+    .filter((file) => file.split('/').some(isDeniedName));
+  if (protectedPaths.length) {
+    throw conflict(`Team artifact history contains ${protectedPaths.length} protected path change(s); no artifact was transferred.`);
+  }
 }
 
 export interface GitSyncServiceOptions extends DistributedServiceOptions {}
@@ -404,6 +430,7 @@ export class GitSyncService {
       ['merge-base', '--is-ancestor', revision, 'HEAD'], { allowFailure: true, maxOutputBytes: 4096 });
     if (reachable.code !== 0) throw conflict('The team artifact commit is not reachable from the producing worktree HEAD.');
     const baseRevision = await this.selectTeamArtifactBase(sourcePath, revision, requestedBaseRevision, input.sessionStartRevision);
+    await assertTeamArtifactHistorySafe(this.options.repository, sourcePath, revision, baseRevision);
 
     const transferId = createHash('sha256').update(`${input.teamId}\0${input.sharedProjectId}\0${input.deliveryId}\0${input.toDeviceId}\0${revision}\0${input.taskId ?? ''}\0${input.path ?? ''}`).digest('hex');
     const refName = teamArtifactRef(input.sharedProjectId, input.deliveryId, revision);
@@ -543,6 +570,7 @@ export class GitSyncService {
       const imported = await repositoryGit(this.options.repository, binding.canonicalPath,
         ['rev-parse', '--verify', `${refName}^{commit}`], { maxOutputBytes: 4096 });
       if (line(imported.stdout).toLowerCase() !== offer.revision.toLowerCase()) throw conflict('The previously imported team artifact ref no longer resolves to its recorded tip.');
+      await assertTeamArtifactHistorySafe(this.options.repository, binding.canonicalPath, offer.revision, offer.baseRevision);
       return TeamArtifactRefSchema.parse({ ...artifact, ref: refName });
     }
     const temp = await mkdtemp(path.join(os.tmpdir(), 'mingle-team-artifact-import-'));
@@ -556,6 +584,7 @@ export class GitSyncService {
       await this.verifyTeamArtifactBundle(binding.canonicalPath, bundlePath, offer);
       const currentRef = await repositoryGit(this.options.repository, binding.canonicalPath,
         ['show-ref', '--verify', '--quiet', refName], { allowFailure: true, maxOutputBytes: 4096 });
+      let createdRef = false;
       if (currentRef.code === 0) {
         const currentTip = await repositoryGit(this.options.repository, binding.canonicalPath,
           ['rev-parse', '--verify', `${refName}^{commit}`], { maxOutputBytes: 4096 });
@@ -564,10 +593,19 @@ export class GitSyncService {
         await repositoryGit(this.options.repository, binding.canonicalPath,
           ['fetch', '--no-tags', '--no-write-fetch-head', '--no-recurse-submodules', bundlePath, `${offer.revision}:${refName}`],
           { timeoutMs: 60_000, maxOutputBytes: 64 * 1024 });
+        createdRef = true;
       }
       const imported = await repositoryGit(this.options.repository, binding.canonicalPath,
         ['rev-parse', '--verify', `${refName}^{commit}`], { maxOutputBytes: 4096 });
       if (line(imported.stdout).toLowerCase() !== offer.revision.toLowerCase()) throw conflict('Imported team artifact ref does not resolve to the exact advertised revision.');
+      try {
+        await assertTeamArtifactHistorySafe(this.options.repository, binding.canonicalPath, offer.revision, offer.baseRevision);
+      } catch (error) {
+        if (createdRef) {
+          await repositoryGit(this.options.repository, binding.canonicalPath, ['update-ref', '-d', refName], { maxOutputBytes: 4096 }).catch(() => undefined);
+        }
+        throw error;
+      }
       this.db.prepare(`UPDATE ${TEAM_ARTIFACT_TABLE} SET status='imported',ref_name=?,updated_at=? WHERE transfer_id=? AND status='ready'`)
         .run(refName, nowIso(), artifact.transferId);
       this.options.changed?.();
@@ -604,6 +642,7 @@ export class GitSyncService {
     const importedRevision = line((await repositoryGit(this.options.repository, binding.canonicalPath,
       ['rev-parse', '--verify', `${refName}^{commit}`], { maxOutputBytes: 4096 })).stdout).toLowerCase();
     if (importedRevision !== offer.revision.toLowerCase()) throw conflict('The imported team artifact ref no longer resolves to its verified commit.');
+    await assertTeamArtifactHistorySafe(this.options.repository, binding.canonicalPath, offer.revision, offer.baseRevision);
     if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(beforeRevision)) throw conflict('The host team workspace has no valid Git HEAD.');
     const dirty = await repositoryGit(this.options.repository, worktreePath,
       ['status', '--porcelain=v1', '--untracked-files=all'], { maxOutputBytes: 64 * 1024 });

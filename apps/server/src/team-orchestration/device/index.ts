@@ -28,7 +28,8 @@ import { git, trimmed } from '../../repository/git-run.ts';
 import { TeamMcpProxy } from './mcp-proxy.ts';
 import { createCommit } from '../../repository/commit.ts';
 import { signingConfigured } from '../../repository/inspect.ts';
-import { isDeniedName } from '../../paths.ts';
+import { isDeniedName, normalizeRelative } from '../../paths.ts';
+import { normalizeScopes, scopesOverlap } from '../../groups/routing.ts';
 
 type AddRoute = (method: string, path: string, handler: (context: Ctx) => unknown | Promise<unknown>) => unknown;
 type DeviceTransport = DistributedWorkspaceService['transport'];
@@ -45,6 +46,8 @@ export interface DeviceSideDeps {
   distributed: DistributedWorkspaceService;
   collaboration: ProjectCollaborationService;
   teamChat: Pick<TeamChatService, 'postAgentReply'>;
+  /** Durable runtime-data root for retained remote delivery worktrees. */
+  deliveryWorktreeRoot?: string;
   hub?: { broadcast(event: unknown): void };
   changed?: () => void;
   /** Injectable timing bounds keep transport/runtime tests deterministic. */
@@ -66,6 +69,7 @@ interface ActiveDelivery {
   baseRevision: string | null;
   worktreePath: string;
   branch: string | null;
+  scope: string[] | null;
   entries: TeamAgentActivityEntry[];
   text: string;
   activityState: 'idle' | 'queued' | 'working' | 'awaiting-approval' | 'quota-exhausted' | 'offline' | 'paused' | 'failed';
@@ -95,6 +99,29 @@ const permissionRank = (value: TeamPermissionLevel) => value === 'supervised' ? 
 const policyRank: Record<Policy, number> = { supervised: 0, balanced: 1, auto: 2, 'full-access': 3 };
 function mostRestrictivePolicy(...policies: Policy[]): Policy {
   return policies.reduce((strictest, policy) => policyRank[policy] < policyRank[strictest] ? policy : strictest);
+}
+
+function pathInAssignmentScope(file: string, scope: string[] | null): boolean {
+  if (!scope) return true;
+  let normalizedFile: string;
+  try { normalizedFile = normalizeRelative(file); }
+  catch { return false; }
+  return scope.some((entry) => {
+    const overlap = scopesOverlap([normalizedFile], [entry]);
+    // scopesOverlap uses the common ancestor as its result; a changed path is allowed only
+    // when that common scope is the assignment entry, not when the file merely contains it.
+    return overlap !== null && overlap.toLocaleLowerCase() === entry.toLocaleLowerCase();
+  });
+}
+
+async function committedPaths(worktreePath: string, baseRevision: string | null, head: string): Promise<string[]> {
+  const range = baseRevision ? `${baseRevision}..${head}` : head;
+  const count = Number(trimmed(await git(worktreePath, ['rev-list', '--count', range], { maxBuffer: 4096 })));
+  if (!Number.isSafeInteger(count) || count > 10_000) throw new Error('Committed delivery history exceeds the 10,000-commit safety limit.');
+  if (count === 0) return [];
+  const result = await git(worktreePath,
+    ['log', '--format=', '--name-only', '--no-renames', '--root', '-m', '-z', range], { maxBuffer: 8 * 1024 * 1024 });
+  return [...new Set(result.stdout.split('\0').filter(Boolean))];
 }
 const identifier = (value: unknown): value is string => typeof value === 'string' && value.length > 0 && value.length <= 200;
 const safeText = (value: unknown, max: number) => redactSecrets(typeof value === 'string' ? value : String(value ?? '')).replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, ' ').slice(0, max);
@@ -587,6 +614,10 @@ export function createDeviceSide(deps: DeviceSideDeps): {
     const agent = shared.agents.find((candidate) => candidate.id === payload.agentId && candidate.deviceId === localDeviceId)
       ?? shared.agents.find((candidate) => candidate.sessionId === payload.agentId && candidate.deviceId === localDeviceId);
     if (!agent || !agent.sessionId) return { rejection: 'agent-unavailable' };
+    if (payload.scope) {
+      try { normalizeScopes(payload.scope); }
+      catch { return { rejection: 'invalid' }; }
+    }
     const accountId = await currentAccountId();
     if (agent.accountId !== accountId) return { rejection: 'agent-unavailable' };
     const row = db.prepare(`SELECT consent_json FROM mingle_team_device_consents WHERE shared_project_id=? AND account_id=? AND device_id=?`)
@@ -776,10 +807,14 @@ export function createDeviceSide(deps: DeviceSideDeps): {
       if (canonicalTop === projectRoot) throw new HttpError(409, 'The shared agent session is not an isolated Git worktree.');
     }
     if (!baseRevision) baseRevision = trimmed(await git(projectRoot, ['rev-parse', '--verify', 'HEAD']));
-    const directory = path.join(os.tmpdir(), 'mingle-team-agent-worktrees', createHash('sha256').update(shared.sharedProjectId).digest('hex').slice(0, 20));
-    await mkdir(directory, { recursive: true });
+    const deliveryWorktreeRoot = deps.deliveryWorktreeRoot ?? path.join(os.homedir(), '.mingle', 'team-worktrees');
+    await mkdir(deliveryWorktreeRoot, { recursive: true, mode: 0o700 });
+    const directory = path.join(await realpath(deliveryWorktreeRoot), createHash('sha256').update(shared.sharedProjectId).digest('hex').slice(0, 20));
+    await mkdir(directory, { recursive: true, mode: 0o700 });
     const worktreePath = path.join(directory, createHash('sha256').update(payload.deliveryId).digest('hex').slice(0, 24));
     const branch = `mingle/team-agent/${createHash('sha256').update(payload.deliveryId).digest('hex').slice(0, 20)}`;
+    db.prepare(`UPDATE mingle_team_device_deliveries SET worktree_path=?,branch=?,base_revision=?,updated_at=? WHERE delivery_id=? AND status='accepted'`)
+      .run(worktreePath, branch, baseRevision, ISO(), payload.deliveryId);
     await git(projectRoot, ['worktree', 'add', '-b', branch, worktreePath, baseRevision]);
     return { path: worktreePath, branch, baseRevision };
   }
@@ -794,7 +829,15 @@ export function createDeviceSide(deps: DeviceSideDeps): {
       const candidates = [...new Set([...tracked.stdout.split('\0'), ...untracked.stdout.split('\0')].filter(Boolean))].sort();
       if (!candidates.length) return;
       if (candidates.length > MAX_AUTO_COMMIT_PATHS) throw new Error(`There are more than ${MAX_AUTO_COMMIT_PATHS} changed paths to snapshot safely.`);
-      const candidatesWithoutSecrets = candidates.filter((file) => !file.split('/').some(isDeniedName));
+      const inScope = candidates.filter((file) => pathInAssignmentScope(file, activeDelivery.scope));
+      const outOfScope = candidates.length - inScope.length;
+      if (outOfScope) {
+        const note = `${outOfScope} out-of-scope path(s) were left in the delivery worktree and not snapshotted.`;
+        activeDelivery.entries.push(TeamAgentActivityEntrySchema.parse({ id: randomUUID(), runId: activeDelivery.runId,
+          at: ISO(), kind: 'status', text: note }));
+        activeDelivery.artifactFailures.push(note);
+      }
+      const candidatesWithoutSecrets = inScope.filter((file) => !file.split('/').some(isDeniedName));
       const ignoredResult = candidatesWithoutSecrets.length
         ? await git(worktreePath, ['check-ignore', '--no-index', '-z', '--stdin'], {
           allowFailure: true, stdin: `${candidatesWithoutSecrets.join('\0')}\0`, maxBuffer: 8 * 1024 * 1024,
@@ -802,7 +845,7 @@ export function createDeviceSide(deps: DeviceSideDeps): {
         : { stdout: '' };
       const ignored = new Set(ignoredResult.stdout.split('\0').filter(Boolean));
       const paths = candidatesWithoutSecrets.filter((file) => !ignored.has(file));
-      const excluded = candidates.length - paths.length;
+      const excluded = inScope.length - paths.length;
       if (excluded) {
         const note = `${excluded} protected or ignored path(s) were excluded from remote artifact commits.`;
         activeDelivery.entries.push(TeamAgentActivityEntrySchema.parse({ id: randomUUID(), runId: activeDelivery.runId,
@@ -837,6 +880,20 @@ export function createDeviceSide(deps: DeviceSideDeps): {
       ? ['rev-list', '--reverse', '--max-count=30', `${activeDelivery.baseRevision}..${head}`]
       : ['rev-list', '--reverse', '--max-count=30', head];
     const revisions = trimmed(await git(activeDelivery.worktreePath, args)).split(/\s+/).filter((id) => /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(id));
+    const changes = await committedPaths(activeDelivery.worktreePath, activeDelivery.baseRevision, head);
+    const protectedPaths = changes.filter((file) => file.split('/').some(isDeniedName));
+    const outOfScopePaths = changes.filter((file) => !pathInAssignmentScope(file, activeDelivery.scope));
+    if (protectedPaths.length || outOfScopePaths.length) {
+      const issues = [
+        protectedPaths.length ? `${protectedPaths.length} protected path change(s)` : '',
+        outOfScopePaths.length ? `${outOfScopePaths.length} committed path change(s) outside the assigned scope` : '',
+      ].filter(Boolean).join(' and ');
+      const note = `Committed delivery history was not transferred because it contains ${issues}; commits and worktree were retained.`;
+      activeDelivery.artifactFailures.push(note);
+      activeDelivery.entries.push(TeamAgentActivityEntrySchema.parse({ id: randomUUID(), runId: activeDelivery.runId,
+        at: ISO(), kind: 'error', text: note }));
+      return [];
+    }
     const artifacts: Array<{ revision: string; transferId?: string; taskId?: string; ref?: string }> = [];
     for (const revision of revisions) {
       try {
@@ -909,6 +966,7 @@ export function createDeviceSide(deps: DeviceSideDeps): {
       }
       live = { payload, teamId: shared.teamId, projectId: shared.projectId, sessionId, runId,
         baseRevision: isolated.baseRevision, worktreePath: isolated.path, branch: isolated.branch,
+        scope: payload.scope ? normalizeScopes(payload.scope) : null,
         entries: [requestEntry], text: '', activityState: 'working', activityWaiters: [],
         timer: null, heartbeatTimer: null, heartbeatSequence: 0, controller, replyPosted: false, artifactFailures: [] };
       active.set(payload.deliveryId, live);

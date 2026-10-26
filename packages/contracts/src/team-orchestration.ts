@@ -240,6 +240,8 @@ export const TeamDeliveryPayloadSchema = z.object({
   hop: z.number().int().min(0).max(12),
   permissionLevel: TeamPermissionLevelSchema, settingsVersion: z.number().int().min(1),
   taskId: Id.optional(),
+  /** Assignment file/directory scope. Absent on legacy and project-wide deliveries. */
+  scope: z.array(z.string().min(1).max(1000)).min(1).max(40).optional(),
   /** Git base the run should start from, if known. */
   baseRevision: z.string().regex(/^[0-9a-f]{40}([0-9a-f]{24})?$/).optional(),
   inputArtifacts: z.array(TeamArtifactRefSchema).max(30).default([]),
