@@ -36,6 +36,7 @@ const INVITED_EMAIL = 'invitee@example.invalid';
 const LEADER_ID = 'example-leader-account';
 const TEAM_ID = 'example-project-team';
 const SHARED_PROJECT_ID = 'example-shared-project';
+const PROXY_SESSION_ID = 'proxy_c001abcedef0123456789abcdef01234';
 const children = [];
 const requests = [];
 const consoleErrors = [];
@@ -51,12 +52,15 @@ let accountMode = 'signed-in';
 let deliveryMode = 'sent';
 let previewMode = 'valid';
 let providerSetupNeeded = false;
+let includeProxySession = false;
 let joinedSessions = [];
 let clonedProject = null;
 let collaborationSnapshot;
+let publishedTeamSessionIds = [];
 let collabGate = null;
 let delayCollaborationOnce = false;
 let collaborationReads = 0;
+let teamStructureReads = 0;
 let passed = 0;
 const failures = [];
 
@@ -140,6 +144,31 @@ function invitationPreview(email = INVITED_EMAIL) {
 }
 
 function teamStructureSnapshot(id = projectId) {
+  const members = publishedTeamSessionIds.flatMap((sessionId, index) => {
+    const session = localSessions.find((candidate) => candidate.id === sessionId);
+    if (!session) return [];
+    return [{
+      agentId: `example-team-agent-${index + 1}`,
+      name: index === 0 ? 'Example local Codex' : `Example local agent ${index + 1}`,
+      handle: `example-local-${index + 1}`,
+      ownerAccountId: LEADER_ID,
+      ownerDisplayName: 'Example leader',
+      deviceId: 'example-leader-device',
+      deviceName: 'Example leader device',
+      local: true,
+      sessionId,
+      provider: 'codex',
+      model: 'example-codex-model',
+      effort: 'medium',
+      role: 'worker',
+      fallbackRank: null,
+      state: 'idle',
+      consent: 'none',
+      currentTask: null,
+      lastActivityAt: null,
+      failure: null,
+    }];
+  });
   return {
     projectId: id,
     teamId: TEAM_ID,
@@ -149,7 +178,7 @@ function teamStructureSnapshot(id = projectId) {
     host: { deviceId: 'example-leader-device', accountId: LEADER_ID, displayName: 'Example leader device', online: true, isThisDevice: true },
     canEdit: true,
     myConsent: null,
-    members: [],
+    members,
     leaderHistory: [],
     needsLeader: false,
     teamSession: null,
@@ -165,6 +194,16 @@ function updateBootstrap() {
   const sampleSessions = sourceBootstrap.sessions.filter((session) => session.projectId === projectId).map((session, index) => ({
     ...session, name: index === 0 ? 'Example local Codex' : `Example local agent ${index + 1}`, provider: 'codex', model: 'example-codex-model', effort: 'medium', policy: 'supervised', status: 'idle',
   }));
+  if (includeProxySession && sampleSessions.length) {
+    sampleSessions.push({ ...sampleSessions[0], id: PROXY_SESSION_ID, name: 'Example remote Codex proxy', status: 'idle' });
+    const createdAt = new Date().toISOString();
+    const groupId = 'example-shared-team-session';
+    boot.groups = [...(boot.groups ?? []), {
+      group: { id: groupId, projectId, title: 'Example shared team session', anchorSessionId: sampleSessions[0].id, mode: 'orchestrated', orchestratorMemberId: 'example-local-member', paused: false, pauseReason: null, maxParallel: 3, maxTurns: 80, maxHops: 4, createdAt, updatedAt: createdAt },
+      members: [{ id: 'example-proxy-member', groupId, sessionId: PROXY_SESSION_ID, handle: 'example-teammate', role: 'worker', joinedAt: createdAt, removedAt: null }],
+      messages: [], requests: [], deliveries: [], assignments: [],
+    }];
+  }
   for (const joinedSession of joinedSessions) {
     if (!sampleSessions.some((session) => session.id === joinedSession.id)) sampleSessions.push(joinedSession);
   }
@@ -290,6 +329,7 @@ async function main() {
       return;
     }
     if (/^\/api\/projects\/[^/]+\/team-structure$/.test(url.pathname) && method === 'GET') {
+      teamStructureReads++;
       await jsonResponse(route, 200, teamStructureSnapshot(decodeURIComponent(url.pathname.split('/')[3])));
       return;
     }
@@ -346,7 +386,19 @@ async function main() {
       await jsonResponse(route, 200, { commands: [], skills: [], warnings: [] });
       return;
     }
-    if (url.pathname === '/api/distributed/agents/publish' && method === 'POST') { await jsonResponse(route, 200, { ok: true, exampleFixture: true }); return; }
+    if (url.pathname === '/api/distributed/agents/publish' && method === 'POST') {
+      publishedTeamSessionIds = Array.isArray(body.sessionIds) ? body.sessionIds.filter((id) => localSessions.some((session) => session.id === id)) : [];
+      if (collaborationSnapshot) {
+        const teammateAgents = collaborationSnapshot.agents.filter((agent) => agent.accountId !== LEADER_ID);
+        const localAgentViews = publishedTeamSessionIds.flatMap((sessionId, index) => {
+          const session = localSessions.find((candidate) => candidate.id === sessionId);
+          if (!session) return [];
+          return [{ id: `example-local-agent-${index + 1}`, accountId: LEADER_ID, deviceId: 'example-leader-device', projectId, sessionId, provider: 'codex', model: 'example-codex-model', state: 'idle' }];
+        });
+        collaborationSnapshot.agents = [...localAgentViews, ...teammateAgents];
+      }
+      await jsonResponse(route, 200, { ok: true, exampleFixture: true }); return;
+    }
     if (url.pathname === '/api/distributed/members/revoke' && method === 'POST') { await jsonResponse(route, 200, { ok: true, exampleFixture: true }); return; }
     if (url.pathname === '/api/distributed/messages' && method === 'POST') { await jsonResponse(route, 200, { ok: true, exampleFixture: true }); return; }
     if (url.pathname === '/api/distributed/tasks/publish' && method === 'POST') { await jsonResponse(route, 200, { ok: true, exampleFixture: true }); return; }
@@ -403,11 +455,17 @@ async function main() {
     await page.locator('.toast').filter({ hasText: 'Join link copied.' }).waitFor();
   });
 
-  await test('combined local/team roster supports inspection, publishing, notes, tasks and owner-scoped removal', async () => {
+  await test('combined local/team roster excludes remote proxies, refreshes orchestration, and supports owner-scoped actions', async () => {
+    includeProxySession = true;
+    publishedTeamSessionIds = [];
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    await page.getByRole('button', { name: 'Add teammates', exact: true }).waitFor();
     const dialog = await ensureTeammatesDialog();
     await dialog.getByText('This shared project is not yet a team-orchestrated project.').waitFor();
     assert.ok(requests.some((item) => item.method === 'GET' && item.pathname === `/api/projects/${projectId}/team-structure`), 'the settings panel receives a typed team-structure fixture rather than the generic array fallback');
     assert.equal(await dialog.getByRole('alert').count(), 0, 'the team settings panel renders without a malformed-snapshot error');
+    assert.equal(await dialog.locator('.pc-agent-row').filter({ hasText: 'Example remote Codex proxy' }).count(), 0, 'a proxy session recorded in group membership is not shown as a local project agent');
+    assert.equal(await dialog.getByRole('checkbox', { name: /Share Example remote Codex proxy with this project/ }).count(), 0, 'a remote proxy cannot be selected for republication');
     await dialog.locator('.pc-agent-row').filter({ hasText: 'Example local Codex' }).waitFor();
     await waitFor(async () => await dialog.locator('.pc-agent-row').filter({ hasText: 'Example local Codex' }).count() === 1, 'leader-owned session de-duplication');
     assert.equal(await dialog.locator('.pc-agent-row').filter({ hasText: 'Example local Codex' }).count(), 1, 'the leader-owned published session appears once in the local section, not again as a remote agent');
@@ -415,10 +473,18 @@ async function main() {
     await teammate.getByRole('button').click();
     await dialog.getByRole('button', { name: 'Open recovery controls' }).waitFor();
     assert.match(await teammate.innerText(), /claude.*example-claude-model.*example-teammate-device/i);
-    const check = dialog.getByRole('checkbox', { name: /Share Example local Codex with this project/ }).first();
+    assert.equal(await dialog.locator('#team-orchestrator-agent option').filter({ hasText: 'No roster agents available' }).count(), 1, 'the fixture starts with no agents in the orchestration roster');
+    const check = dialog.getByRole('checkbox', { name: /Share Example local agent 2 with this project/ }).first();
     await check.check();
+    const structureReadsBeforePublish = teamStructureReads;
     await dialog.getByRole('button', { name: 'Update shared agents' }).click();
-    assert.ok(requests.some((item) => item.method === 'POST' && item.pathname === '/api/distributed/agents/publish' && Array.isArray(item.body.sessionIds)));
+    const publish = requests.findLast((item) => item.method === 'POST' && item.pathname === '/api/distributed/agents/publish');
+    assert.ok(Array.isArray(publish?.body.sessionIds));
+    assert.equal(publish.body.sessionIds.includes(PROXY_SESSION_ID), false, 'the publish API never receives the remote proxy session ID');
+    await waitFor(async () => teamStructureReads > structureReadsBeforePublish
+      && await dialog.locator('#team-orchestrator-agent option').filter({ hasText: 'Example local agent 2' }).count() > 0, 'team orchestration settings refresh after the roster changes');
+    assert.ok(teamStructureReads > structureReadsBeforePublish, 'team orchestration settings refetch after the roster changes');
+    assert.equal(await dialog.locator('#team-orchestrator-agent option').filter({ hasText: 'No roster agents available' }).count(), 0, 'the stale empty-roster option is replaced without reopening Teammates');
     await dialog.getByLabel('Share a project note').fill('Example team note');
     await dialog.getByRole('button', { name: 'Share note', exact: true }).click();
     assert.ok(requests.some((item) => item.pathname === '/api/distributed/messages' && item.body.content === 'Example team note'));
@@ -438,6 +504,8 @@ async function main() {
     assert.equal(await teamSections.getByRole('button', { name: 'Recovery', exact: true }).getAttribute('aria-current'), 'page', 'remote-agent inspection opens the existing qualified-recovery section');
     await page.getByRole('button', { name: 'Back to workspace', exact: true }).click();
     await page.getByRole('button', { name: 'Add teammates', exact: true }).waitFor();
+    includeProxySession = false;
+    publishedTeamSessionIds = [];
   });
 
   await test('cold ?join link clears from address/history and resumes after in-place sign-in', async () => {

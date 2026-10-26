@@ -62,6 +62,7 @@ export function ProjectTeammatesDialog({ project, onClose }: { project: Project;
   const [delivery, setDelivery] = useState<{ status: 'sent' | 'failed' | 'not_configured'; message: string; email: string; joinUrl?: string } | null>(null);
   const [account, setAccount] = useState<AccountState | null>(null);
   const [localSelection, setLocalSelection] = useState<string[] | null>(null);
+  const [teamSettingsRevision, setTeamSettingsRevision] = useState(0);
   const [sharing, setSharing] = useState(false);
   const [note, setNote] = useState('');
   const [taskId, setTaskId] = useState('');
@@ -97,8 +98,13 @@ export function ProjectTeammatesDialog({ project, onClose }: { project: Project;
     return () => controller.abort();
   }, []);
 
-  const localAgents = localSessions;
   const rosterAgents = snapshot?.agents ?? [];
+  const proxySessionIds = new Set((boot?.groups ?? []).flatMap((group) => group.members
+    .filter((member) => member.sessionId.startsWith('proxy_'))
+    .map((member) => member.sessionId)));
+  // The team host reserves proxy_ session IDs for remote agents. They are group handoff members,
+  // not local sessions a project owner can publish back to the shared roster.
+  const localAgents = localSessions.filter((session) => !session.id.startsWith('proxy_') && !proxySessionIds.has(session.id));
   const sharedLocalIds = localAgents.filter((session) => rosterAgents.some((agent) => recordText(agent, ['sessionId']) === session.id)).map((session) => session.id);
   const remoteAgents = rosterAgents.filter((agent) => !(account?.user?.id && recordText(agent, ['accountId']) === account.user.id && localAgents.some((session) => session.id === recordText(agent, ['sessionId']))));
   const selectedLocalIds = localSelection ?? sharedLocalIds;
@@ -144,6 +150,7 @@ export function ProjectTeammatesDialog({ project, onClose }: { project: Project;
       await distributedApi.publishAgents({ teamId: snapshot.project.teamId, sharedProjectId: snapshot.project.sharedProjectId, sessionIds: selectedLocalIds.filter((id) => localAgents.some((session) => session.id === id && publishableSession(session))) });
       setSharedAction('Your selected local agents are now reflected in the shared project roster.');
       setLocalSelection(null);
+      setTeamSettingsRevision((revision) => revision + 1);
       await refresh();
     } catch (cause) { setError(errorMessage(cause)); }
     finally { setSharing(false); }
@@ -212,7 +219,7 @@ export function ProjectTeammatesDialog({ project, onClose }: { project: Project;
       {loading && !snapshot ? <p className="pc-loading" role="status">Loading project roster…</p> : null}
       {snapshot?.project ? <p className="pc-project-ref"><Users size={13} /> {snapshot.project.name} <span>· shared project connected</span></p> : null}
       {!loading && snapshot && !snapshot.project ? <p className="pc-inline-note" role="status">This project’s collaboration workspace is being prepared. Refresh in a moment to see its roster.</p> : null}
-      {snapshot?.project ? <TeamOrchestrationSettings projectId={project.id} /> : null}
+      {snapshot?.project ? <TeamOrchestrationSettings key={`${project.id}:${teamSettingsRevision}`} projectId={project.id} /> : null}
       <div className="pc-agent-list" role="list" aria-label="Local and teammate agents">
         {localAgents.map((session) => <div className="pc-agent-row" role="listitem" key={`local-${session.id}`}>
           <input type="checkbox" aria-label={`Share ${session.name} with this project`} checked={selectedLocalIds.includes(session.id)} disabled={!snapshot?.project || !canManageRoster || !publishableSession(session)} title={!publishableSession(session) ? 'This provider cannot be shared for remote execution.' : undefined} onChange={(event) => setLocalSelection((current) => {
