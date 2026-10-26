@@ -683,6 +683,7 @@ async function main() {
     orchestrationEnabled = true;
     orchestrationPermission = 'full-access';
     orchestrationVersion = 15;
+    deliveryMode = 'sent';
     sharedTeamSession = null;
     hideProjectSessions = false;
     addWrongProjectSession = false;
@@ -743,12 +744,13 @@ async function main() {
     await page.getByRole('button', { name: 'Add teammates', exact: true }).waitFor();
     const dialog = await ensureTeammatesDialog();
     const onboarding = dialog.locator('.team-orch-settings');
+    const shareCallsBefore = requests.filter((item) => item.method === 'POST' && item.pathname === `/api/projects/${projectId}/team-orchestration/share-session`).length;
     await onboarding.getByRole('radio', { name: 'Full access', exact: true }).click();
     await onboarding.getByRole('button', { name: 'Save permission level', exact: true }).click();
     await onboarding.getByRole('status').filter({ hasText: 'Team permission level saved.' }).waitFor();
     const update = requests.findLast((item) => item.method === 'PATCH' && item.pathname === `/api/projects/${projectId}/team-orchestration`);
     assert.deepEqual(update?.body, { permissionLevel: 'full-access', expectedVersion: 41 }, 'permission-only save does not reset leader orchestration, orchestrator, or fallback settings');
-    assert.equal(requests.some((item) => item.method === 'POST' && item.pathname === `/api/projects/${projectId}/team-orchestration/share-session`), false, 'permission editing does not call the binding endpoint');
+    assert.equal(requests.filter((item) => item.method === 'POST' && item.pathname === `/api/projects/${projectId}/team-orchestration/share-session`).length, shareCallsBefore, 'permission editing does not call the binding endpoint');
     sharedTeamSession = null;
     orchestrationEnabled = false;
     orchestrationPermission = 'supervised';
@@ -896,7 +898,10 @@ async function main() {
     await page.setViewportSize({ width: 1280, height: 900 });
     assert.equal(pageErrors.length, 0, `no uncaught browser errors: ${pageErrors.join('; ')}`);
     assert.equal(consoleErrors.length, 0, `no browser console errors: ${consoleErrors.join('; ')}`);
-    assert.ok(httpFailures.every((failure) => [401, 404].includes(failure.status) && failure.pathname === '/api/project-invitations/preview'), `only expected opaque invitation auth/invalid responses are observed: ${JSON.stringify(httpFailures)}`);
+    const teamOrchestrationPath = `/api/projects/${projectId}/team-orchestration`;
+    assert.ok(httpFailures.every((failure) => ([401, 404].includes(failure.status) && failure.pathname === '/api/project-invitations/preview')
+      || (failure.status === 503 && failure.pathname === `${teamOrchestrationPath}/share-session`)
+      || (failure.status === 409 && failure.pathname === teamOrchestrationPath)), `only expected invitation and team-setup fixture responses are observed: ${JSON.stringify(httpFailures)}`);
   });
 
   await test('provider setup-required state opens settings and resumes the same pending invitation', async () => {
