@@ -8,10 +8,10 @@ import {
   AcceptTeamConsentSchema, TEAM_CONSENT_DISCLAIMER_VERSION, TeamActivityPayloadSchema,
   TeamApprovalDecisionPayloadSchema, TeamApprovalRequestPayloadSchema, TeamConsentPayloadSchema,
   TeamDeliveryHeartbeatPayloadSchema, TeamDeliveryPayloadSchema, TeamDeliveryStatusPayloadSchema, TeamInterruptPayloadSchema,
-  TeamStructurePayloadSchema, TeamAgentActivityEntrySchema, UpdateTeamConsentSchema,
+  TeamStructurePayloadSchema, TeamAgentActivityEntrySchema, TeamArtifactRefSchema, TeamArtifactSchema, UpdateTeamConsentSchema,
 } from '@mingle/contracts';
 import type {
-  Policy, ProviderFailure, TeamAgentActivity, TeamAgentActivityEntry, TeamConsent, TeamConsentState,
+  Policy, ProviderFailure, TeamAgentActivity, TeamAgentActivityEntry, TeamArtifactRef, TeamConsent, TeamConsentState,
   TeamDeliveryPayload, TeamPermissionLevel, TeamStructurePayload,
 } from '@mingle/contracts';
 import { ProviderFailureSchema } from '@mingle/contracts';
@@ -29,7 +29,7 @@ import { TeamMcpProxy } from './mcp-proxy.ts';
 import { createCommit } from '../../repository/commit.ts';
 import { signingConfigured } from '../../repository/inspect.ts';
 import { isDeniedName, normalizeRelative } from '../../paths.ts';
-import { normalizeScopes, scopesOverlap } from '../../groups/routing.ts';
+import { normalizeScopes, safeArtifactPath, scopesOverlap } from '../../groups/routing.ts';
 
 type AddRoute = (method: string, path: string, handler: (context: Ctx) => unknown | Promise<unknown>) => unknown;
 type DeviceTransport = DistributedWorkspaceService['transport'];
@@ -872,6 +872,64 @@ export function createDeviceSide(deps: DeviceSideDeps): {
     }
   }
 
+  async function prepareArtifactTransfer(activeDelivery: ActiveDelivery, rawInput: unknown): Promise<TeamArtifactRef> {
+    const input = TeamArtifactSchema.parse(rawInput);
+    const live = active.get(activeDelivery.payload.deliveryId);
+    if (!live || live.runId !== activeDelivery.runId || live.sessionId !== activeDelivery.sessionId
+      || live.controller.signal.aborted || !deps.runtime.isActive(live.sessionId)) {
+      throw new HttpError(409, 'A team artifact must be published by its active owner-device run.');
+    }
+    const row = db.prepare(`SELECT request_json,status,run_id,session_id FROM mingle_team_device_deliveries WHERE delivery_id=?`)
+      .get(activeDelivery.payload.deliveryId) as { request_json: string; status: string; run_id: string | null; session_id: string } | undefined;
+    if (!row || row.status !== 'running' || row.run_id !== activeDelivery.runId || row.session_id !== activeDelivery.sessionId) {
+      throw new HttpError(409, 'The team artifact request no longer matches its active owner-device delivery.');
+    }
+    let persisted: TeamDeliveryPayload;
+    try { persisted = TeamDeliveryPayloadSchema.parse(JSON.parse(row.request_json)); }
+    catch { throw new HttpError(409, 'The saved owner-device delivery request is invalid.'); }
+    if (persisted.sharedProjectId !== activeDelivery.payload.sharedProjectId || persisted.deliveryId !== activeDelivery.payload.deliveryId
+      || persisted.agentId !== activeDelivery.payload.agentId || persisted.integrationDeviceId !== activeDelivery.payload.integrationDeviceId
+      || persisted.taskId !== activeDelivery.payload.taskId || JSON.stringify(persisted.scope ?? null) !== JSON.stringify(activeDelivery.payload.scope ?? null)) {
+      throw new HttpError(403, 'The owner-device artifact request differs from its host-authorized delivery.');
+    }
+    const rejection = deliveryStartRejection(persisted);
+    if (rejection) throw new HttpError(403, `Team consent or settings no longer authorize artifact transfer (${rejection}).`);
+
+    const pathValue = safeArtifactPath(input.path);
+    const expectedTaskId = persisted.taskId ?? undefined;
+    if (input.taskId !== expectedTaskId) {
+      throw new HttpError(403, expectedTaskId
+        ? 'A task artifact must name the task assigned to this owner-device delivery.'
+        : 'This delivery does not authorize publishing an artifact for a task.');
+    }
+    const scope = persisted.scope ? normalizeScopes(persisted.scope) : null;
+    if (persisted.kind === 'assignment' && !scope) throw new HttpError(403, 'The assignment has no verified edit scope for artifact publication.');
+    if (scope && !pathInAssignmentScope(pathValue, scope)) throw new HttpError(403, 'The artifact path is outside this delivery’s assigned scope.');
+    if (pathValue.split('/').some(isDeniedName)) throw new HttpError(403, 'Protected files cannot be published as team artifacts.');
+    if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(input.revision)) throw new HttpError(400, 'A team artifact must name a full committed revision.');
+    const changedPaths = await committedPaths(live.worktreePath, live.baseRevision, input.revision);
+    if (!changedPaths.includes(pathValue)) throw new HttpError(409, `${pathValue} is not a committed change in this delivery revision.`);
+    const outOfScope = changedPaths.filter((file) => pathInAssignmentScope(file, scope) === false || file.split('/').some(isDeniedName));
+    if (outOfScope.length) throw new HttpError(403, 'The artifact commit contains protected or out-of-scope changes and cannot be transferred.');
+    const treeEntry = await git(live.worktreePath, ['ls-tree', '-z', input.revision, '--', pathValue], { maxBuffer: 4096 });
+    const record = treeEntry.stdout.split('\0').filter(Boolean);
+    const match = record.length === 1 ? /^(\d{6}) blob ([0-9a-f]{40,64})\t(.+)$/.exec(record[0]!) : null;
+    if (!match || match[1] === '120000' || match[3] !== pathValue) {
+      throw new HttpError(400, 'A team artifact must be a regular committed file in the active delivery worktree.');
+    }
+
+    const transferred = await deps.distributed.git.exportTeamArtifact({ teamId: activeDelivery.teamId,
+      sharedProjectId: persisted.sharedProjectId, sourceWorktreePath: live.worktreePath, revision: input.revision,
+      ...(live.baseRevision ? { baseRevision: live.baseRevision } : {}), toDeviceId: persisted.integrationDeviceId,
+      deliveryId: persisted.deliveryId, ...(expectedTaskId ? { taskId: expectedTaskId } : {}), path: pathValue });
+    const parsedTransfer = TeamArtifactRefSchema.parse(transferred);
+    if (parsedTransfer.revision.toLowerCase() !== input.revision.toLowerCase() || parsedTransfer.path !== pathValue
+      || parsedTransfer.taskId !== expectedTaskId || !parsedTransfer.transferId) {
+      throw new HttpError(409, 'The owner-device transfer result did not match the requested artifact.');
+    }
+    return parsedTransfer;
+  }
+
   async function exportCommits(activeDelivery: ActiveDelivery): Promise<Array<{ revision: string; transferId?: string; taskId?: string; ref?: string }>> {
     await commitEligibleChanges(activeDelivery);
     const head = trimmed(await git(activeDelivery.worktreePath, ['rev-parse', '--verify', 'HEAD']));
@@ -925,7 +983,12 @@ export function createDeviceSide(deps: DeviceSideDeps): {
       }
       const isolated = await isolatedWorktree(shared, payload, sessionId);
       const proxyConnection = await proxy.create({ teamId: shared.teamId, sharedProjectId: shared.sharedProjectId,
-        hostDeviceId: (await hostDeviceId(shared))!, deliveryId: payload.deliveryId, agentId: payload.agentId });
+        hostDeviceId: (await hostDeviceId(shared))!, deliveryId: payload.deliveryId, agentId: payload.agentId,
+        prepareArtifact: async (artifact) => {
+          const current = active.get(payload.deliveryId);
+          if (!current) throw new HttpError(409, 'The owner-device team run is not active for artifact publication.');
+          return prepareArtifactTransfer(current, artifact);
+        } });
       const beforeStart = deliveryStartRejection(payload);
       if (cancelled.has(payload.deliveryId) || beforeStart || !isAcceptedDelivery(payload.deliveryId)) {
         const row = db.prepare('SELECT status FROM mingle_team_device_deliveries WHERE delivery_id=?').get(payload.deliveryId) as { status: string } | undefined;

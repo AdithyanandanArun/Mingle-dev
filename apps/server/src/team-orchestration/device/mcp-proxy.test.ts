@@ -17,7 +17,7 @@ afterEach(async () => {
   while (proxies.length) await proxies.pop()!.close();
 });
 
-async function connect(timeoutMs: number, respond: boolean) {
+async function connect(timeoutMs: number, respond: boolean, prepareArtifact?: (input: any) => Promise<any>) {
   let proxy!: TeamMcpProxy;
   const calls: any[] = [];
   proxy = new TeamMcpProxy({
@@ -31,7 +31,7 @@ async function connect(timeoutMs: number, respond: boolean) {
     async sync() {},
   }, timeoutMs);
   proxies.push(proxy);
-  const connection = await proxy.create({ teamId: TEAM, sharedProjectId: SHARED, hostDeviceId: HOST, deliveryId: DELIVERY, agentId: AGENT });
+  const connection = await proxy.create({ teamId: TEAM, sharedProjectId: SHARED, hostDeviceId: HOST, deliveryId: DELIVERY, agentId: AGENT, prepareArtifact });
   const client = new Client({ name: 'device-team-test', version: '1.0.0' }, { capabilities: {} });
   clients.push(client);
   const clientTransport = new StreamableHTTPClientTransport(new URL(connection.url), {
@@ -59,5 +59,22 @@ describe('device team MCP proxy', () => {
     expect(result.isError).toBe(true);
     expect((result.content as any[])[0]).toMatchObject({ type: 'text' });
     expect(((result.content as any[])[0] as { text: string }).text).toMatch(/bounded timeout/i);
+  });
+
+  it('exports a committed owner artifact before forwarding the typed tool call with transfer metadata', async () => {
+    const { client, calls } = await connect(500, true, async (input) => {
+      expect(calls).toHaveLength(0);
+      expect(input).toMatchObject({ recipient: 'lead', path: 'index.html', taskId: 'task-1' });
+      return { revision: 'a'.repeat(40), path: input.path, taskId: input.taskId, transferId: 'transfer-owner', ref: 'refs/mingle/team/owner-transfer' };
+    });
+    const result = await client.callTool({ name: 'team_artifact', arguments: {
+      recipient: 'lead', path: 'index.html', revision: 'a'.repeat(40), taskId: 'task-1', note: 'Committed output',
+    } });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({ payload: { tool: 'team_artifact', args: {
+      recipient: 'lead', path: 'index.html', revision: 'a'.repeat(40), taskId: 'task-1',
+      __mingleArtifactTransfer: { transferId: 'transfer-owner', path: 'index.html', taskId: 'task-1' },
+    } } });
+    expect(result.isError).toBeFalsy();
   });
 });

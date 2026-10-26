@@ -9,6 +9,7 @@ import type {
 } from '@mingle/contracts';
 import type { z } from 'zod';
 import { unfinishedDeps } from '../dag.ts';
+import { git } from '../git.ts';
 import type { HandoffService } from '../handoffs.ts';
 import { resolveRunConfig } from '../session-config.ts';
 import type { Store } from '../store.ts';
@@ -86,6 +87,10 @@ const effectiveTurnLimit = (group: ConversationGroup): number | null => {
   const autonomy = group.autonomy;
   return autonomy?.emergencyTurnLimit === undefined ? group.maxTurns : autonomy.emergencyTurnLimit;
 };
+function teamArtifactRefName(sharedProjectId: string, deliveryIdArg: string, revision: string): string {
+  const segment = (value: string) => `${value.replace(/[^A-Za-z0-9._-]/g, '_').replace(/^\.+/, '').slice(0, 36) || 'team'}-${createHash('sha256').update(value).digest('hex').slice(0, 8)}`;
+  return `refs/mingle/team/${segment(sharedProjectId)}/${segment(deliveryIdArg)}/${revision.toLowerCase()}`;
+}
 
 export class GroupService {
   private readonly store: Store;
@@ -2864,12 +2869,22 @@ export class GroupService {
 
   async artifact(ctx: GroupRunContext, input: TeamArtifact): Promise<unknown> {
     const first = this.live(ctx);
-    const { group, member, session } = first;
+    const { group, member, session, delivery } = first;
     const recipient = this.activeByHandle(group, input.recipient);
     if (recipient.id === member.id) throw unprocessable('You cannot send an artifact to yourself');
     const recipientSession = this.store.getSession(recipient.sessionId);
     if (!recipientSession) throw conflict(`@${recipient.handle} is archived`);
     const path = safeArtifactPath(input.path);
+    const activeAssignment = first.delivery.assignmentId ? this.repo.getAssignment(first.delivery.assignmentId) : undefined;
+    if (activeAssignment) {
+      if (input.taskId !== activeAssignment.taskId) throw forbidden('An artifact from an assignment must name that delivery\'s assigned task');
+      const permitted = activeAssignment.scope.some((entry) => path === entry || path.startsWith(`${entry}/`));
+      if (!permitted) throw forbidden('The artifact path is outside the active assignment scope');
+    } else if (first.delivery.taskId) {
+      if (input.taskId !== first.delivery.taskId) throw forbidden('An artifact from a task delivery must name that delivery\'s task');
+    } else if (input.taskId) {
+      throw forbidden('A task artifact can only be published from a delivery that owns that task');
+    }
     let taskId: string | undefined;
     if (input.taskId) {
       const task = this.store.getTask(input.taskId);
@@ -2878,6 +2893,12 @@ export class GroupService {
       if (task.sessionId !== member.sessionId || (assignment && assignment.toMemberId !== member.id)) throw forbidden('You can only publish artifacts for a task you own');
       taskId = task.id;
     }
+    const proxySession = Boolean(this.store.db.prepare('SELECT 1 AS found FROM mingle_team_proxy_sessions WHERE session_id=?').get(session.id));
+    const verifyImportedArtifact = proxySession
+      ? ({ revision, path: artifactPath, blob }: { revision: string; path: string; blob: string }) =>
+        this.verifyImportedTeamArtifact({ groupId: group.id, deliveryId: delivery.id, sessionId: session.id,
+          runId: delivery.runId!, taskId: taskId ?? null, path: artifactPath, revision, blob, worktreePath: session.worktreePath })
+      : undefined;
     if (FULL_SHA.test(input.revision)) {
       const known = this.repo.findArtifact(group.id, member.id, recipient.id, path, input.revision.toLowerCase(), taskId ?? null);
       if (known) return this.artifactResult(known, true);
@@ -2885,6 +2906,11 @@ export class GroupService {
     // The handoff re-checks authority inside its own transaction, immediately before it writes to the recipient session.
     const authorize = () => {
       this.live(ctx);
+      const transferFailure = proxySession ? this.importedTeamArtifactProof({ groupId: group.id, deliveryId: delivery.id, sessionId: session.id,
+        runId: delivery.runId!, taskId: taskId ?? null, path, revision: input.revision }).failure : null;
+      if (transferFailure) {
+        throw forbidden(`Team artifact transfer authorization failed: ${transferFailure}.`);
+      }
       const currentRecipient = this.requireMember(group, recipient.id);
       if (currentRecipient.sessionId !== recipient.sessionId || !this.store.getSession(currentRecipient.sessionId)) throw conflict('The artifact recipient is no longer available');
       if (taskId) {
@@ -2893,7 +2919,7 @@ export class GroupService {
       }
     };
     authorize();
-    const event = await this.handoffs.create({ fromSessionId: member.sessionId, toSessionId: recipient.sessionId, taskId, path, revision: input.revision, note: clean(input.note ?? '', 4000) }, authorize);
+    const event = await this.handoffs.create({ fromSessionId: member.sessionId, toSessionId: recipient.sessionId, taskId, path, revision: input.revision, note: clean(input.note ?? '', 4000) }, authorize, verifyImportedArtifact);
     const handoffMessageId = typeof event.payload.messageId === 'string' ? event.payload.messageId : null;
     const neutralize = (reason: string) => {
       // The verified handoff already exists in the recipient session; keep it from being injected into a run for a stopped sender.
@@ -2928,6 +2954,73 @@ export class GroupService {
     // Wake only queued assignments that were waiting on this exact artifact; nothing is merged and no model turn is forced.
     this.schedule(group.id);
     return this.artifactResult(stored, false);
+  }
+
+  private importedTeamArtifactProof(input: {
+    groupId: string; deliveryId: string; runId: string; sessionId: string; taskId: string | null; path: string; revision: string;
+  }): { failure: string | null; refName?: string } {
+    try {
+      const proxy = this.store.db.prepare(`SELECT team_id,shared_project_id,agent_id,owner_account_id,owner_device_id
+        FROM mingle_team_proxy_sessions WHERE session_id=?`).get(input.sessionId) as {
+          team_id: string; shared_project_id: string; agent_id: string; owner_account_id: string; owner_device_id: string;
+        } | undefined;
+      if (!proxy) return { failure: 'source session is not a team proxy' };
+      const delivery = this.store.db.prepare(`SELECT d.status,d.run_id,d.agent_id,d.owner_account_id,d.owner_device_id,
+          p.host_device_id,p.owner_account_id AS host_owner_account_id,r.agent_id AS roster_agent_id,r.removed_at,c.state,c.owner_account_id AS consent_owner_account_id,
+          c.owner_device_id AS consent_owner_device_id
+        FROM mingle_team_host_deliveries d
+        JOIN mingle_team_host_projects p ON p.team_id=d.team_id AND p.shared_project_id=d.shared_project_id
+        LEFT JOIN mingle_team_host_roster r ON r.team_id=d.team_id AND r.shared_project_id=d.shared_project_id AND r.agent_id=d.agent_id
+        LEFT JOIN mingle_team_host_consents c ON c.team_id=d.team_id AND c.shared_project_id=d.shared_project_id AND c.agent_id=d.agent_id
+        WHERE d.delivery_id=? AND d.group_id=? AND d.session_id=? AND d.team_id=? AND d.shared_project_id=? LIMIT 1`)
+        .get(input.deliveryId, input.groupId, input.sessionId, proxy.team_id, proxy.shared_project_id) as {
+          status: string; run_id: string; agent_id: string; owner_account_id: string; owner_device_id: string;
+          host_device_id: string; host_owner_account_id: string; roster_agent_id: string | null; removed_at: string | null; state: string | null;
+          consent_owner_account_id: string | null; consent_owner_device_id: string | null;
+        } | undefined;
+      if (!delivery || !['accepted', 'running', 'awaiting-approval'].includes(delivery.status)
+        || delivery.run_id !== input.runId || delivery.agent_id !== proxy.agent_id
+        || delivery.owner_account_id !== proxy.owner_account_id || delivery.owner_device_id !== proxy.owner_device_id
+        || delivery.roster_agent_id !== proxy.agent_id || delivery.removed_at !== null || delivery.state !== 'granted'
+        || delivery.consent_owner_account_id !== proxy.owner_account_id || delivery.consent_owner_device_id !== proxy.owner_device_id) {
+        return { failure: 'active host delivery, roster or consent does not match' };
+      }
+      const transfers = this.store.db.prepare(`SELECT transfer_id,source_device_id,peer_device_id,owner_id,offer_json,ref_name
+        FROM mingle_git_team_artifacts WHERE team_id=? AND shared_project_id=? AND delivery_id=? AND direction='incoming' AND status='imported'`)
+        .all(proxy.team_id, proxy.shared_project_id, input.deliveryId) as Array<{
+          transfer_id: string; source_device_id: string; peer_device_id: string; owner_id: string; offer_json: string; ref_name: string | null;
+        }>;
+      const authorizedTransfers = transfers.flatMap((transfer) => {
+        let offer: Record<string, unknown>;
+        try { offer = JSON.parse(transfer.offer_json) as Record<string, unknown>; } catch { return []; }
+        return transfer.source_device_id === proxy.owner_device_id && transfer.peer_device_id === delivery.host_device_id
+          && transfer.owner_id === delivery.host_owner_account_id && offer.transferId === transfer.transfer_id
+          && offer.deliveryId === input.deliveryId && offer.sharedProjectId === proxy.shared_project_id ? [{ offer, refName: transfer.ref_name }] : [];
+      });
+      if (!authorizedTransfers.length) return { failure: 'no imported transfer is bound to the authenticated owner device and host' };
+      const match = authorizedTransfers.find(({ offer }) => typeof offer.revision === 'string'
+        && offer.revision.toLowerCase() === input.revision.toLowerCase() && offer.path === input.path && (offer.taskId ?? null) === input.taskId);
+      if (!match) return { failure: 'the imported transfer offer does not match the requested revision, path and task' };
+      const expectedRef = teamArtifactRefName(proxy.shared_project_id, input.deliveryId, input.revision);
+      if (match.refName !== expectedRef) return { failure: 'the imported artifact ref does not match its authenticated delivery and revision' };
+      return { failure: null, refName: expectedRef };
+    } catch { return { failure: 'authenticated transfer record is unavailable' }; }
+  }
+
+  private async verifyImportedTeamArtifact(input: {
+    groupId: string; deliveryId: string; runId: string; sessionId: string; taskId: string | null; path: string; revision: string;
+    blob: string; worktreePath: string;
+  }): Promise<boolean> {
+    const proof = this.importedTeamArtifactProof(input);
+    if (proof.failure || !proof.refName) return false;
+    const [revision, entry] = await Promise.all([
+      git(input.worktreePath, ['rev-parse', '--verify', '--quiet', '--end-of-options', `${proof.refName}^{commit}`], { allowFailure: true }),
+      git(input.worktreePath, ['ls-tree', '-z', proof.refName, '--', input.path], { allowFailure: true }),
+    ]);
+    if (revision.code !== 0 || revision.stdout.trim().toLowerCase() !== input.revision.toLowerCase()) return false;
+    const records = entry.stdout.split('\0').filter(Boolean);
+    const match = records.length === 1 ? /^(\d{6}) blob ([0-9a-f]{40,64})\t(.+)$/.exec(records[0]!) : null;
+    return Boolean(match && match[1] !== '120000' && match[2] === input.blob && match[3] === input.path);
   }
 
   private artifactResult(row: ArtifactRow, deduplicated: boolean): unknown {

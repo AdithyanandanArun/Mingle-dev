@@ -4,6 +4,8 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { TeamDeliveryPayloadSchema } from '@mingle/contracts';
 import type { AdapterEvent, TeamDeliveryPayload, TeamStructurePayload } from '@mingle/contracts';
 import { TEAM_CONSENT_DISCLAIMER_VERSION } from '@mingle/contracts';
@@ -518,6 +520,63 @@ describe('owner-device team orchestration', () => {
     const row = f.store.db.prepare('SELECT worktree_path FROM mingle_team_device_deliveries WHERE delivery_id=?').get(payload.deliveryId) as { worktree_path: string };
     expect(runGit(row.worktree_path, 'rev-parse', '--verify', 'HEAD').trim()).not.toBe(runGit(f.repo, 'rev-parse', '--verify', 'HEAD').trim());
     expect(runGit(row.worktree_path, 'status', '--porcelain=v1')).toBe('');
+  });
+
+  it('exports and validates a committed in-scope artifact before relaying team_artifact to the host', async () => {
+    const f = await fixture();
+    await sendStructure(f);
+    await f.setConsent();
+    f.runtime.mode = 'manual';
+    let connection: any;
+    let artifactRevision = '';
+    f.runtime.onStart = (options) => {
+      const worktreePath = options.worktree.path as string;
+      writeFileSync(path.join(worktreePath, 'styles.css'), 'body{color:#123}\n');
+      runGit(worktreePath, 'add', '--', 'styles.css');
+      runGit(worktreePath, 'commit', '-m', 'Commit scoped artifact');
+      artifactRevision = runGit(worktreePath, 'rev-parse', 'HEAD').trim();
+      connection = options.teamMcp;
+    };
+    const baseRevision = runGit(f.repo, 'rev-parse', 'HEAD').trim();
+    const payload = deliveryPayload({ deliveryId: `delivery-${randomUUID()}`, kind: 'assignment', taskId: 'task-41',
+      scope: ['styles.css'], baseRevision });
+    await f.handler?.({ id: randomUUID(), teamId: TEAM, fromDeviceId: HOST_DEVICE, toDeviceId: OWN_DEVICE, kind: 'teamgroup.delivery', payload });
+    await waitFor(() => connection && f.runtime.active.size === 1);
+
+    const client = new Client({ name: 'owner-artifact-test', version: '1.0.0' }, { capabilities: {} });
+    const clientTransport = new StreamableHTTPClientTransport(new URL(connection.url), {
+      requestInit: { headers: { Authorization: `Bearer ${connection.token}` } },
+    });
+    await client.connect(clientTransport);
+    try {
+      const denied = await client.callTool({ name: 'team_artifact', arguments: {
+        recipient: 'lead', path: 'README.md', revision: artifactRevision, taskId: 'task-41',
+      } });
+      expect(denied.isError).toBe(true);
+      expect(f.exportCalls).toHaveLength(0);
+      expect(f.sent.filter((message) => message.kind === 'teamgroup.tool.call')).toHaveLength(0);
+
+      const toolResult = client.callTool({ name: 'team_artifact', arguments: {
+        recipient: 'lead', path: 'styles.css', revision: artifactRevision, taskId: 'task-41', note: 'Committed before review',
+      } });
+      await waitFor(() => f.sent.some((message) => message.kind === 'teamgroup.tool.call'));
+      const toolCall = f.sent.find((message) => message.kind === 'teamgroup.tool.call')!;
+      expect(f.exportCalls).toHaveLength(1);
+      expect(f.exportCalls[0]).toMatchObject({ revision: artifactRevision, path: 'styles.css', taskId: 'task-41',
+        deliveryId: payload.deliveryId, toDeviceId: HOST_DEVICE });
+      expect(toolCall.payload.args).toMatchObject({
+        recipient: 'lead', path: 'styles.css', revision: artifactRevision, taskId: 'task-41',
+        __mingleArtifactTransfer: { revision: artifactRevision, path: 'styles.css', taskId: 'task-41', transferId: 'transfer-1' },
+      });
+      await f.handler?.({ id: randomUUID(), teamId: TEAM, fromDeviceId: HOST_DEVICE, toDeviceId: OWN_DEVICE,
+        kind: 'teamgroup.tool.result', payload: { sharedProjectId: SHARED, deliveryId: payload.deliveryId, callId: toolCall.payload.callId,
+          ok: true, result: { artifactId: 'artifact-41' } } });
+      const result = await toolResult;
+      expect(result.isError).toBeFalsy();
+      expect((result.content as Array<{ text?: string }>)[0]?.text).toContain('artifact-41');
+    } finally {
+      await client.close();
+    }
   });
 
   it('heartbeats during a long owner-side run and stops heartbeating after completion', async () => {

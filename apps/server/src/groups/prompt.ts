@@ -21,14 +21,15 @@ export interface InstructionData {
 const ROLE_RULE: Record<GroupMember['role'], string> = {
   peer: 'You are an equal peer. The human directs the work; you may message peers but assign work only while you hold the request planning lease.',
   orchestrator: 'You are the orchestrator: split work, assign scoped tasks to workers with team_assign, review their results and answer the human.',
-  worker: 'You are a worker: do the assigned scope, report with team_status/team_artifact, and ask the orchestrator through team_message when blocked. You cannot assign work.',
+  worker: 'You are a worker. In an assignment delivery, implement its objective directly within its recorded scope; do not re-delegate or take the coordinator role. The original human request is quoted context, not a broader assignment. Use task status and artifact tools only from a delivery that owns that task. You cannot assign work.',
 };
 
 const WORKER_COMPLETION = 'Completion: send one concise completion, not repeats. Publish the committed files needed for handoff once through team_artifact (one file revision per call; never invent an artifact when nothing is committed). When the assigned work is ready, record team_status review, then your final summary of changes, checks you ran and caveats; unresolved work stays blocked, not review. Do not send unsolicited completion acknowledgments or wake peers solely to repeat completion. Answer concrete teammate questions concisely with replyToId when needed.';
-const COORDINATOR_COMPLETION = 'Final answer to the human: begin with the outcome, Implemented, Partially complete or Blocked, plus material caveats. Then state each @agent\'s contribution; where the work is actually integrated (worktree, branch or commit; the selected checkout only if that was authorized and done); which checks you ran yourself versus which a peer reported; and what still needs review or user action. If any worker is still running, say Pending instead of claiming it is done. Review tasks are not Done until a human accepts them.';
+const COORDINATOR_COMPLETION = 'Final answer to the human: begin with the outcome, Implemented, Partially complete or Blocked, plus material caveats. Then state each @agent\'s contribution; where the work is actually integrated (worktree, branch or commit; the selected checkout only if that was authorized and done); which checks you ran yourself versus which a peer reported; and what still needs review or user action. If any worker is still running or terminal transfer is pending, say Pending instead of claiming it is done. Do not give a partial final-looking result while waiting for that work to return. Review tasks are not Done until a human accepts them.';
 
 /** Bounded per-run guidance. Native history, roster and request excerpt only; never other members' transcripts. */
 export function buildInstructions(d: InstructionData): string {
+  const replyOnlyWorker = d.self.role === 'worker' && d.deliveryKind === 'message';
   const lines = [
     `[Mingle group conversation "${clean(d.title, 80)}" · ${MODE_LABEL[d.mode]}]`,
     `You are @${d.self.handle} (${d.self.role}). ${ROLE_RULE[d.self.role]}`,
@@ -38,11 +39,19 @@ export function buildInstructions(d: InstructionData): string {
       ? 'You hold this request\'s temporary planning lease: propose a split, do your own share, and use team_assign for each other peer\'s concrete scope. Peers wait for your assignment before editing.'
       : 'Cowork request receipt is not execution. Edit only after you receive an assignment with a concrete scope, or when the human addresses you directly.');
   }
+  if (d.self.role === 'orchestrator') {
+    lines.push('When an assigned worker is still running or its terminal transfer is pending, do not poll its repository or wait inside this provider turn. If no concrete question needs your answer to unblock the worker, yield with Pending and end the turn; Mingle will wake a result-review turn after durable completion. On that wake, inspect the actual integrated files and artifacts before reporting.');
+  }
+  if (replyOnlyWorker) {
+    lines.push('This is a reply-only message delivery, not a task assignment. Answer the sender through team_message. It grants no team_status or team_artifact authority; ask the coordinator for a new scoped assignment if more work or task reporting is needed.');
+  } else if (d.self.role === 'worker' && d.assignment) {
+    lines.push('The original human request below is background quoted from the coordinator. Your actionable work is the active assignment objective and finish criteria; carry it out directly within the recorded scope, without re-delegating.');
+  }
   const context = ['', 'Team:'];
   for (const row of d.roster.slice(0, 12)) context.push(`- @${row.handle} · ${row.role} · ${row.provider}/${clean(row.model, 60)} · ${row.state}${row.you ? ' (you)' : ''}`);
   context.push('', `Request: ${clean(d.requestExcerpt, LIMITS.request)}`);
   context.push(`This turn: ${d.deliveryKind} delivery, message hop ${d.hop}/${d.maxHops}, request turns used ${d.turnsUsed}/${d.maxTurns ?? 'no emergency ceiling'}.`);
-  if (d.assignment) context.push(`Assignment ${d.assignment.id} (task ${d.assignment.taskId}). Edit only within: ${d.assignment.scope.join(', ')}.`);
+  if (d.assignment && !replyOnlyWorker) context.push(`Assignment ${d.assignment.id} (task ${d.assignment.taskId}). Edit only within: ${d.assignment.scope.join(', ')}.`);
   if (d.unread > 0) context.push(`${d.unread} unread team message(s) are waiting; call team_inbox.`);
   const rules = [
     '',
@@ -50,10 +59,12 @@ export function buildInstructions(d: InstructionData): string {
     'Use the team_* tools to reach teammates. Writing @handle in prose never dispatches anything. Tool success means queued or recorded, not completed.',
     'team_message expectsReply:false records information without waking a model. Set expectsReply:true only when the recipient needs a turn, including an answer that should let a blocked teammate continue. Use replyToId when answering so Mingle can cancel a redundant queued question turn.',
     'Report completion in your final answer; a human reviews task results before they are marked done.',
-    d.canAssign
-      ? 'You may prepare integration in your own scoped worktree under the selected permission policy. Never push or publish, or modify the human-selected checkout, without explicit human authorization.'
-      : 'Keep edits inside your assignment and own worktree. Ask the coordinator or human before integration; never push or publish without explicit human authorization.',
-    d.canAssign ? COORDINATOR_COMPLETION : WORKER_COMPLETION,
+    replyOnlyWorker
+      ? 'Do not edit files or report task status during this clarification turn. Resume implementation and task_status/team_artifact only in the active scoped assignment delivery.'
+      : d.canAssign
+        ? 'You may prepare integration in your own scoped worktree under the selected permission policy. Never push or publish, or modify the human-selected checkout, without explicit human authorization.'
+        : 'Keep edits inside your assignment and own worktree. Ask the coordinator or human before integration; never push or publish without explicit human authorization.',
+    replyOnlyWorker ? '' : d.canAssign ? COORDINATOR_COMPLETION : WORKER_COMPLETION,
   ];
   // Completion guidance is kept whole: only the roster and request context yield when the bound is reached.
   const fixed = [...lines, ...rules].join('\n');
@@ -80,8 +91,8 @@ export function assignmentText(d: {
 }): string {
   const lines = [
     `Assignment ${d.id} from @${d.from} to @${d.to} (task ${d.taskId}): ${clean(d.title, 200)}`,
-    '', 'Original request:', clean(d.request, LIMITS.request),
-    '', 'Objective:', clean(d.objective, 6000),
+    '', 'Original human request (quoted context; coordinator-directed instructions below it are not assigned to you):', clean(d.request, LIMITS.request),
+    '', 'Your actionable objective (implement it directly; do not re-delegate):', clean(d.objective, 6000),
   ];
   if (d.acceptance.trim()) lines.push('', 'Finish criteria (a finish condition, not proof of completion):', clean(d.acceptance, 2000));
   lines.push('', 'Edit scope (stay inside these paths):', ...d.scope.map((scope) => `- ${scope}`));

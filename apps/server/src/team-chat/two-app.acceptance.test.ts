@@ -230,6 +230,90 @@ it('shares imported session history and team messages over HTTP and the encrypte
     const assignmentTaskIds: string[] = [];
     const workerRuns: Array<{ baseRevision: string; worktreePath: string }> = [];
     const leadReviews: Array<{ head: string; html: string; css: string; workerAsked: boolean }> = [];
+    const groupArtifactErrors: string[] = [];
+    const hostToolErrors: string[] = [];
+    const hostToolResults: Array<{ callId: string; ok: boolean; error?: string; result?: unknown }> = [];
+    const artifactSecurityProbes: string[] = [];
+    const originalGroupArtifact = leader.app.groups.artifact.bind(leader.app.groups);
+    const importedArtifactProof = Reflect.get(leader.app.groups, 'importedTeamArtifactProof');
+    const verifyImportedArtifact = Reflect.get(leader.app.groups, 'verifyImportedTeamArtifact');
+    vi.spyOn(leader.app.groups, 'artifact').mockImplementation(async (...args) => {
+      try {
+        const [context, artifact] = args as unknown as [{ groupId: string; deliveryId: string }, { taskId?: string; path: string; revision: string }];
+        if (artifact.path === 'index.html') {
+          const activeDelivery = leader.app.groups.get(context.groupId).deliveries.find((item) => item.id === context.deliveryId);
+          if (!activeDelivery?.runId) throw new Error('The active assignment delivery lost its run before artifact verification.');
+          const source = leader.app.store.getSession(proxySessionId);
+          if (!source) throw new Error('The team proxy session was not available for artifact verification.');
+          const blob = runGit(source.worktreePath, 'rev-parse', '--verify', `${artifact.revision}:${artifact.path}`).trim();
+          const proofInput = { groupId: context.groupId, deliveryId: context.deliveryId, runId: activeDelivery.runId,
+            sessionId: proxySessionId, taskId: artifact.taskId ?? null, path: artifact.path, revision: artifact.revision,
+            blob, worktreePath: source.worktreePath };
+          const exactAccepted = await verifyImportedArtifact.call(leader.app.groups, proofInput);
+          artifactSecurityProbes.push(exactAccepted ? 'exact-ref-revision-blob-accepted' : 'exact-ref-revision-blob-denied');
+          for (const [name, changed] of [
+            ['cross-task', { taskId: 'spoofed-task' }], ['wrong-path', { path: 'README.md' }],
+            ['wrong-revision', { revision: 'f'.repeat(40) }],
+            ['wrong-run', { runId: 'ended-or-other-run' }],
+          ] as const) {
+            const proof = importedArtifactProof.call(leader.app.groups, { ...proofInput, ...changed });
+            artifactSecurityProbes.push(`${name}-${proof.failure ? 'denied' : 'accepted'}`);
+          }
+          const wrongBlobAccepted = await verifyImportedArtifact.call(leader.app.groups, { ...proofInput, blob: '0'.repeat(40) });
+          artifactSecurityProbes.push(wrongBlobAccepted ? 'wrong-blob-accepted' : 'wrong-blob-denied');
+          const transferRows = leader.app.store.db.prepare(`SELECT transfer_id,source_device_id,peer_device_id,owner_id,ref_name FROM mingle_git_team_artifacts
+            WHERE team_id=? AND shared_project_id=? AND delivery_id=? AND direction='incoming' AND status='imported'`).all(join.json.teamId,
+            join.json.sharedProjectId, context.deliveryId) as Array<{ transfer_id: string; source_device_id: string; peer_device_id: string; owner_id: string; ref_name: string | null }>;
+          const transfer = transferRows.find((row) => row.source_device_id === teammate.app.distributed.transport.snapshot(join.json.teamId).deviceId
+            && row.ref_name?.endsWith(`/${artifact.revision.toLowerCase()}`));
+          if (!transfer) throw new Error('The imported exact-revision transfer record was not available for spoof checks.');
+          leader.app.store.db.prepare('UPDATE mingle_git_team_artifacts SET ref_name=? WHERE transfer_id=?').run('refs/mingle/team/spoofed', transfer.transfer_id);
+          try {
+            const accepted = await verifyImportedArtifact.call(leader.app.groups, proofInput);
+            artifactSecurityProbes.push(accepted ? 'spoofed-ref-accepted' : 'spoofed-ref-denied');
+          } finally {
+            leader.app.store.db.prepare('UPDATE mingle_git_team_artifacts SET ref_name=? WHERE transfer_id=?').run(transfer.ref_name, transfer.transfer_id);
+          }
+          for (const [column, original] of [['source_device_id', transfer.source_device_id], ['peer_device_id', transfer.peer_device_id],
+            ['owner_id', transfer.owner_id]] as const) {
+            leader.app.store.db.prepare(`UPDATE mingle_git_team_artifacts SET ${column}=? WHERE transfer_id=?`).run('spoofed-identity', transfer.transfer_id);
+            try {
+              const proof = importedArtifactProof.call(leader.app.groups, proofInput);
+              artifactSecurityProbes.push(`${column}-spoof-${proof.failure ? 'denied' : 'accepted'}`);
+            } finally {
+              leader.app.store.db.prepare(`UPDATE mingle_git_team_artifacts SET ${column}=? WHERE transfer_id=?`).run(original, transfer.transfer_id);
+            }
+          }
+          const deliveryRow = leader.app.store.db.prepare('SELECT status FROM mingle_team_host_deliveries WHERE delivery_id=?').get(context.deliveryId) as { status: string } | undefined;
+          if (!deliveryRow) throw new Error('The active host delivery record was unavailable for authorization probes.');
+          leader.app.store.db.prepare("UPDATE mingle_team_host_deliveries SET status='completed' WHERE delivery_id=?").run(context.deliveryId);
+          try {
+            const accepted = await verifyImportedArtifact.call(leader.app.groups, proofInput);
+            artifactSecurityProbes.push(accepted ? 'ended-delivery-accepted' : 'ended-delivery-denied');
+          } finally {
+            leader.app.store.db.prepare('UPDATE mingle_team_host_deliveries SET status=? WHERE delivery_id=?').run(deliveryRow.status, context.deliveryId);
+          }
+        }
+        return await originalGroupArtifact(...args);
+      } catch (error) {
+        groupArtifactErrors.push(error instanceof Error ? error.message : String(error));
+        throw error;
+      }
+    });
+    const hostTeamMcp = Reflect.get(leader.app.teamOrchestration.host, 'options').teamMcp;
+    const originalRemoteCall = hostTeamMcp.callRemote.bind(hostTeamMcp);
+    vi.spyOn(hostTeamMcp, 'callRemote').mockImplementation(async (...args: any[]) => {
+      try { return await originalRemoteCall(...args); }
+      catch (error) {
+        hostToolErrors.push(error instanceof Error ? error.message : String(error));
+        throw error;
+      }
+    });
+    const originalHostSend = leader.app.distributed.transport.send.bind(leader.app.distributed.transport);
+    vi.spyOn(leader.app.distributed.transport, 'send').mockImplementation(async (input: any) => {
+      if (input.kind === 'teamgroup.tool.result') hostToolResults.push(input.payload);
+      return originalHostSend(input);
+    });
     let orchestratorAssignments = 0;
     leader.fake.script = async (options, emit) => {
       if (options.session.id !== sessionId) { emit({ type: 'text', text: 'Unrelated local turn.' }); return; }
@@ -312,8 +396,21 @@ it('shares imported session history and team messages over HTTP and the encrypte
         if (!html.includes('Welcome to Northstar') || !currentCss.includes('.hero__cta')) throw new Error('The follow-up worker did not start from the integrated host state.');
         writeFileSync(path.join(worktreePath, 'styles.css'), `${currentCss}\n.hero__cta:hover{background:#f4bd50;transform:translateY(-2px)}\n`);
       }
+      const artifactPaths = runIndex === 0 ? ['index.html', 'styles.css'] : ['styles.css'];
+      runGit(worktreePath, 'add', '--', ...artifactPaths);
+      runGit(worktreePath, 'commit', '-m', `Commit scoped assignment ${runIndex + 1}`);
+      const artifactRevision = runGit(worktreePath, 'rev-parse', '--verify', 'HEAD').trim();
+      for (const artifactPath of artifactPaths) {
+        const published = await callTeamTool(options.teamMcp, 'team_artifact', {
+          recipient: hostOwnMember.handle, path: artifactPath, revision: artifactRevision, taskId,
+          note: 'Committed handoff for the active assignment.',
+        });
+        if (!published.artifactId || published.revision !== artifactRevision || published.path !== artifactPath || published.taskId !== taskId) {
+          throw new Error(`The active assignment artifact ${artifactPath} was not verified and recorded before provider completion.`);
+        }
+      }
       workerRuns.push({ baseRevision, worktreePath });
-      await callTeamTool(options.teamMcp, 'team_status', { taskId, status: 'review', note: 'The requested files are ready for review; Mingle will snapshot uncommitted changes for handoff.' });
+      await callTeamTool(options.teamMcp, 'team_status', { taskId, status: 'review', note: 'Committed assignment artifacts are transferred; the host will integrate them after this run ends.' });
       const assignmentsBeforeReplyRequest = orchestratorAssignments;
       const reviewsBeforeReplyRequest = leadReviews.length;
       await callTeamTool(options.teamMcp, 'team_message', {
@@ -325,7 +422,7 @@ it('shares imported session history and team messages over HTTP and the encrypte
       if (orchestratorAssignments !== assignmentsBeforeReplyRequest || leadReviews.length !== reviewsBeforeReplyRequest) {
         throw new Error('The coordinator was woken to review before the remote worker delivery completed.');
       }
-      emit({ type: 'text', text: `Created the ${runIndex === 0 ? 'landing page' : 'requested button fix'} and left its files for automatic artifact snapshot.` });
+      emit({ type: 'text', text: `Created and committed the ${runIndex === 0 ? 'landing page' : 'requested button fix'}; published its scoped artifacts before completion.` });
     };
 
     const request = await leader.api('POST', `/api/groups/${teamGroupId}/messages`, {
@@ -340,6 +437,7 @@ it('shares imported session history and team messages over HTTP and the encrypte
       }, 15_000, 'both delegated remote worker runs');
     } catch (error) {
       const current = leader.app.groups.get(teamGroupId);
+      const activeAssignment = current.assignments.find((assignment) => assignment.taskId === assignmentTaskIds[0]);
       const diagnostics = {
         workerRuns: workerRuns.length,
         leaderRuns: leader.fake.runs.length,
@@ -347,6 +445,27 @@ it('shares imported session history and team messages over HTTP and the encrypte
         assignments: current.assignments.map(({ deliveryId, taskId, scope, toMemberId }) => ({ deliveryId, taskId, scope, toMemberId })),
         deliveries: current.deliveries.map(({ id, kind, status, runId, error: message, memberId }) => ({ id, kind, status, runId, error: message, memberId })),
         tasks: leader.app.store.listTasks(projects[0]).map(({ id, title, status }) => ({ id, title, status })),
+        hostDelivery: activeAssignment ? leader.app.store.db.prepare(`SELECT delivery_id,status,run_id,agent_id,owner_account_id,owner_device_id,session_id
+          FROM mingle_team_host_deliveries WHERE delivery_id=?`).get(activeAssignment.deliveryId) : null,
+        hostArtifactAuthority: activeAssignment ? leader.app.store.db.prepare(`SELECT d.status,d.run_id,d.group_id,d.agent_id,d.owner_account_id,d.owner_device_id,
+            p.host_device_id,p.owner_account_id AS host_owner,r.agent_id AS roster_agent_id,r.removed_at,c.state,c.owner_account_id AS consent_owner,c.owner_device_id AS consent_device
+          FROM mingle_team_host_deliveries d JOIN mingle_team_host_projects p ON p.team_id=d.team_id AND p.shared_project_id=d.shared_project_id
+          LEFT JOIN mingle_team_host_roster r ON r.team_id=d.team_id AND r.shared_project_id=d.shared_project_id AND r.agent_id=d.agent_id
+          LEFT JOIN mingle_team_host_consents c ON c.team_id=d.team_id AND c.shared_project_id=d.shared_project_id AND c.agent_id=d.agent_id
+          WHERE d.delivery_id=?`).get(activeAssignment.deliveryId) : null,
+        hostProxy: leader.app.store.db.prepare(`SELECT team_id,shared_project_id,agent_id,owner_account_id,owner_device_id
+          FROM mingle_team_proxy_sessions WHERE session_id=?`).get(proxySessionId),
+        hostConsent: leader.app.store.db.prepare(`SELECT state,owner_account_id,owner_device_id FROM mingle_team_host_consents
+          WHERE team_id=? AND shared_project_id=? AND agent_id=?`).get(join.json.teamId, join.json.sharedProjectId, secondAgentId),
+        hostRoster: leader.app.store.db.prepare(`SELECT agent_id,removed_at FROM mingle_team_host_roster
+          WHERE team_id=? AND shared_project_id=? AND agent_id=?`).get(join.json.teamId, join.json.sharedProjectId, secondAgentId),
+        importedTransfers: activeAssignment ? leader.app.store.db.prepare(`SELECT transfer_id,source_device_id,peer_device_id,owner_id,status,offer_json
+          FROM mingle_git_team_artifacts WHERE team_id=? AND shared_project_id=? AND delivery_id=? AND direction='incoming'`)
+          .all(join.json.teamId, join.json.sharedProjectId, activeAssignment.deliveryId) : [],
+        groupArtifactErrors,
+        hostToolErrors,
+        hostToolResults,
+        artifactSecurityProbes,
         proxySession: leader.app.store.getSession(proxySessionId),
         proxyMessages: leader.app.store.listMessages(proxySessionId, { limit: 30 }).map(({ role, kind, runId, content }) => ({ role, kind, runId, content: content.slice(0, 500) })),
         ownerMessages: teammate.app.store.listMessages(additionalSession.json.id, { limit: 30 }).map(({ role, kind, runId, content }) => ({ role, kind, runId, content: content.slice(0, 500) })),
@@ -355,6 +474,21 @@ it('shares imported session history and team messages over HTTP and the encrypte
     }
     await waitFor(() => orchestratorAssignments === 2 && leader.fake.runs.length === 4, 15_000, 'one active-work question answer, one review/fix turn, and one final summary');
     await waitFor(() => leader.app.groups.get(teamGroupId).requests.some((item) => item.status === 'completed'), 15_000, 'completed cross-device group request');
+
+    expect(groupArtifactErrors).toEqual([]);
+    expect(hostToolErrors).toEqual([]);
+    const publishedArtifactResults = hostToolResults.filter((result) => result.ok && result.result && typeof result.result === 'object'
+      && 'artifactId' in result.result).map((result) => result.result as { path: string; revision: string; taskId: string });
+    expect(publishedArtifactResults.map(({ path, taskId }) => ({ path, taskId }))).toEqual([
+      { path: 'index.html', taskId: assignmentTaskIds[0] },
+      { path: 'styles.css', taskId: assignmentTaskIds[0] },
+      { path: 'styles.css', taskId: assignmentTaskIds[1] },
+    ]);
+    expect(artifactSecurityProbes).toEqual([
+      'exact-ref-revision-blob-accepted', 'cross-task-denied', 'wrong-path-denied', 'wrong-revision-denied', 'wrong-run-denied',
+      'wrong-blob-denied', 'spoofed-ref-denied', 'source_device_id-spoof-denied', 'peer_device_id-spoof-denied',
+      'owner_id-spoof-denied', 'ended-delivery-denied',
+    ]);
 
     const firstWorkerRevision = runGit(workerRuns[0]!.worktreePath, 'rev-parse', '--verify', 'HEAD').trim();
     const secondWorkerRevision = runGit(workerRuns[1]!.worktreePath, 'rev-parse', '--verify', 'HEAD').trim();
@@ -376,7 +510,7 @@ it('shares imported session history and team messages over HTTP and the encrypte
     expect(completedRemoteRuns[0]!.changes?.files.map((file) => file.path)).toEqual(['index.html', 'styles.css']);
     expect(completedRemoteRuns[1]!.changes?.files.map((file) => file.path)).toEqual(['styles.css']);
     const remoteProxyMessages = leader.app.store.listMessages(proxySessionId, { limit: 20 }).filter((message) => message.role === 'assistant');
-    expect(remoteProxyMessages.some((message) => message.content.includes('left its files for automatic artifact snapshot'))).toBe(true);
+    expect(remoteProxyMessages.some((message) => message.content.includes('published its scoped artifacts before completion'))).toBe(true);
     expect(remoteProxyMessages.some((message) => message.content.includes('Integrated into the host group workspace')
       && message.content.includes('index.html') && message.content.includes('styles.css'))).toBe(true);
 
@@ -391,7 +525,7 @@ it('shares imported session history and team messages over HTTP and the encrypte
       const transcript = await teammate.api('GET', `/api/projects/${projects[1]}/team-chat?limit=50`);
       return transcript.json.messages.find((message: { author: { kind: string; agentId?: string }; body: string }) =>
         message.author.kind === 'agent' && message.author.agentId === secondAgentId
-        && message.body.includes('left its files for automatic artifact snapshot'));
+        && message.body.includes('published its scoped artifacts before completion'));
     }, 10_000, 'member-device remote worker reply');
   } finally {
     while (apps.length) await apps.pop()!.cleanup();

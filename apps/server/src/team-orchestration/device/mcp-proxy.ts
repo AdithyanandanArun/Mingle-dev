@@ -5,9 +5,9 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { z } from 'zod';
 import {
   TeamArtifactSchema, TeamAssignSchema, TeamMessageSchema, TeamStatusSchema,
-  TeamToolCallPayloadSchema, TeamToolResultPayloadSchema,
+  TeamArtifactRefSchema, TeamToolCallPayloadSchema, TeamToolResultPayloadSchema,
 } from '@mingle/contracts';
-import type { TeamMcpConnection } from '@mingle/contracts';
+import type { TeamArtifactRef, TeamMcpConnection } from '@mingle/contracts';
 import type { AuthenticatedEnvelope } from '../../distributed/execution.ts';
 import { redactSecrets, truncate } from '../../util.ts';
 
@@ -16,6 +16,7 @@ const MAX_OUTPUT_CHARS = 64_000;
 const DEFAULT_TIMEOUT_MS = 30_000;
 const MAX_BINDINGS = 64;
 const MAX_IN_FLIGHT = 8;
+type TeamArtifactInput = z.infer<typeof TeamArtifactSchema>;
 
 export interface TeamMcpProxyTransport {
   send(input: { teamId: string; toDeviceId: string; kind: string; payload: unknown; idempotencyKey: string }): Promise<unknown>;
@@ -32,6 +33,8 @@ interface ProxyBinding {
   closed: boolean;
   inFlight: number;
   controllers: Set<AbortController>;
+  /** Transfers an owner-local artifact before the host validates/records its typed handoff. */
+  prepareArtifact?: (input: TeamArtifactInput) => Promise<TeamArtifactRef>;
 }
 
 interface PendingCall {
@@ -121,8 +124,17 @@ export class TeamMcpProxy {
 
   private async call(binding: ProxyBinding, tool: 'team_members' | 'team_inbox' | 'team_assign' | 'team_message' | 'team_artifact' | 'team_status', args: Record<string, unknown>): Promise<unknown> {
     if (binding.closed) throw new Error('This team tool connection has expired.');
+    let forwardedArgs = args;
+    if (tool === 'team_artifact' && binding.prepareArtifact) {
+      const artifact = TeamArtifactSchema.parse(args);
+      const transfer = TeamArtifactRefSchema.parse(await binding.prepareArtifact(artifact));
+      if (transfer.path !== artifact.path || transfer.taskId !== artifact.taskId || transfer.revision.toLowerCase() !== artifact.revision.toLowerCase()) {
+        throw new Error('The owner-device artifact transfer did not match the requested path, task, and commit.');
+      }
+      forwardedArgs = { ...artifact, __mingleArtifactTransfer: transfer };
+    }
     const payload = TeamToolCallPayloadSchema.parse({ sharedProjectId: binding.sharedProjectId,
-      deliveryId: binding.deliveryId, callId: randomUUID(), agentId: binding.agentId, tool, args });
+      deliveryId: binding.deliveryId, callId: randomUUID(), agentId: binding.agentId, tool, args: forwardedArgs });
     const result = new Promise<{ ok: boolean; result?: unknown; error?: string }>((resolve) => {
       const timer = setTimeout(() => {
         this.pending.delete(payload.callId);

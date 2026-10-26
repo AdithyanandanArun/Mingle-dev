@@ -4,7 +4,7 @@ import {
   AddTeamAgentSchema, EnableTeamOrchestrationSchema, TeamApprovalDecisionPayloadSchema,
   TeamApprovalRequestPayloadSchema, TeamConsentPayloadSchema, TeamDeliveryPayloadSchema,
   TeamActivityPayloadSchema, TeamDeliveryHeartbeatPayloadSchema, TeamDeliveryStatusPayloadSchema, TeamInterruptPayloadSchema, TeamOrchestrationSettingsSchema,
-  TEAM_CONSENT_DISCLAIMER_VERSION, TeamPermissionLevelSchema, TeamStructureChangeSchema, TeamStructurePayloadSchema, TeamToolCallPayloadSchema,
+  TEAM_CONSENT_DISCLAIMER_VERSION, TeamArtifactSchema, TeamPermissionLevelSchema, TeamStructureChangeSchema, TeamStructurePayloadSchema, TeamToolCallPayloadSchema,
   TeamToolResultPayloadSchema, TeamArtifactRefSchema,
   type ProviderFailure, type TeamAgentRole, type TeamAgentState, type TeamConsentState,
   type TeamAvailableAgentsSnapshot, type TeamLeaderChange, type TeamPermissionLevel, type TeamStructureMember, type TeamSessionRef,
@@ -26,6 +26,7 @@ import { captureRunTree, compareRunTrees, type RunTreeSnapshot } from '../../run
 import { redactSecrets } from '../../providers/common.ts';
 import type { ProjectCollaborationSnapshot } from '../../../../../packages/contracts/src/project-collaboration.ts';
 import { KeyedLock } from '../../repository/lock.ts';
+import { safeArtifactPath } from '../../groups/routing.ts';
 
 type Row = Record<string, unknown>;
 type HostRow = {
@@ -2000,7 +2001,36 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
     if (!active || active.runId !== delivery.run_id) throw new HttpError(409, 'The team tool call run is no longer active.');
     let result: unknown;
     let error: string | undefined;
-    try { result = await this.options.teamMcp.callRemote(delivery.run_id, delivery.session_id, parsed.data.tool, parsed.data.args); }
+    try {
+      let args = parsed.data.args;
+      if (parsed.data.tool === 'team_artifact') {
+        const { __mingleArtifactTransfer, ...artifactArgs } = args;
+        const artifact = TeamArtifactSchema.parse(artifactArgs);
+        const assignment = this.options.groups.get(delivery.group_id).assignments.find((candidate) => candidate.deliveryId === delivery.delivery_id);
+        const artifactPath = safeArtifactPath(artifact.path);
+        if (assignment) {
+          if (artifact.taskId !== assignment.taskId) throw new HttpError(403, 'The artifact must name this delivery’s assigned task.');
+          const withinScope = assignment.scope.some((scope) => artifactPath === scope || artifactPath.startsWith(`${scope}/`));
+          if (!withinScope) throw new HttpError(403, 'The artifact path is outside its assigned scope.');
+        }
+        if (__mingleArtifactTransfer !== undefined) {
+          const transfer = TeamArtifactRefSchema.parse(__mingleArtifactTransfer);
+          if (transfer.revision.toLowerCase() !== artifact.revision.toLowerCase() || transfer.path !== artifactPath
+            || transfer.taskId !== artifact.taskId) {
+            throw new HttpError(403, 'The owner-device artifact transfer differs from its active handoff request.');
+          }
+          if (!this.options.git) throw new HttpError(409, 'The owner-device artifact cannot be imported because team Git transfer is unavailable.');
+          await this.options.authorizeTeam({ teamId: delivery.team_id, peerDeviceId: delivery.owner_device_id });
+          const imported = await this.options.git.importTeamArtifact({ teamId: delivery.team_id,
+            sharedProjectId: delivery.shared_project_id, deliveryId: delivery.delivery_id, artifact: transfer,
+            sourceDeviceId: delivery.owner_device_id });
+          if (imported.revision.toLowerCase() !== artifact.revision.toLowerCase() || imported.path !== transfer.path
+            || imported.taskId !== transfer.taskId) throw new HttpError(409, 'The imported team artifact differs from its active handoff request.');
+        }
+        args = artifactArgs;
+      }
+      result = await this.options.teamMcp.callRemote(delivery.run_id, delivery.session_id, parsed.data.tool, args);
+    }
     catch (cause) { error = redactSecrets(cause instanceof Error ? cause.message : 'Team tool call failed').slice(0, 2_000); }
     const payload = TeamToolResultPayloadSchema.parse({ sharedProjectId: delivery.shared_project_id, deliveryId: delivery.delivery_id,
       callId: parsed.data.callId, ok: error === undefined, ...(error === undefined ? { result } : { error }) });

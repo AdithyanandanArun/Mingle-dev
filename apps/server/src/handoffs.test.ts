@@ -2,6 +2,7 @@ import { writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { EXAMPLE_ARTIFACT_PATH, EXAMPLE_CLIENT_SESSION_ID, EXAMPLE_CONTRACT_SESSION_ID } from './example.ts';
+import { HandoffService } from './handoffs.ts';
 import { makeRepo, runGit, startTestApp, waitFor, type TestApp } from './test-utils.ts';
 
 const apps: TestApp[] = [];
@@ -107,5 +108,29 @@ describe('handoffs', () => {
     const cross = await t.api('POST', '/api/handoffs', body({ toSessionId: stranger.id }));
     expect(cross.status).toBe(422);
     expect(cross.json.error).toMatch(/same project/);
+  });
+
+  it('accepts an unreachable imported commit only when the internal verifier matches its exact file evidence', async () => {
+    const t = await boot();
+    const from = await sessionOf(t, EXAMPLE_CONTRACT_SESSION_ID);
+    const to = await sessionOf(t, EXAMPLE_CLIENT_SESSION_ID);
+    writeFileSync(path.join(to.worktreePath, 'owner-artifact.ts'), 'export const ownerArtifact = true;\n');
+    runGit(to.worktreePath, 'add', '--', 'owner-artifact.ts');
+    runGit(to.worktreePath, '-c', 'user.name=Owner', '-c', 'user.email=owner@example.invalid', 'commit', '-m', 'owner artifact');
+    const revision = runGit(to.worktreePath, 'rev-parse', 'HEAD').trim();
+    const input = { fromSessionId: from.id, toSessionId: EXAMPLE_CLIENT_SESSION_ID, path: 'owner-artifact.ts', revision, note: '' };
+    const service = new HandoffService(t.app.store);
+
+    await expect(service.create(input)).rejects.toThrow(/not part of the source session history/i);
+    await expect(service.create(input, undefined, () => false)).rejects.toThrow(/not part of the source session history/i);
+    const verified: Array<{ revision: string; path: string; blob: string }> = [];
+    const event = await service.create(input, undefined, (proof) => {
+      verified.push(proof);
+      return proof.revision === revision && proof.path === 'owner-artifact.ts' && /^[0-9a-f]{40,64}$/.test(proof.blob);
+    });
+
+    expect(verified).toHaveLength(1);
+    expect(event).toMatchObject({ type: 'handoff.created', sessionId: EXAMPLE_CLIENT_SESSION_ID,
+      payload: { fromSessionId: from.id, toSessionId: EXAMPLE_CLIENT_SESSION_ID, path: 'owner-artifact.ts', revision } });
   });
 });

@@ -7,6 +7,8 @@ import type { Store } from './store.ts';
 import { conflict, notFound, redactSecrets, unprocessable } from './util.ts';
 
 type HandoffInput = z.infer<typeof HandoffSchema>;
+/** Internal server-side proof for an authenticated imported artifact; never derived from request fields. */
+type ExternalArtifactVerifier = (input: { revision: string; path: string; blob: string }) => boolean | Promise<boolean>;
 
 const REVISION = /^[0-9A-Za-z][0-9A-Za-z._/@{}~^-]{0,99}$/;
 const INLINE_LIMIT = 16 * 1024;
@@ -15,11 +17,11 @@ export class HandoffService {
   constructor(private readonly store: Store) {}
 
   /**
-   * Records an artifact handoff. The artifact must be a committed regular file at an actual revision that belongs to the
-   * source session's history. Nothing is merged and no provider run is started; the receiving session gets a durable
-   * system message that is included in its next explicit run.
+   * Records an artifact handoff. The artifact must be a committed regular file at a revision in the source session's
+   * history, or an exact external revision authorized by the supplied verifier. Nothing is merged and no provider run
+   * is started; the receiving session gets a durable system message included in its next explicit run.
    */
-  async create(input: HandoffInput, assertAuthorized?: () => void): Promise<WorkspaceEvent> {
+  async create(input: HandoffInput, assertAuthorized?: () => void, verifyExternalArtifact?: ExternalArtifactVerifier): Promise<WorkspaceEvent> {
     if (input.fromSessionId === input.toSessionId) throw unprocessable('Source and target sessions must differ');
     const from = this.store.getSession(input.fromSessionId);
     const to = this.store.getSession(input.toSessionId);
@@ -42,7 +44,7 @@ export class HandoffService {
     if (resolved.code !== 0) throw unprocessable(`Revision ${input.revision} does not exist in the source repository`);
     const commit = resolved.stdout.trim();
     const ancestor = await git(from.worktreePath, ['merge-base', '--is-ancestor', commit, 'HEAD'], { allowFailure: true });
-    if (ancestor.code !== 0) throw unprocessable('Revision is not part of the source session history (not reachable from its HEAD)');
+    if (ancestor.code !== 0 && ancestor.code !== 1) throw unprocessable('The source revision ancestry could not be verified');
 
     const entry = await git(from.worktreePath, ['ls-tree', '-z', commit, '--', artifactPath], { allowFailure: true });
     const records = entry.stdout.split('\0').filter(Boolean);
@@ -56,6 +58,11 @@ export class HandoffService {
     if (size <= INLINE_LIMIT) {
       const content = (await git(from.worktreePath, ['cat-file', 'blob', blob!])).stdout;
       if (!content.includes('\0')) inline = redactSecrets(content);
+    }
+    const verifiedExternal = ancestor.code !== 0 && verifyExternalArtifact
+      ? await verifyExternalArtifact({ revision: commit, path: artifactPath, blob: blob! }) : false;
+    if (ancestor.code !== 0 && !verifiedExternal) {
+      throw unprocessable('Revision is not part of the source session history (not reachable from its HEAD)');
     }
     const shortCommit = commit.slice(0, 12);
     const reference = `handoff:${from.id}@${shortCommit}:${artifactPath}#${blob!.slice(0, 12)}`;

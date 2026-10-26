@@ -64,6 +64,7 @@ function fixture(options: { deviceId?: string; role?: 'leader' | 'admin' | 'memb
   };
   const outgoing: Array<{ teamId: string; toDeviceId: string; kind: string; payload: unknown; idempotencyKey: string }> = [];
   const artifactImports: unknown[] = [];
+  const remoteToolCalls: Array<{ runId: string; sessionId: string; tool: string; args: Record<string, unknown>; importsAtCall: number }> = [];
   const artifactIntegrations: unknown[] = [];
   const teamGit = {
     async exportTeamArtifact(input: any) { return { revision: input.revision, transferId: 'host-input-transfer', ref: `refs/mingle/team/input/${input.revision}`, ...(input.path ? { path: input.path } : {}), ...(input.taskId ? { taskId: input.taskId } : {}) }; },
@@ -184,7 +185,10 @@ function fixture(options: { deviceId?: string; role?: 'leader' | 'admin' | 'memb
   const teamMcp = {
     create() { return { url: 'http://127.0.0.1/api/team/mcp', token: 'unused-token' }; },
     revoke() {},
-    async callRemote(_runId: string, _sessionId: string, tool: string) { return { tool, actual: true }; },
+    async callRemote(runId: string, sessionId: string, tool: string, args: Record<string, unknown>) {
+      remoteToolCalls.push({ runId, sessionId, tool, args, importsAtCall: artifactImports.length });
+      return { tool, actual: true };
+    },
   };
   const recovery = { recordFailure() {}, clearFailure() {} };
   const hosts: TeamOrchestrationHost[] = [];
@@ -202,7 +206,7 @@ function fixture(options: { deviceId?: string; role?: 'leader' | 'admin' | 'memb
   };
   let host = makeHost();
   const fx = {
-    store, project, local, get host() { return host; }, outgoing, finished, enqueued, artifactImports, artifactIntegrations, agents, group: () => group, setRole(value: typeof role) { role = value; },
+    store, project, local, get host() { return host; }, outgoing, finished, enqueued, artifactImports, artifactIntegrations, remoteToolCalls, agents, group: () => group, setRole(value: typeof role) { role = value; },
     setDevice(deviceId: string) { localDeviceId = deviceId; },
     setOwnerOnline(value: boolean) { ownerOnline = value; },
     addPublishedAgent(agent: typeof agents[number]) { agents.push(agent); },
@@ -625,6 +629,24 @@ it('dispatches remote proxy deliveries, proxies team MCP calls, rejects mismatch
 
   await fx.incoming('teamgroup.tool.call', { sharedProjectId: SHARED, deliveryId, callId: 'call-1', agentId: REMOTE_AGENT, tool: 'team_members', args: {} });
   expect(fx.outgoing.find((entry) => entry.kind === 'teamgroup.tool.result')?.payload).toMatchObject({ callId: 'call-1', ok: true, result: { actual: true } });
+  const rejectedArtifact = { revision: inputRevision, transferId: 'out-of-scope-transfer', path: 'README.md', taskId: 'task-scoped-1' };
+  await fx.incoming('teamgroup.tool.call', { sharedProjectId: SHARED, deliveryId, callId: 'artifact-out-of-scope', agentId: REMOTE_AGENT,
+    tool: 'team_artifact', args: { recipient: group.members.find((candidate) => candidate.role === 'orchestrator')!.handle, path: rejectedArtifact.path, revision: rejectedArtifact.revision,
+      taskId: rejectedArtifact.taskId, __mingleArtifactTransfer: rejectedArtifact } });
+  expect(fx.outgoing.find((entry) => entry.kind === 'teamgroup.tool.result' && (entry.payload as any).callId === 'artifact-out-of-scope')?.payload)
+    .toMatchObject({ ok: false, error: expect.stringContaining('outside its assigned scope') });
+  expect(fx.artifactImports).toHaveLength(0);
+  expect(fx.remoteToolCalls.some((call) => call.tool === 'team_artifact')).toBe(false);
+
+  const requestedArtifact = { revision: inputRevision, transferId: 'in-scope-transfer', path: 'src/features/landing.ts', taskId: 'task-scoped-1' };
+  await fx.incoming('teamgroup.tool.call', { sharedProjectId: SHARED, deliveryId, callId: 'artifact-in-scope', agentId: REMOTE_AGENT,
+    tool: 'team_artifact', args: { recipient: group.members.find((candidate) => candidate.role === 'orchestrator')!.handle, path: requestedArtifact.path, revision: requestedArtifact.revision,
+      taskId: requestedArtifact.taskId, __mingleArtifactTransfer: requestedArtifact } });
+  expect(fx.artifactImports).toContainEqual(expect.objectContaining({ artifact: requestedArtifact, sourceDeviceId: OWNER_DEVICE }));
+  expect(fx.remoteToolCalls.at(-1)).toMatchObject({ tool: 'team_artifact', importsAtCall: 1,
+    args: { recipient: group.members.find((candidate) => candidate.role === 'orchestrator')!.handle,
+      path: requestedArtifact.path, revision: requestedArtifact.revision, taskId: requestedArtifact.taskId } });
+  expect((fx.remoteToolCalls.at(-1)!.args as any).__mingleArtifactTransfer).toBeUndefined();
   await expect(fx.incoming('teamgroup.tool.call', { sharedProjectId: SHARED, deliveryId, callId: 'call-bad', agentId: LOCAL_AGENT, tool: 'team_members', args: {} })).rejects.toMatchObject({ status: 403 });
 
   await fx.incoming('teamgroup.delivery.status', { sharedProjectId: SHARED, deliveryId, agentId: REMOTE_AGENT, status: 'running', runId: 'owner-run-1', at: new Date().toISOString() });

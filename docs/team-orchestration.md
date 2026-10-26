@@ -32,6 +32,8 @@ The receiver imports only the claimed commit into a deterministic ref under `ref
 
 The host imports returned refs and attempts the clean fast-forward into the group's anchor worktree before completing its proxy delivery. Successfully integrated runs receive a saved changed-file summary, so the group transcript and result card show remote worker paths like local worker paths. Imported refs remain recorded and are included in the result for review. For remote runs, committed handoff inputs are exported to the owner device, listed in `inputArtifacts`, and named in the run prompt before provider execution. Artifact transfer does not validate behavior or push commits. Team consent authorizes transfer and integration; it does not change the separate approvals required by ordinary user-requested Git handoffs.
 
+During an active remote assignment, `team_artifact` first validates the owner-side run, committed path, revision, task and authoritative assignment scope. The owner exports that exact commit to the host; the host imports it into an isolated team ref before recording the existing typed group handoff. This makes committed files available to the handoff verifier without fast-forwarding the group anchor while the owner provider is still running. Terminal completion remains responsible for integration after the run ends.
+
 ## REST surface
 
 | Method & path | Device | Who |
@@ -70,5 +72,7 @@ The owner-side factory is injected through `TeamOrchestrationDeviceSideFactory` 
 Remote completion is a durable host-side intent: the host keeps the proxy delivery live while it imports and fast-forwards artifacts, persisting per-artifact progress so a duplicate terminal status or host restart resumes that work without replaying provider inference. The host records the final proxy message/run and notifies the group scheduler only after integration has settled. A worker's reply-requesting message after its assigned task reaches Review remains queued until its proxy delivery completes; genuine questions during active work can still wake their recipient, and informational messages do not.
 
 Assignment deliveries carry the exact `scope` saved on the matching group assignment (`deliveryId` lookup). The owner executor uses this host-validated path list to limit committed outputs; it never infers scope from prompt prose.
+
+Workers execute the current assignment directly. The original human request embedded in an assignment is quoted background; coordinator-directed delegation instructions are not transferred as worker authority. A reply-requesting clarification is a message delivery, not a continuation of task authority: workers answer it with `team_message`, and request a new scoped assignment when implementation or task status must continue on another turn.
 
 `TeamStructurePayloadSchema` carries optional `host` identity, per-member `consent` fields and `teamSession` so a validated broadcast can populate the read-only structure/session view on another device. Existing required payload fields and message names remain unchanged.
