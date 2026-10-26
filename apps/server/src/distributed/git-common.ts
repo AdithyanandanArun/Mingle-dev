@@ -1,11 +1,11 @@
 import { spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { lstat, readFile, readlink, realpath, stat } from 'node:fs/promises';
-import os from 'node:os';
 import path from 'node:path';
 import type { DatabaseSync, SQLInputValue } from 'node:sqlite';
 import { DistributedDeviceEnvelopeSchema, DistributedProjectBindingSchema } from '../../../../packages/contracts/src/remote-git.ts';
 import type { DistributedDeviceEnvelope } from '../../../../packages/contracts/src/remote-git.ts';
+import { gitNullPath } from '../git-null-path.ts';
 import { conflict, notFound, nowIso } from '../util.ts';
 
 export const MAX_BUNDLE_BYTES = 16 * 1024 * 1024;
@@ -53,12 +53,12 @@ export interface GitProcessResult { code: number; stdout: Buffer; stderr: Buffer
 export interface GitRunOptions { timeoutMs?: number; maxOutputBytes?: number; allowFailure?: boolean; env?: NodeJS.ProcessEnv }
 
 const SAFE_CONFIG: Array<[string, string]> = [
-  ['core.hooksPath', os.devNull],
+  ['core.hooksPath', gitNullPath()],
   ['core.fsmonitor', 'false'],
   ['core.untrackedCache', 'false'],
   ['core.pager', 'cat'],
-  ['core.attributesFile', os.devNull],
-  ['core.excludesFile', os.devNull],
+  ['core.attributesFile', gitNullPath()],
+  ['core.excludesFile', gitNullPath()],
   ['diff.external', ''],
   ['diff.trustExitCode', 'false'],
   ['credential.helper', ''],
@@ -76,7 +76,7 @@ function cleanGitEnvironment(extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
   }
   Object.assign(env, {
     GIT_CONFIG_NOSYSTEM: '1',
-    GIT_CONFIG_GLOBAL: os.devNull,
+    GIT_CONFIG_GLOBAL: gitNullPath(),
     GIT_TERMINAL_PROMPT: '0',
     GIT_OPTIONAL_LOCKS: '0',
     GIT_PAGER: 'cat',

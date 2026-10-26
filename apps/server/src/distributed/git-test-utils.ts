@@ -1,6 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { rmSync } from 'node:fs';
 import type { DatabaseSync } from 'node:sqlite';
+import { gitNullPath } from '../git-null-path.ts';
 import { openDatabase } from '../db.ts';
 import { Store } from '../store.ts';
 import { tmpDir } from '../test-utils.ts';
@@ -61,5 +62,5 @@ export function setGitIdentity(root: string): void {
 
 export function importRunGit(root: string, args: string[]): string {
   // Keep tests on argv-based Git just like the service boundary.
-  return execFileSync('git', args, { cwd: root, encoding: 'utf8', env: { ...process.env, GIT_CONFIG_GLOBAL: process.platform === 'win32' ? 'NUL' : '/dev/null', GIT_CONFIG_NOSYSTEM: '1' } });
+  return execFileSync('git', args, { cwd: root, encoding: 'utf8', env: { ...process.env, GIT_CONFIG_GLOBAL: gitNullPath(), GIT_CONFIG_NOSYSTEM: '1' } });
 }

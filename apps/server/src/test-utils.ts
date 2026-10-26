@@ -4,6 +4,7 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import type { AdapterEvent, AgentAdapter, AppSettings, Provider, ProviderInfo, RunOptions } from '@mingle/contracts';
+import { gitNullPath } from './git-null-path.ts';
 import { createApplication, type ApplicationOptions, type MingleApplication } from './app.ts';
 import type { ProviderRuntime } from './types.ts';
 
@@ -43,7 +44,7 @@ export async function waitFor<T>(fn: () => T | Promise<T>, timeoutMs = 4000, lab
   }
 }
 
-const GIT_ENV = { GIT_AUTHOR_NAME: 'Test', GIT_AUTHOR_EMAIL: 'test@example.invalid', GIT_COMMITTER_NAME: 'Test', GIT_COMMITTER_EMAIL: 'test@example.invalid', GIT_CONFIG_GLOBAL: os.devNull, GIT_CONFIG_NOSYSTEM: '1' };
+const GIT_ENV = { GIT_AUTHOR_NAME: 'Test', GIT_AUTHOR_EMAIL: 'test@example.invalid', GIT_COMMITTER_NAME: 'Test', GIT_COMMITTER_EMAIL: 'test@example.invalid', GIT_CONFIG_GLOBAL: gitNullPath(), GIT_CONFIG_NOSYSTEM: '1' };
 
 export function runGit(cwd: string, ...args: string[]): string {
   return execFileSync('git', args, { cwd, env: { ...process.env, ...GIT_ENV }, encoding: 'utf8' });

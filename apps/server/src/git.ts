@@ -1,9 +1,9 @@
 import { execFile } from 'node:child_process';
-import { devNull } from 'node:os';
 import path from 'node:path';
 import fsp from 'node:fs/promises';
 import type { GitFile, GitStatus } from '@mingle/contracts';
 import { SECRET_PATHSPEC_EXCLUDES, isDeniedName, resolveInside } from './paths.ts';
+import { gitNullPath } from './git-null-path.ts';
 import { HttpError } from './util.ts';
 
 export interface GitResult { stdout: string; stderr: string; code: number }
@@ -34,7 +34,7 @@ export interface GitOptions { timeoutMs?: number; allowFailure?: boolean; maxBuf
 
 /** Runs git with an argv array (never through a shell) and repository-config command execution hooks disabled. */
 export function git(cwd: string, args: string[], options: GitOptions = {}): Promise<GitResult> {
-  const base = ['-c', 'core.quotepath=false', '-c', 'core.fsmonitor=false', '-c', `core.hooksPath=${devNull}`, ...(options.extraConfig ?? []).flatMap((c) => ['-c', c])];
+  const base = ['-c', 'core.quotepath=false', '-c', 'core.fsmonitor=false', '-c', `core.hooksPath=${gitNullPath()}`, ...(options.extraConfig ?? []).flatMap((c) => ['-c', c])];
   return new Promise((resolve, reject) => {
     const child = execFile('git', [...base, ...args], { cwd, env: gitEnv(), timeout: options.timeoutMs ?? 20_000, maxBuffer: options.maxBuffer ?? MAX_BUFFER, encoding: 'utf8', windowsHide: true }, (error, stdout, stderr) => {
       if (!error) return resolve({ stdout, stderr, code: 0 });
@@ -123,7 +123,7 @@ export async function gitStatus(cwd: string): Promise<GitStatus> {
       const target = await resolveInside(cwd, relativeToCwd(info, file.path));
       const stat = await fsp.stat(target.real);
       if (!stat.isFile() || stat.size > MAX_UNTRACKED_BYTES) continue;
-      const result = await git(cwd, ['diff', '--no-index', '--no-ext-diff', '--no-textconv', '--no-color', '--', devNull, target.rel], { allowFailure: true });
+      const result = await git(cwd, ['diff', '--no-index', '--no-ext-diff', '--no-textconv', '--no-color', '--', gitNullPath(), target.rel], { allowFailure: true });
       if (result.code === 1) {
         diff += (diff && !diff.endsWith('\n') ? '\n' : '') + result.stdout;
         untrackedShown++;

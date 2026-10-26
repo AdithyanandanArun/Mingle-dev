@@ -1,5 +1,5 @@
-import { devNull } from 'node:os';
 import { run, type RunResult } from './exec.ts';
+import { gitNullPath } from '../git-null-path.ts';
 import { failureSummary } from './scrub.ts';
 
 export class GitFailure extends Error {
@@ -24,7 +24,7 @@ export interface GitRunOptions {
 }
 
 const CONFIG = [
-  'core.quotepath=false', 'core.fsmonitor=false', `core.hooksPath=${devNull}`, 'protocol.ext.allow=never', 'submodule.recurse=false',
+  'core.quotepath=false', 'core.fsmonitor=false', `core.hooksPath=${gitNullPath()}`, 'protocol.ext.allow=never', 'submodule.recurse=false',
 ];
 const SSH_PASSTHROUGH = new Set(['GIT_SSH', 'GIT_SSH_COMMAND', 'GIT_SSH_VARIANT']);
 
