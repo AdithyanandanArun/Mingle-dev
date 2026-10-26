@@ -50,10 +50,17 @@ export async function verifyGitRepositoryDetection(baseUrl, scratch) {
       token: 'A'.repeat(43), localProjectId: opened.body.id,
       agent: { provider: 'claude', model: 'claude-sonnet-5-5', effort: 'high', policy: 'supervised' },
     });
-    // A valid checkout must reach the account boundary, before any invitation is accepted.
-    assert.equal(joined.status, isRepo ? 401 : 409, JSON.stringify(joined.body));
-    if (isRepo) assert.doesNotMatch(joined.body.error, /not an existing Git repository/);
-    else assert.match(joined.body.error, /not an existing Git repository/);
+    // Account and provider validation run concurrently after repository inspection.
+    // A clean packaging runner may finish either check first; neither accepts an invitation.
+    if (isRepo) {
+      const signedOut = joined.status === 401 && /sign.in.*required|sign in again/i.test(joined.body.error);
+      const missingProvider = joined.status === 409
+        && joined.body.error === 'claude is not currently available on this device. Refresh Providers and choose an available model.';
+      assert.ok(signedOut || missingProvider, JSON.stringify(joined.body));
+    } else {
+      assert.equal(joined.status, 409, JSON.stringify(joined.body));
+      assert.match(joined.body.error, /not an existing Git repository/);
+    }
   }
-  console.log('Packaged Git discovery passed: cloned Unicode/space path, linked worktree, nonrepository and join account boundary.');
+  console.log('Packaged Git discovery passed: cloned Unicode/space path, linked worktree, nonrepository and post-Git join validation.');
 }
