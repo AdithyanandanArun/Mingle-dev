@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { z } from 'zod';
 import {
   AddTeamAgentSchema, EnableTeamOrchestrationSchema, TeamApprovalDecisionPayloadSchema,
   TeamApprovalRequestPayloadSchema, TeamConsentPayloadSchema, TeamDeliveryPayloadSchema,
@@ -9,7 +10,7 @@ import {
   type TeamAvailableAgentsSnapshot, type TeamLeaderChange, type TeamPermissionLevel, type TeamStructureMember, type TeamSessionRef,
   type TeamArtifactRef, type TeamOrchestrationSettings, type TeamStructureSnapshot,
 } from '@mingle/contracts';
-import { ProviderFailureSchema, ProviderSchema, TeamStructurePayloadSchema as StructureSchema, TeamDeliveryPayloadSchema as DeliverySchema } from '@mingle/contracts';
+import { ProviderFailureSchema, ProviderSchema, TeamStructurePayloadSchema as StructureSchema } from '@mingle/contracts';
 import type { DatabaseSync } from 'node:sqlite';
 import type { Store } from '../../store.ts';
 import type { RecoveryService } from '../../recovery/service.ts';
@@ -21,7 +22,7 @@ import type {
 } from '../types.ts';
 import { HttpError } from '../../util.ts';
 import { git } from '../../repository/git-run.ts';
-import { captureRunTree, compareRunTrees } from '../../run-changes.ts';
+import { captureRunTree, compareRunTrees, type RunTreeSnapshot } from '../../run-changes.ts';
 import { redactSecrets } from '../../providers/common.ts';
 import type { ProjectCollaborationSnapshot } from '../../../../../packages/contracts/src/project-collaboration.ts';
 import { KeyedLock } from '../../repository/lock.ts';
@@ -42,6 +43,23 @@ type DeliveryRow = {
   remote_run_id: string | null; status: string; content: string; source_chat_message_id: string | null;
   artifacts_json: string; failure_json: string | null; issued_at: string; timeout_at: number; updated_at: string;
 };
+const CompletionArtifactSchema = z.object({
+  source: TeamArtifactRefSchema,
+  state: z.enum(['pending', 'integrated', 'failed']),
+  imported: TeamArtifactRefSchema.optional(),
+  failure: z.string().max(500).optional(),
+}).strict();
+const CompletionIntentSchema = z.object({
+  kind: z.literal('team-completion'), version: z.literal(1), phase: z.enum(['artifacts', 'finalizing', 'notifying']),
+  remoteRunId: z.string().nullable(), at: z.string(), finalText: z.string().max(50_000),
+  workspaceBefore: z.unknown().nullable(), artifacts: z.array(CompletionArtifactSchema).max(30),
+  artifactFailures: z.array(z.string().max(500)).max(30), importedArtifacts: z.array(TeamArtifactRefSchema).max(30),
+  integratedArtifacts: z.array(TeamArtifactRefSchema).max(30), finalContent: z.string().max(50_000).optional(),
+  workspaceChanges: z.unknown().optional(),
+}).strict();
+const DeliverySchema = TeamDeliveryPayloadSchema;
+type CompletionIntent = z.infer<typeof CompletionIntentSchema> & { workspaceBefore: RunTreeSnapshot | null };
+class CompletionAuthorityError extends Error {}
 type ProjectContext = ProjectCollaborationSnapshot & {
   project: NonNullable<ProjectCollaborationSnapshot['project']>;
   localProjectId: string; accountId: string; localDeviceId: string; hostDeviceId: string;
@@ -64,6 +82,7 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
   private readonly chatByDelivery = new Map<string, string>();
   private readonly chatDeliveryCounts = new Map<string, number>();
   private readonly mutations = new KeyedLock();
+  private readonly deliveryMutations = new KeyedLock();
   private closed = false;
   private readonly now: () => number;
   private readonly deliveryTimeoutMs: number;
@@ -109,9 +128,15 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
   }
 
   private recoverProxyDeliveries(): void {
-    const rows = this.hostRows.prepare(`SELECT delivery_id,session_id,run_id FROM mingle_team_host_deliveries
-      WHERE status IN ('queued','accepted','running','awaiting-approval')`).all() as Array<{ delivery_id: string; session_id: string; run_id: string }>;
+    const rows = this.hostRows.prepare(`SELECT * FROM mingle_team_host_deliveries
+      WHERE status IN ('queued','accepted','running','awaiting-approval','completed')`).all() as Array<DeliveryRow>;
     for (const row of rows) {
+      const intent = this.completionIntent(row);
+      if (intent) {
+        if (liveDelivery(row.status) || (row.status === 'completed' && intent.phase === 'notifying')) this.track(this.processCompletion(row.delivery_id));
+        continue;
+      }
+      if (!liveDelivery(row.status)) continue;
       // The owner device continues independently of the host process. Keep its durable delivery
       // live and resume the persisted idle deadline rather than interrupting valid remote work.
       this.active.set(row.session_id, { runId: row.run_id, controller: new AbortController() });
@@ -1164,6 +1189,9 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
     const member = group.members.find((candidate) => candidate.id === context.memberId && candidate.sessionId === input.session.id);
     const delivery = group.deliveries.find((candidate) => candidate.id === context.deliveryId && candidate.status === 'running');
     if (!member || !delivery || delivery.requestId !== context.requestId) throw new HttpError(409, 'The group delivery is no longer active.');
+    // Assignment scope is host-owned structured state. The same delivery ID is required to avoid
+    // accidentally lending another worker's scope to this run; never derive it from model prose.
+    const assignment = group.assignments.find((candidate) => candidate.deliveryId === context.deliveryId);
     const groupWorkspace = this.groupWorkspace(context.groupId);
     const enabledRole = member.role === 'orchestrator' ? 'orchestrator' : 'worker';
     const basePayload = DeliverySchema.parse({
@@ -1171,7 +1199,8 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
       requestId: context.requestId, agentId: proxy.agent_id, role: enabledRole,
       kind: delivery.kind ?? 'request', content: input.content.slice(0, 100_000), hop: context.hop,
       permissionLevel: settings.permissionLevel, settingsVersion: settings.version,
-      ...(input.options.taskId ? { taskId: input.options.taskId } : {}), inputArtifacts: [], integrationDeviceId: host.host_device_id,
+      ...((assignment?.taskId ?? input.options.taskId) ? { taskId: assignment?.taskId ?? input.options.taskId } : {}),
+      ...(assignment?.scope.length ? { scope: assignment.scope } : {}), inputArtifacts: [], integrationDeviceId: host.host_device_id,
       issuedAt: new Date(this.now()).toISOString(),
     });
     const controller = new AbortController();
@@ -1436,11 +1465,14 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
       throw new HttpError(403, 'The delivery heartbeat came from a different device, agent, or run.');
     }
     await this.verifyOwnerDevice(delivery.team_id, envelope.fromDeviceId, delivery.owner_account_id);
-    if (!liveDelivery(delivery.status)) return;
-    const prior = this.heartbeatSequences.get(delivery.delivery_id) ?? 0;
-    if (parsed.data.sequence <= prior) return;
-    this.heartbeatSequences.set(delivery.delivery_id, parsed.data.sequence);
-    this.extendDeliveryTimeout(delivery.delivery_id);
+    await this.deliveryMutations.run(delivery.delivery_id, async () => {
+      const current = this.delivery(delivery.delivery_id);
+      if (!current || !liveDelivery(current.status) || this.completionIntent(current)) return;
+      const prior = this.heartbeatSequences.get(current.delivery_id) ?? 0;
+      if (parsed.data.sequence <= prior) return;
+      this.heartbeatSequences.set(current.delivery_id, parsed.data.sequence);
+      this.extendDeliveryTimeout(current.delivery_id);
+    });
   }
 
   private deliveryDeadline(now: number, issuedAt: number): number {
@@ -1500,115 +1532,331 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
     if (!delivery || delivery.team_id !== envelope.teamId || delivery.shared_project_id !== parsed.data.sharedProjectId
       || delivery.owner_device_id !== envelope.fromDeviceId || delivery.agent_id !== parsed.data.agentId) return;
     const lateCompletion = parsed.data.status === 'completed' && this.timedOutDelivery(delivery);
-    if (!liveDelivery(delivery.status) && !lateCompletion) return;
-    if (!lateCompletion) this.extendDeliveryTimeout(delivery.delivery_id);
+    const notificationReplay = parsed.data.status === 'completed' && delivery.status === 'completed'
+      && this.completionIntent(delivery)?.phase === 'notifying';
+    if (!liveDelivery(delivery.status) && !lateCompletion && !notificationReplay) return;
     if (parsed.data.status === 'accepted' || parsed.data.status === 'running' || parsed.data.status === 'awaiting-approval') {
-      const next = parsed.data.status === 'awaiting-approval' && delivery.status === 'running'
-        || parsed.data.status === 'running' && ['accepted', 'queued', 'awaiting-approval'].includes(delivery.status)
-        ? parsed.data.status : null;
-      if (!next) return;
-      const changed = this.hostRows.prepare(`UPDATE mingle_team_host_deliveries SET status=?,remote_run_id=COALESCE(?,remote_run_id),updated_at=?
-        WHERE delivery_id=? AND status=?`).run(next, parsed.data.runId, parsed.data.at, delivery.delivery_id, delivery.status);
-      if (Number(changed.changes) !== 1) return;
-      this.options.store.updateSession(delivery.session_id, { status: next === 'awaiting-approval' ? 'waiting' : 'running' });
+      await this.deliveryMutations.run(delivery.delivery_id, async () => {
+        const current = this.delivery(delivery.delivery_id);
+        if (!current || !liveDelivery(current.status) || this.completionIntent(current)) return;
+        this.extendDeliveryTimeout(current.delivery_id);
+        const next = parsed.data.status === 'awaiting-approval' && current.status === 'running'
+          || parsed.data.status === 'running' && ['accepted', 'queued', 'awaiting-approval'].includes(current.status)
+          ? parsed.data.status : null;
+        if (!next) return;
+        const changed = this.hostRows.prepare(`UPDATE mingle_team_host_deliveries SET status=?,remote_run_id=COALESCE(?,remote_run_id),updated_at=?
+          WHERE delivery_id=? AND status=?`).run(next, parsed.data.runId, parsed.data.at, current.delivery_id, current.status);
+        if (Number(changed.changes) !== 1) return;
+        this.options.store.updateSession(current.session_id, { status: next === 'awaiting-approval' ? 'waiting' : 'running' });
+      });
       return;
     }
+
+    if (parsed.data.status === 'completed') {
+      const intent = await this.deliveryMutations.run(delivery.delivery_id, async () => {
+        const current = this.delivery(delivery.delivery_id);
+        if (!current || current.owner_device_id !== envelope.fromDeviceId || current.agent_id !== parsed.data.agentId) return null;
+        const existing = this.completionIntent(current);
+        if (existing) {
+          if (existing.remoteRunId !== parsed.data.runId
+            || existing.finalText !== (parsed.data.finalText ?? '')
+            || JSON.stringify(existing.artifacts.map((entry) => entry.source)) !== JSON.stringify(parsed.data.artifacts)) {
+            throw new HttpError(409, 'A different completion result is already recorded for this team delivery.');
+          }
+          return existing;
+        }
+        const timeoutCompletion = this.timedOutDelivery(current);
+        if (!liveDelivery(current.status) && !timeoutCompletion) return null;
+        const nextIntent: CompletionIntent = {
+          kind: 'team-completion', version: 1, phase: 'artifacts', remoteRunId: parsed.data.runId,
+          at: parsed.data.at, finalText: parsed.data.finalText ?? '', workspaceBefore: null,
+          artifacts: parsed.data.artifacts.map((artifact) => ({ source: TeamArtifactRefSchema.parse(artifact), state: 'pending' as const })),
+          artifactFailures: [], importedArtifacts: [], integratedArtifacts: [],
+        };
+        const changed = this.hostRows.prepare(`UPDATE mingle_team_host_deliveries SET status='running',failure_json=?,remote_run_id=COALESCE(?,remote_run_id),updated_at=?
+          WHERE delivery_id=? AND (status IN ('queued','accepted','running','awaiting-approval') OR (status='failed' AND ?=1))`)
+          .run(JSON.stringify(nextIntent), parsed.data.runId, parsed.data.at, current.delivery_id, Number(timeoutCompletion));
+        if (Number(changed.changes) !== 1) return null;
+        const timer = this.timers.get(current.delivery_id);
+        if (timer) clearTimeout(timer);
+        this.timers.delete(current.delivery_id);
+        return nextIntent;
+      });
+      if (intent) await this.processCompletion(delivery.delivery_id);
+      return;
+    }
+
+    this.extendDeliveryTimeout(delivery.delivery_id);
     const failure = parsed.data.failure ? ProviderFailureSchema.parse({ ...parsed.data.failure, sessionId: delivery.session_id, runId: delivery.run_id,
       message: redactSecrets(parsed.data.failure.message).slice(0, 1000),
       ...(parsed.data.failure.providerCode ? { providerCode: redactSecrets(parsed.data.failure.providerCode).slice(0, 100) } : {}),
       ...(parsed.data.failure.quotaPool ? { quotaPool: redactSecrets(parsed.data.failure.quotaPool).slice(0, 100) } : {}),
     }) : undefined;
-    const outcome = parsed.data.status === 'completed' ? 'completed' : parsed.data.status === 'interrupted' ? 'interrupted' : 'failed';
+    const outcome = parsed.data.status === 'interrupted' ? 'interrupted' : 'failed';
     const rejection = parsed.data.status === 'rejected' ? `Remote agent rejected delivery: ${parsed.data.rejection ?? 'invalid'}` : undefined;
     const failureJson = failure ? JSON.stringify(failure) : rejection ? JSON.stringify({ message: redactSecrets(rejection).slice(0, 500) }) : null;
-    const claimed = this.hostRows.prepare(`UPDATE mingle_team_host_deliveries SET status=?,failure_json=?,remote_run_id=COALESCE(?,remote_run_id),updated_at=?
-      WHERE delivery_id=? AND (status IN ('queued','accepted','running','awaiting-approval') OR (status='failed' AND ?=1))`)
-      .run(outcome, failureJson, parsed.data.runId, parsed.data.at, delivery.delivery_id, Number(lateCompletion));
-    if (Number(claimed.changes) !== 1) return;
-
-    if (parsed.data.status === 'completed') {
-      // The remote provider has finished. Close the proxy run before taking the project Git lease
-      // for ref-only imports, so other host sessions cannot race the repository mutation.
-      const run = this.options.store.getRun(delivery.run_id);
-      if (run?.status === 'running') {
-        this.options.store.finishRun(delivery.run_id, 'completed', Math.max(0, this.now() - Date.parse(run.startedAt)), parsed.data.at);
-      } else if (run && (lateCompletion || liveDelivery(delivery.status)) && run.status !== 'completed') {
-        this.hostRows.prepare(`UPDATE session_runs SET status='completed',finished_at=?,duration_ms=? WHERE id=? AND status IN ('failed','interrupted')`)
-          .run(parsed.data.at, Math.max(0, this.now() - Date.parse(run.startedAt)), delivery.run_id);
-      }
-      this.options.store.updateSession(delivery.session_id, { status: 'idle', error: null });
-      this.options.recovery.clearFailure(delivery.session_id);
-      // The remote provider has stopped. Release the proxy's runtime lock before acquiring the
-      // repository lease to integrate its verified commits into the group's anchor worktree.
-      this.releaseProxyRun(delivery);
-      const importedArtifacts: TeamArtifactRef[] = [];
-      const integratedArtifacts: TeamArtifactRef[] = [];
-      const artifactFailures: string[] = [];
-      const workspace = this.groupWorkspace(delivery.group_id);
-      const workspaceBefore = workspace ? await captureRunTree(workspace.worktreePath) : null;
-      for (const untrustedArtifact of parsed.data.artifacts) {
-        const artifact = TeamArtifactRefSchema.parse(untrustedArtifact);
-        try {
-          if (!this.options.git) throw new Error('Git artifact import is unavailable on the host.');
-          const imported = await this.options.git.importTeamArtifact({ teamId: delivery.team_id,
-            sharedProjectId: delivery.shared_project_id, deliveryId: delivery.delivery_id, artifact,
-            sourceDeviceId: envelope.fromDeviceId });
-          importedArtifacts.push(imported);
-          if (!workspace || !this.options.integrateTeamArtifact) {
-            artifactFailures.push(`Commit ${artifact.revision.slice(0, 12)} was imported as ${imported.ref ?? 'an isolated ref'} but the host group workspace is unavailable for integration.`);
-            continue;
-          }
-          await this.options.integrateTeamArtifact({ localProjectId: workspace.projectId, teamId: delivery.team_id,
-            sharedProjectId: delivery.shared_project_id, deliveryId: delivery.delivery_id, worktreePath: workspace.worktreePath, artifact: imported });
-          integratedArtifacts.push(imported);
-        } catch (error) {
-          artifactFailures.push(redactSecrets(error instanceof Error ? error.message : 'Artifact import failed.').slice(0, 500));
-        }
-      }
-      this.hostRows.prepare('UPDATE mingle_team_host_deliveries SET artifacts_json=? WHERE delivery_id=? AND status=\'completed\'')
-        .run(JSON.stringify(importedArtifacts), delivery.delivery_id);
-      let workspaceChanges: import('@mingle/contracts').RunChanges | undefined;
-      if (workspace && integratedArtifacts.length && workspaceBefore) {
-        const workspaceAfter = await captureRunTree(workspace.worktreePath);
-        workspaceChanges = await compareRunTrees(workspace.worktreePath, workspaceBefore, workspaceAfter);
-        this.options.store.setRunChanges(delivery.run_id, workspaceChanges);
-      }
-      const artifactSummary = importedArtifacts.length
-        ? `\n\nImported committed artifacts:\n${importedArtifacts.map((artifact) =>
-          `- ${safeArtifactText(artifact.path ?? 'committed artifact', 120)} @ ${artifact.revision}${artifact.taskId ? ` (task ${safeArtifactText(artifact.taskId, 80)})` : ''}\n  Git ref: ${safeArtifactText(artifact.ref ?? '', 255)}`,
-        ).join('\n')}` : '';
-      const workspaceSummary = integratedArtifacts.length
-        ? workspaceChanges?.summary.status === 'available'
-          ? workspaceChanges.summary.files.length
-            ? `\n\nIntegrated into the host group workspace${workspace?.branch ? ` (${safeArtifactText(workspace.branch, 200)})` : ''}; changed files:\n${workspaceChanges.summary.files.map((file) => `- ${safeArtifactText(file.path, 500)} (${file.status})`).join('\n')}${workspaceChanges.summary.truncated ? '\n- Additional changed files were omitted from this summary.' : ''}`
-            : '\n\nIntegrated into the host group workspace; no new file changes were recorded.'
-          : '\n\nIntegrated into the host group workspace, but its changed-file summary is unavailable.'
-        : '';
-      const failureSummary = artifactFailures.length ? `\n\nArtifact import/integration failures:\n${artifactFailures.map((failure) => `- ${failure}`).join('\n')}`.slice(0, 15_000) : '';
-      const finalBudget = Math.max(0, 50_000 - artifactSummary.length - workspaceSummary.length - failureSummary.length);
-      const finalText = `${parsed.data.finalText ? redactSecrets(parsed.data.finalText).slice(0, finalBudget) : ''}${artifactSummary}${workspaceSummary}${failureSummary}`;
-      if (finalText) this.options.store.insertMessage({ sessionId: delivery.session_id, runId: delivery.run_id, role: 'assistant', content: finalText });
-      this.finishClaimedDelivery(delivery, 'completed', undefined, undefined, parsed.data.at);
-      const project = this.readHost(delivery.team_id, delivery.shared_project_id);
-      if (delivery.source_chat_message_id && this.chat && delivery.owner_device_id === this.options.transport.snapshot(delivery.team_id).deviceId && finalText && project) {
-        await this.chat.postOrchestratedAgentReply({ projectId: project.local_project_id, sourceMessageId: delivery.source_chat_message_id, agentId: delivery.agent_id, content: finalText });
-      }
-      return;
-    }
+    const claimed = await this.deliveryMutations.run(delivery.delivery_id, async () => {
+      const current = this.delivery(delivery.delivery_id);
+      if (!current || this.completionIntent(current) || (!liveDelivery(current.status) && !this.timedOutDelivery(current))) return false;
+      const changed = this.hostRows.prepare(`UPDATE mingle_team_host_deliveries SET status=?,failure_json=?,remote_run_id=COALESCE(?,remote_run_id),updated_at=?
+        WHERE delivery_id=? AND (status IN ('queued','accepted','running','awaiting-approval') OR status='failed')`)
+        .run(outcome, failureJson, parsed.data.runId, parsed.data.at, delivery.delivery_id);
+      if (Number(changed.changes) !== 1) return false;
+      this.finishClaimedDelivery(current, outcome, failure, rejection, parsed.data.at);
+      return true;
+    });
+    if (!claimed) return;
     if (failure) this.options.recovery.recordFailure(delivery.session_id, delivery.run_id, failure);
-    this.finishClaimedDelivery(delivery, outcome, failure, rejection, parsed.data.at);
     if (failure?.kind === 'quota_exhausted') await this.promoteFallback(delivery.team_id, delivery.shared_project_id, 'fallback-quota');
   }
 
-  private async finishDelivery(deliveryId: string, outcome: 'completed' | 'failed' | 'interrupted', failure?: ProviderFailure, message?: string, at = new Date(this.now()).toISOString(), remoteRunId?: string | null): Promise<void> {
-    const delivery = this.delivery(deliveryId);
-    if (!delivery || !liveDelivery(delivery.status)) return;
-    const changed = this.hostRows.prepare(`UPDATE mingle_team_host_deliveries SET status=?,failure_json=?,remote_run_id=COALESCE(?,remote_run_id),updated_at=?
+  private completionIntent(delivery: DeliveryRow): CompletionIntent | null {
+    if (!delivery.failure_json) return null;
+    const parsed = CompletionIntentSchema.safeParse(safeJson<unknown>(delivery.failure_json, null));
+    if (!parsed.success) return null;
+    return { ...parsed.data, workspaceBefore: parsed.data.workspaceBefore as RunTreeSnapshot | null };
+  }
+
+  private persistCompletionIntent(deliveryId: string, intent: CompletionIntent): void {
+    this.options.store.tx(() => {
+      const changed = this.hostRows.prepare(`UPDATE mingle_team_host_deliveries SET failure_json=?,artifacts_json=?,updated_at=?
+        WHERE delivery_id=? AND status IN ('queued','accepted','running','awaiting-approval')`)
+        .run(JSON.stringify(intent), JSON.stringify(intent.importedArtifacts), new Date(this.now()).toISOString(), deliveryId);
+      if (Number(changed.changes) !== 1) throw new CompletionAuthorityError('The remote delivery stopped before its artifacts could be integrated.');
+    });
+  }
+
+  private async processCompletion(deliveryId: string): Promise<void> {
+    await this.deliveryMutations.run(deliveryId, async () => {
+      const observed = this.delivery(deliveryId);
+      const initialIntent = observed && this.completionIntent(observed);
+      if (!observed || !initialIntent) return;
+      if (observed.status === 'completed' && initialIntent.phase === 'notifying') {
+        await this.notifyCompletedDelivery(observed, initialIntent);
+        return;
+      }
+      if (!liveDelivery(observed.status)) return;
+      await this.mutations.run(`${observed.team_id}\0${observed.shared_project_id}`, async () => {
+        const delivery = this.delivery(deliveryId);
+        let intent = delivery && this.completionIntent(delivery);
+        if (!delivery || !intent || !liveDelivery(delivery.status)) return;
+        try {
+          await this.assertCompletionAuthority(delivery);
+        } catch (error) {
+          if (error instanceof CompletionAuthorityError) {
+            this.finishCompletionInterrupted(delivery, error.message, intent.at);
+            return;
+          }
+          throw error;
+        }
+        const workspace = this.groupWorkspace(delivery.group_id);
+        if (!intent.workspaceBefore) {
+          intent = { ...intent, workspaceBefore: workspace ? await captureRunTree(workspace.worktreePath) : null };
+          this.persistCompletionIntent(deliveryId, intent);
+        }
+        // The provider has ended, but keep its host-side interrupt handle until artifact work is
+        // committed. Revoke MCP authority without aborting the signal used to stop integration.
+        this.options.teamMcp.revoke(delivery.run_id);
+
+        for (let index = 0; index < intent.artifacts.length; index++) {
+          const progress = intent.artifacts[index]!;
+          if (progress.state !== 'pending') continue;
+          try {
+            this.assertCompletionStillLive(deliveryId);
+            if (!progress.imported) {
+              if (!this.options.git) throw new Error('Git artifact import is unavailable on the host.');
+              await this.options.authorizeTeam({ teamId: delivery.team_id, peerDeviceId: delivery.owner_device_id });
+              const imported = await this.options.git.importTeamArtifact({ teamId: delivery.team_id,
+                sharedProjectId: delivery.shared_project_id, deliveryId, artifact: progress.source,
+                sourceDeviceId: delivery.owner_device_id });
+              intent = { ...intent, artifacts: intent.artifacts.map((entry, entryIndex) => entryIndex === index
+                ? { ...entry, imported, state: 'pending' as const } : entry),
+              importedArtifacts: [...intent.importedArtifacts, imported] };
+              this.persistCompletionIntent(deliveryId, intent);
+            }
+            this.assertCompletionStillLive(deliveryId);
+            if (!workspace || !this.options.integrateTeamArtifact) {
+              throw new Error(`Commit ${progress.source.revision.slice(0, 12)} was imported as ${progress.imported?.ref ?? 'an isolated ref'} but the host group workspace is unavailable for integration.`);
+            }
+            const importedArtifact: TeamArtifactRef = intent.artifacts[index]!.imported!;
+            const integrationResult = await this.options.integrateTeamArtifact({ localProjectId: workspace.projectId, teamId: delivery.team_id,
+              sharedProjectId: delivery.shared_project_id, deliveryId, worktreePath: workspace.worktreePath, artifact: importedArtifact });
+            if (integrationResult.revision.toLowerCase() !== importedArtifact.revision.toLowerCase()) {
+              throw new Error(`Artifact ${importedArtifact.revision.slice(0, 12)} did not become the host workspace revision.`);
+            }
+            this.assertCompletionStillLive(deliveryId);
+            intent = { ...intent, artifacts: intent.artifacts.map((entry, entryIndex) => entryIndex === index
+              ? { ...entry, state: 'integrated' as const } : entry),
+            integratedArtifacts: [...intent.integratedArtifacts, importedArtifact] };
+            this.persistCompletionIntent(deliveryId, intent);
+          } catch (error) {
+            if (error instanceof CompletionAuthorityError) throw error;
+            this.assertCompletionStillLive(deliveryId);
+            const failure = redactSecrets(error instanceof Error ? error.message : 'Artifact import/integration failed.').slice(0, 500);
+            intent = { ...intent, artifacts: intent.artifacts.map((entry, entryIndex) => entryIndex === index
+              ? { ...entry, state: 'failed' as const, failure } : entry),
+            artifactFailures: [...intent.artifactFailures, failure].slice(0, 30) };
+            this.persistCompletionIntent(deliveryId, intent);
+          }
+        }
+
+        const currentDelivery = this.delivery(deliveryId);
+        intent = currentDelivery && this.completionIntent(currentDelivery);
+        if (!currentDelivery || !intent || !liveDelivery(currentDelivery.status)) return;
+        this.assertCompletionStillLive(deliveryId);
+        let workspaceChanges: import('@mingle/contracts').RunChanges | undefined;
+        if (workspace && intent.integratedArtifacts.length && intent.workspaceBefore) {
+          const workspaceAfter = await captureRunTree(workspace.worktreePath);
+          workspaceChanges = await compareRunTrees(workspace.worktreePath, intent.workspaceBefore, workspaceAfter);
+          intent = { ...intent, workspaceChanges };
+          this.options.store.setRunChanges(delivery.run_id, workspaceChanges);
+        }
+        const artifactSummary = intent.importedArtifacts.length
+          ? `\n\nImported committed artifacts:\n${intent.importedArtifacts.map((artifact) =>
+            `- ${safeArtifactText(artifact.path ?? 'committed artifact', 120)} @ ${artifact.revision}${artifact.taskId ? ` (task ${safeArtifactText(artifact.taskId, 80)})` : ''}\n  Git ref: ${safeArtifactText(artifact.ref ?? '', 255)}`,
+          ).join('\n')}` : '';
+        const workspaceSummary = intent.integratedArtifacts.length
+          ? workspaceChanges?.summary.status === 'available'
+            ? workspaceChanges.summary.files.length
+              ? `\n\nIntegrated into the host group workspace${workspace?.branch ? ` (${safeArtifactText(workspace.branch, 200)})` : ''}; changed files:\n${workspaceChanges.summary.files.map((file) => `- ${safeArtifactText(file.path, 500)} (${file.status})`).join('\n')}${workspaceChanges.summary.truncated ? '\n- Additional changed files were omitted from this summary.' : ''}`
+              : '\n\nIntegrated into the host group workspace; no new file changes were recorded.'
+            : '\n\nIntegrated into the host group workspace, but its changed-file summary is unavailable.'
+          : '';
+        const failureSummary = intent.artifactFailures.length
+          ? `\n\nArtifact import/integration failures:\n${intent.artifactFailures.map((failure) => `- ${failure}`).join('\n')}`.slice(0, 15_000) : '';
+        const finalBudget = Math.max(0, 50_000 - artifactSummary.length - workspaceSummary.length - failureSummary.length);
+        const finalContent = `${intent.finalText ? redactSecrets(intent.finalText).slice(0, finalBudget) : ''}${artifactSummary}${workspaceSummary}${failureSummary}`.slice(0, 50_000);
+        intent = { ...intent, phase: 'finalizing', finalContent };
+        this.persistCompletionIntent(deliveryId, intent);
+        await this.finalizeCompletion(currentDelivery, intent);
+        this.assertCompletionStillLive(deliveryId);
+        // Commit terminal state before waking the group queue. A successor can then claim the proxy
+        // immediately without the old completion cleanup overwriting its running session state.
+        const notifying: CompletionIntent = { ...intent, phase: 'notifying' };
+        const changed = this.hostRows.prepare(`UPDATE mingle_team_host_deliveries SET status='completed',failure_json=?,artifacts_json=?,updated_at=?
+          WHERE delivery_id=? AND status IN ('queued','accepted','running','awaiting-approval')`)
+          .run(JSON.stringify(notifying), JSON.stringify(intent.importedArtifacts), new Date(this.now()).toISOString(), deliveryId);
+        if (Number(changed.changes) === 1) {
+          this.finishCompletedDelivery(delivery);
+          await this.notifyCompletedDelivery({ ...delivery, status: 'completed', failure_json: JSON.stringify(notifying) }, notifying);
+        }
+      });
+    });
+  }
+
+  /** The durable notifying phase permits restart-safe group completion without redispatching a worker. */
+  private async notifyCompletedDelivery(delivery: DeliveryRow, intent: CompletionIntent): Promise<void> {
+    if (this.closed) return;
+    this.options.groups.onRunFinished(delivery.session_id, delivery.run_id, 'completed');
+    const project = this.readHost(delivery.team_id, delivery.shared_project_id);
+    if (delivery.source_chat_message_id && this.chat && project && intent.finalContent) {
+      await this.chat.postOrchestratedAgentReply({ projectId: project.local_project_id, sourceMessageId: delivery.source_chat_message_id,
+        agentId: delivery.agent_id, content: intent.finalContent });
+      const otherLive = this.hostRows.prepare(`SELECT 1 AS found FROM mingle_team_host_deliveries
+        WHERE source_chat_message_id=? AND delivery_id<>? AND status IN ('queued','accepted','running','awaiting-approval') LIMIT 1`)
+        .get(delivery.source_chat_message_id, delivery.delivery_id);
+      if (!otherLive) await this.chat.setOrchestratedRunState({ messageId: delivery.source_chat_message_id, state: 'completed' });
+    }
+    if (delivery.source_chat_message_id) this.finishChatDelivery(delivery.delivery_id, delivery.source_chat_message_id, 'completed');
+    this.hostRows.prepare(`UPDATE mingle_team_host_deliveries SET failure_json=NULL,updated_at=?
+      WHERE delivery_id=? AND status='completed' AND failure_json IS NOT NULL`)
+      .run(new Date(this.now()).toISOString(), delivery.delivery_id);
+  }
+
+  private async assertCompletionAuthority(delivery: DeliveryRow): Promise<void> {
+    const project = this.readHost(delivery.team_id, delivery.shared_project_id);
+    if (!project || project.group_id !== delivery.group_id || this.closed) throw new CompletionAuthorityError('Team delivery authority ended before artifact integration.');
+    let context: ProjectContext;
+    let group: import('@mingle/contracts').GroupSnapshot;
+    try {
+      [context, group] = await Promise.all([this.context(project.local_project_id), Promise.resolve(this.options.groups.get(delivery.group_id))]);
+    } catch (error) {
+      if (error instanceof HttpError && [403, 404, 409].includes(error.status)) {
+        throw new CompletionAuthorityError('Team project or group membership ended before artifact integration.');
+      }
+      throw error;
+    }
+    const member = group.members.find((candidate) => candidate.sessionId === delivery.session_id && !candidate.removedAt);
+    if (!context.isHost || context.project.sharedProjectId !== delivery.shared_project_id || context.project.teamId !== delivery.team_id
+      || !member || this.consentFor(context, delivery.agent_id) !== 'granted') {
+      throw new CompletionAuthorityError('Team consent or roster authority ended before artifact integration.');
+    }
+    try { await this.verifyOwnerDevice(delivery.team_id, delivery.owner_device_id, delivery.owner_account_id); }
+    catch (error) {
+      if (error instanceof HttpError && error.status === 403) throw new CompletionAuthorityError('The team owner device lost authority before artifact integration.');
+      throw error;
+    }
+  }
+
+  private assertCompletionStillLive(deliveryId: string): void {
+    const current = this.delivery(deliveryId);
+    const active = current ? this.active.get(current.session_id) : undefined;
+    if (this.closed || !current || !liveDelivery(current.status) || !this.completionIntent(current)
+      || active?.runId === current.run_id && active.controller.signal.aborted) {
+      throw new CompletionAuthorityError('The remote delivery was interrupted before artifact integration completed.');
+    }
+  }
+
+  private finishCompletionInterrupted(delivery: DeliveryRow, message: string, at: string): void {
+    const changed = this.hostRows.prepare(`UPDATE mingle_team_host_deliveries SET status='interrupted',failure_json=?,updated_at=?
       WHERE delivery_id=? AND status IN ('queued','accepted','running','awaiting-approval')`)
-      .run(outcome, failure ? JSON.stringify(failure) : message ? JSON.stringify({ message: redactSecrets(message).slice(0, 500) }) : null,
-        remoteRunId ?? null, at, deliveryId);
+      .run(JSON.stringify({ message: redactSecrets(message).slice(0, 500) }), at, delivery.delivery_id);
     if (Number(changed.changes) !== 1) return;
-    this.finishClaimedDelivery(delivery, outcome, failure, message, at);
+    this.finishClaimedDelivery(delivery, 'interrupted', undefined, message, at);
+  }
+
+  private async finalizeCompletion(delivery: DeliveryRow, intent: CompletionIntent): Promise<void> {
+    const at = intent.at;
+    this.options.store.tx(() => {
+      if (intent.finalContent && !this.options.store.listMessages(delivery.session_id, { limit: 2_000 })
+        .some((message) => message.id === this.finalMessageId(delivery.delivery_id))) {
+        this.options.store.insertMessage({ id: this.finalMessageId(delivery.delivery_id), sessionId: delivery.session_id,
+          runId: delivery.run_id, role: 'assistant', content: intent.finalContent });
+      }
+      const run = this.options.store.getRun(delivery.run_id);
+      if (run?.status === 'running') {
+        this.options.store.finishRun(delivery.run_id, 'completed', Math.max(0, this.now() - Date.parse(run.startedAt)), at);
+      } else if (run && run.status !== 'completed') {
+        this.hostRows.prepare(`UPDATE session_runs SET status='completed',finished_at=?,duration_ms=? WHERE id=? AND status IN ('failed','interrupted')`)
+          .run(at, Math.max(0, this.now() - Date.parse(run.startedAt)), delivery.run_id);
+      }
+      this.options.store.updateSession(delivery.session_id, { status: 'idle', error: null });
+      this.options.recovery.clearFailure(delivery.session_id);
+      const alreadyNotified = this.hostRows.prepare(`SELECT 1 AS found FROM events WHERE type='team.delivery.completed' AND json_extract(payload,'$.deliveryId')=? LIMIT 1`)
+        .get(delivery.delivery_id);
+      if (!alreadyNotified) this.options.store.recordEvent({ projectId: this.options.store.getSession(delivery.session_id, true)?.projectId ?? null,
+        sessionId: delivery.session_id, type: 'team.delivery.completed', summary: 'Remote team delivery completed',
+        payload: { deliveryId: delivery.delivery_id, agentId: delivery.agent_id, failure: null } });
+      if (intent.workspaceChanges) this.options.store.setRunChanges(delivery.run_id, intent.workspaceChanges as import('@mingle/contracts').RunChanges);
+      this.options.store.touch();
+    });
+  }
+
+  private finalMessageId(deliveryId: string): string {
+    return `team_result_${createHash('sha256').update(deliveryId).digest('hex').slice(0, 32)}`;
+  }
+
+  private finishCompletedDelivery(delivery: DeliveryRow): void {
+    const timer = this.timers.get(delivery.delivery_id);
+    if (timer) clearTimeout(timer);
+    this.timers.delete(delivery.delivery_id);
+    this.heartbeatSequences.delete(delivery.delivery_id);
+    this.releaseProxyRun(delivery);
+    this.expireApprovals(delivery);
+    this.options.store.touch();
+  }
+
+  private async finishDelivery(deliveryId: string, outcome: 'completed' | 'failed' | 'interrupted', failure?: ProviderFailure, message?: string, at = new Date(this.now()).toISOString(), remoteRunId?: string | null): Promise<void> {
+    await this.deliveryMutations.run(deliveryId, async () => {
+      const delivery = this.delivery(deliveryId);
+      if (!delivery || !liveDelivery(delivery.status)) return;
+      const changed = this.hostRows.prepare(`UPDATE mingle_team_host_deliveries SET status=?,failure_json=?,remote_run_id=COALESCE(?,remote_run_id),updated_at=?
+        WHERE delivery_id=? AND status IN ('queued','accepted','running','awaiting-approval')`)
+        .run(outcome, failure ? JSON.stringify(failure) : message ? JSON.stringify({ message: redactSecrets(message).slice(0, 500) }) : null,
+          remoteRunId ?? null, at, deliveryId);
+      if (Number(changed.changes) !== 1) return;
+      this.finishClaimedDelivery(delivery, outcome, failure, message, at);
+    });
   }
 
   private finishClaimedDelivery(delivery: DeliveryRow, outcome: 'completed' | 'failed' | 'interrupted', failure?: ProviderFailure, message?: string, at = new Date(this.now()).toISOString()): void {
@@ -1702,6 +1950,7 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
     if (!delivery || delivery.team_id !== envelope.teamId || delivery.shared_project_id !== parsed.data.sharedProjectId || !liveDelivery(delivery.status)) {
       throw new HttpError(404, 'The team tool call delivery is unknown or finished.');
     }
+    if (this.completionIntent(delivery)) throw new HttpError(404, 'The team delivery has already completed provider execution.');
     if (delivery.owner_device_id !== envelope.fromDeviceId || delivery.agent_id !== parsed.data.agentId) throw new HttpError(403, 'The team tool call came from a different device or agent.');
     await this.verifyOwnerDevice(delivery.team_id, envelope.fromDeviceId, delivery.owner_account_id);
     this.extendDeliveryTimeout(delivery.delivery_id);
@@ -1858,7 +2107,10 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
     const delivery = candidates.find((candidate) => !candidate.remote_run_id || candidate.remote_run_id === parsed.data.runId);
     if (!delivery) return;
     await this.verifyOwnerDevice(delivery.team_id, envelope.fromDeviceId, delivery.owner_account_id);
-    this.extendDeliveryTimeout(delivery.delivery_id);
+    await this.deliveryMutations.run(delivery.delivery_id, async () => {
+      const current = this.delivery(delivery.delivery_id);
+      if (current && liveDelivery(current.status) && !this.completionIntent(current)) this.extendDeliveryTimeout(current.delivery_id);
+    });
   }
 
   async close(): Promise<void> {
@@ -1873,12 +2125,15 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
       const delivery = this.hostRows.prepare('SELECT delivery_id,team_id,shared_project_id,owner_device_id FROM mingle_team_host_deliveries WHERE run_id=?')
         .get(active.runId) as { delivery_id?: string; team_id?: string; shared_project_id?: string; owner_device_id?: string } | undefined;
       if (delivery?.delivery_id && delivery.team_id && delivery.shared_project_id && delivery.owner_device_id) {
-        const payload = TeamInterruptPayloadSchema.parse({ sharedProjectId: delivery.shared_project_id, deliveryId: delivery.delivery_id, reason: 'The host is shutting down.' });
-        try {
-          await this.options.transport.send({ teamId: delivery.team_id, toDeviceId: delivery.owner_device_id, kind: 'teamgroup.interrupt', payload,
-            idempotencyKey: `teamgroup-interrupt:${delivery.delivery_id}:shutdown`.slice(0, 200) });
-          await this.options.transport.sync();
-        } catch { /* durable host run is still interrupted locally */ }
+        const current = this.delivery(delivery.delivery_id);
+        if (!current || !this.completionIntent(current)) {
+          const payload = TeamInterruptPayloadSchema.parse({ sharedProjectId: delivery.shared_project_id, deliveryId: delivery.delivery_id, reason: 'The host is shutting down.' });
+          try {
+            await this.options.transport.send({ teamId: delivery.team_id, toDeviceId: delivery.owner_device_id, kind: 'teamgroup.interrupt', payload,
+              idempotencyKey: `teamgroup-interrupt:${delivery.delivery_id}:shutdown`.slice(0, 200) });
+            await this.options.transport.sync();
+          } catch { /* durable host run is still interrupted locally */ }
+        }
         await this.finishDelivery(delivery.delivery_id, 'interrupted', undefined, 'The host shut down while this remote delivery was active.');
       } else {
         this.options.teamMcp.revoke(active.runId);

@@ -1,4 +1,4 @@
-import { readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
@@ -253,10 +253,19 @@ it('shares imported session history and team messages over HTTP and the encrypte
       if (orchestratorAssignments === 1) {
         const inbox = await callTeamTool(options.teamMcp, 'team_inbox');
         const workspace = options.session.worktreePath;
+        const workerQuestion = inbox.messages.find((message: { content: string }) => message.content.includes('Should the primary button use mint or amber?'));
+        if (workerQuestion && !existsSync(path.join(workspace, 'index.html'))) {
+          await callTeamTool(options.teamMcp, 'team_message', {
+            recipient: secondAgent.handle, content: 'Use a mint primary accent with an amber hover state.',
+            replyToId: workerQuestion.id, expectsReply: false,
+          });
+          emit({ type: 'text', text: 'Answered the worker’s design question while its assignment is still running.' });
+          return;
+        }
         const html = readFileSync(path.join(workspace, 'index.html'), 'utf8');
         const css = readFileSync(path.join(workspace, 'styles.css'), 'utf8');
         const head = runGit(workspace, 'rev-parse', '--verify', 'HEAD').trim();
-        leadReviews.push({ head, html, css, workerAsked: inbox.messages.some((message: { content: string }) => message.content.includes('Please review the landing page')) });
+        leadReviews.push({ head, html, css, workerAsked: inbox.messages.some((message: { content: string }) => message.content.includes('ready for review')) });
         if (!html.includes('Welcome to Northstar') || !css.includes('.hero')) throw new Error('The remote files were not integrated before orchestrator review.');
         const assigned = await callTeamTool(options.teamMcp, 'team_assign', {
           recipient: secondAgent.handle, title: 'Polish the landing page button',
@@ -286,6 +295,15 @@ it('shares imported session history and team messages over HTTP and the encrypte
       const worktreePath = options.session.worktreePath;
       const baseRevision = runGit(worktreePath, 'rev-parse', '--verify', 'HEAD').trim();
       if (runIndex === 0) {
+        const question = await callTeamTool(options.teamMcp, 'team_message', {
+          recipient: hostOwnMember.handle, content: 'Should the primary button use mint or amber?', expectsReply: true,
+        });
+        if (!question.wakesRecipient) throw new Error('A genuine worker question did not wake the idle coordinator.');
+        const answer = await waitFor(async () => {
+          const inbox = await callTeamTool(options.teamMcp!, 'team_inbox');
+          return inbox.messages.some((message: { content: string }) => message.content.includes('Use a mint primary accent')) ? inbox : null;
+        }, 5_000, 'the coordinator to answer the active worker question');
+        if (!answer) throw new Error('The worker did not receive the coordinator’s answer during active work.');
         writeFileSync(path.join(worktreePath, 'index.html'), '<!doctype html>\n<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Northstar</title><link rel="stylesheet" href="styles.css"><main class="hero"><h1>Welcome to Northstar</h1><p>Make your next idea real.</p><a class="hero__cta" href="#start">Get started</a></main></html>\n');
         writeFileSync(path.join(worktreePath, 'styles.css'), 'body{margin:0;font:16px system-ui;background:#101820;color:#f8fafc}.hero{min-height:100vh;display:grid;place-content:center;gap:1rem;padding:2rem;text-align:center}.hero__cta{justify-self:center;padding:.8rem 1.2rem;border-radius:.5rem;background:#72d6c9;color:#10202a;text-decoration:none}\n');
       } else {
@@ -296,9 +314,17 @@ it('shares imported session history and team messages over HTTP and the encrypte
       }
       workerRuns.push({ baseRevision, worktreePath });
       await callTeamTool(options.teamMcp, 'team_status', { taskId, status: 'review', note: 'The requested files are ready for review; Mingle will snapshot uncommitted changes for handoff.' });
+      const assignmentsBeforeReplyRequest = orchestratorAssignments;
+      const reviewsBeforeReplyRequest = leadReviews.length;
       await callTeamTool(options.teamMcp, 'team_message', {
-        recipient: hostOwnMember.handle, content: 'Please review the landing page in your workspace and send any focused fixes.', expectsReply: false,
+        recipient: hostOwnMember.handle, content: 'The landing page is ready for review; please inspect the integrated files and send any focused fixes.', expectsReply: true,
       });
+      // Deliberately leave a window after both tools returned but before the provider turn ends.
+      // The coordinator must not inspect the host workspace until this remote completion is imported.
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      if (orchestratorAssignments !== assignmentsBeforeReplyRequest || leadReviews.length !== reviewsBeforeReplyRequest) {
+        throw new Error('The coordinator was woken to review before the remote worker delivery completed.');
+      }
       emit({ type: 'text', text: `Created the ${runIndex === 0 ? 'landing page' : 'requested button fix'} and left its files for automatic artifact snapshot.` });
     };
 
@@ -311,7 +337,7 @@ it('shares imported session history and team messages over HTTP and the encrypte
       await leader.app.distributed.transport.sync();
       return workerRuns.length === 2;
     }, 15_000, 'both delegated remote worker runs');
-    await waitFor(() => orchestratorAssignments === 2 && leader.fake.runs.length >= 3, 15_000, 'orchestrator review, fix request, and summary');
+    await waitFor(() => orchestratorAssignments === 2 && leader.fake.runs.length === 4, 15_000, 'one active-work question answer, one review/fix turn, and one final summary');
     await waitFor(() => leader.app.groups.get(teamGroupId).requests.some((item) => item.status === 'completed'), 15_000, 'completed cross-device group request');
 
     const firstWorkerRevision = runGit(workerRuns[0]!.worktreePath, 'rev-parse', '--verify', 'HEAD').trim();
@@ -326,6 +352,7 @@ it('shares imported session history and team messages over HTTP and the encrypte
     expect(readFileSync(path.join(groupWorkspace, 'index.html'), 'utf8')).toContain('Welcome to Northstar');
     expect(readFileSync(path.join(groupWorkspace, 'styles.css'), 'utf8')).toContain('.hero__cta:hover');
     expect(teammate.fake.runs).toHaveLength(2);
+    expect(leader.fake.runs).toHaveLength(4);
 
     const completedRemoteRuns = leader.app.store.bootstrapRuns().filter((run) => run.sessionId === proxySessionId && run.status === 'completed')
       .sort((left, right) => Date.parse(left.startedAt) - Date.parse(right.startedAt));

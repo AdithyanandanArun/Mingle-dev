@@ -2314,6 +2314,7 @@ export class GroupService {
   }
 
   private readiness(group: ConversationGroup, member: MemberRow, d: DeliveryRow): 'ready' | 'defer' | 'cancel' {
+    if (d.kind === 'message' && this.isDeferredRemoteCompletionReply(group, member, d)) return 'defer';
     if (d.taskId && d.kind !== 'assignment') {
       const task = this.store.getTask(d.taskId);
       if (!task || task.sessionId !== member.sessionId || task.status === 'done') { this.cancel(d, 'The task was removed, reassigned or already accepted'); return 'cancel'; }
@@ -2328,6 +2329,29 @@ export class GroupService {
     if (task.status === 'done') { this.cancel(d, 'The task was already accepted as done'); return 'cancel'; }
     if (task.status === 'running' || task.status === 'backlog') return 'defer';
     return this.dependencyState(assignment, task).waiting.length ? 'defer' : 'ready';
+  }
+
+  /**
+   * A remote worker can report Review and ask its coordinator to inspect the result before its
+   * owner-side run has stopped. Keep that reply queued until the proxy delivery is settled: the
+   * host imports and integrates committed artifacts before it calls onRunFinished. Other live
+   * questions remain eligible immediately, and this condition is derived from durable group state
+   * so it also holds after a host restart.
+   */
+  private isDeferredRemoteCompletionReply(group: ConversationGroup, recipient: MemberRow, queued: DeliveryRow): boolean {
+    const message = this.repo.getMessage(queued.messageId);
+    if (!message?.sourceRunId || !message.senderMemberId) return false;
+    const source = this.repo.deliveryByRun(message.sourceRunId);
+    if (!source || source.status !== 'running' || source.groupId !== group.id || source.requestId !== queued.requestId
+      || source.memberId !== message.senderMemberId) return false;
+    const sender = this.repo.getMember(source.memberId);
+    const isProxy = sender && Boolean(this.store.db.prepare('SELECT 1 AS found FROM mingle_team_proxy_sessions WHERE session_id=?')
+      .get(sender.sessionId));
+    if (!isProxy) return false;
+    const assignment = source.assignmentId ? this.repo.getAssignment(source.assignmentId) : undefined;
+    const task = assignment ? this.store.getTask(assignment.taskId) : undefined;
+    return Boolean(assignment && task?.status === 'review' && assignment.toMemberId === sender.id
+      && assignment.fromMemberId === recipient.id && queued.memberId === recipient.id);
   }
 
   /**
@@ -2570,7 +2594,9 @@ export class GroupService {
         const committed = request.turnsUsed + this.repo.requestDeliveries(request.id, ['queued']).length;
        const turnLimit = effectiveTurnLimit(group);
        const blockedByBudget = hop > group.maxHops || (turnLimit !== null && committed >= turnLimit);
-      const lines: ResultLine[] = batch.map((a) => {
+      const reportable = batch.filter((assignment) => !this.hasQueuedAssignmentReply(request.id, target.id, assignment));
+      if (!reportable.length) continue;
+      const lines: ResultLine[] = reportable.map((a) => {
         const d = deliveries.get(a.id)!;
         const worker = this.repo.getMember(a.toMemberId);
         const workerSession = worker ? this.store.getSession(worker.sessionId, true) : undefined;
@@ -2582,9 +2608,20 @@ export class GroupService {
       const message = this.repo.insertMessage({ groupId: group.id, senderMemberId: null, recipients: [delegator], kind: 'status', content: resultText(lines), requestId: request.id });
       this.repo.insertDelivery({ id: deliveryId(), groupId: group.id, requestId: request.id, messageId: message.id, memberId: delegator, kind: 'result', hop });
       this.repo.updateRequest(request.id, { status: 'active' });
-      this.event(group, 'group.result.queued', 'Worker results queued for the coordinator', { requestId: request.id, workers: batch.length });
+      this.event(group, 'group.result.queued', 'Worker results queued for the coordinator', { requestId: request.id, workers: reportable.length });
       if (blockedByBudget) this.holdBudget(group, request.id, 'Worker results are ready, but reviewing them needs another model turn or message hop. The result delivery is retained; raise the applicable group limit and resume, or address the coordinator in a new request.');
     }
+  }
+
+  /** A worker's already-queued reply request carries its completion note; do not add a duplicate result turn. */
+  private hasQueuedAssignmentReply(requestId: string, coordinatorMemberId: string, assignment: AssignmentRow): boolean {
+    const sourceDelivery = this.repo.getDelivery(assignment.deliveryId);
+    if (!sourceDelivery?.runId) return false;
+    return this.repo.requestDeliveries(requestId, ['queued']).some((delivery) => {
+      if (delivery.kind !== 'message' || delivery.memberId !== coordinatorMemberId) return false;
+      const message = this.repo.getMessage(delivery.messageId);
+      return message?.senderMemberId === assignment.toMemberId && message.sourceRunId === sourceDelivery.runId;
+    });
   }
 
   /** Bounded excerpt of the member's final native assistant message for this run. */
