@@ -34,6 +34,12 @@ The host imports returned refs and attempts the clean fast-forward into the grou
 
 During an active remote assignment, `team_artifact` first validates the owner-side run, committed path, revision, task and authoritative assignment scope. The owner exports that exact commit to the host; the host imports it into an isolated team ref before recording the existing typed group handoff. This makes committed files available to the handoff verifier without fast-forwarding the group anchor while the owner provider is still running. Terminal completion remains responsible for integration after the run ends.
 
+The host saves its own task, scope and base revision at dispatch. Before publishing a remote handoff or integrating terminal output, it checks every changed path in the base-to-result history, including intermediate commits, renames and deletions. Scope checks preserve Git path casing. A peer's declaration of one allowed file does not authorize additional changes in its commit.
+
+Artifact operations recheck cancellation and delivery authority after asynchronous preparation, transport and import work. An interrupted MCP transfer removes unpublished transfer chunks and refs; a previously published group handoff remains available. Terminal imports use the recorded durable completion intent rather than requiring the provider to remain running. A later assignment can consume a remote artifact through its exact verified imported transfer and published handoff, without weakening the ordinary producing-worktree ancestry rule or changing the human checkout.
+
+Remote completion replies are signed by the owner device and use a stable delivery ID. The host records request completion and integration without impersonating the remote agent. Normal terminal delivery, restart and duplicate requests recover the owner's signed reply from the saved final result, including a crash before the first reply was persisted. Recovery checks the current account, registered device, local project, agent/session and integration host. Temporary reply-signing failure does not block terminal status delivery. Separate deliveries answering the same human request retain separate identities.
+
 ## REST surface
 
 | Method & path | Device | Who |

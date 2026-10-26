@@ -1,6 +1,6 @@
 # Team session fixes — 26 October 2026
 
-This follows the frozen [coffee-shop test report](coffee-shop-full-test-20261026.md). That report records the original failures; it is not a passing test of these changes. The verification below covers source through `500babb`. Final artifact-boundary integration and the combined server suite are still pending.
+This follows the frozen [coffee-shop test report](coffee-shop-full-test-20261026.md). That report records the original failures; it is not a passing test of these changes. The assembled source tested below is `d89f3c1` plus the diagnostic-only acceptance-test correction in `cc2f274`. A live member run-state display defect is still being corrected.
 
 ## Member conversation and shared state
 
@@ -16,6 +16,7 @@ This follows the frozen [coffee-shop test report](coffee-shop-full-test-20261026
 | Check | Result |
 | --- | --- |
 | Server, web and contracts TypeScript checks | Passed |
+| Assembled server suite | **390 passed across 52 files**, including the two-app encrypted mailbox/artifact workflow; 103.80 seconds in an isolated run |
 | Team-chat and group-view focused tests before the final mirror correction | 22 passed |
 | Group-view tests after the member-origin correction | 9 passed, including project and author isolation |
 | Web unit tests | 5 passed across 3 files |
@@ -28,12 +29,32 @@ This follows the frozen [coffee-shop test report](coffee-shop-full-test-20261026
 | Real agent inspection and draft continuity | Individual inspection worked; raw delivery instructions were collapsed; returning retained the unsent shared draft |
 | Restarted account storage | Both test accounts restored as signed-in using OS-encrypted storage |
 
+## Artifact and recovery corrections
+
+The owner exports committed scoped files before forwarding `team_artifact`; the host imports into an isolated ref before its exact path/blob/handoff checks. Assignment prompts distinguish the current work from quoted coordinator instructions. Clarification turns remain reply-only, and coordinator guidance uses durable result-review wakeups.
+
+The host now records its own delivery base/task/scope and checks the whole transferred history before a handoff or integration. Interrupted MCP transfers recheck authority at asynchronous boundaries and discard unpublished data; published handoffs remain durable. Verified imported artifacts can become subsequent remote task inputs without requiring them to be on the human checkout's HEAD. The scope regression also rejects case-only renames outside an exact assigned Git path.
+
+Completion notifications require a stable delivery identity and reuse a saved signed reply on replay. The regression covers concurrent calls, a new service on the same database, changed-content rejection and separate deliveries answering the same request. Delayed roster publications cannot override a newer withdrawal because publication order is persisted across restart.
+
+Further review found that the host must not author as a remote agent at all. The owner device now publishes its signed reply, and the host independently clears request completion. Owner terminal recovery also recreates a reply from the saved result if the process stopped before its first chat post. A changed owner is fenced; signing failure does not hold back the terminal status. The focused recovery regression and two-app owner-signature regression pass, and the final review found no blocker in that recovery path.
+
+## Live artifact and completion continuation
+
+The shared-browser run created only `handoff-verification.md` in the disposable coffee project. Artifact `art_56d415c6bcef4632`, task `tsk_281dd42f045a437e`, commit `2c9e88ea937c4383f49262c6d672496e400b1a78` was imported at **05:42:39 UTC** and published at **05:42:49 UTC**, before the owner provider ended at **05:43:00 UTC**. Terminal integration then completed and the host notification intent cleared. The website's `index.html` and `styles.css` were unchanged.
+
+The live test's second assignment was invalid: it requested that the original producer consume an artifact addressed to the coordinator. Handoffs are recipient-specific and cannot target the same source session. That queued test assignment was explicitly cancelled and the agent resumed; this is **not** counted as a live forwarding pass. The automated two-app case uses two distinct remote agents, transfers the first agent's published input and checks the successor's integrated base revision.
+
+A separate no-edit request from the member composer received exactly one `OWNER_SIGNED_COMPLETION_OK` reply on each device, signed by the producing owner's registered device. The host stored the source request as completed with its notification intent cleared; no provider runs remained active. This exposed the remaining display defect: the member's original human-message row still said running because the host's forwarded full-message update correctly failed direct author-device validation. A dedicated host-authorized status update is being implemented; direct message authorship checks must remain strict.
+
+Two overlapping full-suite runs each reported 389/390, timing out at the 15-second multi-stage handoff wait while another full suite and native test profiles were starting. The same test passed alone, and the isolated full suite then passed all 390 tests. Production timeout values were not increased. Diagnostics now prioritize dispatch/input-transfer state instead of long successful tool payloads.
+
 The live checks used the shared T3 browser and two separate native Electron test profiles on one Linux computer, with existing real Google accounts and cloud mailbox delivery. These checks submitted no new provider tasks. The final result remains accurately labeled as a response, rather than accepted work.
 
-Local logs: `/tmp/mingle-timeline-focused-20261026.log`, `/tmp/mingle-member-human-mirror-focused.log`, `/tmp/mingle-member-human-mirror-browser.log`, `/tmp/mingle-member-human-mirror-web-tests.log`, and `/tmp/mingle-member-human-mirror-web-build.log`. Fixture screenshots are under `/tmp/mingle-project-collaboration-acceptance-11315/`.
+Local logs include `/tmp/mingle-final-serial-full-server-20261026.log`, `/tmp/mingle-final-forwarding-diagnostic.log`, `/tmp/mingle-owner-reply-recovery-regression.log`, `/tmp/mingle-final-seam-scope-tests.log`, `/tmp/mingle-member-human-mirror-browser.log`, `/tmp/mingle-member-human-mirror-web-tests.log`, and `/tmp/mingle-member-human-mirror-web-build.log`. Sanitized live evidence is under `/home/adithyan/.cache/mingle-coffee-test-20261026/early-artifact-final-evidence.json` and `owner-signed-completion-final-evidence.json`. Fixture screenshots are under `/tmp/mingle-project-collaboration-acceptance-11315/`.
 
 ## Pending final verification
 
-The separate artifact worker is addressing interruption during transfer, reuse of imported remote artifacts as later assignment inputs, and host-side enforcement of the full transferred history against assignment scope. Those fixes require integration, independent review and the final combined suite before the whole fix request can be called complete. A targeted real-provider artifact handoff remains separate from automatic tests.
+Artifact and completion-recovery fixes are integrated and the combined suite passed. The host-to-member run-state display correction still needs integration and verification. Live provider tests remain separate from automatic tests.
 
 No push, deployment or system package installation was performed. Different physical devices/networks and Windows/macOS behavior are outside this Linux evidence.
