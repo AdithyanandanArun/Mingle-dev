@@ -4,6 +4,7 @@ import type { Session, TeamPermissionLevel, TeamStructureSnapshot, UpdateTeamOrc
 import { useMingle } from '../../../store/store';
 import { Button, Segmented } from '../../ui';
 import { TeamOrchestrationApiError, teamOrchestrationApi } from './api';
+import { teamSessionShareEligibility } from './share-eligibility';
 import './team-orchestration-settings.css';
 
 export function TeamOrchestrationSettings({ projectId, currentSession, onShared, onOpenProject }: {
@@ -14,6 +15,7 @@ export function TeamOrchestrationSettings({ projectId, currentSession, onShared,
   onOpenProject?: () => void;
 }) {
   const activeProjectId = useMingle((state) => state.activeProjectId);
+  const boot = useMingle((state) => state.boot);
   const [snapshot, setSnapshot] = useState<TeamStructureSnapshot | null>(null);
   const [permissionLevel, setPermissionLevel] = useState<TeamPermissionLevel>('supervised');
   const [loading, setLoading] = useState(true);
@@ -29,7 +31,7 @@ export function TeamOrchestrationSettings({ projectId, currentSession, onShared,
   const sharedSession = useMemo(() => {
     if (snapshot?.teamSession) {
       const ref = snapshot.teamSession;
-      const session = useMingle.getState().boot?.sessions.find((item) => item.id === ref.sessionId && item.projectId === projectId);
+      const session = boot?.sessions.find((item) => item.id === ref.sessionId && item.projectId === projectId);
       return {
         id: ref.sessionId,
         name: session?.name ?? ref.title,
@@ -42,7 +44,7 @@ export function TeamOrchestrationSettings({ projectId, currentSession, onShared,
       detail: `${currentSession.provider} · ${currentSession.model}`,
     };
     return null;
-  }, [currentSession, projectId, snapshot?.teamSession]);
+  }, [boot?.sessions, currentSession, projectId, snapshot?.teamSession]);
 
   const canApply = (sequence: number, signal?: AbortSignal) => sequence === operation.current
     && currentProjectId.current === projectId
@@ -79,6 +81,7 @@ export function TeamOrchestrationSettings({ projectId, currentSession, onShared,
   const canEdit = Boolean(snapshot?.canEdit && snapshot.host.online && snapshot.host.isThisDevice);
   const projectIsActive = activeProjectId === projectId;
   const hasSessionForProject = Boolean(sharedSession);
+  const shareEligibility = useMemo(() => teamSessionShareEligibility(currentSession, projectId, boot?.sessions ?? [], boot?.groups), [boot, currentSession, projectId]);
   const choosingFullAccess = permissionLevel === 'full-access';
 
   const refreshAfterShare = async (latest: TeamStructureSnapshot, targetSessionId: string, navigate: boolean, sequence: number) => {
@@ -97,6 +100,7 @@ export function TeamOrchestrationSettings({ projectId, currentSession, onShared,
     const sequence = ++operation.current;
     const bindingSessionId = sharedSession.id;
     const bindSession = !hasCanonicalSession;
+    if (bindSession && !shareEligibility.allowed) return;
     setSaving(true);
     setError('');
     setConflict(false);
@@ -158,7 +162,7 @@ export function TeamOrchestrationSettings({ projectId, currentSession, onShared,
   return <section className="team-orch-settings" aria-labelledby="team-orch-settings-title" aria-busy={loading || saving}>
     <header className="team-orch-settings__heading">
       <span className="team-orch-settings__icon"><Crown size={16} /></span>
-      <div><h3 id="team-orch-settings-title">Share a session with the team</h3><p>The current session’s agent coordinates team work automatically.</p></div>
+      <div><h3 id="team-orch-settings-title">Share a session with the team</h3><p>Your current conversation is shared automatically when you invite a teammate.</p></div>
       <Button size="sm" variant="ghost" disabled={loading || saving} onClick={() => void load()} aria-label="Refresh team orchestration settings"><RefreshCw size={13} /></Button>
     </header>
     {loading && !snapshot ? <p className="team-orch-settings__status" role="status">Loading team settings…</p> : null}
@@ -176,6 +180,7 @@ export function TeamOrchestrationSettings({ projectId, currentSession, onShared,
         <p>No local session is open for this project. Open the project and create or select a session, then reopen Teammates to share it.</p>
         <Button size="sm" variant="ghost" disabled={saving} onClick={openProject}>Open this project</Button>
       </div>}
+      {!hasCanonicalSession && sharedSession && !shareEligibility.allowed ? <p className="team-orch-settings__notice" role="status">{shareEligibility.message}</p> : null}
       {snapshot.enabled && snapshot.settings && !snapshot.teamSession ? <p className="team-orch-settings__notice" role="status">Share this session to finish team setup.</p> : null}
       {!canEdit && snapshot.settings ? <p className="team-orch-settings__summary"><Users size={14} /> Team permission: {snapshot.settings.permissionLevel === 'supervised' ? 'Supervised' : 'Full access'}</p> : null}
       {canEdit && hasSessionForProject ? <fieldset className="team-orch-settings__controls" aria-label="Team permission level" disabled={saving}>
@@ -184,11 +189,11 @@ export function TeamOrchestrationSettings({ projectId, currentSession, onShared,
           <Segmented value={permissionLevel} onChange={(value) => { setPermissionLevel(value); setSaved(null); }} label="Team permission level" options={[
             { value: 'supervised', label: 'Supervised' }, { value: 'full-access', label: 'Full access' },
           ]} />
-          <p>Teammate agents run on their owners’ devices with the owners’ provider accounts, in isolated worktrees; Mingle never pushes their changes. Owners must consent to the selected level and can pause or revoke access at any time.</p>
+          <p>Supervised asks owners to approve file or command actions. Full access permits those actions after owner consent. Owners can pause or revoke sharing.</p>
           {choosingFullAccess ? <p className="team-orch-settings__warning" role="alert"><AlertTriangle size={14} />Full access requires every teammate to consent at this level. Raising a project from Supervised to Full access requires teammates to re-consent before new work is delivered.</p> : null}
         </div>
       </fieldset> : null}
-      {canEdit ? <div className="team-orch-settings__actions"><Button variant="primary" size="sm" disabled={saving || loading || !projectIsActive || !hasSessionForProject || (!hasCanonicalSession && currentSession?.projectId !== projectId)} busy={saving} onClick={() => void save()}>{hasCanonicalSession ? 'Save permission level' : 'Share current session'}</Button></div> : null}
+      {canEdit ? <div className="team-orch-settings__actions"><Button variant="primary" size="sm" disabled={saving || loading || !projectIsActive || !hasSessionForProject || (!hasCanonicalSession && (!shareEligibility.allowed || currentSession?.projectId !== projectId))} busy={saving} onClick={() => void save()}>{hasCanonicalSession ? 'Save permission level' : 'Share current session'}</Button></div> : null}
     </> : null}
   </section>;
 }

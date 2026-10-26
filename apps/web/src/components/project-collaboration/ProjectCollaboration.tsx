@@ -14,6 +14,7 @@ import { joinAgentPolicyChoices, joinSuccessCopy, resolveJoinCloneParent } from 
 import { TeamConsentSheet } from '../team-orchestration/settings/TeamConsentSheet';
 import { TeamOrchestrationSettings } from '../team-orchestration/settings/TeamOrchestrationSettings';
 import { teamOrchestrationApi } from '../team-orchestration/settings/api';
+import { teamSessionShareEligibility } from '../team-orchestration/settings/share-eligibility';
 import '../../styles/project-collaboration.css';
 
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -180,18 +181,23 @@ export function ProjectTeammatesDialog({ project, onClose }: { project: Project;
           } else if (!currentSession || currentSession.projectId !== project.id) {
             teamSessionMessage = `${invitationOutcome}, but no local session was selected when Teammates opened. Open ${project.name}, create or select a session, then use Share current session. You do not need to send the invitation again.`;
           } else {
-            const shared = await teamOrchestrationApi.shareSession(project.id, {
-              sessionId: currentSession.id,
-              permissionLevel: structure.settings?.permissionLevel ?? 'supervised',
-              ...(structure.settings ? { expectedVersion: structure.settings.version } : {}),
-            });
-            if (sequence !== invitationSequence.current || useMingle.getState().activeProjectId !== project.id) return;
-            const store = useMingle.getState();
-            store.setTeamSessionInfo(project.id, shared.teamSession ?? null, shared.host.isThisDevice);
-            await store.refreshNow();
-            if (sequence !== invitationSequence.current || useMingle.getState().activeProjectId !== project.id) return;
-            store.selectSession(shared.teamSession?.sessionId ?? currentSession.id);
-            teamSessionMessage = `${invitationOutcome} and ${currentSession.name} is now shared with the team.`;
+            const eligibility = teamSessionShareEligibility(currentSession, project.id, boot?.sessions ?? [], boot?.groups);
+            if (!eligibility.allowed) {
+              teamSessionMessage = `${invitationOutcome}, but no session was shared. ${eligibility.message}`;
+            } else {
+              const shared = await teamOrchestrationApi.shareSession(project.id, {
+                sessionId: currentSession.id,
+                permissionLevel: structure.settings?.permissionLevel ?? 'supervised',
+                ...(structure.settings ? { expectedVersion: structure.settings.version } : {}),
+              });
+              if (sequence !== invitationSequence.current || useMingle.getState().activeProjectId !== project.id) return;
+              const store = useMingle.getState();
+              store.setTeamSessionInfo(project.id, shared.teamSession ?? null, shared.host.isThisDevice);
+              await store.refreshNow();
+              if (sequence !== invitationSequence.current || useMingle.getState().activeProjectId !== project.id) return;
+              store.selectSession(shared.teamSession?.sessionId ?? currentSession.id);
+              teamSessionMessage = `${invitationOutcome} and ${currentSession.name} is now shared with the team.`;
+            }
           }
         }
       } catch (cause) {

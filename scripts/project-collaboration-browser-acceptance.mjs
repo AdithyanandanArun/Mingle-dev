@@ -70,6 +70,8 @@ let sharedTeamSession = null;
 let collaborationBound = false;
 let hideProjectSessions = false;
 let addWrongProjectSession = false;
+let unsupportedAnchorSession = false;
+let mixedGroupUnsupportedLead = false;
 let failShareSessionOnce = false;
 let rejectNextSettingsPatch = false;
 let collabGate = null;
@@ -265,9 +267,14 @@ function updateBootstrap() {
   if (joinedProjectId && joinedProjectId !== projectId && !boot.projects.some((project) => project.id === joinedProjectId)) {
     boot.projects.push({ id: joinedProjectId, name: 'Example invite checkout', path: '/example/invite-checkout', createdAt: new Date().toISOString(), isExample: false });
   }
-  const sampleSessions = sourceBootstrap.sessions.filter((session) => session.projectId === projectId).map((session, index) => ({
-    ...session, name: index === 0 ? 'Example local Codex' : `Example local agent ${index + 1}`, provider: 'codex', model: 'example-codex-model', effort: 'medium', policy: 'supervised', status: 'idle',
-  }));
+  const sampleSessions = sourceBootstrap.sessions.filter((session) => session.projectId === projectId).map((session, index) => {
+    const provider = (unsupportedAnchorSession && index === 0) || (mixedGroupUnsupportedLead && index === 1) ? 'antigravity' : 'codex';
+    return {
+      ...session,
+      name: provider === 'antigravity' ? 'Example local Antigravity' : index === 0 ? 'Example local Codex' : `Example local agent ${index + 1}`,
+      provider, model: 'example-codex-model', effort: 'medium', policy: 'supervised', status: 'idle',
+    };
+  });
   if (hideProjectSessions) sampleSessions.length = 0;
   if (includeProxySession && sampleSessions.length) {
     sampleSessions.push({ ...sampleSessions[0], id: PROXY_SESSION_ID, name: 'Example remote Codex proxy', status: 'idle' });
@@ -284,6 +291,18 @@ function updateBootstrap() {
   }
   const sessionsOutsideExample = sourceBootstrap.sessions.filter((session) => session.projectId !== projectId);
   boot.sessions = [...sessionsOutsideExample, ...sampleSessions, ...joinedSessions.filter((session) => session.projectId !== projectId)];
+  if (mixedGroupUnsupportedLead && sampleSessions.length >= 2) {
+    const createdAt = new Date().toISOString();
+    const groupId = 'example-mixed-provider-group';
+    boot.groups = [...(boot.groups ?? []).filter((group) => group.group.id !== groupId), {
+      group: { id: groupId, projectId, title: 'Example mixed-provider conversation', anchorSessionId: sampleSessions[0].id, mode: 'orchestrated', orchestratorMemberId: 'example-nonanchor-lead', paused: false, pauseReason: null, maxParallel: 3, maxTurns: 80, maxHops: 4, createdAt, updatedAt: createdAt },
+      members: [
+        { id: 'example-anchor-member', groupId, sessionId: sampleSessions[0].id, handle: 'example-anchor', role: 'worker', joinedAt: createdAt, removedAt: null },
+        { id: 'example-nonanchor-lead', groupId, sessionId: sampleSessions[1].id, handle: 'example-nonanchor-lead', role: 'orchestrator', joinedAt: createdAt, removedAt: null },
+      ],
+      messages: [], requests: [], deliveries: [], assignments: [],
+    }];
+  }
   if (addWrongProjectSession) {
     const otherProjectId = 'example-other-project';
     if (!boot.projects.some((project) => project.id === otherProjectId)) boot.projects.push({ id: otherProjectId, name: 'Example other project', path: '/example/other', createdAt: new Date().toISOString(), isExample: false });
@@ -798,6 +817,80 @@ async function main() {
     hideProjectSessions = false;
     addWrongProjectSession = false;
   });
+
+  await test('unsupported Antigravity anchor stays disabled and invite setup explains provider requirements', async () => {
+    unsupportedAnchorSession = true;
+    mixedGroupUnsupportedLead = false;
+    orchestrationEnabled = false;
+    sharedTeamSession = null;
+    deliveryMode = 'sent';
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    await page.getByRole('button', { name: 'Add teammates', exact: true }).waitFor();
+    await page.locator('.sitem').filter({ hasText: 'Example local Antigravity' }).click();
+    const dialog = await ensureTeammatesDialog();
+    const onboarding = dialog.locator('.team-orch-settings');
+    await onboarding.getByRole('status').filter({ hasText: /Team sharing supports Codex, Claude Code, and OpenCode/ }).waitFor();
+    assert.equal(await onboarding.getByRole('button', { name: 'Share current session', exact: true }).isDisabled(), true, 'unsupported standalone providers cannot be manually shared');
+    const shareCount = requests.filter((item) => item.method === 'POST' && item.pathname === `/api/projects/${projectId}/team-orchestration/share-session`).length;
+    await dialog.getByLabel('Teammate email', { exact: true }).fill('antigravity-invite@example.invalid');
+    await dialog.getByRole('button', { name: 'Send invite', exact: true }).click();
+    const deliveryNotice = dialog.getByRole('status').filter({ hasText: /antigravity-invite@example.invalid/ }).filter({ hasText: /Team sharing supports Codex, Claude Code, and OpenCode/ });
+    await deliveryNotice.waitFor();
+    assert.match(await deliveryNotice.innerText(), /no session was shared/i);
+    assert.equal(requests.filter((item) => item.method === 'POST' && item.pathname === `/api/projects/${projectId}/team-orchestration/share-session`).length, shareCount, 'invite-time auto-share skips an unsupported provider without calling the binding API');
+  });
+  unsupportedAnchorSession = false;
+
+  await test('mixed-provider group is blocked when its non-anchor orchestrator is Antigravity', async () => {
+    mixedGroupUnsupportedLead = true;
+    unsupportedAnchorSession = false;
+    orchestrationEnabled = false;
+    sharedTeamSession = null;
+    deliveryMode = 'sent';
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    await page.getByRole('button', { name: 'Add teammates', exact: true }).waitFor();
+    await page.locator('.sitem').filter({ hasText: 'Example local Codex' }).click();
+    const dialog = await ensureTeammatesDialog();
+    const onboarding = dialog.locator('.team-orch-settings');
+    await onboarding.getByRole('status').filter({ hasText: /Example local Antigravity \(antigravity\)/ }).waitFor();
+    assert.equal(await onboarding.getByRole('button', { name: 'Share current session', exact: true }).isDisabled(), true, 'the selected Codex anchor cannot bypass its unsupported group lead');
+    const shareCallsBefore = requests.filter((item) => item.method === 'POST' && item.pathname === `/api/projects/${projectId}/team-orchestration/share-session`).length;
+    await dialog.getByLabel('Teammate email', { exact: true }).fill('mixed-provider-invite@example.invalid');
+    await dialog.getByRole('button', { name: 'Send invite', exact: true }).click();
+    const deliveryNotice = dialog.getByRole('status').filter({ hasText: /mixed-provider-invite@example.invalid/ }).filter({ hasText: /Example local Antigravity \(antigravity\)/ });
+    await deliveryNotice.waitFor();
+    assert.match(await deliveryNotice.innerText(), /no session was shared/i);
+    assert.equal(requests.filter((item) => item.method === 'POST' && item.pathname === `/api/projects/${projectId}/team-orchestration/share-session`).length, shareCallsBefore, 'invite setup does not partially share a mixed-provider group');
+  });
+  mixedGroupUnsupportedLead = false;
+
+  await test('canonical Antigravity conversation retains permission-only editing', async () => {
+    unsupportedAnchorSession = true;
+    orchestrationEnabled = true;
+    orchestrationPermission = 'supervised';
+    orchestrationVersion = 64;
+    sharedTeamSession = { groupId: 'example-antigravity-canonical', sessionId: localSessions[0].id, title: 'Example Antigravity conversation' };
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    await page.getByRole('button', { name: 'Add teammates', exact: true }).waitFor();
+    await page.locator('.sitem').filter({ hasText: 'Example local Antigravity' }).click();
+    const dialog = await ensureTeammatesDialog();
+    const onboarding = dialog.locator('.team-orch-settings');
+    await onboarding.getByText('already shared', { exact: false }).waitFor();
+    assert.equal(await onboarding.getByRole('button', { name: 'Share current session', exact: true }).count(), 0);
+    assert.equal(await onboarding.getByRole('button', { name: 'Save permission level', exact: true }).isEnabled(), true, 'an established canonical conversation remains permission-editable despite its provider');
+    const shareCallsBefore = requests.filter((item) => item.method === 'POST' && item.pathname === `/api/projects/${projectId}/team-orchestration/share-session`).length;
+    await onboarding.getByRole('radio', { name: 'Full access', exact: true }).click();
+    await onboarding.getByRole('button', { name: 'Save permission level', exact: true }).click();
+    await onboarding.getByRole('status').filter({ hasText: 'Team permission level saved.' }).waitFor();
+    const patch = requests.findLast((item) => item.method === 'PATCH' && item.pathname === `/api/projects/${projectId}/team-orchestration`);
+    assert.deepEqual(patch?.body, { permissionLevel: 'full-access', expectedVersion: 64 });
+    assert.equal(requests.filter((item) => item.method === 'POST' && item.pathname === `/api/projects/${projectId}/team-orchestration/share-session`).length, shareCallsBefore, 'canonical permission save never attempts a provider publication');
+  });
+  unsupportedAnchorSession = false;
+  orchestrationEnabled = false;
+  orchestrationPermission = 'supervised';
+  orchestrationVersion = 3;
+  sharedTeamSession = null;
 
   await test('cold ?join link clears from address/history and resumes after in-place sign-in', async () => {
     accountMode = 'signed-out';
