@@ -1,6 +1,6 @@
 # Team session fixes — 26 October 2026
 
-This follows the frozen [coffee-shop test report](coffee-shop-full-test-20261026.md). That report records the original failures; it is not a passing test of these changes. The assembled source tested below is `d89f3c1` plus the diagnostic-only acceptance-test correction in `cc2f274`. A live member run-state display defect is still being corrected.
+This follows the frozen [coffee-shop test report](coffee-shop-full-test-20261026.md). That report records the original failures; it is not a passing test of these changes. The final assembled source tested below is `e267556`, including the host-authorized run-state updates and compatibility repair for existing pending messages.
 
 ## Member conversation and shared state
 
@@ -16,7 +16,7 @@ This follows the frozen [coffee-shop test report](coffee-shop-full-test-20261026
 | Check | Result |
 | --- | --- |
 | Server, web and contracts TypeScript checks | Passed |
-| Assembled server suite | **390 passed across 52 files**, including the two-app encrypted mailbox/artifact workflow; 103.80 seconds in an isolated run |
+| Assembled server suite | **392 passed across 52 files**, including the two-app encrypted mailbox/artifact workflow; 105.35 seconds in the final isolated run |
 | Team-chat and group-view focused tests before the final mirror correction | 22 passed |
 | Group-view tests after the member-origin correction | 9 passed, including project and author isolation |
 | Web unit tests | 5 passed across 3 files |
@@ -28,6 +28,8 @@ This follows the frozen [coffee-shop test report](coffee-shop-full-test-20261026
 | Real member-origin mirror | Existing confirmation rendered once after the corrected signed view arrived |
 | Real agent inspection and draft continuity | Individual inspection worked; raw delivery instructions were collapsed; returning retained the unsent shared draft |
 | Restarted account storage | Both test accounts restored as signed-in using OS-encrypted storage |
+| Existing pending message repair | Member row changed from running to completed after shared history sync; both accounts retained exactly one owner-signed reply |
+| No provider replay during repair | Run counts remained 16 on the host and 9 on the member; zero active runs on either profile |
 
 ## Artifact and recovery corrections
 
@@ -45,16 +47,18 @@ The shared-browser run created only `handoff-verification.md` in the disposable 
 
 The live test's second assignment was invalid: it requested that the original producer consume an artifact addressed to the coordinator. Handoffs are recipient-specific and cannot target the same source session. That queued test assignment was explicitly cancelled and the agent resumed; this is **not** counted as a live forwarding pass. The automated two-app case uses two distinct remote agents, transfers the first agent's published input and checks the successor's integrated base revision.
 
-A separate no-edit request from the member composer received exactly one `OWNER_SIGNED_COMPLETION_OK` reply on each device, signed by the producing owner's registered device. The host stored the source request as completed with its notification intent cleared; no provider runs remained active. This exposed the remaining display defect: the member's original human-message row still said running because the host's forwarded full-message update correctly failed direct author-device validation. A dedicated host-authorized status update is being implemented; direct message authorship checks must remain strict.
+A separate no-edit request from the member composer received exactly one `OWNER_SIGNED_COMPLETION_OK` reply on each device, signed by the producing owner's registered device. The host stored the source request as completed with its notification intent cleared; no provider runs remained active. This exposed a display defect: the member's original human-message row still said running because the host's forwarded full-message update correctly failed direct author-device validation. Dedicated `teamchat.run-state` updates now accept monotonic state changes only from the bound project host, without changing the original author, body or signature. The distinct `chat-state:` idempotency namespace avoids collisions with older full-message updates.
+
+For profiles already affected, history requests include up to 100 unique active human-message IDs from the bound project. The host returns only matching signed human rows within the existing history-response bound; receiving devices verify provenance and update state without replaying orchestration. In the final shared-browser check, the original member row changed from running to completed, both accounts retained exactly one owner-signed reply, and their provider run counts remained 16 and 9 respectively. Both profiles were idle, with empty composers.
 
 Two overlapping full-suite runs each reported 389/390, timing out at the 15-second multi-stage handoff wait while another full suite and native test profiles were starting. The same test passed alone, and the isolated full suite then passed all 390 tests. Production timeout values were not increased. Diagnostics now prioritize dispatch/input-transfer state instead of long successful tool payloads.
 
-The live checks used the shared T3 browser and two separate native Electron test profiles on one Linux computer, with existing real Google accounts and cloud mailbox delivery. These checks submitted no new provider tasks. The final result remains accurately labeled as a response, rather than accepted work.
+The live checks used the shared T3 browser and two separate native Electron test profiles on one Linux computer, with existing real Google accounts and cloud mailbox delivery. The UI, restart and final compatibility-repair checks submitted no new provider tasks. The explicitly authorized live artifact and no-edit completion continuations used real provider inference; automatic tests used fixtures and no paid inference. The final result remains labeled as a response, with no task acceptance implied.
 
-Local logs include `/tmp/mingle-final-serial-full-server-20261026.log`, `/tmp/mingle-final-forwarding-diagnostic.log`, `/tmp/mingle-owner-reply-recovery-regression.log`, `/tmp/mingle-final-seam-scope-tests.log`, `/tmp/mingle-member-human-mirror-browser.log`, `/tmp/mingle-member-human-mirror-web-tests.log`, and `/tmp/mingle-member-human-mirror-web-build.log`. Sanitized live evidence is under `/home/adithyan/.cache/mingle-coffee-test-20261026/early-artifact-final-evidence.json` and `owner-signed-completion-final-evidence.json`. Fixture screenshots are under `/tmp/mingle-project-collaboration-acceptance-11315/`.
+Local logs include `/tmp/mingle-final-legacy-state-full-server-20261026.log`, `/tmp/mingle-final-host-state-full-server-20261026.log`, `/tmp/mingle-final-serial-full-server-20261026.log`, `/tmp/mingle-final-forwarding-diagnostic.log`, `/tmp/mingle-owner-reply-recovery-regression.log`, `/tmp/mingle-final-seam-scope-tests.log`, `/tmp/mingle-member-human-mirror-browser.log`, `/tmp/mingle-member-human-mirror-web-tests.log`, and `/tmp/mingle-member-human-mirror-web-build.log`. Sanitized live evidence is under `/home/adithyan/.cache/mingle-coffee-test-20261026/early-artifact-final-evidence.json`, `owner-signed-completion-final-evidence.json`, and `legacy-status-repair-final-evidence.json`. Fixture screenshots are under `/tmp/mingle-project-collaboration-acceptance-11315/`.
 
-## Pending final verification
+## Final verification and limits
 
-Artifact and completion-recovery fixes are integrated and the combined suite passed. The host-to-member run-state display correction still needs integration and verification. Live provider tests remain separate from automatic tests.
+The fixes are integrated. The final combined suite and server/contracts/web typechecks passed, and the existing member conversation repaired through the shared browser without another provider run. The web unit tests and production build passed before the last server/contracts-only sync-request follow-up; the final web typecheck also passed after it. Live provider tests remain separate from automatic tests.
 
 No push, deployment or system package installation was performed. Different physical devices/networks and Windows/macOS behavior are outside this Linux evidence.
