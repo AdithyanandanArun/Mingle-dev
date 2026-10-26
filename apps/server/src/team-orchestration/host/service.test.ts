@@ -898,9 +898,10 @@ it('resumes persisted artifact progress after host restart without redispatching
 it('replays a persisted post-completion group notification after restart without replaying provider work', async () => {
   const fx = fixture();
   const chatReplies: Array<Record<string, unknown>> = [];
+  const chatStates: Array<Record<string, unknown>> = [];
   const chat = {
     postOrchestratedAgentReply: async (input: Record<string, unknown>) => { chatReplies.push(input); },
-    setOrchestratedRunState: async () => undefined,
+    setOrchestratedRunState: async (input: Record<string, unknown>) => { chatStates.push(input); },
   } as any;
   fx.host.setTeamChat(chat);
   const group = await addRemoteToSession(fx);
@@ -937,7 +938,8 @@ it('replays a persisted post-completion group notification after restart without
   expect(fx.finished.filter((entry) => entry.runId === runId)).toHaveLength(1);
   expect(fx.group()!.deliveries.find((entry) => entry.id === deliveryId)?.status).toBe('completed');
   expect(fx.store.listMessages(sessionId, { limit: 30 }).filter((message) => message.role === 'assistant' && message.runId === runId)).toHaveLength(1);
-  expect(chatReplies[0]).toMatchObject({ deliveryId, sourceMessageId: 'source-chat-notify-restart' });
+  expect(chatReplies).toHaveLength(0);
+  expect(chatStates).toContainEqual({ messageId: 'source-chat-notify-restart', state: 'completed' });
 });
 
 it('preserves owner-completed artifact progress across graceful shutdown and resumes it without provider replay', async () => {

@@ -554,6 +554,27 @@ it('shares imported session history and team messages over HTTP and the encrypte
         message.author.kind === 'agent' && message.author.agentId === secondAgentId
         && message.body.includes('published its scoped artifacts before completion'));
     }, 10_000, 'member-device remote worker reply');
+
+    // Route through the real member chat service, rather than the leader's group composer.
+    // The host must complete notification without trying to sign as this remote owner.
+    teammate.fake.script = async (_options, emit) => { emit({ type: 'text', text: 'Owner-signed direct remote completion.' }); };
+    const direct = await teammate.api('POST', `/api/projects/${projects[1]}/team-chat/messages`, {
+      body: 'Reply once from your owner device; no edits or commands.', mentions: [teammateAgentId],
+    });
+    expect(direct.status, JSON.stringify(direct.json)).toBe(200);
+    const completedDirect = await waitFor(async () => {
+      await leader.app.distributed.transport.sync();
+      await teammate.app.distributed.transport.sync();
+      const delivery = leader.app.store.db.prepare(`SELECT delivery_id,status,failure_json FROM mingle_team_host_deliveries WHERE source_chat_message_id=?`)
+        .get(direct.json.id) as { delivery_id: string; status: string; failure_json: string | null } | undefined;
+      const transcript = await leader.api('GET', `/api/projects/${projects[0]}/team-chat?limit=100`);
+      const reply = transcript.json.messages.find((message: { body: string }) => message.body === 'Owner-signed direct remote completion.');
+      return delivery?.status === 'completed' && delivery.failure_json === null && reply ? { delivery, reply } : null;
+    }, 10_000, 'owner-signed direct reply and completed host notification');
+    expect(completedDirect.reply.author).toMatchObject({ kind: 'agent', agentId: teammateAgentId, ownerAccountId: users[1]!.id });
+    expect(completedDirect.reply.authorDeviceId).toBe(teammate.app.distributed.transport.snapshot(join.json.teamId).deviceId);
+    expect(leader.app.store.db.prepare('SELECT run_state FROM team_chat_messages WHERE id=?').get(direct.json.id)).toMatchObject({ run_state: 'completed' });
+    expect(leader.app.store.db.prepare('SELECT COUNT(*) AS count FROM team_chat_messages WHERE body=?').get('Owner-signed direct remote completion.')).toEqual({ count: 1 });
   } finally {
     while (apps.length) await apps.pop()!.cleanup();
     vi.restoreAllMocks();

@@ -1821,9 +1821,9 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
     if (this.closed) return;
     this.options.groups.onRunFinished(delivery.session_id, delivery.run_id, 'completed');
     const project = this.readHost(delivery.team_id, delivery.shared_project_id);
-    if (delivery.source_chat_message_id && this.chat && project && intent.finalContent) {
-      await this.chat.postOrchestratedAgentReply({ projectId: project.local_project_id, sourceMessageId: delivery.source_chat_message_id,
-        agentId: delivery.agent_id, deliveryId: delivery.delivery_id, content: intent.finalContent });
+    if (delivery.source_chat_message_id && this.chat && project) {
+      // The owner device publishes its signed, delivery-idempotent agent reply. This host
+      // records integration and request completion, but cannot author as a remote agent.
       const otherLive = this.hostRows.prepare(`SELECT 1 AS found FROM mingle_team_host_deliveries
         WHERE source_chat_message_id=? AND delivery_id<>? AND status IN ('queued','accepted','running','awaiting-approval') LIMIT 1`)
         .get(delivery.source_chat_message_id, delivery.delivery_id);
