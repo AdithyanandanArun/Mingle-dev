@@ -38,7 +38,7 @@ pnpm install
 pnpm dev
 ```
 
-Open **http://127.0.0.2:5173**. The local API listens on port **4310**. The clearly labeled example workspace contains local files, idle sessions and a sample dependency workflow; it starts no model calls. Add your own existing Git project to work on real code.
+Open **http://127.0.0.1:5173**. The local API listens on port **4310**. The clearly labeled example workspace contains local files, idle sessions and a sample dependency workflow; it starts no model calls. Add your own existing Git project to work on real code.
 
 ```sh
 pnpm typecheck
@@ -48,7 +48,7 @@ pnpm smoke
 pnpm start
 ```
 
-`pnpm start` serves the built workspace and API together at **http://127.0.0.2:4310**. Tests use local fixtures rather than paid inference.
+`pnpm start` serves the built workspace and API together at **http://127.0.0.1:4310**. Tests use local fixtures rather than paid inference.
 
 ## Mingle account
 

@@ -23,7 +23,7 @@ pnpm install --frozen-lockfile
 pnpm dev
 ```
 
-Open **http://127.0.0.2:5173**. Vite serves the UI and proxies the local API on **127.0.0.2:4310**. Stop development processes with Ctrl+C.
+Open **http://127.0.0.1:5173**. Vite serves the UI and proxies the local API on **127.0.0.1:4310**. Stop development processes with Ctrl+C.
 
 To serve a built UI with the local API:
 
@@ -32,7 +32,7 @@ pnpm build
 pnpm start
 ```
 
-Open **http://127.0.0.2:4310**. To use the Electron development shell instead:
+Open **http://127.0.0.1:4310**. To use the Electron development shell instead:
 
 ```sh
 pnpm build
