@@ -842,6 +842,64 @@ it('replays a persisted post-completion group notification after restart without
   expect(fx.store.listMessages(sessionId, { limit: 30 }).filter((message) => message.role === 'assistant' && message.runId === runId)).toHaveLength(1);
 });
 
+it('preserves owner-completed artifact progress across graceful shutdown and resumes it without provider replay', async () => {
+  let releaseIntegration!: () => void;
+  let integrationStarted!: () => void;
+  const integrationGate = new Promise<void>((resolve) => { releaseIntegration = resolve; });
+  const started = new Promise<void>((resolve) => { integrationStarted = resolve; });
+  const fx = fixture({ integrateTeamArtifact: async ({ artifact }) => {
+    if (artifact.revision === 'd'.repeat(40)) {
+      integrationStarted();
+      await integrationGate;
+    }
+    return { beforeRevision: 'a'.repeat(40), revision: artifact.revision, integrated: true };
+  } });
+  const group = await addRemoteToSession(fx);
+  const sessionId = String((fx.store.db.prepare('SELECT session_id FROM mingle_team_proxy_sessions WHERE agent_id=?').get(REMOTE_AGENT) as { session_id: string }).session_id);
+  const member = group.members.find((candidate) => candidate.sessionId === sessionId)!;
+  const deliveryId = 'team-graceful-close-delivery';
+  const runId = 'team-graceful-close-run';
+  const requestId = 'team-graceful-close-request';
+  group.deliveries.push({ id: deliveryId, groupId: group.group.id, requestId, messageId: 'team-graceful-close-message', memberId: member.id,
+    status: 'running', runId, hop: 0, error: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), kind: 'assignment' });
+  const userMessage = fx.store.insertMessage({ sessionId, role: 'user', content: 'Integrate the two committed artifacts.', runId });
+  fx.store.insertRun({ id: runId, sessionId, userMessageId: userMessage.id, provider: 'codex', model: 'gpt-6-codex', startedAt: new Date().toISOString() });
+  fx.host.start({ session: fx.store.getSession(sessionId)!, runId, content: 'Integrate the two committed artifacts.', options: { groupDeliveryId: deliveryId },
+    context: { groupId: group.group.id, memberId: member.id, requestId, deliveryId, hop: 0, instructions: 'Instructions' } });
+  await waitFor(() => fx.outgoing.some((entry) => entry.kind === 'teamgroup.delivery' && (entry.payload as { deliveryId?: string }).deliveryId === deliveryId));
+
+  const at = new Date().toISOString();
+  const artifacts = [
+    { revision: 'd'.repeat(40), transferId: 'close-transfer-1', path: 'src/first.ts' },
+    { revision: 'e'.repeat(40), transferId: 'close-transfer-2', path: 'src/second.ts' },
+  ];
+  const incoming = fx.incoming('teamgroup.delivery.status', { sharedProjectId: SHARED, deliveryId, agentId: REMOTE_AGENT, status: 'completed',
+    runId: 'owner-run-graceful-close', finalText: 'Both artifacts are committed.', artifacts, at });
+  await started;
+
+  const closing = fx.host.close();
+  releaseIntegration();
+  await closing;
+  await incoming;
+  const interruptedState = fx.store.db.prepare('SELECT status,failure_json,artifacts_json FROM mingle_team_host_deliveries WHERE delivery_id=?').get(deliveryId) as {
+    status: string; failure_json: string | null; artifacts_json: string;
+  };
+  expect(interruptedState.status).toBe('running');
+  expect(interruptedState.failure_json).toContain('team-completion');
+  expect(JSON.parse(interruptedState.artifacts_json)).toEqual([expect.objectContaining({ revision: artifacts[0]!.revision, ref: expect.any(String) })]);
+  expect(fx.finished.filter((entry) => entry.runId === runId)).toHaveLength(0);
+
+  fx.restartHost();
+  await waitFor(() => (fx.store.db.prepare('SELECT status FROM mingle_team_host_deliveries WHERE delivery_id=?').get(deliveryId) as { status: string }).status === 'completed');
+
+  expect(fx.artifactImports).toHaveLength(2);
+  expect(fx.artifactIntegrations).toHaveLength(3);
+  expect(fx.outgoing.filter((entry) => entry.kind === 'teamgroup.delivery' && (entry.payload as { deliveryId?: string }).deliveryId === deliveryId)).toHaveLength(1);
+  expect(fx.finished.filter((entry) => entry.runId === runId)).toHaveLength(1);
+  expect(fx.store.getRun(runId)?.status).toBe('completed');
+  expect(fx.store.listMessages(sessionId, { limit: 30 }).filter((message) => message.role === 'assistant' && message.runId === runId)).toHaveLength(1);
+});
+
 it('rolls back a manual roster change when the group scheduler rejects the transition', async () => {
   const fx = fixture();
   await addRemoteToSession(fx);

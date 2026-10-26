@@ -1592,7 +1592,11 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
         this.timers.delete(current.delivery_id);
         return nextIntent;
       });
-      if (intent) await this.processCompletion(delivery.delivery_id);
+      if (intent) {
+        const work = this.processCompletion(delivery.delivery_id);
+        this.track(work);
+        await work;
+      }
       return;
     }
 
@@ -1637,7 +1641,7 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
   }
 
   private async processCompletion(deliveryId: string): Promise<void> {
-    await this.deliveryMutations.run(deliveryId, async () => {
+    return this.deliveryMutations.run(deliveryId, async () => {
       const observed = this.delivery(deliveryId);
       const initialIntent = observed && this.completionIntent(observed);
       if (!observed || !initialIntent) return;
@@ -1751,6 +1755,9 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
           await this.notifyCompletedDelivery({ ...delivery, status: 'completed', failure_json: JSON.stringify(notifying) }, notifying);
         }
       });
+    }).catch((error: unknown) => {
+      if (error instanceof CompletionAuthorityError) return;
+      throw error;
     });
   }
 
@@ -2161,24 +2168,26 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
         .get(active.runId) as { delivery_id?: string; team_id?: string; shared_project_id?: string; owner_device_id?: string } | undefined;
       if (delivery?.delivery_id && delivery.team_id && delivery.shared_project_id && delivery.owner_device_id) {
         const current = this.delivery(delivery.delivery_id);
-        if (!current || !this.completionIntent(current)) {
+        const hasCompletionIntent = Boolean(current && this.completionIntent(current));
+        if (!hasCompletionIntent) {
           const payload = TeamInterruptPayloadSchema.parse({ sharedProjectId: delivery.shared_project_id, deliveryId: delivery.delivery_id, reason: 'The host is shutting down.' });
           try {
             await this.options.transport.send({ teamId: delivery.team_id, toDeviceId: delivery.owner_device_id, kind: 'teamgroup.interrupt', payload,
               idempotencyKey: `teamgroup-interrupt:${delivery.delivery_id}:shutdown`.slice(0, 200) });
             await this.options.transport.sync();
           } catch { /* durable host run is still interrupted locally */ }
+          await this.finishDelivery(delivery.delivery_id, 'interrupted', undefined, 'The host shut down while this remote delivery was active.');
         }
-        await this.finishDelivery(delivery.delivery_id, 'interrupted', undefined, 'The host shut down while this remote delivery was active.');
       } else {
         this.options.teamMcp.revoke(active.runId);
         this.active.delete(sessionId);
       }
     }
-    for (const [deliveryId, completion] of [...this.completing]) {
+    for (const completion of [...this.completing.values()]) {
       completion.controller.abort();
       this.options.teamMcp.revoke(completion.runId);
-      await this.finishDelivery(deliveryId, 'interrupted', undefined, 'The host shut down while remote artifact integration was pending.');
+      // Keep the completion intent/progress for restart recovery. closed + the abort signal stop
+      // the current artifact loop; the next host resumes the same owner-completed result.
     }
     await Promise.allSettled([...this.pending]);
   }
