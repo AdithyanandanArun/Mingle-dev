@@ -279,6 +279,25 @@ describe('RemoteExecutionService', () => {
     expect(destination.db.prepare("SELECT policy FROM sessions WHERE id = 'session_full_publish'").get()).toEqual({ policy: 'full-access' });
   });
 
+  it('withdraws the last shared agent on peers without clearing another owner or accepting an unscoped withdrawal', async () => {
+    const source = createFixture({ deviceId: DEVICE_A, peerId: DEVICE_B, ownerId: OWNER_A, projectId: 'withdraw_a', sessionId: 'withdraw_a', sessionName: 'Source', provider: 'codex' });
+    const owner = createFixture({ deviceId: DEVICE_B, peerId: DEVICE_A, ownerId: OWNER_B, projectId: 'withdraw_b', sessionId: 'withdraw_b', sessionName: 'Owner', provider: 'codex' });
+    await source.service.bindProject({ teamId: TEAM, sharedProjectId: SHARED_PROJECT, localProjectId: 'withdraw_a' });
+    await owner.service.bindProject({ teamId: TEAM, sharedProjectId: SHARED_PROJECT, localProjectId: 'withdraw_b' });
+    await source.service.publishAgents({ teamId: TEAM, sharedProjectId: SHARED_PROJECT, sessionIds: ['withdraw_a'] });
+    await owner.service.publishAgents({ teamId: TEAM, sharedProjectId: SHARED_PROJECT, sessionIds: ['withdraw_b'] });
+    const publication = owner.transport.sent.at(-1)!;
+    await source.service.onEnvelope(envelope(DEVICE_B, DEVICE_A, publication.kind, publication.payload));
+    expect((await source.service.snapshot(TEAM)).agents).toHaveLength(2);
+    await expect(source.service.onEnvelope(envelope(DEVICE_B, DEVICE_A, 'execution.agents', { agents: [] }))).rejects.toThrow(/shared project/i);
+    expect((await source.service.snapshot(TEAM)).agents).toHaveLength(2);
+
+    await owner.service.publishAgents({ teamId: TEAM, sharedProjectId: SHARED_PROJECT, sessionIds: [] });
+    const withdrawal = owner.transport.sent.at(-1)!;
+    await source.service.onEnvelope(envelope(DEVICE_B, DEVICE_A, withdrawal.kind, withdrawal.payload));
+    expect((await source.service.snapshot(TEAM)).agents).toMatchObject([{ deviceId: DEVICE_A }]);
+  });
+
   it('leaves an archived published session out of the snapshot until refresh revokes it', async () => {
     const destination = createFixture({ deviceId: DEVICE_B, peerId: DEVICE_A, ownerId: OWNER_B, projectId: 'project_archived', sessionId: 'session_archived', sessionName: 'Archived', provider: 'opencode' });
     await destination.service.bindProject({ teamId: TEAM, sharedProjectId: SHARED_PROJECT, localProjectId: 'project_archived' });

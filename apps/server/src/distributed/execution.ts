@@ -517,7 +517,7 @@ export class RemoteExecutionService {
       const at = nowIso();
       this.run(`UPDATE mingle_remote_agents SET revoked_at = ? WHERE team_id = ? AND shared_project_id = ? AND device_id = ? AND owner_id = ? AND revoked_at IS NULL
         AND session_id NOT IN (${parsed.sessionIds.map(() => '?').join(',')})`, at, parsed.teamId, parsed.sharedProjectId, identity.deviceId, identity.ownerId, ...parsed.sessionIds);
-      await this.sendToPeers(client, identity, parsed.sharedProjectId, 'execution.agents', { generatedAt: at, agents: outgoing }, `agents:${at}`);
+      await this.sendToPeers(client, identity, parsed.sharedProjectId, 'execution.agents', { sharedProjectId: parsed.sharedProjectId, generatedAt: at, agents: outgoing }, `agents:${at}`);
       this.recordEvent(identity, parsed.sharedProjectId, 'agents.published', `Published ${outgoing.length} explicit local agent session(s).`, { agentIds: outgoing.map((agent) => agent.id) });
       this.options.changed();
       return outgoing;
@@ -566,7 +566,7 @@ export class RemoteExecutionService {
         if (refreshed) agents.push(this.agentFromRow(refreshed, presence));
       }
       if (changed) {
-        await this.sendToPeers(client, identity, parsed.sharedProjectId, 'execution.agents', { generatedAt: at, agents }, `agents-refresh:${at}`);
+        await this.sendToPeers(client, identity, parsed.sharedProjectId, 'execution.agents', { sharedProjectId: parsed.sharedProjectId, generatedAt: at, agents }, `agents-refresh:${at}`);
         this.recordEvent(identity, parsed.sharedProjectId, 'agents.refreshed', `Refreshed ${agents.length} published agent metadata record(s).`, {
           agentIds: agents.map((agent) => agent.id), quotaProbed: false,
         });
@@ -1116,12 +1116,15 @@ export class RemoteExecutionService {
   private async receiveAgents(envelope: AuthenticatedEnvelope): Promise<void> {
     const payload = asRow(envelope.payload);
     const rawAgents: unknown = payload?.agents;
-    if (!payload || !Array.isArray(rawAgents) || rawAgents.length === 0) throw new HttpError(400, 'Malformed published-agent message.');
+    if (!payload || !Array.isArray(rawAgents) || rawAgents.length > 50) throw new HttpError(400, 'Malformed published-agent message.');
+    // Older nonempty publications identify the project in each agent. Empty
+    // withdrawals must name it explicitly so only that owner's project is cleared.
+    const sharedProjectId = payload.sharedProjectId ?? (rawAgents.length ? RemoteAgentSchema.parse(rawAgents[0]).sharedProjectId : null);
+    if (typeof sharedProjectId !== 'string' || !sharedProjectId.length || sharedProjectId.length > 100) throw new HttpError(400, 'Published agents must identify their shared project.');
     return this.withEnvelope(envelope, async (client, identity, remoteOwnerId) => {
-      const firstAgent = RemoteAgentSchema.parse(rawAgents[0]);
-      const binding = await this.binding(identity, firstAgent.sharedProjectId);
+      const binding = await this.binding(identity, sharedProjectId);
       const at = nowIso();
-      const validated = rawAgents.slice(0, 50).map((raw: unknown) => {
+      const validated = rawAgents.map((raw: unknown) => {
         const agent = RemoteAgentSchema.parse(raw);
         if (agent.teamId !== identity.teamId || agent.deviceId !== envelope.fromDeviceId || agent.ownerId !== remoteOwnerId || agent.sharedProjectId !== binding.sharedProjectId) throw new HttpError(403, 'Published agent identity does not match the authenticated sender and bound project.');
         // Delivery may have waited offline. Receipt time must not turn an old owner
