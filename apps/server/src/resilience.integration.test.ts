@@ -129,7 +129,9 @@ describe('durable resilience API', () => {
     const file = path.join(directory, 'state.sqlite');
     try {
       const current = openDatabase(file);
-      expect(SCHEMA_VERSION).toBe(22);
+      expect(SCHEMA_VERSION).toBeGreaterThanOrEqual(23);
+      const terminalColumns = current.prepare('PRAGMA table_info(mingle_team_device_deliveries)').all() as { name: string }[];
+      expect(terminalColumns.some(column => column.name === 'terminal_status_json')).toBe(true);
       current.exec('DROP TABLE user_questions; DROP TABLE session_plans; DROP TABLE group_recovery_deliveries; ALTER TABLE group_requests DROP COLUMN execution_plan_id; ALTER TABLE group_requests DROP COLUMN intent; ALTER TABLE session_failures DROP COLUMN resolved_at; DROP INDEX conversation_groups_visible; ALTER TABLE conversation_groups DROP COLUMN archived_at; ALTER TABLE messages DROP COLUMN context_refs_json; ALTER TABLE group_messages DROP COLUMN context_refs_json; PRAGMA user_version = 11;');
       current.close();
 
