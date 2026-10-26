@@ -60,6 +60,14 @@ export const EnableTeamOrchestrationSchema = z.object({
 }).strict();
 export type EnableTeamOrchestration = z.infer<typeof EnableTeamOrchestrationSchema>;
 
+/** POST /api/projects/:projectId/team-orchestration/share-session — bind the current local session as the team session. */
+export const ShareTeamSessionSchema = z.object({
+  sessionId: Id,
+  permissionLevel: TeamPermissionLevelSchema,
+  expectedVersion: z.number().int().min(1).optional(),
+}).strict();
+export type ShareTeamSession = z.infer<typeof ShareTeamSessionSchema>;
+
 export const TeamConsentStateSchema = z.enum(['granted', 'needs-reconsent', 'paused', 'revoked']);
 export type TeamConsentState = z.infer<typeof TeamConsentStateSchema>;
 

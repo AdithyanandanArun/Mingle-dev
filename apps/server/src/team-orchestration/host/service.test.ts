@@ -31,7 +31,7 @@ afterEach(async () => {
   while (paths.length) rmSync(paths.pop()!, { recursive: true, force: true });
 });
 
-function fixture(options: { deviceId?: string; role?: 'leader' | 'admin' | 'member'; deliveryTimeoutMs?: number; deliveryMaxDurationMs?: number; now?: () => number;
+function fixture(options: { deviceId?: string; accountId?: string; role?: 'leader' | 'admin' | 'member'; deliveryTimeoutMs?: number; deliveryMaxDurationMs?: number; now?: () => number;
   integrateTeamArtifact?: (input: any) => Promise<{ beforeRevision: string; revision: string; integrated: boolean }> } = {}) {
   const store = new Store(openDatabase(':memory:'));
   const repo = makeRepo();
@@ -117,12 +117,13 @@ function fixture(options: { deviceId?: string; role?: 'leader' | 'admin' | 'memb
           return builder;
         },
       };
-      const user = { id: ACCOUNT, email: 'lead@example.test', aud: 'authenticated', created_at: '2026-01-01T00:00:00Z', app_metadata: {}, user_metadata: {} } as unknown as User;
+      const user = { id: options.accountId ?? ACCOUNT, email: 'lead@example.test', aud: 'authenticated', created_at: '2026-01-01T00:00:00Z', app_metadata: {}, user_metadata: {} } as unknown as User;
       return callback(cloud as unknown as SupabaseClient, user);
     },
   };
   let group: GroupSnapshot | null = null;
   let failNextSync = false;
+  let publishLocalAgents: ((input: { teamId: string; sharedProjectId: string; sessionIds: string[] }) => Promise<unknown>) | null = null;
   let pumpCount = 0;
   let afterRunFinished: ((sessionId: string, runId: string, outcome: string) => void) | null = null;
   const finished: Array<{ sessionId: string; runId: string; outcome: string }> = [];
@@ -203,6 +204,10 @@ function fixture(options: { deviceId?: string; role?: 'leader' | 'admin' | 'memb
         artifactIntegrations.push(input);
         return options.integrateTeamArtifact!(input);
       } : undefined,
+      publishLocalAgents: async (input) => {
+        if (!publishLocalAgents) throw new Error('Publisher not configured.');
+        return publishLocalAgents(input);
+      },
       deliveryTimeoutMs: options.deliveryTimeoutMs ?? 60_000, deliveryMaxDurationMs: options.deliveryMaxDurationMs, now: options.now });
     hosts.push(host);
     return host;
@@ -210,6 +215,7 @@ function fixture(options: { deviceId?: string; role?: 'leader' | 'admin' | 'memb
   let host = makeHost();
   const fx = {
     store, project, local, get host() { return host; }, outgoing, finished, enqueued, artifactImports, artifactDiscards, artifactIntegrations, remoteToolCalls, agents, group: () => group, setRole(value: typeof role) { role = value; },
+    setPublisher(callback: typeof publishLocalAgents) { publishLocalAgents = callback; },
     setDevice(deviceId: string) { localDeviceId = deviceId; },
     setOwnerOnline(value: boolean) { ownerOnline = value; },
     addPublishedAgent(agent: typeof agents[number]) { agents.push(agent); },
@@ -394,6 +400,181 @@ it('keeps explicit team enablement group-free until Add agents converts a sessio
   expect((await fx.host.structure(PROJECT)).teamSession).toMatchObject({ groupId: group.group.id, sessionId: LOCAL_AGENT });
 });
 
+it('shares the current local session as a one-member team group and is idempotent with a zero remote roster', async () => {
+  const fx = fixture();
+  const first = await fx.host.shareSession(PROJECT, { sessionId: LOCAL_AGENT, permissionLevel: 'supervised' });
+  const group = fx.group()!;
+  expect(group.group).toMatchObject({ projectId: PROJECT, anchorSessionId: LOCAL_AGENT, mode: 'orchestrated' });
+  expect(group.members).toHaveLength(1);
+  expect(group.members[0]).toMatchObject({ sessionId: LOCAL_AGENT, role: 'orchestrator' });
+  expect(first).toMatchObject({ enabled: true, settings: { version: 1, orchestratorAgentId: LOCAL_AGENT },
+    teamSession: { groupId: group.group.id, sessionId: LOCAL_AGENT } });
+  expect((await fx.host.availableAgents(PROJECT)).teamSession).toMatchObject({ groupId: group.group.id, sessionId: LOCAL_AGENT });
+  expect(fx.host.activeCount()).toBe(0);
+  expect(fx.outgoing.some((entry) => entry.kind === 'teamgroup.delivery')).toBe(false);
+
+  const retry = await fx.host.shareSession(PROJECT, { sessionId: LOCAL_AGENT, permissionLevel: 'supervised', expectedVersion: 1 });
+  expect(retry.settings?.version).toBe(1);
+  expect(retry.teamSession?.groupId).toBe(group.group.id);
+  expect(fx.group()?.members).toHaveLength(1);
+});
+
+it('auto-publishes only the selected session while retaining the host device published set', async () => {
+  const fx = fixture();
+  fx.agents.splice(0, 1);
+  const calls: Array<{ teamId: string; sharedProjectId: string; sessionIds: string[] }> = [];
+  fx.setPublisher(async (input) => {
+    calls.push(input);
+    fx.addPublishedAgent({ id: LOCAL_AGENT, name: fx.local.name, accountId: ACCOUNT, deviceId: DEVICE,
+      projectId: PROJECT, sessionId: LOCAL_AGENT, provider: fx.local.provider, model: fx.local.model, state: 'idle' });
+  });
+
+  await fx.host.shareSession(PROJECT, { sessionId: LOCAL_AGENT, permissionLevel: 'supervised' });
+
+  expect(calls).toEqual([{ teamId: TEAM, sharedProjectId: SHARED, sessionIds: [LOCAL_AGENT] }]);
+  expect(fx.group()?.members.map((member) => member.sessionId)).toEqual([LOCAL_AGENT]);
+});
+
+it('does not publish a different session when a canonical team session is already bound', async () => {
+  const fx = fixture();
+  await fx.host.shareSession(PROJECT, { sessionId: LOCAL_AGENT, permissionLevel: 'supervised' });
+  const other = fx.store.insertSession({ id: 'other-current-session', projectId: PROJECT, name: 'Another session', provider: 'codex', model: 'gpt-6-codex',
+    effort: 'high', policy: 'supervised', isolated: false, worktreePath: fx.project.path, branch: null });
+  const calls: string[][] = [];
+  fx.setPublisher(async (input) => { calls.push(input.sessionIds); });
+
+  await expect(fx.host.shareSession(PROJECT, { sessionId: other.id, permissionLevel: 'supervised' }))
+    .rejects.toMatchObject({ status: 409, message: expect.stringContaining('canonical session') });
+
+  expect(calls).toEqual([]);
+});
+
+it('preserves advanced host settings when permission is changed on the established canonical group', async () => {
+  const fx = fixture();
+  await fx.host.shareSession(PROJECT, { sessionId: LOCAL_AGENT, permissionLevel: 'supervised' });
+  const row = fx.store.db.prepare(`SELECT settings_json FROM mingle_team_host_projects WHERE team_id=? AND shared_project_id=?`).get(TEAM, SHARED) as { settings_json: string };
+  const advanced = { ...JSON.parse(row.settings_json), leaderOrchestration: false, fallbackAgentIds: [REMOTE_AGENT] };
+  fx.store.db.prepare(`UPDATE mingle_team_host_projects SET settings_json=? WHERE team_id=? AND shared_project_id=?`)
+    .run(JSON.stringify(advanced), TEAM, SHARED);
+
+  const changed = await fx.host.shareSession(PROJECT, { sessionId: LOCAL_AGENT, permissionLevel: 'full-access', expectedVersion: 1 });
+
+  expect(changed.settings).toMatchObject({ ...advanced, permissionLevel: 'full-access', version: 2 });
+  expect(fx.group()?.members).toHaveLength(1);
+});
+
+it('attaches a legacy enabled zero-roster row with leader routing while preserving fallback settings', async () => {
+  const fx = fixture();
+  await fx.host.enable(PROJECT, enableInput());
+  const row = fx.store.db.prepare(`SELECT settings_json FROM mingle_team_host_projects WHERE team_id=? AND shared_project_id=?`).get(TEAM, SHARED) as { settings_json: string };
+  fx.store.db.prepare('DELETE FROM mingle_team_host_roster WHERE team_id=? AND shared_project_id=?').run(TEAM, SHARED);
+  const priorSettings = { ...JSON.parse(row.settings_json), leaderOrchestration: false, fallbackAgentIds: [REMOTE_AGENT] };
+  fx.store.db.prepare(`UPDATE mingle_team_host_projects SET settings_json=? WHERE team_id=? AND shared_project_id=?`)
+    .run(JSON.stringify(priorSettings), TEAM, SHARED);
+  fx.agents.splice(0, 1);
+  const publishCalls: string[][] = [];
+  fx.setPublisher(async (input) => {
+    publishCalls.push(input.sessionIds);
+    fx.addPublishedAgent({ id: LOCAL_AGENT, name: fx.local.name, accountId: ACCOUNT, deviceId: DEVICE,
+      projectId: PROJECT, sessionId: LOCAL_AGENT, provider: fx.local.provider, model: fx.local.model, state: 'idle' });
+  });
+
+  await expect(fx.host.shareSession(PROJECT, { sessionId: LOCAL_AGENT, permissionLevel: 'supervised' }))
+    .rejects.toMatchObject({ status: 409, message: expect.stringContaining('expectedVersion') });
+  expect(publishCalls).toEqual([]);
+
+  const attached = await fx.host.shareSession(PROJECT, { sessionId: LOCAL_AGENT, permissionLevel: 'supervised', expectedVersion: 1 });
+
+  expect(attached.settings).toMatchObject({ ...priorSettings, leaderOrchestration: true, version: 2 });
+  expect(attached.teamSession?.sessionId).toBe(LOCAL_AGENT);
+  expect(publishCalls).toEqual([[LOCAL_AGENT]]);
+  expect(fx.group()?.members).toHaveLength(1);
+});
+
+it('adopts the visible anchor of an existing local group and derives its non-anchor lead without changing group state', async () => {
+  const fx = fixture();
+  const second = fx.store.insertSession({ id: 'local-existing-worker', projectId: PROJECT, name: 'Existing worker', provider: 'codex', model: 'gpt-6-codex',
+    effort: 'high', policy: 'supervised', isolated: false, worktreePath: fx.project.path, branch: null });
+  const existing: GroupSnapshot = { group: { id: 'group_existing_local', projectId: PROJECT, title: 'Existing local group', anchorSessionId: LOCAL_AGENT,
+    mode: 'orchestrated', orchestratorMemberId: 'member-local-lead', paused: false, pauseReason: null, maxParallel: 2, maxTurns: 80, maxHops: 6,
+    createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }, members: [
+      { id: 'member-local-anchor', groupId: 'group_existing_local', sessionId: LOCAL_AGENT, handle: 'local-anchor', role: 'worker', held: false, joinedAt: new Date().toISOString(), removedAt: null },
+      { id: 'member-local-lead', groupId: 'group_existing_local', sessionId: second.id, handle: 'local-lead', role: 'orchestrator', held: false, joinedAt: new Date().toISOString(), removedAt: null },
+    ], messages: [], requests: [], deliveries: [], assignments: [] };
+  const original = structuredClone(existing);
+  fx.setGroup(existing);
+  const publishCalls: string[][] = [];
+  fx.setPublisher(async (input) => {
+    publishCalls.push(input.sessionIds);
+    fx.addPublishedAgent({ id: 'local-nonanchor-lead', name: 'Existing worker', accountId: ACCOUNT, deviceId: DEVICE,
+      projectId: PROJECT, sessionId: second.id, provider: 'codex', model: 'gpt-6-codex', state: 'idle' });
+  });
+
+  const result = await fx.host.shareSession(PROJECT, { sessionId: LOCAL_AGENT, permissionLevel: 'supervised' });
+
+  expect(result.teamSession).toMatchObject({ groupId: existing.group.id, sessionId: LOCAL_AGENT });
+  expect(result.settings?.orchestratorAgentId).toBe('local-nonanchor-lead');
+  expect(publishCalls).toEqual([[LOCAL_AGENT, second.id]]);
+  expect(fx.group()).toEqual(original);
+  expect(fx.store.db.prepare('SELECT group_id FROM mingle_team_host_projects WHERE team_id=? AND shared_project_id=?').get(TEAM, SHARED))
+    .toEqual({ group_id: existing.group.id });
+});
+
+it('adopts an existing cowork group without adding an orchestrator or changing its mode', async () => {
+  const fx = fixture();
+  const existing: GroupSnapshot = { group: { id: 'group_existing_cowork', projectId: PROJECT, title: 'Existing cowork', anchorSessionId: LOCAL_AGENT,
+    mode: 'cowork', orchestratorMemberId: null, paused: false, pauseReason: null, maxParallel: 2, maxTurns: 80, maxHops: 6,
+    createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }, members: [
+      { id: 'member-local-peer', groupId: 'group_existing_cowork', sessionId: LOCAL_AGENT, handle: 'local-peer', role: 'peer', held: false, joinedAt: new Date().toISOString(), removedAt: null },
+    ], messages: [], requests: [], deliveries: [], assignments: [] };
+  const original = structuredClone(existing);
+  fx.setGroup(existing);
+
+  const result = await fx.host.shareSession(PROJECT, { sessionId: LOCAL_AGENT, permissionLevel: 'supervised' });
+
+  expect(result.settings?.orchestratorAgentId).toBeNull();
+  expect(fx.group()).toEqual(original);
+});
+
+it('rejects other-project and proxy sessions, wrong host roles/devices, and stale expected versions', async () => {
+  const fx = fixture();
+  const otherRepo = makeRepo();
+  paths.push(otherRepo);
+  fx.store.insertProject({ id: 'other-team-project', name: 'Other project', path: otherRepo });
+  const wrongProject = fx.store.insertSession({ id: 'session-other-project', projectId: 'other-team-project', name: 'Other', provider: 'claude', model: 'claude-sonnet-5-5',
+    effort: 'high', policy: 'supervised', isolated: false, worktreePath: otherRepo, branch: null });
+  const proxy = fx.store.insertSession({ id: 'session-team-proxy', projectId: PROJECT, name: 'Proxy', provider: 'codex', model: 'gpt-6-codex',
+    effort: 'high', policy: 'supervised', isolated: false, worktreePath: fx.project.path, branch: null });
+  fx.store.db.prepare(`INSERT INTO mingle_team_proxy_sessions(session_id,team_id,shared_project_id,agent_id,owner_account_id,owner_device_id,handle)
+    VALUES(?,?,?,?,?,?,?)`).run(proxy.id, TEAM, SHARED, REMOTE_AGENT, OWNER, OWNER_DEVICE, 'owner');
+  await expect(fx.host.shareSession(PROJECT, { sessionId: wrongProject.id, permissionLevel: 'supervised' })).rejects.toMatchObject({ status: 404 });
+  await expect(fx.host.shareSession(PROJECT, { sessionId: proxy.id, permissionLevel: 'supervised' })).rejects.toMatchObject({ status: 404 });
+
+  const member = fixture({ role: 'member' });
+  await expect(member.host.shareSession(PROJECT, { sessionId: LOCAL_AGENT, permissionLevel: 'supervised' })).rejects.toMatchObject({ status: 403 });
+  const wrongDevice = fixture({ deviceId: OWNER_DEVICE });
+  await expect(wrongDevice.host.shareSession(PROJECT, { sessionId: LOCAL_AGENT, permissionLevel: 'supervised' })).rejects.toMatchObject({ status: 403 });
+  const wrongAccount = fixture({ accountId: '10000000-0000-4000-8000-000000000003' });
+  await expect(wrongAccount.host.shareSession(PROJECT, { sessionId: LOCAL_AGENT, permissionLevel: 'supervised' })).rejects.toMatchObject({ status: 403 });
+
+  await fx.host.enable(PROJECT, enableInput());
+  await expect(fx.host.shareSession(PROJECT, { sessionId: LOCAL_AGENT, permissionLevel: 'supervised', expectedVersion: 99 })).rejects.toMatchObject({ status: 409 });
+});
+
+it('increments settings and requires re-consent when attaching with raised full-access permission', async () => {
+  const fx = fixture();
+  await fx.host.enable(PROJECT, enableInput());
+  seedRemoteConsent(fx);
+
+  const result = await fx.host.shareSession(PROJECT, { sessionId: LOCAL_AGENT, permissionLevel: 'full-access', expectedVersion: 1 });
+
+  expect(result.settings).toMatchObject({ version: 2, permissionLevel: 'full-access' });
+  expect(fx.store.db.prepare(`SELECT state FROM mingle_team_host_consents WHERE team_id=? AND shared_project_id=? AND agent_id=?`)
+    .get(TEAM, SHARED, REMOTE_AGENT)).toEqual({ state: 'needs-reconsent' });
+  expect(result.members.find((member) => member.agentId === REMOTE_AGENT)?.consent).toBe('needs-reconsent');
+  await expect(fx.host.shareSession(PROJECT, { sessionId: LOCAL_AGENT, permissionLevel: 'supervised', expectedVersion: 1 })).rejects.toMatchObject({ status: 409 });
+});
+
 it('uses owner-name handles with provider and numeric suffixes when an owner has multiple agents', async () => {
   const fx = fixture();
   fx.agents.push({ id: 'remote-agent-two', name: 'Remote Codex 2', accountId: OWNER, deviceId: OWNER_DEVICE,
@@ -522,7 +703,9 @@ it('requires the host lead/admin and clears team-session metadata when the last 
   fx.removeGroupMember(remote.id);
   await waitFor(() => fx.store.db.prepare('SELECT removed_at FROM mingle_team_host_roster WHERE agent_id=?').get(REMOTE_AGENT)
     && (fx.store.db.prepare('SELECT removed_at FROM mingle_team_host_roster WHERE agent_id=?').get(REMOTE_AGENT) as { removed_at: string | null }).removed_at !== null);
-  expect((await fx.host.structure(PROJECT)).teamSession).toBeNull();
+  expect((await fx.host.structure(PROJECT)).teamSession).toMatchObject({ groupId: group.group.id, sessionId: LOCAL_AGENT });
+  expect(fx.store.listEvents({ projectId: PROJECT }).filter((event) => event.type === 'team.session.updated').at(-1)?.payload)
+    .toMatchObject({ teamSession: { groupId: group.group.id, sessionId: LOCAL_AGENT } });
 });
 
 it('clears and broadcasts the team session when its group is deleted, keeping team mode and consent', async () => {
