@@ -538,15 +538,15 @@ it('adopts an existing cowork group without adding an orchestrator or changing i
   expect(fx.group()).toEqual(original);
 });
 
-it('rejects a mixed-provider local group before partially publishing its supported anchor', async () => {
+it.each(['orchestrator', 'worker'] as const)('rejects an unsupported local %s before binding or partially publishing the group', async (unsupportedRole) => {
   const fx = fixture();
   const antigravityLead = fx.store.insertSession({ id: 'local-antigravity-lead', projectId: PROJECT, name: 'Antigravity lead', provider: 'antigravity', model: 'gemini-pro',
     effort: 'high', policy: 'supervised', isolated: false, worktreePath: fx.project.path, branch: null });
   const existing: GroupSnapshot = { group: { id: 'group_mixed_provider', projectId: PROJECT, title: 'Mixed-provider group', anchorSessionId: LOCAL_AGENT,
-    mode: 'orchestrated', orchestratorMemberId: 'member-antigravity-lead', paused: false, pauseReason: null, maxParallel: 2, maxTurns: 80, maxHops: 6,
+    mode: 'orchestrated', orchestratorMemberId: unsupportedRole === 'orchestrator' ? 'member-antigravity-lead' : 'member-local-anchor', paused: false, pauseReason: null, maxParallel: 2, maxTurns: 80, maxHops: 6,
     createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }, members: [
-      { id: 'member-local-anchor', groupId: 'group_mixed_provider', sessionId: LOCAL_AGENT, handle: 'local-anchor', role: 'worker', held: false, joinedAt: new Date().toISOString(), removedAt: null },
-      { id: 'member-antigravity-lead', groupId: 'group_mixed_provider', sessionId: antigravityLead.id, handle: 'antigravity-lead', role: 'orchestrator', held: false, joinedAt: new Date().toISOString(), removedAt: null },
+      { id: 'member-local-anchor', groupId: 'group_mixed_provider', sessionId: LOCAL_AGENT, handle: 'local-anchor', role: unsupportedRole === 'orchestrator' ? 'worker' : 'orchestrator', held: false, joinedAt: new Date().toISOString(), removedAt: null },
+      { id: 'member-antigravity-lead', groupId: 'group_mixed_provider', sessionId: antigravityLead.id, handle: 'antigravity-lead', role: unsupportedRole, held: false, joinedAt: new Date().toISOString(), removedAt: null },
     ], messages: [], requests: [], deliveries: [], assignments: [] };
   fx.setGroup(existing);
   const original = structuredClone(existing);

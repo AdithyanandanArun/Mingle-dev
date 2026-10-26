@@ -683,8 +683,15 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
 
     const requiredSessionIds = [...new Set([session.id, ...(orchestratorSessionId && orchestratorSessionId !== session.id ? [orchestratorSessionId] : [])])];
     const requiredSessions = requiredSessionIds.map((sessionId) => this.options.store.getSession(sessionId));
-    if (requiredSessions.some((candidate) => !candidate || candidate.projectId !== context.localProjectId || this.isProxySession(candidate.id))) {
+    const localGroupSessionIds = new Set([...requiredSessionIds, ...(boundGroup?.members ?? [])
+      .filter((member) => !member.removedAt && !this.isProxySession(member.sessionId)).map((member) => member.sessionId)]);
+    const localGroupSessions = [...localGroupSessionIds].map((sessionId) => this.options.store.getSession(sessionId));
+    if (localGroupSessions.some((candidate) => !candidate || candidate.projectId !== context.localProjectId || this.isProxySession(candidate.id))) {
       throw new HttpError(409, 'The existing team group contains an unavailable local session.');
+    }
+    const unsupported = localGroupSessions.find((candidate) => candidate && !publishableLocalProviders.has(candidate.provider));
+    if (unsupported) {
+      throw new HttpError(409, `${unsupported.provider} sessions cannot be published for remote team execution. Use Claude, Codex, or OpenCode sessions.`);
     }
     if (requiredSessions.some((candidate) => candidate && ['running', 'waiting'].includes(candidate.status))) {
       throw new HttpError(409, 'Wait for the current session and group lead to finish before sharing this group.');
@@ -692,10 +699,6 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
     const localAgentForSession = (sessionId: string) => context.agents.find((agent) => agent.deviceId === context.localDeviceId
       && agent.accountId === context.accountId && agent.projectId === context.localProjectId && agent.sessionId === sessionId);
     if (requiredSessionIds.some((sessionId) => !localAgentForSession(sessionId))) {
-      const unsupported = requiredSessions.find((candidate) => candidate && !publishableLocalProviders.has(candidate.provider));
-      if (unsupported) {
-        throw new HttpError(409, `${unsupported.provider} sessions cannot be published for remote team execution. Use Claude, Codex, or OpenCode sessions.`);
-      }
       if (!this.options.publishLocalAgents) throw new HttpError(409, 'This session could not be published for team orchestration.');
       const alreadyPublished = context.agents.filter((agent) => agent.deviceId === context.localDeviceId && agent.sessionId
         && agent.projectId === context.localProjectId && !this.isProxySession(agent.sessionId)).map((agent) => agent.sessionId!);
