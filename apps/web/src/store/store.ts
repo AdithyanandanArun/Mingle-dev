@@ -125,6 +125,8 @@ interface MingleState {
   closeDialog(): void;
   selectProject(id: string): void;
   preferTeamSession(projectId: string): void;
+  /** Initialize the legacy default only after authenticated remote team structure is known. */
+  preferTeamSessionIfUnset(projectId: string): void;
   setTeamSessionInfo(projectId: string, teamSession: TeamSessionRef | null, hostIsThisDevice: boolean): void;
   restoreTeamSessionSelection(projectId: string, sessionId: string): void;
   openTeamSession(projectId: string, sessionId: string): void;
@@ -640,6 +642,13 @@ export const useMingle = create<MingleState>((set, get) => {
       if (state.activeProjectId === projectId && teamInfo && !teamInfo.hostIsThisDevice && teamInfo.teamSession) {
         get().openTeamSession(projectId, teamInfo.teamSession.sessionId);
       }
+    },
+    preferTeamSessionIfUnset(projectId) {
+      const state = get();
+      const teamInfo = state.teamSessionsByProject[projectId];
+      if (!state.boot?.projects.some((project) => project.id === projectId) || !teamInfo || teamInfo.hostIsThisDevice
+        || state.teamSessionAutoSelectByProject[projectId] !== undefined) return;
+      patch({ teamSessionAutoSelectByProject: { ...state.teamSessionAutoSelectByProject, [projectId]: true } });
     },
     setTeamSessionInfo(projectId, teamSession, hostIsThisDevice) {
       set((state) => {

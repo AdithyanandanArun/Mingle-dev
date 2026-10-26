@@ -821,6 +821,47 @@ async function main() {
     assert.equal(pageErrors.length, 0, `no uncaught browser errors in member group view: ${pageErrors.join('; ')}`);
   });
 
+  await test('legacy joined projects migrate to an existing shared group only when no explicit selection exists', async () => {
+    accountMode = 'signed-in';
+    memberTeamSessionCreated = true;
+    memberGroupResultState = 'review';
+    assert.ok(joinedProjectId && joinedSessions[0], 'the earlier invitation join supplies a legacy member project and local agent');
+    await page.evaluate(({ projectId: joinedId, sessionId }) => {
+      const key = 'relay.ui.v2';
+      const saved = JSON.parse(localStorage.getItem(key) ?? '{}');
+      saved.activeProjectId = joinedId;
+      saved.view = 'workspace';
+      saved.sessionByProject = { ...(saved.sessionByProject ?? {}), [joinedId]: sessionId };
+      saved.selectedTeamSessionByProject = { ...(saved.selectedTeamSessionByProject ?? {}) };
+      delete saved.selectedTeamSessionByProject[joinedId];
+      saved.teamSessionAutoSelectByProject = { ...(saved.teamSessionAutoSelectByProject ?? {}) };
+      delete saved.teamSessionAutoSelectByProject[joinedId];
+      localStorage.setItem(key, JSON.stringify(saved));
+    }, { projectId: joinedProjectId, sessionId: joinedSessions[0].id });
+    const teamChatsBefore = requests.filter((item) => item.pathname === `/api/projects/${joinedProjectId}/team-chat`).length;
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    const sharedRow = page.getByRole('button', { name: 'Example shared team session, shared project team conversation', exact: true });
+    const invitedAgent = page.getByRole('button', { name: /Your agent · @example-invited-1: Example invited agent 1/ });
+    await sharedRow.waitFor();
+    await waitFor(() => sharedRow.getAttribute('aria-current').then((value) => value === 'true'), 'legacy remote project migrates to the existing shared session');
+    await waitFor(() => requests.filter((item) => item.pathname === `/api/projects/${joinedProjectId}/team-chat`).length > teamChatsBefore, 'legacy shared team chat opens');
+    assert.equal(await invitedAgent.getAttribute('aria-current'), null, 'the old local-agent pick does not masquerade as an explicit choice');
+    assert.equal(await page.evaluate((id) => JSON.parse(localStorage.getItem('relay.ui.v2') ?? '{}').teamSessionAutoSelectByProject?.[id], joinedProjectId), true,
+      'the first authenticated remote structure persists the one-time default');
+
+    await invitedAgent.click();
+    await waitFor(() => invitedAgent.getAttribute('aria-current').then((value) => value === 'true'), 'explicit local agent selection');
+    assert.equal(await page.evaluate((id) => JSON.parse(localStorage.getItem('relay.ui.v2') ?? '{}').teamSessionAutoSelectByProject?.[id], joinedProjectId), false,
+      'explicit agent selection records a durable opt-out');
+    const readsBeforeRefresh = teamStructureReads;
+    await page.evaluate((id) => window.dispatchEvent(new CustomEvent('mingle:team-structure-updated', { detail: { projectId: id } })), joinedProjectId);
+    await waitFor(() => teamStructureReads > readsBeforeRefresh, 'authenticated team structure refresh after explicit selection');
+    assert.equal(await invitedAgent.getAttribute('aria-current'), 'true', 'a refreshed remote structure respects the explicit local-agent choice');
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    await waitFor(() => invitedAgent.getAttribute('aria-current').then((value) => value === 'true'), 'explicit local-agent choice survives reload');
+    assert.equal(await sharedRow.getAttribute('aria-current'), null, 'the legacy migration does not override an explicit choice on later loads');
+  });
+
   note(`INFO fixtures: local FakeProviders runtime; collaboration/auth/email/clone/join payloads are intercepted Example fixtures; no provider inference was submitted.`);
   note(`INFO screenshots: ${JSON.stringify(screenshots)}`);
   if (failures.length) throw new Error(`${failures.length} browser acceptance check(s) failed; see ${path.join(outputDir, 'browser-acceptance.log')}`);
