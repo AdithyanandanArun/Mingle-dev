@@ -332,11 +332,27 @@ it('shares imported session history and team messages over HTTP and the encrypte
       content: 'Build a small static landing website with index.html and styles.css. You are the orchestrator: plan, delegate the implementation to the teammate agent, review what they deliver, ask for fixes, and summarise.',
     });
     expect(request.status, JSON.stringify(request.json)).toBe(202);
-    await waitFor(async () => {
-      await teammate.app.distributed.transport.sync();
-      await leader.app.distributed.transport.sync();
-      return workerRuns.length === 2;
-    }, 15_000, 'both delegated remote worker runs');
+    try {
+      await waitFor(async () => {
+        await teammate.app.distributed.transport.sync();
+        await leader.app.distributed.transport.sync();
+        return workerRuns.length === 2;
+      }, 15_000, 'both delegated remote worker runs');
+    } catch (error) {
+      const current = leader.app.groups.get(teamGroupId);
+      const diagnostics = {
+        workerRuns: workerRuns.length,
+        leaderRuns: leader.fake.runs.length,
+        teammateRuns: teammate.fake.runs.length,
+        assignments: current.assignments.map(({ deliveryId, taskId, scope, toMemberId }) => ({ deliveryId, taskId, scope, toMemberId })),
+        deliveries: current.deliveries.map(({ id, kind, status, runId, error: message, memberId }) => ({ id, kind, status, runId, error: message, memberId })),
+        tasks: leader.app.store.listTasks(projects[0]).map(({ id, title, status }) => ({ id, title, status })),
+        proxySession: leader.app.store.getSession(proxySessionId),
+        proxyMessages: leader.app.store.listMessages(proxySessionId, { limit: 30 }).map(({ role, kind, runId, content }) => ({ role, kind, runId, content: content.slice(0, 500) })),
+        ownerMessages: teammate.app.store.listMessages(additionalSession.json.id, { limit: 30 }).map(({ role, kind, runId, content }) => ({ role, kind, runId, content: content.slice(0, 500) })),
+      };
+      throw new Error(`${error instanceof Error ? error.message : String(error)}\nAcceptance diagnostics: ${JSON.stringify(diagnostics).slice(0, 10_000)}`);
+    }
     await waitFor(() => orchestratorAssignments === 2 && leader.fake.runs.length === 4, 15_000, 'one active-work question answer, one review/fix turn, and one final summary');
     await waitFor(() => leader.app.groups.get(teamGroupId).requests.some((item) => item.status === 'completed'), 15_000, 'completed cross-device group request');
 

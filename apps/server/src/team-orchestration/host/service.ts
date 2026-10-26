@@ -76,6 +76,8 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
   private readonly unsubscribe: () => void;
   private readonly unsubscribeStore: () => void;
   private readonly active = new Map<string, { runId: string; controller: AbortController }>();
+  /** Completed provider runs that still have cancellable host-side artifact work. */
+  private readonly completing = new Map<string, { sessionId: string; runId: string; controller: AbortController }>();
   private readonly timers = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly heartbeatSequences = new Map<string, number>();
   private readonly pending = new Set<Promise<unknown>>();
@@ -1287,7 +1289,15 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
 
   interrupt(sessionId: string): boolean {
     const active = this.active.get(sessionId);
-    if (!active) return false;
+    if (!active) {
+      const completion = [...this.completing].find(([, current]) => current.sessionId === sessionId);
+      if (!completion) return false;
+      const [deliveryId, current] = completion;
+      current.controller.abort();
+      this.options.teamMcp.revoke(current.runId);
+      void this.finishDelivery(deliveryId, 'interrupted', undefined, 'Interrupted by the host.');
+      return true;
+    }
     const proxy = this.proxy(sessionId);
     const delivery = this.hostRows.prepare('SELECT delivery_id FROM mingle_team_host_deliveries WHERE run_id=?').get(active.runId) as { delivery_id?: string } | undefined;
     if (!proxy || !delivery?.delivery_id) return false;
@@ -1654,9 +1664,9 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
           intent = { ...intent, workspaceBefore: workspace ? await captureRunTree(workspace.worktreePath) : null };
           this.persistCompletionIntent(deliveryId, intent);
         }
-        // The provider has ended, but keep its host-side interrupt handle until artifact work is
-        // committed. Revoke MCP authority without aborting the signal used to stop integration.
-        this.options.teamMcp.revoke(delivery.run_id);
+        // Release the provider slot before GitSync's repository mutation lease. Keep a separate
+        // cancellation handle for host-side artifact processing until terminal notification.
+        this.beginCompletion(delivery);
 
         for (let index = 0; index < intent.artifacts.length; index++) {
           const progress = intent.artifacts[index]!;
@@ -1791,10 +1801,23 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
   private assertCompletionStillLive(deliveryId: string): void {
     const current = this.delivery(deliveryId);
     const active = current ? this.active.get(current.session_id) : undefined;
+    const completing = this.completing.get(deliveryId);
+    const controller = current && completing?.runId === current.run_id ? completing.controller
+      : current && active?.runId === current.run_id ? active.controller : undefined;
     if (this.closed || !current || !liveDelivery(current.status) || !this.completionIntent(current)
-      || active?.runId === current.run_id && active.controller.signal.aborted) {
+      || controller?.signal.aborted) {
       throw new CompletionAuthorityError('The remote delivery was interrupted before artifact integration completed.');
     }
+  }
+
+  private beginCompletion(delivery: DeliveryRow): void {
+    const active = this.active.get(delivery.session_id);
+    const controller = active?.runId === delivery.run_id ? active.controller : new AbortController();
+    if (active?.runId === delivery.run_id) this.active.delete(delivery.session_id);
+    this.completing.set(delivery.delivery_id, { sessionId: delivery.session_id, runId: delivery.run_id, controller });
+    this.options.teamMcp.revoke(delivery.run_id);
+    // A late completion must not make a newer proxy run appear idle.
+    if (!active || active.runId === delivery.run_id) this.options.store.updateSession(delivery.session_id, { status: 'idle', error: null });
   }
 
   private finishCompletionInterrupted(delivery: DeliveryRow, message: string, at: string): void {
@@ -1820,7 +1843,8 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
         this.hostRows.prepare(`UPDATE session_runs SET status='completed',finished_at=?,duration_ms=? WHERE id=? AND status IN ('failed','interrupted')`)
           .run(at, Math.max(0, this.now() - Date.parse(run.startedAt)), delivery.run_id);
       }
-      this.options.store.updateSession(delivery.session_id, { status: 'idle', error: null });
+      const active = this.active.get(delivery.session_id);
+      if (!active || active.runId === delivery.run_id) this.options.store.updateSession(delivery.session_id, { status: 'idle', error: null });
       this.options.recovery.clearFailure(delivery.session_id);
       const alreadyNotified = this.hostRows.prepare(`SELECT 1 AS found FROM events WHERE type='team.delivery.completed' AND json_extract(payload,'$.deliveryId')=? LIMIT 1`)
         .get(delivery.delivery_id);
@@ -1871,13 +1895,19 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
     if (run?.status === 'running' && outcome !== 'completed') {
       this.options.store.finishRun(delivery.run_id, outcome, Math.max(0, this.now() - Date.parse(run.startedAt)), at);
     }
-    if (outcome !== 'completed') this.options.store.updateSession(delivery.session_id, { status: outcome === 'interrupted' ? 'interrupted' : 'error', error: redactSecrets(message ?? failure?.message ?? 'Remote team delivery failed').slice(0, 1000) });
+    const nextActive = this.active.get(delivery.session_id);
+    if (outcome !== 'completed' && (!nextActive || nextActive.runId === delivery.run_id)) {
+      this.options.store.updateSession(delivery.session_id, { status: outcome === 'interrupted' ? 'interrupted' : 'error',
+        error: redactSecrets(message ?? failure?.message ?? 'Remote team delivery failed').slice(0, 1000) });
+    }
     if (message && outcome !== 'completed') this.options.store.insertMessage({ sessionId: delivery.session_id, runId: delivery.run_id, role: 'system', kind: 'error', content: redactSecrets(message).slice(0, 1000) });
     if (delivery.request_id && delivery.group_id) this.options.groups.onRunFinished(delivery.session_id, delivery.run_id, outcome);
     this.options.store.recordEvent({ projectId: this.options.store.getSession(delivery.session_id, true)?.projectId ?? null, sessionId: delivery.session_id,
       type: `team.delivery.${outcome}`, summary: `Remote team delivery ${outcome}`, payload: { deliveryId, agentId: delivery.agent_id, failure: failure ?? null } });
     this.options.store.touch();
-    if (failure?.kind === 'quota_exhausted') this.options.store.updateSession(delivery.session_id, { error: failure.message });
+    if (failure?.kind === 'quota_exhausted' && (!nextActive || nextActive.runId === delivery.run_id)) {
+      this.options.store.updateSession(delivery.session_id, { error: failure.message });
+    }
     if (delivery.source_chat_message_id) this.finishChatDelivery(delivery.delivery_id, delivery.source_chat_message_id, outcome);
   }
 
@@ -1886,6 +1916,11 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
     if (current?.runId === delivery.run_id) {
       current.controller.abort();
       this.active.delete(delivery.session_id);
+    }
+    const completing = this.completing.get(delivery.delivery_id);
+    if (completing?.runId === delivery.run_id) {
+      completing.controller.abort();
+      this.completing.delete(delivery.delivery_id);
     }
     this.options.teamMcp.revoke(delivery.run_id);
   }
@@ -2139,6 +2174,11 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
         this.options.teamMcp.revoke(active.runId);
         this.active.delete(sessionId);
       }
+    }
+    for (const [deliveryId, completion] of [...this.completing]) {
+      completion.controller.abort();
+      this.options.teamMcp.revoke(completion.runId);
+      await this.finishDelivery(deliveryId, 'interrupted', undefined, 'The host shut down while remote artifact integration was pending.');
     }
     await Promise.allSettled([...this.pending]);
   }
