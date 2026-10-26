@@ -1,11 +1,11 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { SupabaseClient } from '@supabase/supabase-js';
+import type { GroupSnapshot } from '../../../../packages/contracts/src/groups.ts';
 import type {
-  TeamChatAgent, TeamChatAuthor, TeamChatMessage, TeamChatPeer, TeamChatSnapshot, TeamChatSyncRequest,
-  TeamChatSyncResponse,
+  TeamChatAgent, TeamChatAuthor, TeamChatGroupView, TeamChatMessage, TeamChatPeer, TeamChatSnapshot, TeamChatSyncRequest, TeamChatSyncResponse,
 } from '../../../../packages/contracts/src/team-chat.ts';
 import {
-  SendTeamChatMessageSchema, TeamChatAuthorSchema, TeamChatMessageSchema, TeamChatSnapshotSchema, TeamChatSyncRequestSchema, TeamChatSyncResponseSchema,
+  SendTeamChatMessageSchema, TeamChatAuthorSchema, TeamChatGroupViewSchema, TeamChatMessageSchema, TeamChatSnapshotSchema, TeamChatSyncRequestSchema, TeamChatSyncResponseSchema,
 } from '../../../../packages/contracts/src/team-chat.ts';
 import type { AccountService } from '../account/service.ts';
 import type { DistributedWorkspaceService } from '../distributed/service.ts';
@@ -14,6 +14,7 @@ import type { ProjectCollaborationService } from '../project-collaboration/servi
 import type { TeamChatOrchestrationMessage } from '../team-orchestration/types.ts';
 import { HttpError, notFound, nowIso, redactSecrets } from '../util.ts';
 import { canonicalJson, fingerprintForPublicKeys, verifyDevicePayload } from '../distributed/crypto.ts';
+import { decodeGroupView, encodeGroupView, groupViewSourceId, projectGroupView } from './group-view.ts';
 
 type DbRow = Record<string, unknown>;
 type SharedSnapshot = Awaited<ReturnType<ProjectCollaborationService['snapshot']>>;
@@ -41,11 +42,14 @@ interface PendingSyncRequest {
 function signingPayload(message: TeamChatMessage, authorDeviceId: string): string {
   const author = message.author.kind === 'human'
     ? { kind: 'human', accountId: message.author.accountId }
-    : { kind: 'agent', agentId: message.author.agentId, ownerAccountId: message.author.ownerAccountId };
+    : message.author.kind === 'agent'
+      ? { kind: 'agent', agentId: message.author.agentId, ownerAccountId: message.author.ownerAccountId }
+      : { kind: 'system', deviceId: message.author.deviceId };
   return canonicalJson({
     domain: 'mingle-team-chat-message-v1', id: message.id, teamId: message.teamId,
     sharedProjectId: message.sharedProjectId, author, body: message.body,
     mentions: message.mentions, replyTo: message.replyTo ?? null, createdAt: message.createdAt,
+    ...(message.kind ? { kind: message.kind } : {}),
     source: message.source ?? null, authorDeviceId,
   });
 }
@@ -80,6 +84,12 @@ export class TeamChatService {
   private readonly pending = new Set<Promise<unknown>>();
   private readonly agentReplyFlights = new Map<string, { fingerprint: string; promise: Promise<TeamChatMessage> }>();
   private readonly sessionMirrorFlights = new Map<string, { fingerprint: string; promise: Promise<TeamChatMessage | null> }>();
+  private sharedGroupSnapshotProvider?: (projectId: string) => Promise<GroupSnapshot | null>;
+  private unsubscribeGroupViews: (() => void) | null = null;
+  private readonly groupViewTimers = new Map<string, NodeJS.Timeout>();
+  private readonly groupViewFlights = new Map<string, Promise<TeamChatGroupView | null>>();
+  private readonly groupViewDirty = new Set<string>();
+  private readonly groupViewFingerprints = new Map<string, string>();
   private readonly syncRequestedAt = new Map<string, number>();
   private readonly pendingSyncRequests = new Map<string, PendingSyncRequest>();
   private readonly syncRequestRates = new Map<string, number>();
@@ -100,6 +110,141 @@ export class TeamChatService {
 
   setOrchestration(service: { routeTeamChatMessage(projectId: string, message: TeamChatOrchestrationMessage): Promise<'routed' | 'handled' | false> }): void {
     this.orchestration = service;
+  }
+
+  /** Provides only the host's current project team-session snapshot; the client receives a strict public projection. */
+  setSharedGroupSnapshotProvider(provider: (projectId: string) => Promise<GroupSnapshot | null>): void {
+    this.unsubscribeGroupViews?.();
+    for (const timer of this.groupViewTimers.values()) clearTimeout(timer);
+    this.groupViewTimers.clear();
+    this.sharedGroupSnapshotProvider = provider;
+    this.unsubscribeGroupViews = this.options.store.subscribe((event) => {
+      if (!event?.projectId || !/^(?:group\.|task\.|session\.run\.)/.test(event.type)) return;
+      this.scheduleGroupView(event.projectId);
+    });
+  }
+
+  private scheduleGroupView(projectId: string): void {
+    if (this.closed || !this.sharedGroupSnapshotProvider) return;
+    const prior = this.groupViewTimers.get(projectId);
+    if (prior) clearTimeout(prior);
+    const timer = setTimeout(() => {
+      this.groupViewTimers.delete(projectId);
+      void this.publishSharedGroupView(projectId).catch(() => undefined);
+    }, 180);
+    timer.unref();
+    this.groupViewTimers.set(projectId, timer);
+  }
+
+  private async publishSharedGroupView(projectId: string): Promise<TeamChatGroupView | null> {
+    const provider = this.sharedGroupSnapshotProvider;
+    if (!provider || this.closed) return null;
+    const active = this.groupViewFlights.get(projectId);
+    if (active) {
+      this.groupViewDirty.add(projectId);
+      return active;
+    }
+    const flight = this.createAndPublishSharedGroupView(projectId, provider);
+    this.groupViewFlights.set(projectId, flight);
+    try { return await flight; }
+    finally {
+      if (this.groupViewFlights.get(projectId) === flight) this.groupViewFlights.delete(projectId);
+      if (!this.closed && this.groupViewDirty.delete(projectId)) this.scheduleGroupView(projectId);
+    }
+  }
+
+  private async createAndPublishSharedGroupView(
+    projectId: string, provider: (projectId: string) => Promise<GroupSnapshot | null>,
+  ): Promise<TeamChatGroupView | null> {
+    try {
+      const [before, accountId] = await Promise.all([
+        this.options.collaboration.snapshot(projectId),
+        this.options.account.withAuthenticatedClient(async (_client, user) => user.id),
+      ]);
+      const project = before.project;
+      if (!project || !before.members.some((member) => member.accountId === accountId && member.role === 'leader' && member.status === 'active')) return null;
+      const authority = this.options.store.db.prepare(`SELECT owner_id,team_id,shared_project_id,leader_device_id
+        FROM mingle_project_collaboration_sources WHERE local_project_id=?`).get(projectId) as DbRow | undefined;
+      const deviceId = this.options.distributed.transport.snapshot(project.teamId).deviceId;
+      if (!authority || authority.owner_id !== accountId || authority.team_id !== project.teamId || authority.shared_project_id !== project.sharedProjectId
+        || !deviceId || authority.leader_device_id !== deviceId) return null;
+
+      // The provider may await host structure; rebind authority after it returns before reading/publishing any content.
+      const snapshot = await provider(projectId);
+      if (!snapshot || snapshot.group.projectId !== projectId) return null;
+      const [after, currentAccountId] = await Promise.all([
+        this.options.collaboration.snapshot(projectId),
+        this.options.account.withAuthenticatedClient(async (_client, user) => user.id),
+      ]);
+      const currentAuthority = this.options.store.db.prepare(`SELECT owner_id,team_id,shared_project_id,leader_device_id
+        FROM mingle_project_collaboration_sources WHERE local_project_id=?`).get(projectId) as DbRow | undefined;
+      const currentDeviceId = this.options.distributed.transport.snapshot(project.teamId).deviceId;
+      if (this.closed || currentAccountId !== accountId || currentDeviceId !== deviceId || !currentAuthority
+        || currentAuthority.owner_id !== accountId || currentAuthority.team_id !== project.teamId
+        || currentAuthority.shared_project_id !== project.sharedProjectId || currentAuthority.leader_device_id !== deviceId
+        || after.project?.teamId !== project.teamId || after.project.sharedProjectId !== project.sharedProjectId
+        || !after.members.some((member) => member.accountId === accountId && member.role === 'leader' && member.status === 'active')) return null;
+
+      const key = `${project.teamId}:${project.sharedProjectId}:${snapshot.group.id}`;
+      const candidate = projectGroupView(snapshot, this.options.store, 1);
+      const candidateBody = encodeGroupView(candidate);
+      const boundedCandidate = decodeGroupView(candidateBody);
+      const fingerprintFor = (view: TeamChatGroupView) => createHash('sha256').update(canonicalJson({ ...view, version: 0, updatedAt: '' })).digest('hex');
+      const fingerprint = fingerprintFor(boundedCandidate);
+      const previous = this.latestGroupView(project.teamId, project.sharedProjectId);
+      const previousFingerprint = previous ? fingerprintFor(previous) : null;
+      if (fingerprint === this.groupViewFingerprints.get(key) || fingerprint === previousFingerprint) {
+        this.groupViewFingerprints.set(key, fingerprint);
+        return previous ?? boundedCandidate;
+      }
+      const version = Math.max(previous?.version ?? 0, Number(this.options.store.getMeta(`team-chat-group-view:${project.sharedProjectId}:${snapshot.group.id}`) ?? 0)) + 1;
+      const unboundedView = projectGroupView(snapshot, this.options.store, version);
+      const body = encodeGroupView(unboundedView);
+      const view = decodeGroupView(body);
+      const sourceMessageId = groupViewSourceId(snapshot.group.id);
+      const unsigned = TeamChatMessageSchema.parse({
+        id: `team-view-${createHash('sha256').update(snapshot.group.id).digest('hex').slice(0, 32)}`,
+        teamId: project.teamId, sharedProjectId: project.sharedProjectId,
+        author: { kind: 'system', deviceId, displayName: 'Mingle' }, body, mentions: [], createdAt: nowIso(),
+        deliveryState: 'sending', runState: null, kind: 'group-view',
+        source: { sessionId: 'team-group-view', messageId: sourceMessageId },
+      });
+      const signed = await this.signMessage(unsigned);
+      // Fence authority once more after signing, which may be asynchronous on some transports.
+      const [latestCollaboration, signingAccount] = await Promise.all([
+        this.options.collaboration.snapshot(projectId),
+        this.options.account.withAuthenticatedClient(async (_client, user) => user.id),
+      ]);
+      const signingDevice = this.options.distributed.transport.snapshot(project.teamId).deviceId;
+      const latestAuthority = this.options.store.db.prepare(`SELECT owner_id,team_id,shared_project_id,leader_device_id
+        FROM mingle_project_collaboration_sources WHERE local_project_id=?`).get(projectId) as DbRow | undefined;
+      if (this.closed || signingAccount !== accountId || signingDevice !== deviceId || !latestAuthority
+        || latestAuthority.owner_id !== accountId || latestAuthority.leader_device_id !== deviceId
+        || latestAuthority.team_id !== project.teamId || latestAuthority.shared_project_id !== project.sharedProjectId
+        || latestCollaboration.project?.teamId !== project.teamId || latestCollaboration.project.sharedProjectId !== project.sharedProjectId
+        || !latestCollaboration.members.some((member) => member.accountId === accountId && member.role === 'leader' && member.status === 'active')) return null;
+      this.options.store.setMeta(`team-chat-group-view:${project.sharedProjectId}:${snapshot.group.id}`, String(version));
+      const saved = this.persist(signed, 'sending');
+      this.groupViewFingerprints.set(key, fingerprint);
+      try {
+        const delivered = await this.sendToPeers(project.teamId, project.sharedProjectId, 'teamchat.group-view',
+          TeamChatMessageSchema.parse({ ...saved, deliveryState: 'sent' }), `group-view:${snapshot.group.id}:${version}`, deviceId, undefined, true);
+        this.setDeliveryState(saved.id, delivered.length ? 'sent' : 'failed');
+      } catch { this.setDeliveryState(saved.id, 'failed'); }
+      return view;
+    } catch (error) {
+      if (this.closed) return null;
+      throw error;
+    }
+  }
+
+  private assertRegisteredHostDevice(teamId: string, sharedProjectId: string, deviceId: string): void {
+    let row: DbRow | undefined;
+    try {
+      row = this.options.store.db.prepare(`SELECT host_device_id FROM mingle_team_device_structures
+        WHERE team_id=? AND shared_project_id=?`).get(teamId, sharedProjectId) as DbRow | undefined;
+    } catch { /* The authenticated host structure has not been received on this device. */ }
+    if (!row || row.host_device_id !== deviceId) throw new HttpError(403, 'Only the registered project-host device may publish shared group state.');
   }
 
   private track<T>(work: Promise<T>): Promise<T> {
@@ -203,10 +348,14 @@ export class TeamChatService {
   }
 
   private rowMessage(row: DbRow): TeamChatMessage {
+    const author = jsonParse<TeamChatAuthor>(row.author_json);
+    const groupView = author.kind === 'system' && typeof row.source_message_id === 'string'
+      && row.source_message_id.startsWith('team-group-view:');
     return TeamChatMessageSchema.parse({
       id: row.id, teamId: row.team_id, sharedProjectId: row.shared_project_id,
-      author: jsonParse(row.author_json), body: row.body, mentions: jsonParse(row.mentions_json),
+      author, body: row.body, mentions: jsonParse(row.mentions_json),
       ...(row.reply_to ? { replyTo: row.reply_to } : {}), createdAt: row.created_at,
+      ...(groupView ? { kind: 'group-view' as const } : {}),
       ...(typeof row.author_device_id === 'string' && typeof row.author_signature === 'string'
         ? { authorDeviceId: row.author_device_id, authorSignature: row.author_signature } : {}),
       deliveryState: row.delivery_state, runState: row.run_state ?? null,
@@ -218,10 +367,10 @@ export class TeamChatService {
     const beforeRow = options.before ? this.options.store.db.prepare(`SELECT created_at,id FROM team_chat_messages
       WHERE team_id=? AND shared_project_id=? AND id=?`).get(teamId, sharedProjectId, options.before) as DbRow | undefined : undefined;
     const rows = beforeRow
-      ? this.options.store.db.prepare(`SELECT * FROM team_chat_messages WHERE team_id=? AND shared_project_id=?
+      ? this.options.store.db.prepare(`SELECT * FROM team_chat_messages WHERE team_id=? AND shared_project_id=? AND json_extract(author_json,'$.kind')!='system'
         AND (created_at < ? OR (created_at = ? AND id < ?)) ORDER BY created_at DESC,id DESC LIMIT ?`)
         .all(teamId, sharedProjectId, String(beforeRow.created_at), String(beforeRow.created_at), String(beforeRow.id), options.limit + 1) as DbRow[]
-      : this.options.store.db.prepare(`SELECT * FROM team_chat_messages WHERE team_id=? AND shared_project_id=?
+      : this.options.store.db.prepare(`SELECT * FROM team_chat_messages WHERE team_id=? AND shared_project_id=? AND json_extract(author_json,'$.kind')!='system'
         ORDER BY created_at DESC,id DESC LIMIT ?`).all(teamId, sharedProjectId, options.limit + 1) as DbRow[];
     const hasMore = rows.length > options.limit;
     const messages = sortMessages(rows.slice(0, options.limit).map((row) => this.rowMessage(row)));
@@ -229,14 +378,26 @@ export class TeamChatService {
   }
 
   private latestMessage(teamId: string, sharedProjectId: string): TeamChatMessage | null {
-    const row = this.options.store.db.prepare(`SELECT * FROM team_chat_messages WHERE team_id=? AND shared_project_id=?
+    const row = this.options.store.db.prepare(`SELECT * FROM team_chat_messages WHERE team_id=? AND shared_project_id=? AND json_extract(author_json,'$.kind')!='system'
       ORDER BY created_at DESC,id DESC LIMIT 1`).get(teamId, sharedProjectId) as DbRow | undefined;
     return row ? this.rowMessage(row) : null;
+  }
+
+  private latestGroupView(teamId: string, sharedProjectId: string): TeamChatGroupView | null {
+    const row = this.options.store.db.prepare(`SELECT * FROM team_chat_messages WHERE team_id=? AND shared_project_id=?
+      AND json_extract(author_json,'$.kind')='system' AND source_session_id='team-group-view'
+      ORDER BY created_at DESC,id DESC LIMIT 1`).get(teamId, sharedProjectId) as DbRow | undefined;
+    if (!row) return null;
+    const message = this.rowMessage(row);
+    if (message.kind !== 'group-view') return null;
+    try { return TeamChatGroupViewSchema.parse(decodeGroupView(message.body)); }
+    catch { return null; }
   }
 
   async snapshot(projectId: string, page: { limit: number; before?: string }): Promise<TeamChatSnapshot> {
     const { localProject, shared } = await this.binding(projectId);
     const project = shared.project!;
+    const freshlyPublished = page.before ? null : await this.publishSharedGroupView(projectId);
     const transport = this.options.distributed.transport.snapshot(project.teamId);
     const peers: TeamChatPeer[] = transport.devices.filter((device) => device.id !== transport.deviceId).map((device) => ({
       deviceId: device.id, ownerAccountId: device.ownerId, name: device.name, status: device.status,
@@ -251,9 +412,10 @@ export class TeamChatService {
     const agents = this.teamAgents(shared.agents, currentAccountId, transport.deviceId);
     const pageResult = this.listMessages(project.teamId, project.sharedProjectId, page);
     this.requestBackfill(project.teamId, project.sharedProjectId, transport.deviceId, pageResult.messages).catch(() => undefined);
+    const groupView = freshlyPublished ?? this.latestGroupView(project.teamId, project.sharedProjectId);
     return TeamChatSnapshotSchema.parse({
       project: { teamId: project.teamId, sharedProjectId: project.sharedProjectId, name: project.name },
-      ...pageResult, members, agents,
+      ...pageResult, ...(groupView ? { groupView } : {}), members, agents,
       transport: {
         status: transport.status, error: transport.error?.slice(0, 500) ?? null, localDeviceId: transport.deviceId,
         linkedDeviceCount: peers.filter((peer) => peer.linked && peer.status !== 'revoked').length,
@@ -273,7 +435,12 @@ export class TeamChatService {
       if (oldestKey) this.syncRequestedAt.delete(oldestKey);
     }
     this.syncRequestedAt.set(key, this.now());
-    const latestAt = messages.at(-1)?.createdAt ?? this.latestMessage(teamId, sharedProjectId)?.createdAt ?? null;
+    const latestViewRow = this.options.store.db.prepare(`SELECT created_at FROM team_chat_messages WHERE team_id=? AND shared_project_id=?
+      AND json_extract(author_json,'$.kind')='system' AND source_session_id='team-group-view' ORDER BY created_at DESC,id DESC LIMIT 1`)
+      .get(teamId, sharedProjectId) as DbRow | undefined;
+    const latestAt = [messages.at(-1)?.createdAt, this.latestMessage(teamId, sharedProjectId)?.createdAt,
+      typeof latestViewRow?.created_at === 'string' ? latestViewRow.created_at : null]
+      .filter((value): value is string => Boolean(value)).sort().at(-1) ?? null;
     // Include the entire millisecond for concurrent writers; message IDs break timestamp ties locally.
     const since = latestAt ? new Date(Math.max(0, Date.parse(latestAt) - 1)).toISOString() : null;
     const payload: TeamChatSyncRequest = TeamChatSyncRequestSchema.parse({ sharedProjectId, requestId: randomUUID(), since });
@@ -366,6 +533,21 @@ export class TeamChatService {
     const existingRow = this.options.store.db.prepare('SELECT * FROM team_chat_messages WHERE id=?').get(parsed.id) as DbRow | undefined;
     if (existingRow) {
       const existing = this.rowMessage(existingRow);
+      if (parsed.kind === 'group-view' && existing.kind === 'group-view') {
+        const sameSource = existing.teamId === parsed.teamId && existing.sharedProjectId === parsed.sharedProjectId
+          && existing.author.kind === 'system' && parsed.author.kind === 'system'
+          && existing.author.deviceId === parsed.author.deviceId && existing.source?.messageId === parsed.source?.messageId;
+        if (!sameSource) throw new HttpError(409, 'A shared group view identity changed its host or project.');
+        const currentView = decodeGroupView(existing.body);
+        const nextView = decodeGroupView(parsed.body);
+        if (nextView.group.id !== currentView.group.id) throw new HttpError(409, 'A shared group view identity changed groups.');
+        if (nextView.version <= currentView.version) return { ...existing, deliveryState: localDelivery };
+        this.options.store.db.prepare(`UPDATE team_chat_messages SET body=?,created_at=?,delivery_state=?,run_state=NULL,author_signature=? WHERE id=?`)
+          .run(parsed.body, parsed.createdAt, localDelivery, parsed.authorSignature ?? null, parsed.id);
+        this.notifyTeamChatUpdated(parsed.teamId, parsed.sharedProjectId);
+        const refreshed = this.options.store.db.prepare('SELECT * FROM team_chat_messages WHERE id=?').get(parsed.id) as DbRow;
+        return this.rowMessage(refreshed);
+      }
       const sameIdentity = existing.teamId === parsed.teamId && existing.sharedProjectId === parsed.sharedProjectId
         && existing.author.kind === parsed.author.kind && JSON.stringify(existing.author) === JSON.stringify(parsed.author)
         && existing.body === parsed.body && JSON.stringify(existing.mentions) === JSON.stringify(parsed.mentions)
@@ -817,7 +999,7 @@ export class TeamChatService {
         authorAccountId = claimedAuthor.accountId;
         if (!shared.members.some((member) => member.accountId === authorAccountId)) throw new HttpError(403, 'The message author is not in the current shared-project membership.');
         author = { kind: 'human', accountId: authorAccountId, displayName: memberDisplayName(shared.members, authorAccountId) };
-      } else {
+      } else if (claimedAuthor.kind === 'agent') {
         // Accept old signed messages that used a local session ID; keep the signed identity intact.
         const rosterAgent = shared.agents.find((agent) => agent.id === claimedAuthor.agentId)
           ?? shared.agents.find((agent) => agent.sessionId === claimedAuthor.agentId);
@@ -830,11 +1012,21 @@ export class TeamChatService {
           kind: 'agent', agentId: claimedAuthor.agentId, agentName: rosterAgent.name, ownerAccountId: rosterAgent.accountId,
           provider: rosterAgent.provider, model: rosterAgent.model,
         });
+      } else {
+        if (message.kind !== 'group-view' || claimedAuthor.deviceId !== message.authorDeviceId
+          || message.source?.sessionId !== 'team-group-view' || !message.source.messageId.startsWith('team-group-view:')) {
+          throw new HttpError(403, 'System-authored records are reserved for signed shared group views.');
+        }
+        this.assertRegisteredHostDevice(message.teamId, message.sharedProjectId, message.authorDeviceId);
+        authorAccountId = senderOwnerId;
+        author = { kind: 'system', deviceId: claimedAuthor.deviceId, displayName: 'Mingle' };
       }
       if (!shared.members.some((member) => member.accountId === authorAccountId)) throw new HttpError(403, 'The message author account is not an active team member.');
       if (direct && (message.authorDeviceId !== envelope.fromDeviceId || authorAccountId !== senderOwnerId)) {
         throw new HttpError(403, 'A direct team-chat message must be authored by its authenticated sender device and account.');
       }
+      if (message.kind === 'group-view' && author.kind !== 'system') throw new HttpError(403, 'A shared group view must be host-authored.');
+      if (author.kind === 'system' && author.deviceId !== envelope.fromDeviceId) throw new HttpError(403, 'The host-authored group view came from a different device.');
       authorDeviceIds.push(message.authorDeviceId);
       expectedOwners.push(authorAccountId);
       normalized.push(TeamChatMessageSchema.parse({ ...message, author }));
@@ -866,22 +1058,42 @@ export class TeamChatService {
   }
 
   private onEnvelope(envelope: { id: string; teamId: string; fromDeviceId: string; toDeviceId: string; kind: string; payload: unknown }): Promise<void> {
-    if (!['teamchat.message', 'teamchat.sync.request', 'teamchat.sync.response'].includes(envelope.kind)) return Promise.resolve();
+    if (!['teamchat.message', 'teamchat.group-view', 'teamchat.sync.request', 'teamchat.sync.response'].includes(envelope.kind)) return Promise.resolve();
     return this.track(this.receiveEnvelope(envelope));
   }
 
   private async receiveEnvelope(envelope: { id: string; teamId: string; fromDeviceId: string; toDeviceId: string; kind: string; payload: unknown }): Promise<void> {
     this.ensureOpen();
+    if (envelope.kind === 'teamchat.group-view') {
+      const message = TeamChatMessageSchema.parse(envelope.payload);
+      if (message.teamId !== envelope.teamId || message.kind !== 'group-view' || message.author.kind !== 'system') {
+        throw new HttpError(400, 'The shared group-view message is invalid.');
+      }
+      const view = decodeGroupView(message.body);
+      if (message.source?.sessionId !== 'team-group-view' || message.source.messageId !== groupViewSourceId(view.group.id)) {
+        throw new HttpError(400, 'The shared group-view identity does not match its group.');
+      }
+      const { localProjectId, senderOwnerId } = await this.validateRemote(envelope, message.sharedProjectId, []);
+      const { shared } = await this.binding(localProjectId);
+      if (shared.project?.teamId !== envelope.teamId || shared.project.sharedProjectId !== message.sharedProjectId) {
+        throw new HttpError(403, 'The shared group view is outside this shared project binding.');
+      }
+      const [verified] = await this.verifyMessageProvenance([message], shared, envelope, senderOwnerId, true);
+      if (verified?.kind !== 'group-view' || verified.author.kind !== 'system') throw new HttpError(403, 'The shared group view was not verified.');
+      this.persist({ ...verified, deliveryState: 'sent' }, 'sent');
+      return;
+    }
     if (envelope.kind === 'teamchat.message') {
       const message = TeamChatMessageSchema.parse(envelope.payload);
       if (message.teamId !== envelope.teamId) throw new HttpError(400, 'Team chat message has a mismatched team ID.');
+      if (message.kind === 'group-view' || message.author.kind === 'system') throw new HttpError(403, 'Shared group-view records use their host-authorized transport channel.');
       const claimedOwner = message.author.kind === 'human' ? message.author.accountId : message.author.ownerAccountId;
       const { localProjectId, senderOwnerId } = await this.validateRemote(envelope, message.sharedProjectId, [claimedOwner]);
       const { shared } = await this.binding(localProjectId);
       if (shared.project?.teamId !== envelope.teamId || shared.project.sharedProjectId !== message.sharedProjectId) throw new HttpError(403, 'The message is outside this shared project binding.');
       const [verified] = await this.verifyMessageProvenance([message], shared, envelope, senderOwnerId, true);
       this.persist({ ...verified!, deliveryState: 'sent' }, 'sent');
-      if (verified && this.orchestration) {
+      if (verified && verified.author.kind !== 'system' && this.orchestration) {
         const routing = await this.orchestration.routeTeamChatMessage(localProjectId, {
           id: verified.id, teamId: verified.teamId, sharedProjectId: verified.sharedProjectId,
           body: verified.body, mentions: verified.mentions, author: verified.author,
@@ -919,7 +1131,8 @@ export class TeamChatService {
       if (pending.batchCount !== null && pending.batchCount !== response.batchCount) throw new HttpError(400, 'The sync response batch count changed during transfer.');
       if (pending.batches.has(response.batchIndex)) return;
       if (pending.messageCount + response.messages.length > SYNC_MESSAGE_LIMIT) throw new HttpError(413, 'The sync response exceeds its requested history limit.');
-      const authors = response.messages.map((message) => message.author.kind === 'human' ? message.author.accountId : message.author.ownerAccountId);
+      const authors = response.messages.flatMap((message) => message.author.kind === 'human' ? [message.author.accountId]
+        : message.author.kind === 'agent' ? [message.author.ownerAccountId] : []);
       const { localProjectId, senderOwnerId } = await this.validateRemote(envelope, response.sharedProjectId, authors);
       const { shared } = await this.binding(localProjectId);
       if (shared.project?.teamId !== envelope.teamId || shared.project.sharedProjectId !== response.sharedProjectId) throw new HttpError(403, 'The sync response is outside this shared project binding.');
@@ -964,9 +1177,14 @@ export class TeamChatService {
     this.closed = true;
     clearInterval(this.retryTimer);
     this.unsubscribe();
+    this.unsubscribeGroupViews?.();
+    this.unsubscribeGroupViews = null;
+    for (const timer of this.groupViewTimers.values()) clearTimeout(timer);
+    this.groupViewTimers.clear();
+    this.groupViewDirty.clear();
     this.pendingSyncRequests.clear();
     this.syncRequestRates.clear();
     this.syncResponseRates.clear();
-    await Promise.allSettled([...this.pending]);
+    await Promise.allSettled([...this.pending, ...this.groupViewFlights.values()]);
   }
 }

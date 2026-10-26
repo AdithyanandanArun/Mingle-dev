@@ -10,18 +10,72 @@ export const TeamChatHumanAuthorSchema = z.object({
   kind: z.literal('human'), accountId: z.string().uuid(), displayName: z.string().trim().min(1).max(120),
 }).strict();
 
-export const TeamChatAuthorSchema = z.discriminatedUnion('kind', [TeamChatHumanAuthorSchema, TeamChatAgentAuthorSchema]);
+/** Host-authored, non-chat project metadata. It never represents a person or an agent turn. */
+export const TeamChatSystemAuthorSchema = z.object({
+  kind: z.literal('system'), deviceId: z.string().uuid(), displayName: z.literal('Mingle'),
+}).strict();
+
+export const TeamChatAuthorSchema = z.discriminatedUnion('kind', [TeamChatHumanAuthorSchema, TeamChatAgentAuthorSchema, TeamChatSystemAuthorSchema]);
 export const TeamChatRunStateSchema = z.enum(['queued', 'running', 'awaiting-approval', 'completed', 'failed', 'interrupted']);
+
+export const TeamChatGroupTaskStatusSchema = z.enum(['backlog', 'ready', 'running', 'blocked', 'review', 'done', 'unknown']);
+export const TeamChatGroupDeliveryStatusSchema = z.enum(['queued', 'running', 'completed', 'failed', 'interrupted', 'cancelled']);
+export const TeamChatGroupResultStatusSchema = z.enum(['pending', 'in-progress', 'paused', 'failed', 'stopped', 'blocked', 'follow-up', 'review', 'accepted', 'responded', 'unknown']);
+export const TeamChatGroupRequestStatusSchema = z.enum(['active', 'paused', 'completed', 'failed', 'interrupted', 'cancelled', 'expired', 'unknown']);
+
+/** Strict allowlist for read-only shared group state. No session transcripts, prompts, local paths or provider context. */
+export const TeamChatGroupViewSchema = z.object({
+  version: z.number().int().positive(),
+  group: z.object({ id: z.string().trim().min(1).max(100), title: z.string().max(100), mode: z.enum(['cowork', 'orchestrated', 'current-leads']), paused: z.boolean() }).strict(),
+  routing: z.object({ mode: z.enum(['cowork', 'orchestrated', 'current-leads']), defaultRecipientHandles: z.array(z.string().trim().min(1).max(32)).max(64) }).strict(),
+  members: z.array(z.object({ handle: z.string().trim().min(1).max(32), role: z.enum(['peer', 'orchestrator', 'worker']), removed: z.boolean() }).strict()).max(64),
+  messages: z.array(z.object({
+    id: z.string().trim().min(1).max(100), seq: z.number().int().nonnegative(), kind: z.enum(['user', 'agent', 'assignment', 'status', 'artifact']),
+    senderHandle: z.string().trim().min(1).max(32).nullable(), recipientHandles: z.array(z.string().trim().min(1).max(32)).max(64),
+    content: z.string().max(8_000), requestId: z.string().trim().min(1).max(100).nullable(), createdAt: z.string().datetime({ offset: true }),
+  }).strict()).max(100),
+  requests: z.array(z.object({
+    id: z.string().trim().min(1).max(100), messageId: z.string().trim().min(1).max(100), plannerHandle: z.string().trim().min(1).max(32).nullable(),
+    status: TeamChatGroupRequestStatusSchema, turnsUsed: z.number().int().nonnegative(), createdAt: z.string().datetime({ offset: true }),
+  }).strict()).max(20),
+  deliveries: z.array(z.object({
+    id: z.string().trim().min(1).max(100), requestId: z.string().trim().min(1).max(100), messageId: z.string().trim().min(1).max(100),
+    handle: z.string().trim().min(1).max(32), kind: z.enum(['request', 'assignment', 'message', 'result']),
+    status: TeamChatGroupDeliveryStatusSchema, hop: z.number().int().nonnegative(), error: z.string().max(240).nullable(),
+    createdAt: z.string().datetime({ offset: true }), updatedAt: z.string().datetime({ offset: true }),
+  }).strict()).max(200),
+  assignments: z.array(z.object({
+    id: z.string().trim().min(1).max(100), requestId: z.string().trim().min(1).max(100), deliveryId: z.string().trim().min(1).max(100),
+    fromHandle: z.string().trim().min(1).max(32), toHandle: z.string().trim().min(1).max(32), taskId: z.string().trim().min(1).max(100),
+    title: z.string().trim().min(1).max(200), taskStatus: TeamChatGroupTaskStatusSchema, scope: z.array(z.string().trim().min(1).max(500)).max(40),
+    createdAt: z.string().datetime({ offset: true }),
+  }).strict()).max(100),
+  result: z.object({
+    requestId: z.string().trim().min(1).max(100), status: TeamChatGroupResultStatusSchema, title: z.string().trim().min(1).max(100),
+    summary: z.string().trim().min(1).max(500), facts: z.array(z.string().trim().min(1).max(120)).max(12),
+    changedPaths: z.array(z.string().trim().min(1).max(500)).max(100),
+  }).strict().nullable(),
+  updatedAt: z.string().datetime({ offset: true }),
+}).strict();
 
 export const TeamChatMessageSchema = z.object({
   id: z.string().trim().min(1).max(100), teamId: z.string().uuid(), sharedProjectId: z.string().uuid(),
   author: TeamChatAuthorSchema, body: z.string().max(20_000), mentions: z.array(z.string().trim().min(1).max(100)).max(20),
   replyTo: z.string().trim().min(1).max(100).nullable().optional(), createdAt: z.string().datetime({ offset: true }),
+  /** Hidden signed system record that carries a bounded, whitelisted shared group view. */
+  kind: z.literal('group-view').optional(),
   // Optional only so pre-provenance local history remains readable. Incoming messages must provide both.
   authorDeviceId: z.string().uuid().optional(), authorSignature: z.string().min(80).max(100).optional(),
   deliveryState: z.enum(['sending', 'sent', 'failed']), runState: TeamChatRunStateSchema.nullable(),
   source: z.object({ sessionId: z.string().trim().min(1).max(100), messageId: z.string().trim().min(1).max(100) }).strict().optional(),
-}).strict();
+}).strict().superRefine((message, ctx) => {
+  if (message.kind === 'group-view' && (message.author.kind !== 'system' || !message.source?.messageId.startsWith('team-group-view:'))) {
+    ctx.addIssue({ code: 'custom', path: ['kind'], message: 'A shared group view must be a host-signed system record.' });
+  }
+  if (message.author.kind === 'system' && message.kind !== 'group-view') {
+    ctx.addIssue({ code: 'custom', path: ['author'], message: 'System authors are reserved for shared group-view records.' });
+  }
+});
 
 export const SendTeamChatMessageSchema = z.object({
   body: z.string().trim().min(1).max(20_000), mentions: z.array(z.string().trim().min(1).max(100)).max(20).default([]),
@@ -63,6 +117,7 @@ export const TeamChatPeerSchema = z.object({
 export const TeamChatSnapshotSchema = z.object({
   project: z.object({ teamId: z.string().uuid(), sharedProjectId: z.string().uuid(), name: z.string().min(1).max(100) }).strict(),
   messages: z.array(TeamChatMessageSchema).max(200), hasMore: z.boolean(), nextBefore: z.string().max(100).nullable(),
+  groupView: TeamChatGroupViewSchema.nullable().optional(),
   members: z.array(TeamChatMemberSchema).max(500), agents: z.array(TeamChatAgentSchema).max(500),
   transport: z.object({ status: z.enum(['ready', 'offline', 'signed-out', 'unregistered', 'error']),
     error: z.string().max(500).nullable(), localDeviceId: z.string().uuid().nullable(), linkedDeviceCount: z.number().int().nonnegative(),
@@ -72,6 +127,7 @@ export const TeamChatSnapshotSchema = z.object({
 export type TeamChatMessage = z.infer<typeof TeamChatMessageSchema>;
 export type TeamChatAuthor = z.infer<typeof TeamChatAuthorSchema>;
 export type TeamChatAgentAuthor = z.infer<typeof TeamChatAgentAuthorSchema>;
+export type TeamChatGroupView = z.infer<typeof TeamChatGroupViewSchema>;
 export type TeamChatRunState = z.infer<typeof TeamChatRunStateSchema>;
 export type SendTeamChatMessage = z.infer<typeof SendTeamChatMessageSchema>;
 export type TeamChatSyncRequest = z.infer<typeof TeamChatSyncRequestSchema>;
@@ -88,7 +144,7 @@ export interface TeamChatPeer { deviceId: string; ownerAccountId: string; name: 
 
 export interface TeamChatSnapshot {
   project: { teamId: string; sharedProjectId: string; name: string };
-  messages: TeamChatMessage[]; hasMore: boolean; nextBefore: string | null;
+  messages: TeamChatMessage[]; hasMore: boolean; nextBefore: string | null; groupView?: TeamChatGroupView | null;
   members: TeamChatMember[]; agents: TeamChatAgent[];
   transport: { status: 'ready' | 'offline' | 'signed-out' | 'unregistered' | 'error'; error: string | null; localDeviceId: string | null; linkedDeviceCount: number; onlineDeviceCount: number; peers: TeamChatPeer[] };
 }
