@@ -700,7 +700,11 @@ export class TeamChatService {
     await this.updateAndFanOut({ ...this.rowMessage(row), runState: input.state });
   }
 
-  async postOrchestratedAgentReply(input: { projectId: string; sourceMessageId: string; agentId: string; content: string }): Promise<void> {
+  async postOrchestratedAgentReply(input: { projectId: string; sourceMessageId: string; agentId: string; content: string; deliveryId?: string }): Promise<void> {
+    if (input.deliveryId !== undefined) {
+      await this.postAgentReply(input.projectId, input.agentId, input.content, input.sourceMessageId, `orchestrated:${input.deliveryId}`);
+      return;
+    }
     const { shared } = await this.binding(input.projectId);
     const project = shared.project!;
     const [accountId, deviceId] = await Promise.all([

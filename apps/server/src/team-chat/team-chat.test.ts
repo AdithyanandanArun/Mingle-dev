@@ -132,7 +132,7 @@ function fixture(withAgent = false) {
     distributed: distributed as unknown as DistributedWorkspaceService,
     collaboration: collaboration as unknown as ProjectCollaborationService });
   return {
-    store, project, session, service, outgoing, runtimeCalls: fake.runs, account, collaboration,
+    store, project, session, service, outgoing, runtimeCalls: fake.runs, account, collaboration, distributed,
     receive: (envelope: any) => {
       if (!receive) throw new Error('No team chat transport listener');
       return receive(envelope);
@@ -400,6 +400,30 @@ it('routes enabled team-chat requests through the orchestration host and signs l
   const reply = snapshot.messages.find((message) => message.author.kind === 'agent');
   expect(reply).toMatchObject({ body: 'I found the change.', replyTo: 'human-source', authorDeviceId: DEVICE, runState: 'completed' });
   expect(reply?.author.kind === 'agent' && reply.author.agentId).toBe(f.session!.id);
+});
+
+it('reuses the saved remote completion reply after notification replay and keeps distinct deliveries separate', async () => {
+  const f = fixture(true);
+  f.service.setOrchestration({ async routeTeamChatMessage() { return 'routed'; } });
+  try {
+    const human = await f.service.send(PROJECT, { body: 'Review both remote task results.', mentions: [] });
+    const reply = { projectId: PROJECT, sourceMessageId: human.id, agentId: f.session!.id, content: 'The task is ready for review.', deliveryId: 'example-remote-delivery-1' };
+    await Promise.all([f.service.postOrchestratedAgentReply(reply), f.service.postOrchestratedAgentReply(reply)]);
+    // A new service has no in-memory reply flight; its only replay evidence is the saved row.
+    const restarted = new TeamChatService({ store: f.store, account: f.account as unknown as AccountService,
+      distributed: f.distributed as unknown as DistributedWorkspaceService,
+      collaboration: f.collaboration as unknown as ProjectCollaborationService });
+    try {
+      await restarted.postOrchestratedAgentReply(reply);
+      await restarted.postOrchestratedAgentReply({ ...reply, deliveryId: 'example-remote-delivery-2' });
+      await expect(restarted.postOrchestratedAgentReply({ ...reply, content: 'Changed result under the same identity.' })).rejects.toMatchObject({ status: 409 });
+    } finally { await restarted.close(); }
+    const replies = (await f.service.snapshot(PROJECT, { limit: 20 })).messages.filter((message) => message.author.kind === 'agent');
+    expect(replies).toHaveLength(2);
+    expect(new Set(replies.map((message) => message.source?.messageId)).size).toBe(2);
+    expect(replies.every((message) => message.body === reply.content && message.replyTo === human.id)).toBe(true);
+    expect(f.runtimeCalls).toHaveLength(0);
+  } finally { await f.close(); }
 });
 
 it('routes authenticated member-device mentions and untagged messages into the shared group path', async () => {

@@ -108,7 +108,7 @@ export interface TeamChatOrchestrationMessage {
 
 export interface TeamOrchestrationChat {
   setOrchestratedRunState(input: { messageId: string; state: 'running' | 'completed' | 'failed' }): Promise<void>;
-  postOrchestratedAgentReply(input: { projectId: string; sourceMessageId: string; agentId: string; content: string }): Promise<void>;
+  postOrchestratedAgentReply(input: { projectId: string; sourceMessageId: string; agentId: string; content: string; deliveryId?: string }): Promise<void>;
   mirrorTeamSessionMessage(input: { projectId: string; sessionId: string; sourceMessageId: string; content: string; kind: 'human' | 'agent'; replyTo?: string }): Promise<unknown>;
   postOrchestrationStatus(input: { projectId: string; content: string }): Promise<void>;
 }
