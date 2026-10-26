@@ -459,7 +459,8 @@ it('preserves advanced host settings when permission is changed on the establish
 
   const changed = await fx.host.shareSession(PROJECT, { sessionId: LOCAL_AGENT, permissionLevel: 'full-access', expectedVersion: 1 });
 
-  expect(changed.settings).toMatchObject({ ...advanced, permissionLevel: 'full-access', version: 2 });
+  expect(changed.settings).toMatchObject({ ...advanced, permissionLevel: 'full-access', version: 2, updatedAt: expect.any(String) });
+  expect(Date.parse(changed.settings!.updatedAt)).toBeGreaterThanOrEqual(Date.parse(advanced.updatedAt));
   expect(fx.group()?.members).toHaveLength(1);
 });
 
@@ -485,7 +486,8 @@ it('attaches a legacy enabled zero-roster row with leader routing while preservi
 
   const attached = await fx.host.shareSession(PROJECT, { sessionId: LOCAL_AGENT, permissionLevel: 'supervised', expectedVersion: 1 });
 
-  expect(attached.settings).toMatchObject({ ...priorSettings, leaderOrchestration: true, version: 2 });
+  expect(attached.settings).toMatchObject({ ...priorSettings, leaderOrchestration: true, version: 2, updatedAt: expect.any(String) });
+  expect(Date.parse(attached.settings!.updatedAt)).toBeGreaterThanOrEqual(Date.parse(priorSettings.updatedAt));
   expect(attached.teamSession?.sessionId).toBe(LOCAL_AGENT);
   expect(publishCalls).toEqual([[LOCAL_AGENT]]);
   expect(fx.group()?.members).toHaveLength(1);
