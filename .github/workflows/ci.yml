@@ -21,6 +21,8 @@ jobs:
       - name: Check desktop encrypted account storage
         run: node --test apps/desktop/account-storage/*.test.mjs
       - run: pnpm typecheck
-      - run: pnpm test
+      # Multi-app acceptance starts real Git, SQLite and encrypted transport fixtures.
+      # Run files serially on the shared runner, matching the verified local suite.
+      - run: pnpm --filter @mingle/server exec vitest run --maxWorkers=1
       - run: pnpm build
       - run: pnpm smoke
