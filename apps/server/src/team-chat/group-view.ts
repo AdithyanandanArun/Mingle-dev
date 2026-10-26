@@ -8,6 +8,7 @@ import { redactSecrets } from '../util.ts';
 const MAX_PACKED_BODY = 18_000;
 const MAX_UNPACKED_BYTES = 160_000;
 const GROUP_VIEW_PREFIX = 'team-group-view:';
+const GROUP_VIEW_BODY_PREFIX = 'team-group-view:v1:';
 
 export function groupViewSourceId(groupId: string): string {
   return `${GROUP_VIEW_PREFIX}${createHash('sha256').update(groupId).digest('hex').slice(0, 32)}`;
@@ -165,22 +166,42 @@ export function projectGroupView(snapshot: GroupSnapshot, store: Store, version:
 
 export function encodeGroupView(view: TeamChatGroupView): string {
   const boundedView = structuredClone(TeamChatGroupViewSchema.parse(view));
-  const body = () => `team-group-view:v1:${deflateRawSync(Buffer.from(JSON.stringify(boundedView), 'utf8'), { level: 9 }).toString('base64')}`;
-  let packed = body();
-  while (packed.length > MAX_PACKED_BODY && boundedView.messages.length) { boundedView.messages.shift(); packed = body(); }
-  while (packed.length > MAX_PACKED_BODY && boundedView.assignments.length > 10) { boundedView.assignments.shift(); packed = body(); }
-  if (packed.length > MAX_PACKED_BODY && boundedView.result) {
-    boundedView.result.changedPaths = boundedView.result.changedPaths.slice(-20);
-    packed = body();
+  const body = () => {
+    const unpacked = Buffer.from(JSON.stringify(boundedView), 'utf8');
+    const compressed = deflateRawSync(unpacked, { level: 9 }).toString('base64');
+    return { packed: `${GROUP_VIEW_BODY_PREFIX}${compressed}`, unpackedBytes: unpacked.byteLength };
+  };
+  const trimOldest = (): boolean => {
+    if (boundedView.messages.length > 1) { boundedView.messages.shift(); return true; }
+    if (boundedView.assignments.length > 1) { boundedView.assignments.shift(); return true; }
+    if (boundedView.deliveries.length > 1) { boundedView.deliveries.shift(); return true; }
+    if (boundedView.requests.length > 1) { boundedView.requests.shift(); return true; }
+    if (boundedView.result && boundedView.result.changedPaths.length > 1) { boundedView.result.changedPaths.shift(); return true; }
+    if (boundedView.assignments[0]?.scope.length) { boundedView.assignments[0].scope.pop(); return true; }
+    if (boundedView.result?.changedPaths.length) { boundedView.result.changedPaths.shift(); return true; }
+    const latestMessage = boundedView.messages[0];
+    if (latestMessage?.content) {
+      const nextLength = Math.floor(latestMessage.content.length / 2);
+      latestMessage.content = nextLength ? `${latestMessage.content.slice(0, nextLength).trimEnd()}…` : '';
+      return true;
+    }
+    if (boundedView.assignments.length) { boundedView.assignments.shift(); return true; }
+    if (boundedView.deliveries.length) { boundedView.deliveries.shift(); return true; }
+    if (boundedView.requests.length) { boundedView.requests.shift(); return true; }
+    if (boundedView.messages.length) { boundedView.messages.shift(); return true; }
+    return false;
+  };
+  let encoded = body();
+  while (encoded.packed.length > MAX_PACKED_BODY || encoded.unpackedBytes > MAX_UNPACKED_BYTES) {
+    if (!trimOldest()) throw new Error('The bounded shared group view exceeds its transport limit.');
+    encoded = body();
   }
-  if (packed.length > MAX_PACKED_BODY) throw new Error('The bounded shared group view exceeds its transport limit.');
-  return packed;
+  return encoded.packed;
 }
 
 export function decodeGroupView(body: string): TeamChatGroupView {
-  const prefix = 'team-group-view:v1:';
-  if (!body.startsWith(prefix) || body.length > MAX_PACKED_BODY) throw new Error('The shared group view payload is invalid.');
-  const compressed = Buffer.from(body.slice(prefix.length), 'base64');
+  if (!body.startsWith(GROUP_VIEW_BODY_PREFIX) || body.length > MAX_PACKED_BODY) throw new Error('The shared group view payload is invalid.');
+  const compressed = Buffer.from(body.slice(GROUP_VIEW_BODY_PREFIX.length), 'base64');
   const unpacked = inflateRawSync(compressed, { maxOutputLength: MAX_UNPACKED_BYTES });
   return TeamChatGroupViewSchema.parse(JSON.parse(unpacked.toString('utf8')));
 }

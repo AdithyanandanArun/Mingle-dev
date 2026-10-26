@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { rmSync } from 'node:fs';
+import { inflateRawSync } from 'node:zlib';
 import { expect, it } from 'vitest';
 import type { SupabaseClient, User } from '@supabase/supabase-js';
 import type { GroupSnapshot, RunChanges } from '../../../../packages/contracts/src/index.ts';
@@ -12,7 +13,7 @@ import type { AccountService } from '../account/service.ts';
 import type { DistributedWorkspaceService } from '../distributed/service.ts';
 import type { ProjectCollaborationService } from '../project-collaboration/service.ts';
 import { TeamChatService } from './service.ts';
-import { projectGroupView } from './group-view.ts';
+import { decodeGroupView, encodeGroupView, projectGroupView } from './group-view.ts';
 
 const HOST_ACCOUNT = '10000000-0000-4000-8000-000000000001';
 const MEMBER_ACCOUNT = '10000000-0000-4000-8000-000000000002';
@@ -279,6 +280,32 @@ it('preserves full Cowork routing and recipient metadata for the maximum 64-memb
     expect(projected.members).toHaveLength(64);
     expect(projected.routing.defaultRecipientHandles).toHaveLength(64);
     expect(projected.messages[0]?.recipientHandles).toHaveLength(64);
+  } finally { await host.close(); }
+});
+
+it('bounds both compressed body size and inflated UTF-8 bytes while preserving latest routing and result', async () => {
+  const host = node({ projectId: HOST_PROJECT, accountId: HOST_ACCOUNT, deviceId: HOST_DEVICE, role: 'host' });
+  try {
+    const snapshot = sharedGroup(host);
+    const repeatedMultibyteText = '🧋'.repeat(1_500);
+    const requestMessage = snapshot.messages[0]!;
+    snapshot.messages = [requestMessage, ...Array.from({ length: 49 }, (_, index) => ({
+      ...requestMessage, id: `maximum-history-${index}`, seq: index + 2, kind: 'status' as const,
+      senderMemberId: 'worker-member', recipientMemberIds: [], content: repeatedMultibyteText,
+    }))];
+    const view = projectGroupView(snapshot, host.store, 1);
+    expect(Buffer.byteLength(JSON.stringify(view), 'utf8')).toBeGreaterThan(160_000);
+
+    const encoded = encodeGroupView(view);
+    expect(encoded.length).toBeLessThanOrEqual(18_000);
+    const prefix = 'team-group-view:v1:';
+    const unpacked = inflateRawSync(Buffer.from(encoded.slice(prefix.length), 'base64'), { maxOutputLength: 160_000 });
+    expect(unpacked.byteLength).toBeLessThanOrEqual(160_000);
+    const decoded = decodeGroupView(encoded);
+    expect(decoded.messages.length).toBeLessThan(50);
+    expect(decoded.messages.at(-1)).toMatchObject({ id: 'maximum-history-48', content: repeatedMultibyteText });
+    expect(decoded.routing).toEqual(view.routing);
+    expect(decoded.result).toEqual(view.result);
   } finally { await host.close(); }
 });
 
