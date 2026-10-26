@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { openDatabase } from '../db.ts';
 import { RemoteExecutionService, type AuthenticatedEnvelope, type RemoteExecutionAccount, type RemoteExecutionProviders, type RemoteExecutionRuntime, type RemoteExecutionTransport, type RemoteExecutionWorkspace } from './execution.ts';
 
@@ -80,6 +80,7 @@ let services: RemoteExecutionService[] = [];
 afterEach(async () => {
   for (const service of services.splice(0)) await service.close();
   for (const db of databases.splice(0)) db.close();
+  vi.useRealTimers();
 });
 
 interface Fixture {
@@ -232,6 +233,39 @@ describe('RemoteExecutionService', () => {
     const unchanged = await destination.service.refreshPublishedAgents({ teamId: TEAM, sharedProjectId: SHARED_PROJECT });
     expect(unchanged[0]!.presenceObservedAt).toBe(observedAt);
     expect(destination.transport.sent.filter((entry) => entry.kind === 'execution.agents')).toHaveLength(2);
+  });
+
+  it('renews unchanged owner presence, expires missing updates, and never refreshes quota by heartbeat', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-10-26T06:00:00Z'));
+    const source = createFixture({ deviceId: DEVICE_A, peerId: DEVICE_B, ownerId: OWNER_A, projectId: 'presence_a', sessionId: 'presence_a', sessionName: 'Source', provider: 'codex' });
+    const owner = createFixture({ deviceId: DEVICE_B, peerId: DEVICE_A, ownerId: OWNER_B, projectId: 'presence_b', sessionId: 'presence_b', sessionName: 'Owner', provider: 'codex' });
+    await source.service.bindProject({ teamId: TEAM, sharedProjectId: SHARED_PROJECT, localProjectId: 'presence_a' });
+    await owner.service.bindProject({ teamId: TEAM, sharedProjectId: SHARED_PROJECT, localProjectId: 'presence_b' });
+    owner.quota = { state: 'available', observedAt: now() };
+    await owner.service.publishAgents({ teamId: TEAM, sharedProjectId: SHARED_PROJECT, sessionIds: ['presence_b'] });
+    const first = owner.transport.sent.at(-1)!;
+    await source.service.onEnvelope(envelope(DEVICE_B, DEVICE_A, first.kind, first.payload));
+    const remote = async () => (await source.service.snapshot(TEAM)).agents.find((agent) => agent.deviceId === DEVICE_B)!;
+    expect(await remote()).toMatchObject({ presence: 'idle', presenceKnown: true, quotaState: 'available' });
+
+    // Seven minutes with no session/configuration changes still produces bounded
+    // owner observations. Quota expires independently and no provider run starts.
+    for (let minute = 1; minute <= 7; minute++) {
+      vi.setSystemTime(new Date(Date.parse('2026-10-26T06:00:00Z') + minute * 60_000));
+      await owner.service.refreshPublishedAgents({ teamId: TEAM, sharedProjectId: SHARED_PROJECT });
+      const heartbeat = owner.transport.sent.at(-1)!;
+      await source.service.onEnvelope(envelope(DEVICE_B, DEVICE_A, heartbeat.kind, heartbeat.payload));
+      expect(await remote()).toMatchObject({ presence: 'idle', presenceKnown: true, presenceObservedAt: now() });
+    }
+    expect(owner.transport.sent.filter((entry) => entry.kind === 'execution.agents')).toHaveLength(8);
+    expect(await remote()).toMatchObject({ quotaState: 'unknown', quotaKnown: false });
+    expect(owner.runCalls).toHaveLength(0);
+
+    vi.setSystemTime(new Date('2026-10-26T06:10:00Z'));
+    // Even a newly received but delayed signed roster must remain stale.
+    await source.service.onEnvelope(envelope(DEVICE_B, DEVICE_A, first.kind, first.payload));
+    expect(await remote()).toMatchObject({ presence: 'unknown', presenceKnown: false });
   });
 
   it('publishes a full-access session without changing its saved policy', async () => {

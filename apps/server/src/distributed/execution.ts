@@ -421,7 +421,7 @@ export class RemoteExecutionService {
     const quotaFresh = Boolean(quotaObservedAt && Date.parse(quotaObservedAt) <= Date.now() + 30_000 && Date.now() - Date.parse(quotaObservedAt) < 5 * 60_000);
     return RemoteAgentSchema.parse({ id: row.id, teamId: row.team_id, sharedProjectId: row.shared_project_id, deviceId: row.device_id,
       ownerId: row.owner_id, sessionId: row.session_id, name: row.name, provider: row.provider, model: row.model, policy: row.policy,
-      configDigest: row.config_digest, publishedAt: row.published_at, presence: presenceOverride ?? (presenceFresh ? row.presence : 'unknown'),
+      configDigest: row.config_digest, publishedAt: row.published_at, presence: presenceOverride ?? (presenceFresh && Number(row.presence_known) === 1 ? row.presence : 'unknown'),
       presenceKnown: presenceOverride ? presenceOverride !== 'unknown' : Number(row.presence_known) === 1 && presenceFresh, presenceObservedAt,
       quotaState: Number(row.quota_known) === 1 && quotaFresh ? row.quota_state : 'unknown',
       quotaKnown: Number(row.quota_known) === 1 && quotaFresh, quotaObservedAt,
@@ -554,7 +554,10 @@ export class RemoteExecutionService {
         const digest = configDigest(session);
         const profileChanged = row.name !== name || row.provider !== session.provider || row.model !== model || row.policy !== session.policy ||
           row.config_digest !== digest || row.presence !== presence || Number(row.presence_known) !== 1 || row.active_group_id !== groupId;
-        if (profileChanged) {
+        // The metadata timer runs every 30 seconds. Renew an unchanged observation before
+        // peers' two-minute freshness window expires, without probing provider quota.
+        const presenceDue = !freshIso(row.presence_observed_at, 60_000);
+        if (profileChanged || presenceDue) {
           changed = this.run(`UPDATE mingle_remote_agents SET name = ?, provider = ?, model = ?, policy = ?, config_digest = ?,
             published_at = ?, presence = ?, presence_known = 1, presence_observed_at = ?, active_group_id = ? WHERE id = ? AND revoked_at IS NULL`,
           name, session.provider, model, session.policy, digest, at, presence, at, groupId, String(row.id)) > 0 || changed;
@@ -1121,7 +1124,9 @@ export class RemoteExecutionService {
       const validated = rawAgents.slice(0, 50).map((raw: unknown) => {
         const agent = RemoteAgentSchema.parse(raw);
         if (agent.teamId !== identity.teamId || agent.deviceId !== envelope.fromDeviceId || agent.ownerId !== remoteOwnerId || agent.sharedProjectId !== binding.sharedProjectId) throw new HttpError(403, 'Published agent identity does not match the authenticated sender and bound project.');
-        return { ...agent, presenceObservedAt: at, publishedAt: at };
+        // Delivery may have waited offline. Receipt time must not turn an old owner
+        // observation into fresh evidence that this agent is currently idle.
+        return agent;
       });
       const accepted = this.transaction(() => {
         if (!this.recordEnvelope(envelope)) return false;
@@ -1135,7 +1140,7 @@ export class RemoteExecutionService {
           quota_state=excluded.quota_state, quota_known=excluded.quota_known, quota_observed_at=excluded.quota_observed_at,
           quota_reason=excluded.quota_reason, active_group_id=excluded.active_group_id, revoked_at=NULL`, agent.id, agent.teamId, agent.sharedProjectId,
         agent.deviceId, agent.ownerId, agent.sessionId, agent.name, agent.provider, agent.model, agent.policy, agent.configDigest, at,
-         agent.presence, agent.presenceKnown ? 1 : 0, at, agent.quotaState, agent.quotaKnown ? 1 : 0, agent.quotaObservedAt,
+         agent.presence, agent.presenceKnown ? 1 : 0, agent.presenceObservedAt, agent.quotaState, agent.quotaKnown ? 1 : 0, agent.quotaObservedAt,
          agent.quotaReason, agent.activeGroupId);
         this.recordEvent(identity, binding.sharedProjectId, 'agents.received', `Received ${validated.length} explicitly published agent session(s).`, { fromDeviceId: envelope.fromDeviceId });
         return true;
