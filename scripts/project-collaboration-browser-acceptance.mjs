@@ -51,7 +51,7 @@ let accountMode = 'signed-in';
 let deliveryMode = 'sent';
 let previewMode = 'valid';
 let providerSetupNeeded = false;
-let joinedSession = null;
+let joinedSessions = [];
 let clonedProject = null;
 let collaborationSnapshot;
 let collabGate = null;
@@ -104,11 +104,23 @@ async function test(label, run) {
     const message = cause instanceof Error ? cause.stack ?? cause.message : String(cause);
     failures.push({ label, message });
     note(`FAIL ${label}: ${message}`);
+    note(`DEBUG page errors: ${JSON.stringify(pageErrors.slice(-8))}`);
+    note(`DEBUG console errors: ${JSON.stringify(consoleErrors.slice(-8))}`);
+    note(`DEBUG HTTP failures: ${JSON.stringify(httpFailures.slice(-12))}`);
     if (page && !page.isClosed()) {
       const state = await page.locator('[role=dialog]').innerText().catch(() => 'No dialog open.');
       note(`DEBUG visible dialog: ${state.slice(0, 1600)}`);
     }
   }
+}
+
+async function ensureTeammatesDialog() {
+  const dialog = page.getByRole('dialog', { name: 'Teammates' });
+  if (!(await dialog.count())) {
+    await page.getByRole('button', { name: 'Add teammates', exact: true }).click();
+    await dialog.waitFor();
+  }
+  return dialog;
 }
 
 function accountState(status, email = INVITED_EMAIL) {
@@ -127,6 +139,25 @@ function invitationPreview(email = INVITED_EMAIL) {
   return { invitationId: 'example-invitation', projectName: 'Example Mingle project', repositoryUrl: 'https://example.invalid/acme/mingle-demo.git', email, expiresAt: new Date(Date.now() + 86_400_000).toISOString(), role: 'member', exampleFixture: true };
 }
 
+function teamStructureSnapshot(id = projectId) {
+  return {
+    projectId: id,
+    teamId: TEAM_ID,
+    sharedProjectId: SHARED_PROJECT_ID,
+    enabled: false,
+    settings: null,
+    host: { deviceId: 'example-leader-device', accountId: LEADER_ID, displayName: 'Example leader device', online: true, isThisDevice: true },
+    canEdit: true,
+    myConsent: null,
+    members: [],
+    leaderHistory: [],
+    needsLeader: false,
+    teamSession: null,
+    observedAt: new Date().toISOString(),
+    exampleFixture: true,
+  };
+}
+
 function updateBootstrap() {
   const boot = structuredClone(sourceBootstrap);
   boot.projects = [...boot.projects.filter((project) => project.id !== projectId), { ...sourceBootstrap.projects.find((project) => project.id === projectId), id: projectId, name: 'Example local checkout', isExample: false }];
@@ -134,7 +165,9 @@ function updateBootstrap() {
   const sampleSessions = sourceBootstrap.sessions.filter((session) => session.projectId === projectId).map((session, index) => ({
     ...session, name: index === 0 ? 'Example local Codex' : `Example local agent ${index + 1}`, provider: 'codex', model: 'example-codex-model', effort: 'medium', policy: 'supervised', status: 'idle',
   }));
-  if (joinedSession && !sampleSessions.some((session) => session.id === joinedSession.id)) sampleSessions.push(joinedSession);
+  for (const joinedSession of joinedSessions) {
+    if (!sampleSessions.some((session) => session.id === joinedSession.id)) sampleSessions.push(joinedSession);
+  }
   boot.sessions = [...sourceBootstrap.sessions.filter((session) => session.projectId !== projectId), ...sampleSessions];
   boot.providers = providerSetupNeeded ? [
     { id: 'codex', name: 'Codex', available: false, version: null, executable: null, reason: 'Example fixture: provider needs setup.', policies: [], models: [] },
@@ -256,6 +289,10 @@ async function main() {
       await jsonResponse(route, 200, collaborationSnapshot);
       return;
     }
+    if (/^\/api\/projects\/[^/]+\/team-structure$/.test(url.pathname) && method === 'GET') {
+      await jsonResponse(route, 200, teamStructureSnapshot(decodeURIComponent(url.pathname.split('/')[3])));
+      return;
+    }
     if (/^\/api\/projects\/[^/]+\/collaboration\/invitations$/.test(url.pathname) && method === 'POST') {
       const id = `example-invitation-${collaborationSnapshot.invitations.length + 1}`;
       const status = deliveryMode;
@@ -274,12 +311,13 @@ async function main() {
       return;
     }
     if (url.pathname === '/api/project-invitations/join' && method === 'POST') {
-      joinedSession = {
-        ...(localSessions[0] ?? {}), id: 'example-invitation-initial-session', projectId: body.localProjectId,
-        name: 'Example first agent', provider: body.agent.provider, model: body.agent.model, effort: body.agent.effort,
-        policy: 'supervised', status: 'idle', error: null,
-      };
-      await jsonResponse(route, 200, { projectId: body.localProjectId, sessionId: joinedSession.id, teamId: TEAM_ID, sharedProjectId: SHARED_PROJECT_ID, alreadyJoined: false, exampleFixture: true });
+      const agents = body.agents ?? (body.agent ? [body.agent] : []);
+      joinedSessions = agents.map((agent, index) => ({
+        ...(localSessions[index] ?? localSessions[0] ?? {}), id: `example-invitation-agent-${index + 1}`, projectId: body.localProjectId,
+        name: `Example invited agent ${index + 1}`, provider: agent.provider, model: agent.model, effort: agent.effort,
+        policy: agent.policy, status: 'idle', error: null,
+      }));
+      await jsonResponse(route, 200, { projectId: body.localProjectId, sessionId: joinedSessions[0]?.id, sessionIds: joinedSessions.map((session) => session.id), teamId: TEAM_ID, sharedProjectId: SHARED_PROJECT_ID, alreadyJoined: false, exampleFixture: true });
       return;
     }
     if (url.pathname === '/api/directories' && method === 'GET') {
@@ -341,7 +379,7 @@ async function main() {
     assert.equal(requests.some((item) => item.method === 'POST' && item.pathname === '/api/sessions'), false, 'inviting does not create a provider session');
     await page.screenshot({ path: screenshots.invite, fullPage: true });
     await page.evaluate((token) => window.mingleProjectInvitations.emit(token), TOKEN);
-    const joinDialog = page.getByRole('dialog', { name: 'Join project' });
+    const joinDialog = page.getByRole('dialog', { name: 'Join Example Mingle project?' });
     await joinDialog.getByText('Example Mingle project', { exact: true }).waitFor();
     assert.equal(await initialComposer.inputValue(), 'Example unsent local draft stays in place', 'warm invite overlay preserves the active composer draft');
     await joinDialog.getByRole('button', { name: 'Close dialog', exact: true }).click();
@@ -349,6 +387,7 @@ async function main() {
   });
 
   await test('failed and not-configured email delivery remain distinct; only unsent response offers a join-link fallback', async () => {
+    await ensureTeammatesDialog();
     deliveryMode = 'failed';
     await page.getByLabel('Teammate email', { exact: true }).fill('failed@example.invalid');
     await page.getByRole('button', { name: 'Send invite', exact: true }).click();
@@ -365,7 +404,10 @@ async function main() {
   });
 
   await test('combined local/team roster supports inspection, publishing, notes, tasks and owner-scoped removal', async () => {
-    const dialog = page.getByRole('dialog', { name: 'Teammates' });
+    const dialog = await ensureTeammatesDialog();
+    await dialog.getByText('This shared project is not yet a team-orchestrated project.').waitFor();
+    assert.ok(requests.some((item) => item.method === 'GET' && item.pathname === `/api/projects/${projectId}/team-structure`), 'the settings panel receives a typed team-structure fixture rather than the generic array fallback');
+    assert.equal(await dialog.getByRole('alert').count(), 0, 'the team settings panel renders without a malformed-snapshot error');
     await dialog.locator('.pc-agent-row').filter({ hasText: 'Example local Codex' }).waitFor();
     await waitFor(async () => await dialog.locator('.pc-agent-row').filter({ hasText: 'Example local Codex' }).count() === 1, 'leader-owned session de-duplication');
     assert.equal(await dialog.locator('.pc-agent-row').filter({ hasText: 'Example local Codex' }).count(), 1, 'the leader-owned published session appears once in the local section, not again as a remote agent');
@@ -407,21 +449,34 @@ async function main() {
     await page.getByRole('heading', { name: 'Sign in to join this project' }).waitFor();
     await page.getByRole('button', { name: 'Continue with Google' }).click();
     await page.getByText('Example Mingle project', { exact: true }).waitFor();
-    const providerForm = page.locator('.pc-join .pc-agent-config select');
+    const invitation = page.getByRole('dialog', { name: 'Join Example Mingle project?' });
+    await invitation.getByRole('button', { name: 'Join project', exact: true }).click();
+    const workspace = page.getByRole('dialog', { name: 'Where should we put the code?' });
+    await workspace.getByRole('button', { name: 'I already have a checkout', exact: true }).click();
+    await workspace.getByRole('radio', { name: /Example local checkout/ }).click();
+    await workspace.getByRole('button', { name: 'Use this checkout', exact: true }).click();
+    const agents = page.getByRole('dialog', { name: 'Add your agents' });
+    await agents.getByRole('heading', { name: 'Choose one or more local agents' }).waitFor();
+    const providerForm = agents.locator('.pc-agent-config select');
     assert.equal(await providerForm.nth(0).inputValue(), 'codex');
     assert.equal(await providerForm.nth(1).inputValue(), 'example-codex-model');
     assert.equal(await providerForm.nth(2).inputValue(), 'medium');
-    assert.equal(await page.getByRole('button', { name: 'Join project', exact: true }).isDisabled(), true, 'a local checkout must be explicitly selected before joining');
-    await page.getByRole('radio', { name: /Example local checkout/ }).click();
+    assert.equal(await providerForm.nth(3).inputValue(), 'supervised');
     const beforeJoin = requests.filter((item) => item.method === 'POST' && item.pathname === '/api/project-invitations/join').length;
     assert.equal(requests.some((item) => item.method === 'POST' && item.pathname === '/api/sessions'), false, 'setup has not pre-created a session');
     await page.screenshot({ path: screenshots.join, fullPage: true });
-    await page.getByRole('button', { name: 'Join project', exact: true }).click();
+    await agents.getByRole('button', { name: 'Join project', exact: true }).click();
+    const joinFlow = page.locator('.pc-join');
+    await joinFlow.getByText('Please review before agreeing').waitFor();
+    assert.equal(await joinFlow.locator('.team-consent__agent').filter({ hasText: 'Example invited agent 1' }).locator('input[type=checkbox]').isChecked(), true, 'the newly configured local agent is selected for explicit review before sharing');
+    await joinFlow.getByRole('button', { name: 'Skip for now', exact: true }).click();
     await page.getByRole('heading', { name: 'You’re in' }).waitFor();
     const joins = requests.filter((item) => item.method === 'POST' && item.pathname === '/api/project-invitations/join');
     assert.equal(joins.length, beforeJoin + 1, 'only the explicit Join project action accepts the invite');
-    assert.deepEqual(joins.at(-1)?.body, { token: TOKEN, localProjectId: projectId, agent: { provider: 'codex', model: 'example-codex-model', effort: 'medium', policy: 'supervised' } });
+    assert.deepEqual(joins.at(-1)?.body, { token: TOKEN, localProjectId: projectId, agents: [{ provider: 'codex', model: 'example-codex-model', effort: 'medium', policy: 'supervised' }] });
     assert.equal(requests.some((item) => item.method === 'POST' && /\/api\/sessions\/?$/.test(item.pathname)), false, 'the join endpoint is the sole initial-session creation path');
+    assert.equal(requests.some((item) => item.method === 'POST' && item.pathname.endsWith('/team-consent')), false, 'skipping consent leaves the configured agent private');
+    await page.getByRole('dialog', { name: 'Project joined' }).getByText('remain private', { exact: false }).waitFor();
     await page.getByRole('dialog', { name: 'Project joined' }).getByRole('button', { name: 'Open project', exact: true }).click();
   });
 
@@ -442,7 +497,7 @@ async function main() {
     await joinDialog.getByRole('heading', { name: 'Sign in to join this project' }).waitFor();
     previewMode = 'valid';
     await joinDialog.getByRole('button', { name: 'Continue with Google' }).click();
-    await joinDialog.getByText('Example Mingle project', { exact: true }).waitFor();
+    await page.getByRole('dialog', { name: 'Join Example Mingle project?' }).getByText('Example Mingle project', { exact: true }).waitFor();
     assert.equal(requests.filter((item) => item.method === 'POST' && item.pathname === '/api/project-invitations/join').length, joinsBeforeSwitch, 'switching accounts preserves the invitation without accepting it');
   });
 
@@ -454,16 +509,14 @@ async function main() {
     const sessionRow = page.locator('.sitem').first();
     if (await sessionRow.count()) await sessionRow.click();
     await page.evaluate((token) => window.mingleProjectInvitations.emit(token), TOKEN);
-    const dialog = page.getByRole('dialog', { name: 'Join project' });
-    await dialog.getByText('Example Mingle project', { exact: true }).waitFor();
+    const invitation = page.getByRole('dialog', { name: 'Join Example Mingle project?' });
+    await invitation.getByRole('button', { name: 'Join project', exact: true }).click();
+    const dialog = page.getByRole('dialog', { name: 'Where should we put the code?' });
+    await dialog.getByText('https://example.invalid/acme/mingle-demo.git', { exact: true }).waitFor();
     assert.equal(await page.locator('.header').isVisible(), true, 'the workspace remains mounted behind the join overlay');
     assert.equal(new URL(page.url()).searchParams.has('join'), false);
     await dialog.getByRole('button', { name: 'Clone repository', exact: true }).click();
-    await dialog.getByLabel('Clone into parent folder').fill('/example/checkouts');
-    assert.equal(requests.some((item) => item.method === 'POST' && item.pathname === '/api/projects/clone'), false, 'opening an invitation never clones by itself');
-    await dialog.getByRole('button', { name: 'Clone checkout', exact: true }).click();
-    await waitFor(() => requests.some((item) => item.method === 'POST' && item.pathname === '/api/projects/clone'), 'explicit clone request');
-    assert.equal(await dialog.getByRole('radio', { name: /mingle-demo/ }).getAttribute('aria-checked'), 'true');
+    await dialog.getByLabel('Repository destination parent folder').fill('/example/checkouts');
     await page.setViewportSize({ width: 390, height: 844 });
     await page.screenshot({ path: screenshots.narrow, fullPage: true });
     const geometry = await dialog.evaluate((element) => ({
@@ -472,9 +525,18 @@ async function main() {
     }));
     assert.ok(geometry.documentWidth <= geometry.viewport, `narrow invite layout does not overflow: ${JSON.stringify(geometry)}`);
     assert.ok(geometry.modalRight <= geometry.viewport + 1, `dialog remains in the narrow viewport: ${JSON.stringify(geometry)}`);
-    await dialog.getByRole('button', { name: 'Join project', exact: true }).click();
+    assert.equal(requests.some((item) => item.method === 'POST' && item.pathname === '/api/projects/clone'), false, 'opening an invitation never clones by itself');
+    await dialog.getByRole('button', { name: 'Clone and continue', exact: true }).click();
+    await waitFor(() => requests.some((item) => item.method === 'POST' && item.pathname === '/api/projects/clone'), 'explicit clone request');
+    assert.deepEqual(requests.findLast((item) => item.method === 'POST' && item.pathname === '/api/projects/clone')?.body, { url: 'https://example.invalid/acme/mingle-demo.git', name: 'mingle-demo', parentPath: '/example/checkouts' });
+    const agents = page.getByRole('dialog', { name: 'Add your agents' });
+    await agents.getByRole('button', { name: 'Join project', exact: true }).click();
+    const joinFlow = page.locator('.pc-join');
+    await joinFlow.getByText('Please review before agreeing').waitFor();
+    await joinFlow.getByRole('button', { name: 'Skip for now', exact: true }).click();
     await page.getByRole('heading', { name: 'You’re in' }).waitFor();
     await page.getByRole('dialog', { name: 'Project joined' }).getByRole('button', { name: 'Open project', exact: true }).click();
+    await page.setViewportSize({ width: 1280, height: 900 });
     assert.equal(pageErrors.length, 0, `no uncaught browser errors: ${pageErrors.join('; ')}`);
     assert.equal(consoleErrors.length, 0, `no browser console errors: ${consoleErrors.join('; ')}`);
     assert.ok(httpFailures.every((failure) => [401, 404].includes(failure.status) && failure.pathname === '/api/project-invitations/preview'), `only expected opaque invitation auth/invalid responses are observed: ${JSON.stringify(httpFailures)}`);
@@ -488,11 +550,27 @@ async function main() {
     await page.getByRole('button', { name: 'Add teammates', exact: true }).waitFor();
     const joinsBefore = requests.filter((item) => item.method === 'POST' && item.pathname === '/api/project-invitations/join').length;
     await page.evaluate((token) => window.mingleProjectInvitations.emit(token), TOKEN);
-    await page.getByRole('heading', { name: 'Provider setup needed' }).waitFor();
-    await page.getByRole('button', { name: 'Open provider settings', exact: true }).click();
+    const invitation = page.getByRole('dialog', { name: 'Join Example Mingle project?' });
+    await invitation.getByRole('button', { name: 'Join project', exact: true }).click();
+    const workspace = page.getByRole('dialog', { name: 'Where should we put the code?' });
+    await workspace.getByRole('button', { name: 'I already have a checkout', exact: true }).click();
+    await workspace.getByRole('radio', { name: /Example local checkout/ }).click();
+    await workspace.getByRole('button', { name: 'Use this checkout', exact: true }).click();
+    const agents = page.getByRole('dialog', { name: 'Add your agents' });
+    await agents.getByRole('heading', { name: 'No eligible provider is ready' }).waitFor();
+    assert.equal(await agents.getByRole('button', { name: 'Join project', exact: true }).isDisabled(), true);
+    await agents.getByRole('button', { name: 'Open provider settings', exact: true }).click();
     await page.getByRole('button', { name: 'Back to workspace', exact: true }).waitFor();
     await page.getByRole('button', { name: 'Back to workspace', exact: true }).click();
-    await page.getByRole('heading', { name: 'Provider setup needed' }).waitFor();
+    await page.getByRole('dialog', { name: 'Join Example Mingle project?' }).waitFor();
+    assert.ok(requests.some((item) => item.method === 'POST' && item.pathname === '/api/project-invitations/preview' && item.body.token === TOKEN), 'the same invitation remains available after returning from settings');
+    const resumedInvitation = page.getByRole('dialog', { name: 'Join Example Mingle project?' });
+    await resumedInvitation.getByRole('button', { name: 'Join project', exact: true }).click();
+    const resumedWorkspace = page.getByRole('dialog', { name: 'Where should we put the code?' });
+    await resumedWorkspace.getByRole('button', { name: 'I already have a checkout', exact: true }).click();
+    await resumedWorkspace.getByRole('radio', { name: /Example local checkout/ }).click();
+    await resumedWorkspace.getByRole('button', { name: 'Use this checkout', exact: true }).click();
+    await page.getByRole('dialog', { name: 'Add your agents' }).getByRole('heading', { name: 'No eligible provider is ready' }).waitFor();
     assert.equal(requests.filter((item) => item.method === 'POST' && item.pathname === '/api/project-invitations/join').length, joinsBefore, 'provider setup does not accept the invitation or create an agent');
     providerSetupNeeded = false;
   });
@@ -500,7 +578,7 @@ async function main() {
   await test('late collaboration snapshot after dismissing the dialog cannot resurrect stale UI', async () => {
     delayCollaborationOnce = true;
     const readsBefore = collaborationReads;
-    await page.getByRole('dialog', { name: 'Join project' }).getByRole('button', { name: 'Close dialog', exact: true }).click();
+    await page.getByRole('dialog', { name: 'Add your agents' }).getByRole('button', { name: 'Close dialog', exact: true }).click();
     await page.getByRole('button', { name: 'Add teammates', exact: true }).click();
     await page.getByRole('dialog', { name: 'Teammates' }).waitFor();
     await waitFor(() => collaborationReads > readsBefore, 'delayed collaboration read to start');
@@ -518,6 +596,14 @@ async function main() {
 
 try {
   await main();
+} catch (cause) {
+  if (page) {
+    note(`DEBUG uncaught page errors: ${JSON.stringify(pageErrors.slice(-8))}`);
+    note(`DEBUG uncaught console errors: ${JSON.stringify(consoleErrors.slice(-8))}`);
+    note(`DEBUG uncaught HTTP failures: ${JSON.stringify(httpFailures.slice(-12))}`);
+    if (!page.isClosed()) note(`DEBUG uncaught visible dialog: ${(await page.locator('[role=dialog]').innerText().catch(() => 'No dialog open.')).slice(0, 1600)}`);
+  }
+  throw cause;
 } finally {
   await closeAll();
 }
