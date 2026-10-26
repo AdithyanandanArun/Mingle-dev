@@ -92,7 +92,12 @@ export const SendTeamChatMessageSchema = z.object({
 
 export const TeamChatSyncRequestSchema = z.object({
   sharedProjectId: z.string().uuid(), requestId: z.string().uuid(), since: z.string().datetime({ offset: true }).nullable(),
-}).strict();
+  pendingMessageIds: z.array(z.string().trim().min(1).max(100)).max(100).optional(),
+}).strict().superRefine((request, ctx) => {
+  if (request.pendingMessageIds && new Set(request.pendingMessageIds).size !== request.pendingMessageIds.length) {
+    ctx.addIssue({ code: 'custom', path: ['pendingMessageIds'], message: 'Pending message IDs must be unique.' });
+  }
+});
 
 export const TeamChatSyncResponseSchema = z.object({
   sharedProjectId: z.string().uuid(), requestId: z.string().uuid(),

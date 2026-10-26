@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { rmSync } from 'node:fs';
 import { expect, it } from 'vitest';
 import type { SupabaseClient, User } from '@supabase/supabase-js';
+import { TeamChatSyncRequestSchema } from '../../../../packages/contracts/src/team-chat.ts';
 import { canonicalJson, generateDeviceKeyMaterial, signDevicePayload } from '../distributed/crypto.ts';
 import { openDatabase } from '../db.ts';
 import { Store } from '../store.ts';
@@ -297,6 +298,8 @@ it('accepts only registered-host run-state updates for existing human messages w
     });
     expect(f.outgoing.find((entry) => entry.kind === 'teamchat.run-state')?.payload)
       .toEqual({ sharedProjectId: SHARED, messageId: original.id, state: 'running' });
+    expect(f.outgoing.find((entry) => entry.kind === 'teamchat.run-state')?.idempotencyKey)
+      .toBe(`chat-state:${original.id}:running:${PEER}`);
 
     const stateEnvelope = (fromDeviceId: string, payload: unknown, teamId = TEAM) => ({
       id: randomUUID(), teamId, fromDeviceId, toDeviceId: DEVICE, kind: 'teamchat.run-state', payload,
@@ -398,6 +401,80 @@ it('rate-limits repeated sync requests from the same peer device', async () => {
     await expect(f.receive(makeRequest())).resolves.toBeUndefined();
     expect(f.outgoing.filter((entry) => entry.kind === 'teamchat.sync.response')).toHaveLength(1);
   } finally { await f.close(); }
+});
+
+it('repairs an older active human message from targeted signed backfill without replaying work or disclosing another project', async () => {
+  const member = fixture(true);
+  const host = fixture(true);
+  try {
+    const oldCreatedAt = '2026-01-01T00:00:00.000Z';
+    const original = member.remoteMessage({
+      id: randomUUID(), teamId: TEAM, sharedProjectId: SHARED,
+      author: { kind: 'human', accountId: ACCOUNT, displayName: 'Ada' }, body: 'Older direct team request',
+      mentions: [], createdAt: oldCreatedAt, deliveryState: 'sent', runState: null,
+    }, PEER, PEER_KEYS);
+    const received = { id: randomUUID(), teamId: TEAM, fromDeviceId: PEER, toDeviceId: DEVICE, kind: 'teamchat.message', payload: original };
+    await member.receive(received);
+    await host.receive(received);
+    member.store.db.prepare("UPDATE team_chat_messages SET run_state='running' WHERE id=?").run(original.id);
+    await host.service.setOrchestratedRunState({ messageId: original.id, state: 'completed' });
+    expect(host.store.db.prepare('SELECT run_state FROM team_chat_messages WHERE id=?').get(original.id)).toEqual({ run_state: 'completed' });
+
+    const newerReply = await member.service.postAgentReply(PROJECT, member.session!.id,
+      'A newer final response has arrived.', original.id, 'newer-final-for-pending-backfill');
+    expect(Date.parse(newerReply.createdAt)).toBeGreaterThan(Date.parse(oldCreatedAt));
+    let routedCount = 0;
+    member.service.setOrchestration({ async routeTeamChatMessage() { routedCount += 1; return 'handled'; } });
+    await member.service.snapshot(PROJECT, { limit: 100 });
+    await until(() => member.outgoing.some((entry) => entry.kind === 'teamchat.sync.request'));
+    const syncRequest = member.outgoing.find((entry) => entry.kind === 'teamchat.sync.request')!;
+    const request = TeamChatSyncRequestSchema.parse(syncRequest.payload);
+    expect(Date.parse(request.since!)).toBeGreaterThan(Date.parse(oldCreatedAt));
+    expect(request.pendingMessageIds).toEqual([original.id]);
+    expect(() => TeamChatSyncRequestSchema.parse({ ...request, pendingMessageIds: Array(101).fill(original.id) })).toThrow();
+    expect(() => TeamChatSyncRequestSchema.parse({ ...request, pendingMessageIds: [''] })).toThrow();
+    expect(() => TeamChatSyncRequestSchema.parse({ ...request, pendingMessageIds: [original.id, original.id] })).toThrow();
+
+    const otherProjectId = '30000000-0000-4000-8000-000000000099';
+    const otherProjectMessage = host.remoteMessage({
+      id: randomUUID(), teamId: TEAM, sharedProjectId: otherProjectId,
+      author: { kind: 'human', accountId: ACCOUNT, displayName: 'Ada' }, body: 'Do not disclose this other project record',
+      mentions: [], createdAt: oldCreatedAt, deliveryState: 'sent', runState: 'completed',
+    }, PEER, PEER_KEYS);
+    host.store.db.prepare(`INSERT INTO team_chat_messages
+      (id,team_id,shared_project_id,author_json,body,mentions_json,created_at,delivery_state,run_state,author_device_id,author_signature)
+      VALUES (?,?,?,?,?,?,?,'sent',?,?,?)`).run(otherProjectMessage.id, TEAM, otherProjectId, JSON.stringify(otherProjectMessage.author),
+      otherProjectMessage.body, JSON.stringify(otherProjectMessage.mentions), otherProjectMessage.createdAt,
+      otherProjectMessage.runState, otherProjectMessage.authorDeviceId, otherProjectMessage.authorSignature);
+
+    const maliciousRequest = TeamChatSyncRequestSchema.parse({ ...request, pendingMessageIds: [original.id, otherProjectMessage.id] });
+    await expect(host.receive({ ...syncRequest, id: randomUUID(), fromDeviceId: PEER, toDeviceId: DEVICE, payload: {
+      ...maliciousRequest, pendingMessageIds: Array(101).fill(original.id),
+    } })).rejects.toThrow();
+    await host.receive({ ...syncRequest, id: randomUUID(), fromDeviceId: PEER, toDeviceId: DEVICE, payload: maliciousRequest });
+    const responseEntry = host.outgoing.find((entry) => entry.kind === 'teamchat.sync.response')!;
+    const response = responseEntry.payload as { sharedProjectId: string; requestId: string; batchIndex: number; batchCount: number; messages: Array<{ id: string; body: string; runState: string | null }> };
+    expect(response.messages).toEqual([expect.objectContaining({ id: original.id, body: original.body, runState: 'completed' })]);
+    expect(response.messages.some((message) => message.id === otherProjectMessage.id || message.body.includes('other project'))).toBe(false);
+
+    await member.receive({ id: randomUUID(), teamId: TEAM, fromDeviceId: PEER, toDeviceId: DEVICE,
+      kind: 'teamchat.sync.response', payload: response });
+    expect(member.store.db.prepare(`SELECT run_state,body,author_json,author_device_id,author_signature
+      FROM team_chat_messages WHERE id=?`).get(original.id)).toEqual({
+      run_state: 'completed', body: original.body,
+      author_json: JSON.stringify({ kind: 'human', accountId: ACCOUNT, displayName: 'Ada' }),
+      author_device_id: PEER, author_signature: original.authorSignature,
+    });
+    expect(routedCount).toBe(0);
+    expect(member.runtimeCalls).toHaveLength(0);
+    expect(host.runtimeCalls).toHaveLength(0);
+    const priorHostStateFanouts = host.outgoing.filter((entry) => entry.kind === 'teamchat.run-state').length;
+    await host.service.setOrchestratedRunState({ messageId: original.id, state: 'completed' });
+    expect(host.outgoing.filter((entry) => entry.kind === 'teamchat.run-state')).toHaveLength(priorHostStateFanouts);
+  } finally {
+    await member.close();
+    await host.close();
+  }
 });
 
 it('backfills bounded message batches without starting local runs from team-chat mentions', async () => {

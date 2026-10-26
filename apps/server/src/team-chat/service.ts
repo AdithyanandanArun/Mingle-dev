@@ -443,7 +443,14 @@ export class TeamChatService {
       .filter((value): value is string => Boolean(value)).sort().at(-1) ?? null;
     // Include the entire millisecond for concurrent writers; message IDs break timestamp ties locally.
     const since = latestAt ? new Date(Math.max(0, Date.parse(latestAt) - 1)).toISOString() : null;
-    const payload: TeamChatSyncRequest = TeamChatSyncRequestSchema.parse({ sharedProjectId, requestId: randomUUID(), since });
+    const pendingMessageIds = (this.options.store.db.prepare(`SELECT id FROM team_chat_messages
+      WHERE team_id=? AND shared_project_id=? AND json_extract(author_json,'$.kind')='human'
+        AND run_state IN ('queued','running','awaiting-approval')
+      ORDER BY created_at,id LIMIT 100`).all(teamId, sharedProjectId) as DbRow[])
+      .map((row) => String(row.id));
+    const payload: TeamChatSyncRequest = TeamChatSyncRequestSchema.parse({
+      sharedProjectId, requestId: randomUUID(), since, pendingMessageIds,
+    });
     const prepared = new Map<string, string>();
     return this.sendToPeers(teamId, payload.sharedProjectId, 'teamchat.sync.request', payload,
       `sync-request:${payload.requestId}`, localDeviceId, (peerDeviceIds) => {
@@ -695,7 +702,7 @@ export class TeamChatService {
           sharedProjectId: persisted.sharedProjectId, messageId: persisted.id, state: persisted.runState,
         });
         await this.sendToPeers(persisted.teamId, persisted.sharedProjectId, 'teamchat.run-state', update,
-          `chat:${persisted.id}:state:${persisted.runState}`);
+          `chat-state:${persisted.id}:${persisted.runState}`);
         return;
       }
       await this.sendToPeers(message.teamId, message.sharedProjectId, 'teamchat.message',
@@ -1128,12 +1135,22 @@ export class TeamChatService {
       // the host to navigate to its separate team-chat API. Metadata failure
       // must not prevent ordinary signed conversation history from syncing.
       await this.publishSharedGroupView(localProjectId).catch(() => null);
-      const rows = this.options.store.db.prepare(`SELECT * FROM team_chat_messages WHERE team_id=? AND shared_project_id=?
+      const requestedRows = request.pendingMessageIds?.length
+        ? this.options.store.db.prepare(`SELECT * FROM team_chat_messages WHERE team_id=? AND shared_project_id=?
+            AND id IN (${request.pendingMessageIds.map(() => '?').join(',')})
+            AND json_extract(author_json,'$.kind')='human' AND author_device_id IS NOT NULL AND author_signature IS NOT NULL
+          ORDER BY created_at,id`)
+          .all(envelope.teamId, request.sharedProjectId, ...request.pendingMessageIds) as DbRow[]
+        : [];
+      const requestedIds = requestedRows.map((row) => String(row.id));
+      const recentLimit = Math.max(0, SYNC_MESSAGE_LIMIT - requestedRows.length);
+      const excludeRequested = requestedIds.length ? `AND id NOT IN (${requestedIds.map(() => '?').join(',')})` : '';
+      const rows = recentLimit > 0 ? this.options.store.db.prepare(`SELECT * FROM team_chat_messages WHERE team_id=? AND shared_project_id=?
         AND author_device_id IS NOT NULL AND author_signature IS NOT NULL
-        AND (? IS NULL OR created_at > ?) ORDER BY created_at,id LIMIT ?`).all(envelope.teamId, request.sharedProjectId,
-        request.since, request.since, SYNC_MESSAGE_LIMIT) as DbRow[];
+        AND (? IS NULL OR created_at > ?) ${excludeRequested} ORDER BY created_at,id LIMIT ?`).all(envelope.teamId, request.sharedProjectId,
+        request.since, request.since, ...requestedIds, recentLimit) as DbRow[] : [];
       const localDeviceId = this.options.distributed.transport.snapshot(envelope.teamId).deviceId;
-      const messages = rows.map((row) => ({ ...this.rowMessage(row), deliveryState: 'sent' as const }))
+      const messages = [...requestedRows, ...rows].map((row) => ({ ...this.rowMessage(row), deliveryState: 'sent' as const }))
         // Views have stricter host-device authority than relayed chat. A member
         // must not echo a received host view into an otherwise valid history
         // batch: recipients correctly reject views relayed by another device.
