@@ -1,5 +1,5 @@
 pkgname=mingle-bin
-pkgver=0.0.2
+pkgver=0.0.3
 pkgrel=1
 pkgdesc='Local development workspace for independent coding-agent sessions'
 provides=('relay-workspace-bin')
@@ -46,7 +46,7 @@ if [[ -f "${_archive}" ]]; then
 else
   source=("${_archive}::https://github.com/AdithyanandanArun/Mingle-dev/releases/download/v${pkgver}/mingle-${pkgver}-linux-x64.tar.gz")
 fi
-sha256sums=('6d3fb6be2ef34de23054ae9fe32a60d5b243180900cb38d5470c42a67c8eef59')
+sha256sums=('a9d512961fa351e264ee463175930969681b20acd7c0b55e5267bf1c64bc5be5')
 
 package() {
   local _release="${srcdir}/mingle-${pkgver}-linux-x64"
