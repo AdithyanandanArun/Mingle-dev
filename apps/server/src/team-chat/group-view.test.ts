@@ -8,6 +8,7 @@ import { TeamChatMessageSchema } from '../../../../packages/contracts/src/team-c
 import { canonicalJson, generateDeviceKeyMaterial, signDevicePayload } from '../distributed/crypto.ts';
 import { openDatabase } from '../db.ts';
 import { Store } from '../store.ts';
+import { GroupRepo } from '../groups/repo.ts';
 import { FakeProviders, makeRepo } from '../test-utils.ts';
 import type { AccountService } from '../account/service.ts';
 import type { DistributedWorkspaceService } from '../distributed/service.ts';
@@ -194,6 +195,30 @@ function sharedGroup(host: ReturnType<typeof node>): GroupSnapshot {
     assignments: [{ id: 'example-assignment-record', groupId: 'example-shared-group', requestId: 'example-request', fromMemberId: 'lead-member', toMemberId: 'worker-member', taskId: task.id, deliveryId: 'example-delivery', scope: ['src/order.ts'], createdAt: at }],
   };
 }
+
+it('projects member-origin human mirror IDs only from the same bound shared project', async () => {
+  const host = node({ projectId: HOST_PROJECT, accountId: HOST_ACCOUNT, deviceId: HOST_DEVICE, role: 'host' });
+  try {
+    const snapshot = sharedGroup(host);
+    const session = host.store.insertSession({ projectId: HOST_PROJECT, name: 'Example lead', provider: 'claude', model: 'claude-sonnet-5-5', effort: 'high', policy: 'supervised', isolated: false, worktreePath: host.project.path, branch: null });
+    const repo = new GroupRepo(host.store.db);
+    repo.insertGroup({ ...snapshot.group, anchorSessionId: session.id });
+    const insertChat = host.store.db.prepare(`INSERT INTO team_chat_messages
+      (id,team_id,shared_project_id,author_json,body,mentions_json,created_at,delivery_state)
+      VALUES (?,?,?,?,?,'[]',?,'sent')`);
+    const ids = [
+      ['member-human-source', SHARED, 'human'],
+      ['other-project-source', 'other-shared-project', 'human'],
+      ['agent-source', SHARED, 'agent'],
+    ] as const;
+    snapshot.messages = ids.map(([id, sharedProjectId, kind]) => {
+      insertChat.run(id, TEAM, sharedProjectId, JSON.stringify({ kind }), 'Identical text is not identity.', snapshot.group.createdAt);
+      return repo.insertMessage({ groupId: snapshot.group.id, senderMemberId: null, recipients: [], kind: 'user', content: 'Identical text is not identity.', clientMessageId: `teamchat-${id}` });
+    });
+    const view = projectGroupView(snapshot, host.store, 1);
+    expect(view.messages.map((message) => message.sourceMessageId)).toEqual(['member-human-source', null, null]);
+  } finally { await host.close(); }
+});
 
 it('publishes only bounded shared group routing, assignment, task, result and relative-change metadata to an active member', async () => {
   memberActive = true;

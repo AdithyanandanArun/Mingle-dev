@@ -172,6 +172,7 @@ function memberTeamChatSnapshot() {
         { id: 'example-group-assignment', seq: 2, kind: 'assignment', senderHandle: 'example-host-lead', recipientHandles: ['example-invited-1'], content: '', requestId: 'example-group-request-id', createdAt: at(-360_000) },
         { id: 'example-group-agent-entry', seq: 3, kind: 'agent', sourceMessageId: 'example-group-agent-response', senderHandle: 'example-host-lead', recipientHandles: [], content: mirroredAgentBody, requestId: 'example-group-request-id', createdAt: at(-240_000) },
         { id: 'example-group-progress', seq: 4, kind: 'status', senderHandle: 'example-invited-1', recipientHandles: [], content: memberGroupResultState === 'in-progress' ? mirroredAgentBody : 'The task is ready for human review.', requestId: 'example-group-request-id', createdAt: at(-120_000) },
+        { id: 'example-group-member-confirmation', seq: 5, kind: 'user', sourceMessageId: 'example-member-confirmation-message', senderHandle: null, recipientHandles: ['example-host-lead'], content: 'Host confirmation after the assignment progress.', requestId: 'example-group-request-id', createdAt: at(1000) },
       ],
       requests: [{ id: 'example-group-request-id', messageId: 'example-group-request', plannerHandle: 'example-host-lead', status: memberGroupResultState === 'in-progress' ? 'active' : 'completed', turnsUsed: 2, createdAt: at(-420_000) }],
       deliveries: [{ id: 'example-group-delivery', requestId: 'example-group-request-id', messageId: 'example-group-assignment', handle: 'example-invited-1', kind: 'assignment', status: memberGroupResultState === 'in-progress' ? 'running' : 'completed', hop: 1, error: null, createdAt: at(-360_000), updatedAt: at(-120_000) }],
@@ -769,6 +770,7 @@ async function main() {
     assert.equal(await page.locator('.team-session__group-card').count(), 1, 'the assignment is a structured shared group card');
     assert.equal(await page.locator('[data-group-message-id="example-group-request"]').count(), 0, 'the exact human group mirror is not repeated');
     assert.equal(await page.locator('[data-group-message-id="example-group-agent-entry"]').count(), 0, 'the exact agent group mirror is not repeated');
+    assert.equal(await page.locator('[data-group-message-id="example-group-member-confirmation"]').count(), 0, 'a member-origin human request uses its durable chat identity to suppress the group mirror');
     assert.equal(await page.locator('[data-group-message-id="example-group-progress"]').count(), 1, 'same text from a different group author remains visible');
     assert.equal(await page.locator('.chat__inner .md').evaluateAll((nodes) => nodes.filter((node) => node.textContent?.trim() === 'The shared assignment is in progress.').length), 2,
       'identical text from the host agent and invited agent is not content-deduplicated');

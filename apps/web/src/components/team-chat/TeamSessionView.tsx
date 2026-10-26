@@ -35,9 +35,9 @@ type TeamSessionTimelineRow =
 function isMirroredGroupEntry(entry: TeamChatGroupView['messages'][number], messages: readonly TeamChatMessage[]): boolean {
   const authorKind = entry.kind === 'user' ? 'human' : entry.kind === 'agent' ? 'agent' : null;
   if (!authorKind) return false;
-  const sourceMessageId = entry.kind === 'user' ? entry.id : entry.sourceMessageId;
+  const sourceMessageId = entry.sourceMessageId ?? (entry.kind === 'user' ? entry.id : null);
   return messages.some((message) => message.author.kind === authorKind && (
-    message.id === entry.id || Boolean(sourceMessageId && message.source?.messageId === sourceMessageId)
+    message.id === entry.id || Boolean(sourceMessageId && (message.id === sourceMessageId || message.source?.messageId === sourceMessageId))
   ));
 }
 

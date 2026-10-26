@@ -100,6 +100,16 @@ function resultFor(snapshot: GroupSnapshot, store: Store): TeamChatGroupView['re
 }
 
 export function projectGroupView(snapshot: GroupSnapshot, store: Store, version: number): TeamChatGroupView {
+  // Member-origin chat requests have a distinct group message ID. Resolve the durable
+  // routing identity only inside this project's collaboration binding, never by text.
+  const routedHumanRows = store.db.prepare(`SELECT g.id,c.id AS source_id
+    FROM group_messages g JOIN team_chat_messages c ON g.client_message_id='teamchat-' || c.id
+    JOIN mingle_project_collaboration_sources s ON s.team_id=c.team_id AND s.shared_project_id=c.shared_project_id
+    WHERE s.local_project_id=? AND g.group_id=? AND g.kind='user'
+      AND json_extract(c.author_json,'$.kind')='human'
+      AND g.id IN (SELECT value FROM json_each(?))`).all(snapshot.group.projectId, snapshot.group.id,
+    JSON.stringify(snapshot.messages.slice(-50).filter((message) => message.kind === 'user').map((message) => message.id))) as Array<{ id: string; source_id: string }>;
+  const routedHumanSources = new Map(routedHumanRows.map((row) => [row.id, row.source_id]));
   const memberById = new Map(snapshot.members.map((member) => [member.id, member]));
   const activeMembers = snapshot.members.filter((member) => !member.removedAt);
   const removedMembers = snapshot.members.filter((member) => member.removedAt);
@@ -117,7 +127,7 @@ export function projectGroupView(snapshot: GroupSnapshot, store: Store, version:
   });
   const messages: TeamChatGroupView['messages'] = snapshot.messages.slice(-50).map((message) => ({
     id: message.id, seq: message.seq, kind: message.kind,
-    sourceMessageId: message.sourceMessageId,
+    sourceMessageId: message.kind === 'user' ? routedHumanSources.get(message.id) ?? null : message.sourceMessageId,
     senderHandle: message.senderMemberId ? memberById.get(message.senderMemberId)?.handle ?? null : null,
     recipientHandles: message.recipientMemberIds.flatMap((id) => {
       const member = memberById.get(id);
