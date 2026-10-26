@@ -382,6 +382,26 @@ it('seeds an idle existing group when the member opens history without a host re
   } finally { await Promise.all([host.close(), member.close()]); }
 });
 
+it('syncs member chat back to the host without relaying a received host-only view', async () => {
+  memberActive = true;
+  const host = node({ projectId: HOST_PROJECT, accountId: HOST_ACCOUNT, deviceId: HOST_DEVICE, role: 'host' });
+  const member = node({ projectId: MEMBER_PROJECT, accountId: MEMBER_ACCOUNT, deviceId: MEMBER_DEVICE, role: 'member' });
+  try {
+    const snapshot = sharedGroup(host);
+    host.service.setSharedGroupSnapshotProvider(async () => snapshot);
+    await host.service.snapshot(HOST_PROJECT, { limit: 20 });
+    await member.receive(host.outgoing.find((entry) => entry.kind === 'teamchat.group-view'));
+    await member.service.send(MEMBER_PROJECT, { body: 'Example member reply after reconnect.', mentions: [] });
+    await waitFor(() => host.outgoing.some((entry) => entry.kind === 'teamchat.sync.request'), 'host history request');
+    await member.receive(host.outgoing.find((entry) => entry.kind === 'teamchat.sync.request'));
+    const response = member.outgoing.find((entry) => entry.kind === 'teamchat.sync.response');
+    expect(response?.payload.messages.some((message: { kind?: string }) => message.kind === 'group-view')).toBe(false);
+    expect(response?.payload.messages.some((message: { body: string }) => message.body === 'Example member reply after reconnect.')).toBe(true);
+    await host.receive(response);
+    expect((await host.service.snapshot(HOST_PROJECT, { limit: 20 })).messages.some((message) => message.body === 'Example member reply after reconnect.')).toBe(true);
+  } finally { await Promise.all([host.close(), member.close()]); }
+});
+
 it('recovers an unchanged view after failed fan-out through member-opened authenticated backfill without a host snapshot', async () => {
   memberActive = true;
   const host = node({ projectId: HOST_PROJECT, accountId: HOST_ACCOUNT, deviceId: HOST_DEVICE, role: 'host' });

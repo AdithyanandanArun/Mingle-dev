@@ -1118,7 +1118,12 @@ export class TeamChatService {
         AND author_device_id IS NOT NULL AND author_signature IS NOT NULL
         AND (? IS NULL OR created_at > ?) ORDER BY created_at,id LIMIT ?`).all(envelope.teamId, request.sharedProjectId,
         request.since, request.since, SYNC_MESSAGE_LIMIT) as DbRow[];
-      const messages = rows.map((row) => ({ ...this.rowMessage(row), deliveryState: 'sent' as const }));
+      const localDeviceId = this.options.distributed.transport.snapshot(envelope.teamId).deviceId;
+      const messages = rows.map((row) => ({ ...this.rowMessage(row), deliveryState: 'sent' as const }))
+        // Views have stricter host-device authority than relayed chat. A member
+        // must not echo a received host view into an otherwise valid history
+        // batch: recipients correctly reject views relayed by another device.
+        .filter((message) => message.author.kind !== 'system' || message.author.deviceId === localDeviceId);
       for (const batch of this.batches(request.sharedProjectId, request.requestId, messages)) {
         const batchDigest = createHash('sha256').update(JSON.stringify(batch)).digest('hex').slice(0, 32);
         await this.options.distributed.transport.send({ teamId: envelope.teamId, toDeviceId: envelope.fromDeviceId,
