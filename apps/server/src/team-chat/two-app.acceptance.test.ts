@@ -446,6 +446,12 @@ it('shares imported session history and team messages over HTTP and the encrypte
         workerRuns: workerRuns.length,
         leaderRuns: leader.fake.runs.length,
         teammateRuns: teammate.fake.runs.length,
+        hostDeliveries: leader.app.store.db.prepare(`SELECT delivery_id,status,failure_json FROM mingle_team_host_deliveries WHERE shared_project_id=?`)
+          .all(join.json.sharedProjectId),
+        ownerDeliveries: teammate.app.store.db.prepare(`SELECT delivery_id,status,error,json_extract(request_json,'$.inputArtifacts') AS inputs
+          FROM mingle_team_device_deliveries WHERE shared_project_id=?`).all(join.json.sharedProjectId),
+        inputTransfers: leader.app.store.db.prepare(`SELECT delivery_id,status,retry_error AS error,json_extract(offer_json,'$.purpose') AS purpose
+          FROM mingle_git_team_artifacts WHERE shared_project_id=? AND direction='outgoing'`).all(join.json.sharedProjectId),
         assignments: current.assignments.map(({ deliveryId, taskId, scope, toMemberId }) => ({ deliveryId, taskId, scope, toMemberId })),
         groupArtifacts: leader.app.store.db.prepare(`SELECT a.group_id,a.from_member_id,a.to_member_id,a.task_id,a.path,a.commit_id
           FROM group_artifacts a WHERE a.group_id=? ORDER BY a.created_at`).all(teamGroupId),
@@ -472,7 +478,7 @@ it('shares imported session history and team messages over HTTP and the encrypte
           .all(join.json.teamId, join.json.sharedProjectId, activeAssignment.deliveryId) : [],
         groupArtifactErrors,
         hostToolErrors,
-        hostToolResults,
+        hostToolResults: hostToolResults.map((result) => ({ callId: result.callId, ok: result.ok, error: result.error })),
         artifactSecurityProbes,
         proxySession: leader.app.store.getSession(proxySessionId),
         proxyMessages: leader.app.store.listMessages(proxySessionId, { limit: 30 }).map(({ role, kind, runId, content }) => ({ role, kind, runId, content: content.slice(0, 500) })),
