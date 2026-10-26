@@ -700,28 +700,11 @@ export class TeamChatService {
     await this.updateAndFanOut({ ...this.rowMessage(row), runState: input.state });
   }
 
-  async postOrchestratedAgentReply(input: { projectId: string; sourceMessageId: string; agentId: string; content: string; deliveryId?: string }): Promise<void> {
-    if (input.deliveryId !== undefined) {
-      await this.postAgentReply(input.projectId, input.agentId, input.content, input.sourceMessageId, `orchestrated:${input.deliveryId}`);
-      return;
+  async postOrchestratedAgentReply(input: { projectId: string; sourceMessageId: string; agentId: string; content: string; deliveryId: string }): Promise<void> {
+    if (typeof input.deliveryId !== 'string' || !input.deliveryId.trim() || input.deliveryId.length > 180) {
+      throw new HttpError(400, 'A bounded remote delivery identity is required for a completion reply.');
     }
-    const { shared } = await this.binding(input.projectId);
-    const project = shared.project!;
-    const [accountId, deviceId] = await Promise.all([
-      this.options.account.withAuthenticatedClient(async (_client, user) => user.id),
-      Promise.resolve(this.options.distributed.transport.snapshot(project.teamId).deviceId),
-    ]);
-    const agent = this.teamAgents(shared.agents, accountId, deviceId).find((candidate) => candidate.id === input.agentId && candidate.local);
-    if (!agent) throw new HttpError(403, 'The local agent is no longer published by this team device.');
-    const unsigned = TeamChatMessageSchema.parse({
-      id: randomUUID(), teamId: project.teamId, sharedProjectId: project.sharedProjectId,
-      author: { kind: 'agent', agentId: agent.id, agentName: agent.name, ownerAccountId: accountId, provider: agent.provider, model: agent.model },
-      body: redactSecrets(input.content).slice(0, 20_000), mentions: [], replyTo: input.sourceMessageId,
-      createdAt: nowIso(), deliveryState: 'sending', runState: 'completed',
-    });
-    const signed = await this.signMessage(unsigned);
-    this.persist(signed, 'sending');
-    await this.deliverAgentMessage(signed);
+    await this.postAgentReply(input.projectId, input.agentId, input.content, input.sourceMessageId, `orchestrated:${input.deliveryId}`);
   }
 
   /** Mirrors an ordinary group-composer message/reply into the signed shared transcript. */

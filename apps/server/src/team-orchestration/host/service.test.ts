@@ -665,6 +665,21 @@ it('dispatches remote proxy deliveries, proxies team MCP calls, rejects mismatch
       path: requestedArtifact.path, revision: requestedArtifact.revision, taskId: requestedArtifact.taskId } });
   expect((fx.remoteToolCalls.at(-1)!.args as any).__mingleArtifactTransfer).toBeUndefined();
 
+  runGit(artifactWorktree, 'mv', 'src/features/landing.ts', 'src/features/Landing.ts');
+  runGit(artifactWorktree, '-c', 'user.name=Owner test', '-c', 'user.email=owner-test@example.invalid', 'commit', '-m', 'Change an assigned path by case');
+  const caseRevision = runGit(artifactWorktree, 'rev-parse', '--verify', 'HEAD').trim();
+  runGit(fx.project.path, 'update-ref', `refs/mingle/team/${SHARED}/${deliveryId}/${caseRevision}`, caseRevision);
+  const callsBeforeCaseArtifact = fx.remoteToolCalls.length;
+  await fx.incoming('teamgroup.tool.call', { sharedProjectId: SHARED, deliveryId, callId: 'artifact-case-scope', agentId: REMOTE_AGENT,
+    tool: 'team_artifact', args: { recipient: group.members.find((candidate) => candidate.role === 'orchestrator')!.handle,
+      path: 'src/features/landing.ts', revision: caseRevision, taskId: 'task-scoped-1',
+      __mingleArtifactTransfer: { revision: caseRevision, transferId: 'a'.repeat(64), path: 'src/features/landing.ts', taskId: 'task-scoped-1' } } });
+  expect(fx.outgoing.find((entry) => entry.kind === 'teamgroup.tool.result' && (entry.payload as any).callId === 'artifact-case-scope')?.payload)
+    .toMatchObject({ ok: false, error: expect.stringContaining('out-of-scope path src/features/Landing.ts') });
+  expect(fx.remoteToolCalls).toHaveLength(callsBeforeCaseArtifact);
+  runGit(artifactWorktree, 'mv', 'src/features/Landing.ts', 'src/features/landing.ts');
+  runGit(artifactWorktree, '-c', 'user.name=Owner test', '-c', 'user.email=owner-test@example.invalid', 'commit', '-m', 'Restore assigned path casing');
+
   writeFileSync(path.join(artifactWorktree, 'README.md'), '# changed outside the assigned source scope\n');
   runGit(artifactWorktree, 'add', '--', 'README.md');
   runGit(artifactWorktree, '-c', 'user.name=Owner test', '-c', 'user.email=owner-test@example.invalid', 'commit', '-m', 'Intermediate out-of-scope change');

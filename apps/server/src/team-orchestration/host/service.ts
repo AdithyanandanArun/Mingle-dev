@@ -2364,9 +2364,5 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
 }
 
 function isPathWithinArtifactScope(file: string, scopes: string[]): boolean {
-  const normalized = file.toLocaleLowerCase();
-  return scopes.some((scope) => {
-    const entry = scope.toLocaleLowerCase();
-    return normalized === entry || normalized.startsWith(`${entry}/`);
-  });
+  return scopes.some((scope) => file === scope || file.startsWith(`${scope}/`));
 }

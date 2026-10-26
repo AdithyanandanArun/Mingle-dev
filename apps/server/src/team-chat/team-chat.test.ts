@@ -389,16 +389,16 @@ it('routes enabled team-chat requests through the orchestration host and signs l
       return 'routed';
     },
   });
-  await f.service.send(PROJECT, { body: 'Plan a small fix', mentions: [] });
+  const human = await f.service.send(PROJECT, { body: 'Plan a small fix', mentions: [] });
   await until(() => routed.length === 1);
   expect(routed).toHaveLength(1);
   expect(routed[0]).toMatchObject({ projectId: PROJECT, message: { body: 'Plan a small fix', mentions: [] } });
   expect(f.runtimeCalls).toEqual([]);
 
-  await f.service.postOrchestratedAgentReply({ projectId: PROJECT, sourceMessageId: 'human-source', agentId: f.session!.id, content: 'I found the change.' });
+  await f.service.postOrchestratedAgentReply({ projectId: PROJECT, sourceMessageId: human.id, agentId: f.session!.id, deliveryId: 'example-orchestrated-delivery', content: 'I found the change.' });
   const snapshot = await f.service.snapshot(PROJECT, { limit: 20 });
   const reply = snapshot.messages.find((message) => message.author.kind === 'agent');
-  expect(reply).toMatchObject({ body: 'I found the change.', replyTo: 'human-source', authorDeviceId: DEVICE, runState: 'completed' });
+  expect(reply).toMatchObject({ body: 'I found the change.', replyTo: human.id, authorDeviceId: DEVICE, runState: 'completed' });
   expect(reply?.author.kind === 'agent' && reply.author.agentId).toBe(f.session!.id);
 });
 
