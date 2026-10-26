@@ -21,7 +21,7 @@ import {
 
 const COMMANDS = [
   { name: 'new', description: 'Create a new session' },
-  { name: 'stop', description: 'Pause the group and interrupt running members' },
+  { name: 'stop', description: 'Interrupt active agent runs and pause queued work; resume explicitly to continue' },
   { name: 'members', description: 'Open participants, status and settings' },
   { name: 'agent', description: 'Add another agent to this group' },
   { name: 'settings', description: 'Open Settings' },

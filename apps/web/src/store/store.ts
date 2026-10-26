@@ -46,7 +46,8 @@ export interface TerminalState {
 
 const LS = 'relay.ui.v2';
 interface Persisted {
-  activeProjectId?: string; sessionByProject?: Record<string, string>; selectedTeamSessionByProject?: Record<string, string>; view?: View; contextTab?: ContextTab;
+  activeProjectId?: string; sessionByProject?: Record<string, string>; selectedTeamSessionByProject?: Record<string, string>;
+  teamSessionAutoSelectByProject?: Record<string, boolean>; view?: View; contextTab?: ContextTab;
   contextOpen?: boolean; terminalOpen?: boolean; terminalHeight?: number; scope?: Scope;
 }
 /** The Preview tab became the shared Browser tab; keep a saved selection pointing at it. */
@@ -77,6 +78,8 @@ interface MingleState {
   activeProjectId: string | null;
   teamSessionsByProject: Record<string, { teamSession: TeamSessionRef | null; hostIsThisDevice: boolean }>;
   selectedTeamSessionByProject: Record<string, string>;
+  /** Keeps an invited member on the shared conversation when its host creates it later. Explicit agent selection cancels it. */
+  teamSessionAutoSelectByProject: Record<string, boolean>;
   sessionByProject: Record<string, string>;
   view: View;
   settingsReturnView: Exclude<View, 'settings'>;
@@ -121,6 +124,7 @@ interface MingleState {
   openDialog(d: Dialog): void;
   closeDialog(): void;
   selectProject(id: string): void;
+  preferTeamSession(projectId: string): void;
   setTeamSessionInfo(projectId: string, teamSession: TeamSessionRef | null, hostIsThisDevice: boolean): void;
   restoreTeamSessionSelection(projectId: string, sessionId: string): void;
   openTeamSession(projectId: string, sessionId: string): void;
@@ -274,7 +278,9 @@ export const useMingle = create<MingleState>((set, get) => {
   const savePersisted = (): void => {
     const s = get();
     const data: Persisted = {
-      activeProjectId: s.activeProjectId ?? undefined, sessionByProject: s.sessionByProject, selectedTeamSessionByProject: s.selectedTeamSessionByProject, view: s.view, contextTab: s.contextTab,
+      activeProjectId: s.activeProjectId ?? undefined, sessionByProject: s.sessionByProject,
+      selectedTeamSessionByProject: s.selectedTeamSessionByProject, teamSessionAutoSelectByProject: s.teamSessionAutoSelectByProject,
+      view: s.view, contextTab: s.contextTab,
       contextOpen: s.contextOpen, terminalOpen: s.terminalOpen, terminalHeight: s.terminalHeight, scope: s.scope,
     };
     try {
@@ -484,6 +490,7 @@ export const useMingle = create<MingleState>((set, get) => {
     activeProjectId: persisted.activeProjectId ?? null,
     teamSessionsByProject: {},
     selectedTeamSessionByProject: persisted.selectedTeamSessionByProject ?? {},
+    teamSessionAutoSelectByProject: persisted.teamSessionAutoSelectByProject ?? {},
     sessionByProject: persisted.sessionByProject ?? {},
     view: persisted.view ?? 'workspace',
     settingsReturnView: 'workspace',
@@ -605,21 +612,34 @@ export const useMingle = create<MingleState>((set, get) => {
     setGroupActionBusy: (groupActionBusyId) => set({ groupActionBusyId }),
 
     selectProject(id) {
-      const { boot, sessionByProject, teamSessionsByProject, selectedTeamSessionByProject } = get();
+      const { boot, sessionByProject, teamSessionsByProject, selectedTeamSessionByProject, teamSessionAutoSelectByProject } = get();
       if (!boot?.projects.some((p) => p.id === id)) return;
       const children = groupChildSessionIds(boot.groups);
       const sessions = boot.sessions.filter((s) => s.projectId === id && !children.has(s.id));
       const remembered = sessionByProject[id];
       const teamInfo = teamSessionsByProject[id];
-      const remoteTeamSessionId = teamInfo && !teamInfo.hostIsThisDevice
-        && teamInfo.teamSession?.sessionId === selectedTeamSessionByProject[id]
+      const remoteTeamSessionId = teamInfo && !teamInfo.hostIsThisDevice && teamInfo.teamSession
+        && (teamSessionAutoSelectByProject[id] || teamInfo.teamSession.sessionId === selectedTeamSessionByProject[id])
         ? teamInfo.teamSession.sessionId : null;
       const pick = sessions.find((s) => s.id === remembered) ?? sessions[0];
+      const nextSelectedTeam = remoteTeamSessionId
+        ? { ...selectedTeamSessionByProject, [id]: remoteTeamSessionId }
+        : selectedTeamSessionByProject;
       patch({
         activeProjectId: id, settingsProjectId: id, centerTab: 'session', sidebarOpen: false,
         sessionByProject: remoteTeamSessionId ? { ...sessionByProject, [id]: remoteTeamSessionId } : pick ? { ...sessionByProject, [id]: pick.id } : sessionByProject,
+        selectedTeamSessionByProject: nextSelectedTeam,
       });
       if (!remoteTeamSessionId && pick?.unread && get().view === 'workspace') void get().organizeSession(pick.id, { unread: false }).catch(() => {});
+    },
+    preferTeamSession(projectId) {
+      if (!get().boot?.projects.some((project) => project.id === projectId)) return;
+      patch({ teamSessionAutoSelectByProject: { ...get().teamSessionAutoSelectByProject, [projectId]: true } });
+      const state = get();
+      const teamInfo = state.teamSessionsByProject[projectId];
+      if (state.activeProjectId === projectId && teamInfo && !teamInfo.hostIsThisDevice && teamInfo.teamSession) {
+        get().openTeamSession(projectId, teamInfo.teamSession.sessionId);
+      }
     },
     setTeamSessionInfo(projectId, teamSession, hostIsThisDevice) {
       set((state) => {
@@ -640,8 +660,11 @@ export const useMingle = create<MingleState>((set, get) => {
     },
     restoreTeamSessionSelection(projectId, sessionId) {
       const state = get();
-      if (state.activeProjectId !== projectId || state.selectedTeamSessionByProject[projectId] !== sessionId || state.sessionByProject[projectId] === sessionId) return;
-      patch({ sessionByProject: { ...state.sessionByProject, [projectId]: sessionId } });
+      const selected = state.selectedTeamSessionByProject[projectId] === sessionId;
+      const automatic = state.teamSessionAutoSelectByProject[projectId] === true;
+      if (state.activeProjectId !== projectId || (!selected && !automatic) || state.sessionByProject[projectId] === sessionId) return;
+      patch({ sessionByProject: { ...state.sessionByProject, [projectId]: sessionId },
+        selectedTeamSessionByProject: { ...state.selectedTeamSessionByProject, [projectId]: sessionId } });
     },
     openTeamSession(projectId, sessionId) {
       const project = get().boot?.projects.find((item) => item.id === projectId);
@@ -664,6 +687,7 @@ export const useMingle = create<MingleState>((set, get) => {
       patch({
         activeProjectId: s.projectId, sessionByProject: { ...get().sessionByProject, [s.projectId]: s.id },
         selectedTeamSessionByProject: Object.fromEntries(Object.entries(get().selectedTeamSessionByProject).filter(([projectId]) => projectId !== s.projectId)),
+        teamSessionAutoSelectByProject: { ...get().teamSessionAutoSelectByProject, [s.projectId]: false },
         view: 'workspace', centerTab: 'session', sidebarOpen: false,
       });
       const toRead = group ? activeMembers(group).map((member) => boot.sessions.find((x) => x.id === member.sessionId)).filter((x): x is Session => Boolean(x?.unread)) : s.unread ? [s] : [];

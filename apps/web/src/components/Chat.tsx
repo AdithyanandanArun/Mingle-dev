@@ -4,7 +4,7 @@ import type { Session, SessionPlan, SessionRun, ToolCall, UserQuestion } from '@
 import { useMingle, useProject, useActiveSession, useActiveGroup } from '../store/store';
 import type { DisplayMessage } from '../lib/conversation';
 import { Button, EmptyState, PROVIDER_NAME } from './ui';
-import { ApprovalCard, LegacyToolGroup, MessageRow, SessionPlanCard, UserQuestionCard } from './ConversationParts';
+import { ApprovalCard, InternalDeliveryDisclosure, LegacyToolGroup, MessageRow, SessionPlanCard, UserQuestionCard } from './ConversationParts';
 import { GroupConversation } from './group/GroupConversation';
 import { Composer } from './Composer';
 import { RunActivity } from './RunActivity';
@@ -187,6 +187,10 @@ function SingleSessionPane() {
               if (index > 0 && messages[index - 1]?.role === 'tool') return null;
               return <LegacyToolGroup key={m.id} messages={group} />;
             }
+            if (m.role === 'user' && (m.kind === 'group-delivery' || m.kind === 'team-delivery')) return <Fragment key={m.id}>
+              <InternalDeliveryDisclosure message={m} />
+              {(runsByUserMessage.get(m.id) ?? []).map(run => <RunActivity key={run.id} run={run} initialCalls={toolCallsByRun.get(run.id) ?? EMPTY_TOOL_CALLS} />)}
+            </Fragment>;
             return (
               <Fragment key={m.id}>
                 <MessageRow m={m} provider={session.provider} onAskAboutThis={(quote) => appendContextReference(session.id, quote)} />

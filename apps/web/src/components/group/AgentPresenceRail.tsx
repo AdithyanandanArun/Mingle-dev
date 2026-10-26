@@ -41,7 +41,8 @@ function PresenceRow({
 }) {
   const presence = memberPresence({ snapshot, member, session, runs, approvals, connection });
   const isWorking = presence.working;
-  const currentLabel = presence.label;
+  const ownerPaused = Boolean(presence.state === 'paused' && teamMember && !teamMember.local && member.held);
+  const currentLabel = ownerPaused ? 'Paused by owner' : presence.label;
   const elapsed = useElapsed(presence.startedAt, isWorking);
   const summary = session ? configSummary({ model: session.model, effort: session.effort, policy: session.policy, serviceTier: session.serviceTier ?? 'standard' }, providers, session.provider) : null;
   const currentTask = useMingle((state) => {
@@ -72,7 +73,7 @@ function PresenceRow({
         {teamMember && !teamMember.local ? <><small className="agent-presence__device">{teamName}</small><small className="agent-presence__device">{teamAgentMetadata({ ownerDisplayName: teamMember.ownerDisplayName, provider: teamMember.provider, model: teamMember.model, deviceName: teamMember.deviceName })}</small></> : null}
         {summary && session ? <small className="agent-presence__model" title={`${summary.model} · ${summary.detail}`}>{summary.model} · {summary.detail.split(' · ')[0]}</small> : null}
         {teamMember && !summary ? <small className="agent-presence__model">{teamMember.model}{teamMember.effort ? ` · ${teamMember.effort} effort` : ''}</small> : null}
-        {(teamMember?.currentTask ?? presence.detail) ? <small className="agent-presence__detail" title={teamMember?.currentTask ?? presence.detail ?? undefined}>{teamMember?.currentTask ?? presence.detail}</small> : null}
+        {(ownerPaused ? 'The teammate owner paused this agent.' : teamMember?.currentTask ?? presence.detail) ? <small className="agent-presence__detail" title={ownerPaused ? 'The teammate owner paused this agent.' : teamMember?.currentTask ?? presence.detail ?? undefined}>{ownerPaused ? 'The teammate owner paused this agent.' : teamMember?.currentTask ?? presence.detail}</small> : null}
       </button>
     </li>
   );
@@ -80,16 +81,17 @@ function PresenceRow({
 
 function TeamPresenceRow({ member, state = member.state, onOpen }: { member: TeamStructureMember; state?: TeamAgentState; onOpen: (agent: ActivityAgent) => void }) {
   const displayName = teamAgentDisplayName(member.name, member.ownerDisplayName, member.provider);
+  const stateLabel = state === 'paused' && !member.local ? 'Paused by owner' : TEAM_STATE_LABEL[state];
   const open = () => onOpen({
     agentId: member.agentId, handle: member.handle, name: displayName, provider: member.provider, model: member.model,
     local: member.local, ownerDisplayName: member.ownerDisplayName, deviceName: member.deviceName, role: member.role,
     state, currentTask: member.currentTask, sessionId: member.sessionId, failureMessage: member.failure?.message ?? null,
   });
   return <li className={`agent-presence__row is-${state}`}>
-    <button type="button" className="agent-presence__open" onClick={open} aria-label={`Open @${member.handle} conversation, ${TEAM_STATE_LABEL[state]}`}>
+    <button type="button" className="agent-presence__open" onClick={open} aria-label={`Open @${member.handle} conversation, ${stateLabel}`}>
       <div className="agent-presence__identity" title={member.role}>
         <AgentIdentity handle={member.handle} identityKey={member.agentId} provider={member.provider} role={member.role === 'orchestrator' ? 'Orchestrator' : undefined} />
-        <span className="agent-presence__state"><span className={state === 'working' ? 'activity-shimmer' : undefined}>{TEAM_STATE_LABEL[state]}</span></span>
+        <span className="agent-presence__state"><span className={state === 'working' ? 'activity-shimmer' : undefined}>{stateLabel}</span></span>
       </div>
       {!member.local ? <><small className="agent-presence__device">{displayName}</small><small className="agent-presence__device">{teamAgentMetadata({ ownerDisplayName: member.ownerDisplayName, provider: member.provider, model: member.model, deviceName: member.deviceName })}</small></> : null}
       <small className="agent-presence__model">{member.model}{member.effort ? ` · ${member.effort} effort` : ''}</small>
@@ -99,7 +101,7 @@ function TeamPresenceRow({ member, state = member.state, onOpen }: { member: Tea
 }
 
 export function AgentPresenceRail({
-  snapshot, members, sessions, runs, approvals, connection, providers, hidden = false, teamMembers = [], teamStates = {}, projectId,
+  snapshot, members, sessions, runs, approvals, connection, providers, hidden = false, teamMembers = [], teamStates = {}, projectId, expandAtWidth = 960,
 }: {
   snapshot: GroupSnapshot | null; members: readonly GroupMember[]; sessions: readonly Session[]; runs: readonly SessionRun[];
   approvals: readonly Approval[]; connection: 'online' | 'connecting' | 'offline'; providers: readonly ProviderInfo[];
@@ -107,6 +109,8 @@ export function AgentPresenceRail({
   teamMembers?: readonly TeamStructureMember[];
   teamStates?: Readonly<Record<string, TeamAgentState>>;
   projectId?: string;
+  /** Shared member chat keeps its roster visible at narrower desktop widths. */
+  expandAtWidth?: number;
 }) {
   const panel = useRef<HTMLElement>(null);
   const head = useRef<HTMLElement>(null);
@@ -154,7 +158,7 @@ export function AgentPresenceRail({
     };
     const updateDefault = () => {
       const availableHeight = Math.max(0, (transcript?.clientHeight ?? container.clientHeight) - 24);
-      if (preference.current === null) setExpanded(container.clientWidth >= 960 && availableHeight >= 240);
+      if (preference.current === null) setExpanded(container.clientWidth >= expandAtWidth && availableHeight >= 240);
     };
     update();
     updateDefault();
@@ -167,7 +171,7 @@ export function AgentPresenceRail({
       observer.disconnect();
       window.removeEventListener('resize', updateDefault);
     };
-  }, []);
+  }, [expandAtWidth]);
 
   const toggle = () => {
     const next = !expanded;

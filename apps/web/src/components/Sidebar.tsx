@@ -10,6 +10,7 @@ import { DialogMotionContext, IconButton, Menu, MenuItem, MenuLabel, MenuSeparat
 import { activeMembers, findGroupForSession, groupChildSessionIds, groupSessionStatus } from '../lib/groups';
 import { RemoveProjectDialog } from './RemoveProjectDialog';
 import { useRetainedPresence } from '../lib/motion';
+import { useTeamStructure } from '../lib/team-structure-context';
 
 const VIEWS: { view: View; label: string; icon: typeof Kanban }[] = [
   { view: 'tasks', label: 'Tasks', icon: Kanban }, { view: 'activity', label: 'Activity', icon: Activity }, { view: 'map', label: 'Agent map', icon: Network }, { view: 'team-structure', label: 'Team structure', icon: Network },
@@ -25,6 +26,7 @@ export function Sidebar() {
   const boot = useMingle((state) => state.boot);
   const project = useProject();
   const teamInfo = useMingle((state) => project ? state.teamSessionsByProject[project.id] : undefined);
+  const teamStructure = useTeamStructure().snapshot;
   const view = useMingle((state) => state.view);
   const sidebarOpen = useMingle((state) => state.sidebarOpen);
   const activeSessionId = useMingle((state) => state.activeProjectId ? state.sessionByProject[state.activeProjectId] : undefined);
@@ -115,12 +117,31 @@ export function Sidebar() {
     <div className="sidebar__sessions">
       <div className="session-scroll" role="list" aria-label="Sessions">
         {!sessions.length && !remoteTeamSession ? <p className="sidebar__empty">No sessions yet.</p> : null}
+        {remoteTeamSession ? <div className="sgroup sgroup--team-session" role="group" aria-label="Shared project group conversation">
+          <div className="sgroup__label">Shared project conversation</div>
+          <div role="listitem" className="sitem-row" data-session-id={remoteTeamSession.sessionId}>
+            <button type="button" className={cx('sitem', remoteTeamSession.sessionId === activeSessionId && view === 'workspace' && 'is-active')}
+              onClick={() => openTeamSession(project!.id, remoteTeamSession.sessionId)}
+              aria-current={remoteTeamSession.sessionId === activeSessionId && view === 'workspace' ? 'true' : undefined}
+              aria-label={`${remoteTeamSession.title}, shared project team conversation`}
+              title={`${remoteTeamSession.title} · Shared project conversation`}>
+              <span className="sitem__text"><span className="sitem__meta"><span>Shared group · {project?.name}</span><span><Users size={11} aria-hidden="true" /></span></span><strong><span>{remoteTeamSession.title}</span></strong></span>
+              <span className="sitem__state"><span className="team-session-row__mark" aria-label="Team conversation">Team</span></span>
+            </button>
+          </div>
+        </div> : null}
         {GROUPS.map((group) => {
           const items = sessions.filter((session) => group.match(session) && (group.id === 'pinned' || !session.pinned)).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
           if (!items.length) return null;
           return <div key={group.id} className="sgroup" role="group" aria-label={group.label}>
             {group.id !== 'idle' || sessions.some((session) => session.pinned) ? <div className="sgroup__label">{group.label}</div> : null}
-            {items.map((session) => <div role="listitem" key={session.id} className="sitem-row" data-session-id={session.id} onContextMenu={(event) => {
+            {items.map((session) => {
+              const groupSnapshot = findGroupForSession(boot?.groups, session.id);
+              const groupConversation = groupSnapshot?.group.anchorSessionId === session.id;
+              const teamAgent = teamStructure && teamStructure.projectId === project?.id
+                ? teamStructure.members.find((member) => member.local && member.sessionId === session.id) : undefined;
+              const kind = groupConversation ? 'Shared group conversation' : teamAgent ? `Your agent · @${teamAgent.handle}` : 'Individual session';
+              return <div role="listitem" key={session.id} className={cx('sitem-row', teamAgent && 'sitem-row--agent', groupConversation && 'sitem-row--group')} data-session-id={session.id} onContextMenu={(event) => {
               event.preventDefault();
               const row = event.currentTarget.querySelector<HTMLButtonElement>('.sitem')!;
               setMenuOpen(true);
@@ -133,9 +154,9 @@ export function Sidebar() {
               setMenuOpen(true);
               setMenu({ sessionId: session.id, x: bounds.left + 24, y: bounds.bottom, returnFocus: event.target as HTMLElement });
             }}>
-              <button type="button" className={cx('sitem', session.id === activeSessionId && view === 'workspace' && 'is-active', session.unread && 'is-unread')} onClick={() => selectSession(session.id)} aria-current={session.id === activeSessionId && view === 'workspace' ? 'true' : undefined} aria-label={`${session.name}${session.pinned ? ', pinned' : ''}${session.unread ? ', unread' : ''}`} title={`${session.name} · ${session.model}`}>
-                <span className="sitem__text"><span className="sitem__meta"><span>{project?.name}</span><span>{relativeTime(session.updatedAt, now)}</span></span><strong>{session.unread ? <i className="sitem__unread" aria-hidden="true" /> : null}<span>{session.name}</span></strong></span>
-                <span className="sitem__state">{session.pinned ? <Pin size={11} aria-hidden="true" /> : null}{session.status !== 'idle' ? <StatusDot status={session.status} label={false} /> : null}</span>
+              <button type="button" className={cx('sitem', session.id === activeSessionId && view === 'workspace' && 'is-active', session.unread && 'is-unread')} onClick={() => selectSession(session.id)} aria-current={session.id === activeSessionId && view === 'workspace' ? 'true' : undefined} aria-label={`${kind}: ${session.name}${session.pinned ? ', pinned' : ''}${session.unread ? ', unread' : ''}`} title={`${kind} · ${session.name} · ${session.model}`}>
+                <span className="sitem__text"><span className="sitem__meta"><span>{kind}</span><span>{relativeTime(session.updatedAt, now)}</span></span><strong>{session.unread ? <i className="sitem__unread" aria-hidden="true" /> : null}<span>{session.name}</span></strong></span>
+                <span className="sitem__state">{session.pinned ? <Pin size={11} aria-hidden="true" /> : null}{session.status !== 'idle' ? <StatusDot status={session.status} label={false} /> : null}{teamAgent ? <span className="agent-session-row__mark">Agent</span> : groupConversation ? <span className="group-session-row__mark">Group</span> : null}</span>
               </button>
               <button type="button" className="sitem__actions" aria-label={`Actions for ${session.name}`} aria-haspopup="menu" aria-expanded={menuOpen && menu?.sessionId === session.id} onClick={(event) => {
                 const bounds = event.currentTarget.getBoundingClientRect();
@@ -145,18 +166,10 @@ export function Sidebar() {
                   setMenuOpen(true);
                 }
               }}><MoreHorizontal size={14} /></button>
-            </div>)}
+            </div>;
+            })}
           </div>;
         })}
-        {remoteTeamSession ? <div className="sgroup" role="group" aria-label="Team session">
-          <div className="sgroup__label">Team session</div>
-          <div role="listitem" className="sitem-row" data-session-id={remoteTeamSession.sessionId}>
-            <button type="button" className={cx('sitem', remoteTeamSession.sessionId === activeSessionId && view === 'workspace' && 'is-active')} onClick={() => openTeamSession(project!.id, remoteTeamSession.sessionId)} aria-current={remoteTeamSession.sessionId === activeSessionId && view === 'workspace' ? 'true' : undefined} aria-label={`${remoteTeamSession.title}, shared team session`} title={`${remoteTeamSession.title} · Shared with team`}>
-              <span className="sitem__text"><span className="sitem__meta"><span>Shared with team</span><span><Users size={11} aria-hidden="true" /></span></span><strong><span>{remoteTeamSession.title}</span></strong></span>
-              <span className="sitem__state"><span className="team-session-row__mark" aria-label="Team session">Team</span></span>
-            </button>
-          </div>
-        </div> : null}
       </div>
     </div>
     {retainedMenu && menuPresent ? <ContextMenu key={menuKey} x={retainedMenu.x} y={retainedMenu.y} items={menuItems} returnFocus={retainedMenu.returnFocus} open={menuOpen} closing={menuClosing} onClose={closeMenu} /> : null}

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { ArrowUp, AtSign, Loader2, X } from 'lucide-react';
-import { TeamAgentStateSchema, type Session, type TeamChatAgent, type TeamChatMessage, type TeamSessionRef, type TeamStructureMember, type TeamStructureSnapshot } from '@mingle/contracts';
+import { TeamAgentStateSchema, type Session, type TeamChatAgent, type TeamChatGroupView, type TeamChatMessage, type TeamSessionRef, type TeamStructureMember, type TeamStructureSnapshot } from '@mingle/contracts';
 import { useMingle } from '../../store/store';
 import { api, errorMessage } from '../../lib/api';
 import { clockTime, cx } from '../../lib/format';
@@ -31,6 +31,7 @@ function canonicalHandle(agent: TeamChatAgent, member?: TeamStructureMember): st
 function TeamMessage({ message, teamSession, agents, members }: {
   message: TeamChatMessage; teamSession: TeamSessionRef; agents: readonly TeamChatAgent[]; members: readonly TeamStructureMember[];
 }) {
+  if (message.author.kind === 'system') return null;
   const memberById = new Map(members.map((member) => [member.agentId, member]));
   const agentById = new Map(agents.map((agent) => [agent.id, agent]));
   const toLabel = (agentId: string) => {
@@ -64,8 +65,85 @@ function TeamMessage({ message, teamSession, agents, members }: {
   </div>;
 }
 
-function TeamSessionComposer({ projectId, sessionId, agents, structure, onMessage, onSent }: {
+const MODE_NAME: Record<TeamChatGroupView['group']['mode'], string> = {
+  cowork: 'Cowork', orchestrated: 'Orchestrated', 'current-leads': 'Current agent leads',
+};
+const TASK_STATE: Record<TeamChatGroupView['assignments'][number]['taskStatus'], string> = {
+  backlog: 'Backlog', ready: 'Ready', running: 'Running', blocked: 'Blocked', review: 'Needs review', done: 'Accepted', unknown: 'Unknown',
+};
+const RESULT_STATE: Record<NonNullable<TeamChatGroupView['result']>['status'], string> = {
+  pending: 'Waiting to start', 'in-progress': 'In progress', paused: 'Paused', failed: 'Failed', stopped: 'Stopped',
+  blocked: 'Blocked', 'follow-up': 'Follow-up needed', review: 'Ready for review', accepted: 'Accepted', responded: 'Responded', unknown: 'Outcome unavailable',
+};
+
+function SharedGroupEntry({ entry, view, members, agents }: {
+  entry: TeamChatGroupView['messages'][number]; view: TeamChatGroupView;
+  members: readonly TeamStructureMember[]; agents: readonly TeamChatAgent[];
+}) {
+  const structureMember = members.find((member) => member.handle === entry.senderHandle);
+  const groupMember = view.members.find((member) => member.handle === entry.senderHandle);
+  const agent = structureMember ? agents.find((candidate) => candidate.id === structureMember.agentId) : undefined;
+  const deliveries = view.deliveries.filter((delivery) => delivery.messageId === entry.id);
+  const assignments = view.assignments.filter((assignment) => assignment.deliveryId && deliveries.some((delivery) => delivery.id === assignment.deliveryId));
+  const time = <time className="msg__time" dateTime={entry.createdAt} title={clockTime(entry.createdAt)}>{clockTime(entry.createdAt)}</time>;
+  if (entry.kind === 'user') return <article className="msg msg--user team-session__group-message" data-group-message-id={entry.id}>
+    <div className="msg__bubble"><Markdown text={entry.content} /></div>
+    {entry.recipientHandles.length ? <div className="msg__to">To {entry.recipientHandles.map((handle) => <span className="handle" key={handle}>@{handle} </span>)}</div> : null}
+    {deliveries.length ? <SharedDeliveryStates deliveries={deliveries} /> : null}{time}
+  </article>;
+
+  if (entry.kind === 'assignment' || entry.kind === 'artifact') return <section className="group-card team-session__group-card" aria-label={entry.kind === 'assignment' ? 'Shared assignment' : 'Shared artifact'} data-group-message-id={entry.id}>
+    <header><span className="group-card__kind">{entry.kind === 'assignment' ? 'Assignment' : 'Artifact'}</span><span className="group-card__route">{entry.senderHandle ? `@${entry.senderHandle}` : 'Shared group'}{entry.recipientHandles.length ? <> → {entry.recipientHandles.map((handle) => `@${handle}`).join(', ')}</> : null}</span></header>
+    <div className="group-card__body">{entry.content ? <Markdown text={entry.content} /> : assignments.length
+      ? <p>Task details are summarized from the shared task record below.</p> : <p>Shared task summary not reported.</p>}</div>
+    {assignments.map((assignment) => <div className="group-card__meta" key={assignment.id}>
+      <span><strong>{assignment.title}</strong> · {TASK_STATE[assignment.taskStatus]}</span>
+      {assignment.scope.length ? <ul aria-label="Shared assignment scope">{assignment.scope.map((path) => <li key={path}><code>{path}</code></li>)}</ul> : null}
+    </div>)}
+    {deliveries.length ? <SharedDeliveryStates deliveries={deliveries} /> : null}{time}
+  </section>;
+
+  const role: Speaker['role'] = groupMember?.role ?? (structureMember?.role === 'orchestrator' ? 'orchestrator'
+    : structureMember?.role === 'idle' ? 'peer' : 'worker');
+  const speaker: Speaker | null = entry.senderHandle ? {
+    memberId: structureMember?.agentId ?? entry.senderHandle, sessionId: structureMember?.sessionId ?? agent?.sessionId ?? entry.senderHandle,
+    handle: entry.senderHandle, role, removed: groupMember?.removed ?? false,
+  } : null;
+  if (entry.kind === 'status') return <section className="team-session__group-status" role="note" aria-label="Shared group progress" data-group-message-id={entry.id}>
+    {speaker ? <AgentIdentity handle={speaker.handle} identityKey={speaker.sessionId} provider={structureMember?.provider ?? agent?.provider} role={speaker.role === 'orchestrator' ? 'Orchestrator' : undefined} /> : null}
+    <Markdown text={entry.content} />{deliveries.length ? <SharedDeliveryStates deliveries={deliveries} /> : null}{time}
+  </section>;
+  return <article className="msg msg--assistant team-session__group-message" aria-label={speaker ? `Shared group response from @${speaker.handle}` : 'Shared group response'} data-group-message-id={entry.id}>
+    <div className="msg__main">
+      {speaker ? <AgentIdentity handle={speaker.handle} identityKey={speaker.sessionId} provider={structureMember?.provider ?? agent?.provider} role={speaker.role === 'orchestrator' ? 'Orchestrator' : undefined} /> : null}
+      <div className="msg__content"><Markdown text={entry.content} /></div>
+      {deliveries.length ? <SharedDeliveryStates deliveries={deliveries} /> : null}{time}
+    </div>
+  </article>;
+}
+
+function SharedDeliveryStates({ deliveries }: { deliveries: TeamChatGroupView['deliveries'] }) {
+  return <ul className="deliveries" aria-label="Shared delivery status">
+    {deliveries.map((delivery) => <li key={delivery.id} className={`delivery is-${delivery.status}`}>
+      <i aria-hidden="true" /><span className="handle">@{delivery.handle}</span><span>{delivery.status}{delivery.hop ? ` · hop ${delivery.hop}` : ''}</span>
+      {delivery.error ? <span className="sr-only">{delivery.error}</span> : null}
+    </li>)}
+  </ul>;
+}
+
+function SharedGroupResult({ result }: { result: NonNullable<TeamChatGroupView['result']> }) {
+  return <section className={`team-session__result is-${result.status}`} aria-label="Latest shared group result">
+    <div className="team-session__result-head"><strong>{result.title}</strong><span>{RESULT_STATE[result.status]}</span></div>
+    <p>{result.summary}</p>
+    {result.facts.length ? <ul>{result.facts.map((fact) => <li key={fact}>{fact}</li>)}</ul> : null}
+    {result.changedPaths.length ? <details><summary>Changed relative paths ({result.changedPaths.length})</summary><ul>{result.changedPaths.map((path) => <li key={path}><code>{path}</code></li>)}</ul></details> : null}
+    <small>Task state and changed paths are shared records. A completed turn does not mean the work was accepted.</small>
+  </section>;
+}
+
+function TeamSessionComposer({ projectId, sessionId, agents, structure, groupView, onMessage, onSent }: {
   projectId: string; sessionId: string; agents: readonly TeamChatAgent[]; structure: TeamStructureSnapshot | null;
+  groupView: TeamChatGroupView | null;
   onMessage: (message: TeamChatMessage) => void; onSent: () => Promise<unknown>;
 }) {
   const draft = useMingle((state) => state.drafts[sessionId] ?? '');
@@ -81,11 +159,17 @@ function TeamSessionComposer({ projectId, sessionId, agents, structure, onMessag
   const [dismissed, setDismissed] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const suggestions = useMemo(() => agents.map((agent) => ({
-    agent, member: structure?.members.find((candidate) => candidate.agentId === agent.id),
-  })), [agents, structure?.members]);
+  const suggestions = useMemo(() => agents.flatMap((agent) => {
+    const member = structure?.members.find((candidate) => candidate.agentId === agent.id);
+    const handle = canonicalHandle(agent, member);
+    if (groupView && (!member || !groupView.members.some((candidate) => !candidate.removed && candidate.handle === handle))) return [];
+    return [{ agent, member }];
+  }), [agents, groupView, structure?.members]);
   const orchestratorId = structure?.settings?.orchestratorAgentId ?? structure?.members.find((member) => member.role === 'orchestrator')?.agentId;
   const orchestrator = suggestions.find((candidate) => candidate.agent.id === orchestratorId) ?? suggestions[0];
+  const defaultTargets = groupView
+    ? groupView.routing.defaultRecipientHandles.flatMap((handle) => suggestions.filter((candidate) => canonicalHandle(candidate.agent, candidate.member) === handle))
+    : orchestrator ? [orchestrator] : [];
   const cursor = Math.min(caret, draft.length);
   const before = draft.slice(0, cursor);
   const mentionMatch = /(?:^|[\s([{"'“‘,;:!?])@([A-Za-z0-9_-]*)$/.exec(before);
@@ -98,7 +182,7 @@ function TeamSessionComposer({ projectId, sessionId, agents, structure, onMessag
     return new RegExp(`(?:^|[\\s([{"'“‘,;:!?])@${handle}(?=$|[\\s.,!?;:)\\]}])`, 'i').test(draft);
   }).map(({ agent }) => agent.id);
   const mentionedIds = [...new Set([...picked, ...typedIds])];
-  const recipientIds = mentionedIds.length ? mentionedIds : orchestrator ? [orchestrator.agent.id] : [];
+  const recipientIds = mentionedIds.length ? mentionedIds : defaultTargets.map((target) => target.agent.id);
 
   useEffect(() => {
     const element = input.current;
@@ -145,8 +229,8 @@ function TeamSessionComposer({ projectId, sessionId, agents, structure, onMessag
           return <span className="recips__chip is-mention" key={id}><AgentIdentity handle={handle} identityKey={id} provider={target.agent.provider} />
             {picked.includes(id) ? <button type="button" aria-label={`Remove @${handle} from recipients`} onClick={() => setPicked((current) => current.filter((value) => value !== id))}><X size={10} aria-hidden="true" /></button> : null}
           </span>;
-        }) : orchestrator ? <span className="recips__chip is-default"><AgentIdentity handle={canonicalHandle(orchestrator.agent, orchestrator.member)} identityKey={orchestrator.agent.id} provider={orchestrator.agent.provider} /></span> : null}
-        {!mentionedIds.length ? <span className="recips__default">default: orchestrator</span> : null}
+        }) : defaultTargets.map(({ agent, member }) => <span className="recips__chip is-default" key={agent.id}><AgentIdentity handle={canonicalHandle(agent, member)} identityKey={agent.id} provider={agent.provider} /></span>)}
+        {!mentionedIds.length ? <span className="recips__default">{groupView ? `${MODE_NAME[groupView.routing.mode]} · default route` : 'default: orchestrator'}</span> : null}
         <button ref={pickerButton} type="button" className="recips__pick" aria-haspopup="dialog" aria-expanded={pickerOpen} onClick={() => setPickerOpen((value) => !value)}><AtSign size={12} aria-hidden="true" /> Choose</button>
         {picked.length ? <button type="button" className="recips__clear" onClick={() => setPicked([])}>Clear selection</button> : null}
       </div>
@@ -180,7 +264,8 @@ function TeamSessionComposer({ projectId, sessionId, agents, structure, onMessag
         </button></div>
       </div>
     </form>
-    {error ? <p className="composer__note is-error" role="alert">{error}</p> : connection !== 'online' ? <p className="composer__note" role="status">Reconnect to Mingle to send to the team session.</p> : null}
+    {error ? <p className="composer__note is-error" role="alert">{error}</p> : connection !== 'online' ? <p className="composer__note" role="status">Reconnect to Mingle to send to the team session.</p>
+      : groupView?.group.paused ? <p className="composer__note" role="status">The shared group is paused. Messages may wait in its queue until the group host resumes it.</p> : null}
     <Popover anchor={pickerButton} open={pickerOpen} onClose={() => setPickerOpen(false)} label="Choose recipients" width={300} align="start" className="recips-pop">
       <fieldset className="recips-pop__list"><legend>Send to these agents</legend>
         {suggestions.map(({ agent, member }) => <label key={agent.id} className="check">
@@ -188,7 +273,7 @@ function TeamSessionComposer({ projectId, sessionId, agents, structure, onMessag
           <span><AgentIdentity handle={canonicalHandle(agent, member)} identityKey={agent.id} provider={agent.provider} /><small>{member?.role ?? (agent.local ? 'On this device' : 'Teammate')} · {agent.provider} · {agent.state}</small></span>
         </label>)}
       </fieldset>
-      <div className="recips-pop__foot"><small>{picked.length ? `${picked.length} selected` : 'Nothing selected: default: orchestrator'}</small><button type="button" className="link-btn" disabled={!picked.length} onClick={() => setPicked([])}>Clear selection</button></div>
+      <div className="recips-pop__foot"><small>{picked.length ? `${picked.length} selected` : groupView ? `Nothing selected: ${MODE_NAME[groupView.routing.mode]} default route` : 'Nothing selected: default: orchestrator'}</small><button type="button" className="link-btn" disabled={!picked.length} onClick={() => setPicked([])}>Clear selection</button></div>
     </Popover>
   </div>;
 }
@@ -208,16 +293,39 @@ export function TeamSessionView({ projectId, teamSession, structure }: {
   const scroller = useRef<HTMLDivElement>(null);
   const follows = useRef(true);
   const olderHeight = useRef<number | null>(null);
-  const refreshInFlight = useRef(false);
+  const refreshSequence = useRef(0);
+  const refreshInFlight = useRef<number | null>(null);
   const refreshAgain = useRef(false);
+  const accountScope = useRef<{ projectId: string; accountId: string } | null>(null);
 
   const refresh = useCallback(async (signal?: AbortSignal) => {
     if (signal?.aborted) return;
-    if (refreshInFlight.current) { refreshAgain.current = true; return; }
-    refreshInFlight.current = true;
+    if (refreshInFlight.current !== null) { refreshAgain.current = true; return; }
+    const requestId = ++refreshSequence.current;
+    refreshInFlight.current = requestId;
     try {
+      const account = await api.account(signal);
+      const accountId = account.status === 'signed-in' ? account.user?.id ?? null : null;
+      if (signal?.aborted || useMingle.getState().activeProjectId !== projectId) return;
+      const priorScope = accountScope.current;
+      if (priorScope && (priorScope.projectId !== projectId || priorScope.accountId !== accountId)) setSnapshot(null);
+      if (!accountId) throw new Error('Sign in to the invited team account to view this shared conversation.');
+      const requestScope = priorScope?.projectId === projectId && priorScope.accountId === accountId
+        ? priorScope : { projectId, accountId };
+      accountScope.current = requestScope;
       const latest = await api.projectTeamChat(projectId, { limit: 100 }, signal);
       if (signal?.aborted) return;
+      const confirmedAccount = await api.account(signal);
+      if (signal?.aborted) return;
+      const confirmedAccountId = confirmedAccount.status === 'signed-in' ? confirmedAccount.user?.id ?? null : null;
+      if (confirmedAccountId !== accountId || accountScope.current !== requestScope || useMingle.getState().activeProjectId !== projectId) {
+        if (accountScope.current === requestScope && confirmedAccountId !== accountId) {
+          accountScope.current = confirmedAccountId ? { projectId, accountId: confirmedAccountId } : null;
+          setSnapshot(null);
+          throw new Error('The signed-in team account changed while this conversation was loading. Refresh to continue.');
+        }
+        return;
+      }
       setSnapshot((current) => {
         if (!current || current.project.sharedProjectId !== latest.project.sharedProjectId) return latest;
         const rows = new Map(latest.messages.map((message) => [message.id, message]));
@@ -227,10 +335,12 @@ export function TeamSessionView({ projectId, teamSession, structure }: {
       });
       setError(null);
     } finally {
-      refreshInFlight.current = false;
-      if (refreshAgain.current && !signal?.aborted) {
-        refreshAgain.current = false;
-        window.setTimeout(() => { void refresh(signal).catch(() => undefined); }, 0);
+      if (refreshInFlight.current === requestId) {
+        refreshInFlight.current = null;
+        if (refreshAgain.current && !signal?.aborted) {
+          refreshAgain.current = false;
+          window.setTimeout(() => { void refresh(signal).catch(() => undefined); }, 0);
+        }
       }
     }
   }, [projectId]);
@@ -245,23 +355,39 @@ export function TeamSessionView({ projectId, teamSession, structure }: {
     const timer = window.setInterval(() => { if (document.visibilityState === 'visible') void refresh(controller.signal).catch(() => undefined); }, 60_000);
     const visibility = () => { if (document.visibilityState === 'visible') void refresh(controller.signal).catch(() => undefined); };
     document.addEventListener('visibilitychange', visibility);
-    return () => { controller.abort(); unsubscribe(); window.clearInterval(timer); document.removeEventListener('visibilitychange', visibility); };
+    return () => {
+      controller.abort();
+      refreshAgain.current = false;
+      refreshInFlight.current = null;
+      unsubscribe(); window.clearInterval(timer); document.removeEventListener('visibilitychange', visibility);
+    };
   }, [refresh]);
 
-  const messages = snapshot?.messages ?? [];
+  const structureSnapshot = structure ?? teamStructure.snapshot;
+  const snapshotMatchesProject = Boolean(structureSnapshot?.projectId === projectId && snapshot?.project.sharedProjectId === structureSnapshot.sharedProjectId);
+  const activeSnapshot = snapshotMatchesProject ? snapshot : null;
+  const messages = activeSnapshot?.messages ?? [];
   useLayoutEffect(() => {
     const node = scroller.current;
     if (!node) return;
     if (olderHeight.current !== null) { node.scrollTop += node.scrollHeight - olderHeight.current; olderHeight.current = null; }
     else if (follows.current) node.scrollTop = node.scrollHeight;
-  }, [messages.length, messages.at(-1)?.body, messages.at(-1)?.runState]);
+  }, [messages.length, messages.at(-1)?.body, messages.at(-1)?.runState, activeSnapshot?.groupView?.version]);
 
   const loadOlder = async () => {
-    if (!snapshot?.nextBefore || loadingOlder) return;
+    if (!activeSnapshot?.nextBefore || loadingOlder) return;
+    const requestScope = accountScope.current;
+    if (!requestScope || requestScope.projectId !== projectId || useMingle.getState().activeProjectId !== projectId) return;
     olderHeight.current = scroller.current?.scrollHeight ?? null;
     setLoadingOlder(true); setError(null);
     try {
-      const older = await api.projectTeamChat(projectId, { limit: 100, before: snapshot.nextBefore });
+      const older = await api.projectTeamChat(projectId, { limit: 100, before: activeSnapshot.nextBefore });
+      const account = await api.account();
+      const accountId = account.status === 'signed-in' ? account.user?.id ?? null : null;
+      if (accountScope.current !== requestScope || accountId !== requestScope.accountId || useMingle.getState().activeProjectId !== projectId) {
+        olderHeight.current = null;
+        return;
+      }
       setSnapshot((current) => current ? {
         ...current, messages: [...older.messages, ...current.messages.filter((message) => !older.messages.some((row) => row.id === message.id))],
         hasMore: older.hasMore, nextBefore: older.nextBefore,
@@ -270,14 +396,16 @@ export function TeamSessionView({ projectId, teamSession, structure }: {
     finally { setLoadingOlder(false); }
   };
 
-  const agents = snapshot?.agents ?? [];
-  const structureSnapshot = structure ?? teamStructure.snapshot;
+  const agents = activeSnapshot?.agents ?? [];
   const members = structureSnapshot?.members ?? [];
+  const groupView = activeSnapshot?.groupView?.group.id === teamSession.groupId ? activeSnapshot.groupView : null;
+  const groupEntries = groupView?.messages.filter((entry) => !messages.some((message) => message.body === entry.content
+    && ((entry.kind === 'user' && message.author.kind === 'human') || (entry.kind === 'agent' && message.author.kind === 'agent')))) ?? [];
   const teamStates = useMemo(() => Object.fromEntries(agents.flatMap((agent) => {
     const state = TeamAgentStateSchema.safeParse(agent.state);
     return state.success ? [[agent.id, state.data] as const] : [];
   })), [agents]);
-  const empty = !loading && !messages.length;
+  const empty = !loading && !messages.length && !groupEntries.length;
   if (!project) return <div className="chat chat--group"><div className="chat__empty"><h3>Team session unavailable</h3><p>This project is no longer available.</p></div></div>;
 
   return <div className="chat chat--group chat--team-session">
@@ -290,16 +418,27 @@ export function TeamSessionView({ projectId, teamSession, structure }: {
             follows.current = node.scrollHeight - node.scrollTop - node.clientHeight < 80;
           }}>
             <div className="chat__inner">
-              {snapshot?.hasMore ? <button type="button" className="team-session__load-older" onClick={() => void loadOlder()} disabled={loadingOlder || connection !== 'online'}>{loadingOlder ? <Loader2 size={13} className="spin" /> : null}Load older messages</button> : null}
+              {activeSnapshot?.hasMore ? <button type="button" className="team-session__load-older" onClick={() => void loadOlder()} disabled={loadingOlder || connection !== 'online'}>{loadingOlder ? <Loader2 size={13} className="spin" /> : null}Load older messages</button> : null}
               {loading && !snapshot ? <div className="chat__empty" role="status"><Loader2 size={18} className="spin" /><p>Opening the shared session…</p></div> : null}
               {empty ? <div className="chat__empty"><h3>Start the team session</h3><p>Send a message to the orchestrator or mention a teammate’s agent.</p></div> : null}
               {messages.map((message) => <TeamMessage key={message.id} message={message} teamSession={teamSession} agents={agents} members={members} />)}
-              {error && !snapshot ? <div className="chat__error" role="alert"><strong>Team session unavailable</strong><span>{error}</span><button type="button" className="link-btn" onClick={() => { setLoading(true); void refresh().catch((cause) => setError(errorMessage(cause))).finally(() => setLoading(false)); }}>Retry</button></div> : null}
+              {groupView ? <>
+                <section className="team-session__group-routing" aria-label="Shared group routing">
+                  <strong>{MODE_NAME[groupView.routing.mode]}</strong>
+                  <span>Unaddressed messages → {groupView.routing.defaultRecipientHandles.length ? groupView.routing.defaultRecipientHandles.map((handle) => `@${handle}`).join(', ') : 'no default agent reported'}</span>
+                  {groupView.group.paused ? <span className="team-session__paused">Paused · messages may wait for the host to resume the group</span> : null}
+                </section>
+                {groupEntries.length ? <section className="team-session__group-feed" aria-label="Shared group activity">
+                  {groupEntries.map((entry) => <SharedGroupEntry key={`group:${entry.id}`} entry={entry} view={groupView} members={members} agents={agents} />)}
+                </section> : null}
+                {groupView.result ? <SharedGroupResult result={groupView.result} /> : null}
+              </> : null}
+              {error && !activeSnapshot ? <div className="chat__error" role="alert"><strong>Team session unavailable</strong><span>{error}</span><button type="button" className="link-btn" onClick={() => { setLoading(true); void refresh().catch((cause) => setError(errorMessage(cause))).finally(() => setLoading(false)); }}>Retry</button></div> : null}
             </div>
           </div>
         </div>
-        {error && snapshot ? <div className="chat__error team-session__error" role="alert"><span>{error}</span><button type="button" className="link-btn" onClick={() => void refresh().catch((cause) => setError(errorMessage(cause)))}>Retry</button></div> : null}
-        <TeamSessionComposer projectId={projectId} sessionId={teamSession.sessionId} agents={agents} structure={structureSnapshot}
+        {error && activeSnapshot ? <div className="chat__error team-session__error" role="alert"><span>{error}</span><button type="button" className="link-btn" onClick={() => void refresh().catch((cause) => setError(errorMessage(cause)))}>Retry</button></div> : null}
+        <TeamSessionComposer projectId={projectId} sessionId={teamSession.sessionId} agents={agents} structure={structureSnapshot} groupView={groupView}
           onMessage={(sent) => setSnapshot((current) => current ? {
             ...current,
             messages: current.messages.some((message) => message.id === sent.id) ? current.messages : [...current.messages, sent].sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id)).slice(-200),
@@ -307,7 +446,7 @@ export function TeamSessionView({ projectId, teamSession, structure }: {
           onSent={async () => { await refresh(); }} />
         <div className="composer-wrap"><GitBar project={project} session={null} /></div>
       </section>
-      <AgentPresenceRail snapshot={null} members={[]} sessions={sessions} runs={[]} approvals={[]} connection={connection} providers={[]} hidden={contextOpen} teamMembers={members} teamStates={teamStates} projectId={projectId} />
+      <AgentPresenceRail snapshot={null} members={[]} sessions={sessions} runs={[]} approvals={[]} connection={connection} providers={[]} hidden={contextOpen} teamMembers={members} teamStates={teamStates} projectId={projectId} expandAtWidth={600} />
     </div>
   </div>;
 }

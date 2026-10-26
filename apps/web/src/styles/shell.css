@@ -53,6 +53,9 @@
 .team-control--remote { cursor: default; }
 .team-control--remote:hover { border-color: transparent; background: transparent; color: var(--fg-1); }
 .team-session-row__mark { color: var(--fg-3); font-size: var(--text-2xs); }
+.agent-session-row__mark, .group-session-row__mark { padding: 2px 5px; border: 1px solid var(--line); border-radius: 5px; color: var(--fg-2); font-size: 9px; line-height: 1.2; }
+.group-session-row__mark { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 35%, var(--line)); }
+.sgroup--team-session { margin-bottom: 8px; padding-bottom: 4px; border-bottom: 1px solid var(--line-soft); }
 @media (max-width: 680px) { .crumbs__project { max-width: 120px; } .header { padding-left: 10px; } }
 @media (max-width: 600px) {
   .header--team {

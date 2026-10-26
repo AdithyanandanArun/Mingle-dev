@@ -41,7 +41,7 @@ export function memberPresence(input: MemberPresenceInput): MemberPresence {
     }
     if (session.status === 'error') return presence('error', 'Error', session.error ?? queued);
     if (member.held || snapshot.group.paused) {
-      const reason = member.held ? 'Agent paused by you' : snapshot.group.pauseReason ?? 'Group paused';
+      const reason = member.held ? 'Agent paused in this group' : snapshot.group.pauseReason ?? 'Group paused';
       return presence('paused', 'Paused', queued ? `${queued} · ${reason}` : reason);
     }
     if (queuedCount) return presence('queued', 'Queued', `${queued} · waiting to start`);

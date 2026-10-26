@@ -561,9 +561,6 @@ export function ProjectInviteJoinDialog({ token, onClose, onOpenAccountSettings,
         agents: agentDrafts.map((draft) => ({ provider: draft.provider as 'codex' | 'claude' | 'opencode', model: draft.model, effort: draft.effort, policy: draft.policy })),
       });
       await useMingle.getState().refreshNow();
-      if (result.projectId) useMingle.getState().selectProject(result.projectId);
-      const firstSessionId = result.sessionIds?.[0] ?? result.sessionId;
-      if (firstSessionId) useMingle.getState().selectSession(firstSessionId);
       const normalizedResult = { ...result, sessionIds: result.sessionIds?.length ? result.sessionIds : [result.sessionId] };
       setJoinResult(normalizedResult);
       setStep('consent');

@@ -90,7 +90,7 @@ export function MembersPopover({ snapshot, anchor, open, onClose }: { snapshot: 
               <div className="member__main">
                 <div className="member__title">
                   <AgentIdentity handle={member.handle} identityKey={member.sessionId} provider={session?.provider} role={ROLE_LABEL[member.role]} />
-                  {member.held ? <span className="roster__role">Paused by you</span> : null}
+                  {member.held ? <span className="roster__role">Paused in this group</span> : null}
                   {session ? <StatusDot status={session.status} /> : null}
                 </div>
                 {session && summary ? <small>{providerName(session.provider)} · {summary.model} · {summary.detail}</small> : <small>Session unavailable</small>}

@@ -27,6 +27,8 @@ const screenshots = {
   invite: path.join(outputDir, 'teammates-invite.png'),
   join: path.join(outputDir, 'join-project-desktop.png'),
   narrow: path.join(outputDir, 'join-project-narrow.png'),
+  memberDesktop: path.join(outputDir, 'member-shared-group.png'),
+  member900: path.join(outputDir, 'member-shared-group-900.png'),
 };
 mkdirSync(outputDir, { recursive: true });
 
@@ -46,6 +48,9 @@ let serverReady = false;
 let browser;
 let page;
 let projectId = '';
+let joinedProjectId = '';
+let memberTeamSessionCreated = false;
+let memberGroupResultState = 'in-progress';
 let localSessions = [];
 let sourceBootstrap;
 let accountMode = 'signed-in';
@@ -108,13 +113,6 @@ async function test(label, run) {
     const message = cause instanceof Error ? cause.stack ?? cause.message : String(cause);
     failures.push({ label, message });
     note(`FAIL ${label}: ${message}`);
-    note(`DEBUG page errors: ${JSON.stringify(pageErrors.slice(-8))}`);
-    note(`DEBUG console errors: ${JSON.stringify(consoleErrors.slice(-8))}`);
-    note(`DEBUG HTTP failures: ${JSON.stringify(httpFailures.slice(-12))}`);
-    if (page && !page.isClosed()) {
-      const state = await page.locator('[role=dialog]').innerText().catch(() => 'No dialog open.');
-      note(`DEBUG visible dialog: ${state.slice(0, 1600)}`);
-    }
   }
 }
 
@@ -143,7 +141,62 @@ function invitationPreview(email = INVITED_EMAIL) {
   return { invitationId: 'example-invitation', projectName: 'Example Mingle project', repositoryUrl: 'https://example.invalid/acme/mingle-demo.git', email, expiresAt: new Date(Date.now() + 86_400_000).toISOString(), role: 'member', exampleFixture: true };
 }
 
+function memberTeamChatSnapshot() {
+  const now = new Date().toISOString();
+  return {
+    project: { teamId: TEAM_ID, sharedProjectId: SHARED_PROJECT_ID, name: 'Example invite checkout' },
+    messages: [
+      { id: 'example-member-human-message', teamId: TEAM_ID, sharedProjectId: SHARED_PROJECT_ID, author: { kind: 'human', accountId: LEADER_ID, displayName: 'Example leader' }, body: 'Add a total to each order row.', mentions: [], createdAt: now, deliveryState: 'sent', runState: 'running' },
+      { id: 'example-member-agent-message', teamId: TEAM_ID, sharedProjectId: SHARED_PROJECT_ID, author: { kind: 'agent', agentId: 'example-host-agent', agentName: 'Example host lead', ownerAccountId: LEADER_ID, provider: 'claude', model: 'example-claude-model' }, body: 'The example order total is being checked against the shared task.', mentions: [], replyTo: 'example-member-human-message', createdAt: now, deliveryState: 'sent', runState: 'completed' },
+    ],
+    hasMore: false, nextBefore: null,
+    members: [{ accountId: LEADER_ID, displayName: 'Example leader', role: 'leader' }, { accountId: 'example-invitee-account', displayName: 'Example invitee', role: 'member' }],
+    agents: [
+      { id: 'example-host-agent', name: 'Example host lead', accountId: LEADER_ID, deviceId: 'example-leader-device', projectId: joinedProjectId, sessionId: 'example-host-session', provider: 'claude', model: 'example-claude-model', state: 'working', local: false },
+      ...joinedSessions.map((session, index) => ({ id: `example-invited-agent-${index + 1}`, name: session.name, accountId: 'example-invitee-account', deviceId: 'example-invitee-device', projectId: joinedProjectId, sessionId: session.id, provider: session.provider, model: session.model, state: 'idle', local: true })),
+    ],
+    transport: { status: 'ready', error: null, localDeviceId: 'example-invitee-device', linkedDeviceCount: 1, onlineDeviceCount: 1, peers: [] },
+    groupView: memberTeamSessionCreated ? {
+      version: memberGroupResultState === 'in-progress' ? 1 : 2,
+      group: { id: 'example-shared-team-session', title: 'Example shared team session', mode: 'orchestrated', paused: false },
+      routing: { mode: 'orchestrated', defaultRecipientHandles: ['example-host-lead'] },
+      members: [
+        { handle: 'example-host-lead', role: 'orchestrator', removed: false },
+        { handle: 'example-invited-1', role: 'worker', removed: false },
+      ],
+      messages: [
+        { id: 'example-group-request', seq: 1, kind: 'user', senderHandle: null, recipientHandles: ['example-host-lead'], content: 'Add a total to each order row.', requestId: 'example-group-request-id', createdAt: now },
+        { id: 'example-group-assignment', seq: 2, kind: 'assignment', senderHandle: 'example-host-lead', recipientHandles: ['example-invited-1'], content: '', requestId: 'example-group-request-id', createdAt: now },
+        { id: 'example-group-progress', seq: 3, kind: 'status', senderHandle: 'example-invited-1', recipientHandles: [], content: memberGroupResultState === 'in-progress' ? 'The shared assignment is in progress.' : 'The task is ready for human review.', requestId: 'example-group-request-id', createdAt: now },
+      ],
+      requests: [{ id: 'example-group-request-id', messageId: 'example-group-request', plannerHandle: 'example-host-lead', status: memberGroupResultState === 'in-progress' ? 'active' : 'completed', turnsUsed: 2, createdAt: now }],
+      deliveries: [{ id: 'example-group-delivery', requestId: 'example-group-request-id', messageId: 'example-group-assignment', handle: 'example-invited-1', kind: 'assignment', status: memberGroupResultState === 'in-progress' ? 'running' : 'completed', hop: 1, error: null, createdAt: now, updatedAt: now }],
+      assignments: [{ id: 'example-group-assignment-record', requestId: 'example-group-request-id', deliveryId: 'example-group-delivery', fromHandle: 'example-host-lead', toHandle: 'example-invited-1', taskId: 'example-group-task', title: 'Add order total', taskStatus: memberGroupResultState === 'in-progress' ? 'running' : 'review', scope: ['src/order.ts'], createdAt: now }],
+      result: { requestId: 'example-group-request-id', status: memberGroupResultState, title: memberGroupResultState === 'in-progress' ? 'In progress' : 'Ready for review', summary: memberGroupResultState === 'in-progress' ? 'Shared group work is still running or queued; this result is partial.' : 'The shared task state is ready for human review.', facts: ['1 assigned task', memberGroupResultState === 'in-progress' ? '1 turn running' : '1 need review'], changedPaths: memberGroupResultState === 'in-progress' ? [] : ['src/order.ts'] },
+      updatedAt: now,
+    } : null,
+    exampleFixture: true,
+  };
+}
+
 function teamStructureSnapshot(id = projectId) {
+  if (joinedSessions.length && id === joinedProjectId) {
+    const now = new Date().toISOString();
+    return {
+      projectId: id, teamId: TEAM_ID, sharedProjectId: SHARED_PROJECT_ID, enabled: true,
+      settings: { leaderOrchestration: true, permissionLevel: 'supervised', orchestratorAgentId: 'example-host-agent', fallbackAgentIds: [], version: 1, updatedAt: now, updatedByAccountId: LEADER_ID },
+      host: { deviceId: 'example-leader-device', accountId: LEADER_ID, displayName: 'Example leader device', online: true, isThisDevice: false },
+      canEdit: false,
+      myConsent: { teamId: TEAM_ID, sharedProjectId: SHARED_PROJECT_ID, accountId: 'example-invitee-account', deviceId: 'example-invitee-device', agentIds: ['example-invited-agent-1'], permissionLevel: 'supervised', settingsVersion: 1, disclaimerVersion: '1', state: 'granted', acceptedAt: now, updatedAt: now },
+      members: [
+        { agentId: 'example-host-agent', name: 'Example host lead', handle: 'example-host-lead', ownerAccountId: LEADER_ID, ownerDisplayName: 'Example leader', deviceId: 'example-leader-device', deviceName: 'Example leader device', local: false, sessionId: null, provider: 'claude', model: 'example-claude-model', effort: 'high', role: 'orchestrator', fallbackRank: null, state: 'working', consent: 'granted', currentTask: 'Review the shared order total assignment', lastActivityAt: now, failure: null },
+        ...joinedSessions.map((session, index) => ({ agentId: `example-invited-agent-${index + 1}`, name: session.name, handle: `example-invited-${index + 1}`, ownerAccountId: 'example-invitee-account', ownerDisplayName: 'Example invitee', deviceId: 'example-invitee-device', deviceName: 'Example member device', local: true, sessionId: session.id, provider: session.provider, model: session.model, effort: session.effort, role: 'worker', fallbackRank: null, state: 'idle', consent: 'granted', currentTask: null, lastActivityAt: null, failure: null })),
+      ],
+      leaderHistory: [], needsLeader: false,
+      teamSession: memberTeamSessionCreated ? { groupId: 'example-shared-team-session', sessionId: 'example-host-anchor', title: 'Example shared team session' } : null,
+      observedAt: now, exampleFixture: true,
+    };
+  }
   const members = publishedTeamSessionIds.flatMap((sessionId, index) => {
     const session = localSessions.find((candidate) => candidate.id === sessionId);
     if (!session) return [];
@@ -191,6 +244,9 @@ function updateBootstrap() {
   const boot = structuredClone(sourceBootstrap);
   boot.projects = [...boot.projects.filter((project) => project.id !== projectId), { ...sourceBootstrap.projects.find((project) => project.id === projectId), id: projectId, name: 'Example local checkout', isExample: false }];
   if (clonedProject && !boot.projects.some((project) => project.id === clonedProject.id)) boot.projects.push(clonedProject);
+  if (joinedProjectId && joinedProjectId !== projectId && !boot.projects.some((project) => project.id === joinedProjectId)) {
+    boot.projects.push({ id: joinedProjectId, name: 'Example invite checkout', path: '/example/invite-checkout', createdAt: new Date().toISOString(), isExample: false });
+  }
   const sampleSessions = sourceBootstrap.sessions.filter((session) => session.projectId === projectId).map((session, index) => ({
     ...session, name: index === 0 ? 'Example local Codex' : `Example local agent ${index + 1}`, provider: 'codex', model: 'example-codex-model', effort: 'medium', policy: 'supervised', status: 'idle',
   }));
@@ -205,9 +261,17 @@ function updateBootstrap() {
     }];
   }
   for (const joinedSession of joinedSessions) {
-    if (!sampleSessions.some((session) => session.id === joinedSession.id)) sampleSessions.push(joinedSession);
+    if (joinedSession.projectId === projectId && !sampleSessions.some((session) => session.id === joinedSession.id)) sampleSessions.push(joinedSession);
   }
-  boot.sessions = [...sourceBootstrap.sessions.filter((session) => session.projectId !== projectId), ...sampleSessions];
+  const sessionsOutsideExample = sourceBootstrap.sessions.filter((session) => session.projectId !== projectId);
+  boot.sessions = [...sessionsOutsideExample, ...sampleSessions, ...joinedSessions.filter((session) => session.projectId !== projectId)];
+  if (joinedSessions.length) {
+    const internal = joinedSessions.flatMap((session, index) => [
+      { id: `example-team-delivery-${index + 1}`, sessionId: session.id, role: 'user', kind: 'team-delivery', content: 'Human objective: add a total to each order row. Internal group routing rules: send a status report to the coordinator, do not expose this wrapper as a human message.', createdAt: new Date().toISOString() },
+      { id: `example-team-answer-${index + 1}`, sessionId: session.id, role: 'assistant', content: 'Example provider response.', createdAt: new Date().toISOString() },
+    ]);
+    boot.messages = [...boot.messages.filter((message) => !joinedSessions.some((session) => session.id === message.sessionId)), ...internal];
+  }
   boot.providers = providerSetupNeeded ? [
     { id: 'codex', name: 'Codex', available: false, version: null, executable: null, reason: 'Example fixture: provider needs setup.', policies: [], models: [] },
     { id: 'claude', name: 'Claude Code', available: false, version: null, executable: null, reason: 'Example fixture: provider needs setup.', policies: [], models: [] },
@@ -308,7 +372,13 @@ async function main() {
       return;
     }
     if (/^\/api\/projects\/[^/]+\/collaboration$/.test(url.pathname) && method === 'GET') {
+      const requestedProjectId = decodeURIComponent(url.pathname.split('/')[3]);
       collaborationReads++;
+      if (joinedProjectId && requestedProjectId === joinedProjectId && accountMode === 'wrong-account') { await jsonResponse(route, 403, { error: 'The current account is not a member of this example project.' }); return; }
+      if (joinedProjectId && requestedProjectId !== joinedProjectId && requestedProjectId !== projectId) {
+        await jsonResponse(route, 200, { project: null, members: [], agents: [], invitations: [], email: { configured: false }, exampleFixture: true });
+        return;
+      }
       if (delayCollaborationOnce) {
         delayCollaborationOnce = false;
         collabGate = await new Promise((resolve) => { setTimeout(() => resolve('released'), 1200); });
@@ -333,6 +403,15 @@ async function main() {
       await jsonResponse(route, 200, teamStructureSnapshot(decodeURIComponent(url.pathname.split('/')[3])));
       return;
     }
+    if (/^\/api\/projects\/[^/]+\/team-chat$/.test(url.pathname) && method === 'GET') {
+      const requestedProjectId = decodeURIComponent(url.pathname.split('/')[3]);
+      if (accountMode !== 'signed-in' || requestedProjectId !== joinedProjectId) {
+        await jsonResponse(route, 403, { error: 'The current account or project is not authorized for this shared conversation.' });
+        return;
+      }
+      await jsonResponse(route, 200, memberTeamChatSnapshot());
+      return;
+    }
     if (/^\/api\/projects\/[^/]+\/collaboration\/invitations$/.test(url.pathname) && method === 'POST') {
       const id = `example-invitation-${collaborationSnapshot.invitations.length + 1}`;
       const status = deliveryMode;
@@ -352,6 +431,9 @@ async function main() {
     }
     if (url.pathname === '/api/project-invitations/join' && method === 'POST') {
       const agents = body.agents ?? (body.agent ? [body.agent] : []);
+      joinedProjectId = body.localProjectId;
+      memberTeamSessionCreated = false;
+      memberGroupResultState = 'in-progress';
       joinedSessions = agents.map((agent, index) => ({
         ...(localSessions[index] ?? localSessions[0] ?? {}), id: `example-invitation-agent-${index + 1}`, projectId: body.localProjectId,
         name: `Example invited agent ${index + 1}`, provider: agent.provider, model: agent.model, effort: agent.effort,
@@ -402,6 +484,10 @@ async function main() {
     if (url.pathname === '/api/distributed/members/revoke' && method === 'POST') { await jsonResponse(route, 200, { ok: true, exampleFixture: true }); return; }
     if (url.pathname === '/api/distributed/messages' && method === 'POST') { await jsonResponse(route, 200, { ok: true, exampleFixture: true }); return; }
     if (url.pathname === '/api/distributed/tasks/publish' && method === 'POST') { await jsonResponse(route, 200, { ok: true, exampleFixture: true }); return; }
+    if (/^\/api\/distributed\/groups\/[^/]+$/.test(url.pathname) && method === 'GET') {
+      await jsonResponse(route, 200, { agents: [], messages: [], tasks: [], requests: [], exampleFixture: true });
+      return;
+    }
     if (method === 'GET') { await jsonResponse(route, 200, []); return; }
     await jsonResponse(route, 200, { ok: true, exampleFixture: true });
   });
@@ -656,6 +742,85 @@ async function main() {
     assert.equal(await page.getByRole('alert').count(), 0, 'a stale successful GET cannot create an error or toast');
   });
 
+  await test('invited member opens the late shared group, sees read-only parity, and keeps deliberate agent/project selection scoped', async () => {
+    accountMode = 'signed-in';
+    providerSetupNeeded = false;
+    memberTeamSessionCreated = false;
+    await page.setViewportSize({ width: 1280, height: 900 });
+    assert.ok(joinedProjectId, 'an earlier explicit invitation join supplies the example member project');
+    const invitedAgent = page.getByRole('button', { name: /Your agent · @example-invited-1: Example invited agent 1/ });
+    await invitedAgent.waitFor();
+    assert.equal(await page.locator('.sgroup--team-session').count(), 0, 'the project has not received its team session yet');
+
+    const readsBefore = teamStructureReads;
+    memberTeamSessionCreated = true;
+    await page.evaluate((id) => window.dispatchEvent(new CustomEvent('mingle:team-structure-updated', { detail: { projectId: id } })), joinedProjectId);
+    const sharedRow = page.getByRole('button', { name: 'Example shared team session, shared project team conversation', exact: true });
+    await sharedRow.waitFor();
+    await waitFor(() => teamStructureReads > readsBefore && sharedRow.getAttribute('aria-current').then((value) => value === 'true'), 'late shared team session auto-selection');
+    await waitFor(() => requests.some((item) => item.pathname === `/api/projects/${joinedProjectId}/team-chat`), 'member shared team chat snapshot request');
+    await page.getByText('Add a total to each order row.', { exact: true }).waitFor();
+    await page.getByText('Add order total', { exact: true }).waitFor();
+    await page.getByRole('region', { name: 'Latest shared group result' }).locator('.team-session__result-head > span').getByText('In progress', { exact: true }).waitFor();
+    assert.equal(await page.locator('.team-session__group-card').count(), 1, 'the assignment is a structured shared group card');
+    assert.equal(await page.getByText('Orchestrated · default route', { exact: true }).count(), 1, 'the composer shows the actual shared group routing mode');
+    assert.ok((await page.locator('.agent-presence__row').count()) >= 2, 'the visible agent dock shows this member’s agent and the host lead');
+    assert.equal(await page.getByRole('button', { name: /Pause group|Stop active runs/ }).count(), 0, 'member group view adds no host pause/stop controls');
+    await page.screenshot({ path: screenshots.memberDesktop, fullPage: true });
+
+    await page.setViewportSize({ width: 900, height: 760 });
+    const geometry = await page.evaluate(() => ({ viewport: innerWidth, document: document.documentElement.scrollWidth,
+      composer: document.querySelector('.composer')?.getBoundingClientRect().right ?? 0,
+      dockVisible: Boolean(document.querySelector('.agent-presence__list:not([aria-hidden="true"]) .agent-presence__row')) }));
+    assert.ok(geometry.document <= geometry.viewport, `the shared group view fits a 900px viewport: ${JSON.stringify(geometry)}`);
+    assert.ok(geometry.composer <= geometry.viewport + 1, `the composer stays in the 900px viewport: ${JSON.stringify(geometry)}`);
+    assert.equal(geometry.dockVisible, true, 'the member agent dock remains expanded at 900px');
+    await page.screenshot({ path: screenshots.member900, fullPage: true });
+
+    await page.setViewportSize({ width: 1280, height: 900 });
+    const groupDraft = 'Example member draft survives agent and project navigation';
+    const sharedComposer = page.locator('#composer-example-host-anchor');
+    await sharedComposer.fill(groupDraft);
+    await invitedAgent.click();
+    await page.locator('.internal-delivery-detail').waitFor();
+    assert.equal(await page.getByText('Internal group routing rules', { exact: false }).isVisible(), false, 'runtime delivery instructions are collapsed by exact message kind');
+    await page.locator('.internal-delivery-detail summary').click();
+    await page.getByText('Internal group routing rules', { exact: false }).waitFor();
+    await page.locator('.internal-delivery-detail summary').click();
+    // A later host update must not steal a member's explicit agent inspection.
+    memberGroupResultState = 'review';
+    await page.evaluate((id) => window.dispatchEvent(new CustomEvent('mingle:team-structure-updated', { detail: { projectId: id } })), joinedProjectId);
+    await page.waitForTimeout(150);
+    assert.equal(await invitedAgent.getAttribute('aria-current'), 'true', 'explicit agent inspection wins over later group updates');
+
+    await page.getByRole('button', { name: /Project: .*Switch project/ }).click();
+    await page.getByRole('menuitem', { name: 'Example local checkout', exact: true }).click();
+    await page.waitForTimeout(180);
+    assert.equal(await page.locator('.sgroup--team-session').count(), 0, 'the joined project’s team session does not leak into another project');
+    assert.equal(await page.getByText('Add an order total to each order row.', { exact: true }).count(), 0, 'project switch clears the prior group transcript');
+    await page.getByRole('button', { name: /Project: .*Switch project/ }).click();
+    await page.getByRole('menuitem', { name: 'mingle-demo', exact: true }).click();
+    await invitedAgent.waitFor();
+    await sharedRow.click();
+    await page.locator('#composer-example-host-anchor').waitFor();
+    assert.equal(await page.locator('#composer-example-host-anchor').inputValue(), groupDraft, 'unsent shared draft survives conversation and project navigation');
+
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    const restoredTeamRow = page.getByRole('button', { name: 'Example shared team session, shared project team conversation', exact: true });
+    await restoredTeamRow.waitFor();
+    await waitFor(() => restoredTeamRow.getAttribute('aria-current').then((value) => value === 'true'), 'persisted project/team session selection after restart');
+    await page.getByRole('region', { name: 'Latest shared group result' }).locator('.team-session__result-head > span').getByText('Ready for review', { exact: true }).waitFor();
+
+    accountMode = 'wrong-account';
+    await page.evaluate((id) => window.dispatchEvent(new CustomEvent('mingle:team-chat-updated', { detail: { projectId: id } })), joinedProjectId);
+    await page.getByRole('alert').filter({ hasText: 'current account or project is not authorized' }).waitFor();
+    assert.equal(await page.getByText('Add an order total to each order row.', { exact: true }).count(), 0, 'group transcript is cleared when account authority changes');
+    accountMode = 'signed-in';
+    await page.evaluate((id) => window.dispatchEvent(new CustomEvent('mingle:team-chat-updated', { detail: { projectId: id } })), joinedProjectId);
+    await page.getByRole('region', { name: 'Latest shared group result' }).locator('.team-session__result-head > span').getByText('Ready for review', { exact: true }).waitFor();
+    assert.equal(pageErrors.length, 0, `no uncaught browser errors in member group view: ${pageErrors.join('; ')}`);
+  });
+
   note(`INFO fixtures: local FakeProviders runtime; collaboration/auth/email/clone/join payloads are intercepted Example fixtures; no provider inference was submitted.`);
   note(`INFO screenshots: ${JSON.stringify(screenshots)}`);
   if (failures.length) throw new Error(`${failures.length} browser acceptance check(s) failed; see ${path.join(outputDir, 'browser-acceptance.log')}`);
@@ -665,12 +830,6 @@ async function main() {
 try {
   await main();
 } catch (cause) {
-  if (page) {
-    note(`DEBUG uncaught page errors: ${JSON.stringify(pageErrors.slice(-8))}`);
-    note(`DEBUG uncaught console errors: ${JSON.stringify(consoleErrors.slice(-8))}`);
-    note(`DEBUG uncaught HTTP failures: ${JSON.stringify(httpFailures.slice(-12))}`);
-    if (!page.isClosed()) note(`DEBUG uncaught visible dialog: ${(await page.locator('[role=dialog]').innerText().catch(() => 'No dialog open.')).slice(0, 1600)}`);
-  }
   throw cause;
 } finally {
   await closeAll();

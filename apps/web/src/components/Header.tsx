@@ -102,7 +102,7 @@ export function Header() {
                   disabled={group ? !online || !groupHasWork || groupActionBusy : !session || !hasActiveRun || stopping}
                   why={group ? !online ? 'Reconnect to the server first' : groupActionBusy ? 'A group action is already in progress' : 'No active or queued work' : 'No active run to stop'}
                   onSelect={interrupt}
-                >{group ? 'Stop all agents' : 'Interrupt run'}</MenuItem>
+                >{group ? 'Stop active runs & pause queue' : 'Interrupt run'}</MenuItem>
                 <MenuSeparator />
                 {group
                   ? <MenuItem danger icon={<Trash2 size={14} />} disabled={!online} why="Reconnect to the server first" onSelect={() => openDialog({ kind: 'delete-group', groupId: group.group.id })}>Delete group…</MenuItem>

@@ -160,7 +160,7 @@ export function RecoveryPanel({ snapshot, sessions, runs, tasks }: {
     const candidateSession = sessions.find((item) => item.id === candidate.sessionId);
     const availability = candidateSession ? providerAvailability(providers, candidateSession.provider) : null;
     const isBusyMember = isBusy(candidateSession);
-    const unavailable = candidate.held ? 'Paused by you'
+    const unavailable = candidate.held ? 'Paused in this group'
       : !candidateSession ? 'Session unavailable'
         : isBusyMember ? 'Busy with another run or queued work'
         : availability && !availability.available ? `Provider unavailable: ${availability.reason}` : undefined;

@@ -56,6 +56,20 @@ export const LegacyToolGroup = memo(function LegacyToolGroup({ messages }: { mes
   );
 });
 
+/** Group/team delivery prompts contain runtime routing instructions, not a separate human chat message. */
+export function InternalDeliveryDisclosure({ message }: { message: DisplayMessage }) {
+  if (message.role !== 'user' || (message.kind !== 'group-delivery' && message.kind !== 'team-delivery')) return null;
+  return <details className="conversation-detail conversation-detail--system internal-delivery-detail" data-message-id={message.id}>
+    <summary className="conversation-detail__summary">
+      <ChevronRight size={12} className="conversation-detail__chevron" aria-hidden="true" />
+      <Info size={13} aria-hidden="true" />
+      <span className="conversation-detail__label">Internal shared-work delivery</span>
+      <span className="conversation-detail__preview">Runtime instructions hidden</span>
+    </summary>
+    <div className="conversation-detail__body"><p>This is delivery context generated for the agent, not a separate message from a person.</p><Markdown text={message.content} /></div>
+  </details>;
+}
+
 /** Names who is speaking in a shared conversation; standalone assistant responses remain provider-icon-free. */
 export function SpeakerLabel({ speaker, provider, identityKey, trailing }: { speaker: Pick<Speaker, 'handle' | 'role' | 'removed' | 'memberId'>; provider?: Provider | null; identityKey?: string; trailing?: ReactNode }) {
   return (

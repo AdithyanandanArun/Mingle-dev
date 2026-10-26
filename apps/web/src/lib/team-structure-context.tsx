@@ -21,6 +21,7 @@ export function TeamStructureProvider({ projectId, children }: { projectId: stri
   const activeProjectId = useMingle((state) => state.activeProjectId);
   const sessionByProject = useMingle((state) => state.sessionByProject);
   const selectedTeamSessionByProject = useMingle((state) => state.selectedTeamSessionByProject);
+  const teamSessionAutoSelectByProject = useMingle((state) => state.teamSessionAutoSelectByProject);
   const [snapshot, setSnapshot] = useState<TeamStructureSnapshot | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -92,9 +93,11 @@ export function TeamStructureProvider({ projectId, children }: { projectId: stri
     if (!projectId || !currentSnapshot || currentSnapshot.host.isThisDevice || !currentSnapshot.teamSession || activeProjectId !== projectId) return;
     const ref = currentSnapshot.teamSession;
     const selected = selectedTeamSessionByProject[projectId] ?? (sessionByProject[projectId] === ref.sessionId ? ref.sessionId : null);
-    if (selected !== ref.sessionId || sessionByProject[projectId] === ref.sessionId) return;
+    const automatic = teamSessionAutoSelectByProject[projectId] === true;
+    if (!automatic && selected !== ref.sessionId) return;
+    if (sessionByProject[projectId] === ref.sessionId && selectedTeamSessionByProject[projectId] === ref.sessionId) return;
     useMingle.getState().restoreTeamSessionSelection(projectId, ref.sessionId);
-  }, [activeProjectId, projectId, selectedTeamSessionByProject, sessionByProject, snapshot]);
+  }, [activeProjectId, projectId, selectedTeamSessionByProject, teamSessionAutoSelectByProject, sessionByProject, snapshot]);
 
   const currentSnapshot = snapshot?.projectId === projectId ? snapshot : null;
   const currentError = errorProjectId === projectId ? error : null;

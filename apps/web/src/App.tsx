@@ -187,11 +187,13 @@ export function App() {
 
   const openJoinedProject = async (projectId: string) => {
     const store = useMingle.getState();
+    store.preferTeamSession(projectId);
     await store.refreshNow();
     try {
       const structure = await teamSessionsApi.structure(projectId);
+      if (structure.projectId !== projectId) throw new Error('Team structure belongs to a different project.');
       store.setTeamSessionInfo(projectId, structure.teamSession ?? null, structure.host.isThisDevice);
-      if (structure.teamSession) {
+      if (structure.teamSession && !structure.host.isThisDevice) {
         store.openTeamSession(projectId, structure.teamSession.sessionId);
         return;
       }

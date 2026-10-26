@@ -84,7 +84,7 @@ export function GroupControl({ snapshot }: { snapshot: GroupSnapshot }) {
           disabled={!online || busy}
           busy={busy}
           why={busy ? 'A group action is already in progress.' : actionWhy}
-          title={group.paused ? 'Resume queued group work.' : 'Stop starting new work; current runs finish.'}
+          title={group.paused ? 'Resume queued group work.' : 'Pause dispatch. Current runs keep going; queued work waits.'}
           aria-label={actionLabel}
           aria-busy={busy}
           onClick={() => {

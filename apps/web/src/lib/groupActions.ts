@@ -36,7 +36,7 @@ export const removeMember = (groupId: string, memberId: string): Promise<boolean
 /** The server pauses dispatch and interrupts all members atomically. Queued work needs explicit Resume. */
 export async function stopGroup(snapshot: GroupSnapshot): Promise<void> {
   if (await groupAction(snapshot.group.id, () => api.stopGroup(snapshot.group.id))) {
-    useMingle.getState().toast('info', 'Group stopped and paused. Resume explicitly to continue queued work.');
+    useMingle.getState().toast('info', 'Active runs interrupted; queued group work is paused. Resume explicitly to continue.');
   }
 }
 export const resumeMember = (groupId: string, memberId: string): Promise<boolean> => settle(() => api.resumeGroupMember(groupId, memberId));

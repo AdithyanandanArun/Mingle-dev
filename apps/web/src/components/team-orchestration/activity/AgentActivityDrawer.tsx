@@ -7,7 +7,7 @@ import { errorMessage } from '../../../lib/api';
 import type { DisplayMessage } from '../../../lib/conversation';
 import { teamActivityApi } from './api';
 import { AgentIdentity } from '../../group/AgentIdentity';
-import { ApprovalCard, LegacyToolGroup, MessageRow, SessionPlanCard, UserQuestionCard } from '../../ConversationParts';
+import { ApprovalCard, InternalDeliveryDisclosure, LegacyToolGroup, MessageRow, SessionPlanCard, UserQuestionCard } from '../../ConversationParts';
 import { Markdown } from '../../Markdown';
 import { RunActivity } from '../../RunActivity';
 import { RunChanges } from '../../RunChanges';
@@ -159,6 +159,10 @@ function LocalConversation({ session }: { session: Session | undefined }) {
         for (let next = index + 1; next < messages.length && messages[next]?.role === 'tool'; next++) batch.push(messages[next]!);
         return <LegacyToolGroup key={message.id} messages={batch} />;
       }
+      if (message.role === 'user' && (message.kind === 'group-delivery' || message.kind === 'team-delivery')) return <Fragment key={message.id}>
+        <InternalDeliveryDisclosure message={message} />
+        {(runByMessage.get(message.id) ?? []).map((run) => <RunActivity key={run.id} run={run} initialCalls={byRun.get(run.id) ?? EMPTY_TOOLS} />)}
+      </Fragment>;
       return <Fragment key={message.id}>
         <MessageRow m={message} provider={session.provider} />
         {message.role === 'user' ? (runByMessage.get(message.id) ?? []).map((run) => <RunActivity key={run.id} run={run} initialCalls={byRun.get(run.id) ?? EMPTY_TOOLS} />) : null}
