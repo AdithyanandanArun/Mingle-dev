@@ -4,10 +4,10 @@ Start here to use Mingle or set up a development checkout. For the project's cur
 
 ## Install the desktop app
 
-Download a package from [GitHub releases](https://github.com/AdithyanandanArun/Mingle-dev/releases). The [0.0.1 release](https://github.com/AdithyanandanArun/Mingle-dev/releases/tag/v0.0.1) contains a Debian/Ubuntu amd64 `.deb`, a Windows x64 setup `.exe`, a Linux x64 `.tar.gz`, and their SHA-256 files.
+Download a package from [GitHub releases](https://github.com/AdithyanandanArun/Mingle-dev/releases). The [0.0.2 release](https://github.com/AdithyanandanArun/Mingle-dev/releases/tag/v0.0.2) contains a Debian/Ubuntu amd64 `.deb`, a Windows x64 setup `.exe`, a Linux x64 `.tar.gz`, and their SHA-256 files.
 
-- Debian/Ubuntu: install the downloaded package with `sudo apt install ./mingle_0.0.1_amd64.deb`.
-- Windows: run `mingle-0.0.1-win32-x64-setup.exe`. Installation is per-user. The installer is unsigned, so Windows may show an unknown-publisher prompt.
+- Debian/Ubuntu: install the downloaded package with `sudo apt install ./mingle_0.0.2_amd64.deb`.
+- Windows: run `mingle-0.0.2-win32-x64-setup.exe`. Installation is per-user. The installer is unsigned, so Windows may show an unknown-publisher prompt.
 - Arch Linux: see [desktop distribution](docs/desktop-distribution.md) for building the package locally. An AUR package has not been published.
 
 Launch **Mingle** from the application menu. Desktop packages include Electron, Node, the local server and the UI. Coding-provider tools and accounts are configured separately. Signing in to a Mingle account is optional for local development sessions.
@@ -23,7 +23,7 @@ pnpm install --frozen-lockfile
 pnpm dev
 ```
 
-Open **http://127.0.0.1:5173**. Vite serves the UI and proxies the local API on **127.0.0.1:4310**. Stop development processes with Ctrl+C.
+Open **http://127.0.0.2:5173**. Vite serves the UI and proxies the local API on **127.0.0.2:4310**. Stop development processes with Ctrl+C.
 
 To serve a built UI with the local API:
 
@@ -32,7 +32,7 @@ pnpm build
 pnpm start
 ```
 
-Open **http://127.0.0.1:4310**. To use the Electron development shell instead:
+Open **http://127.0.0.2:4310**. To use the Electron development shell instead:
 
 ```sh
 pnpm build

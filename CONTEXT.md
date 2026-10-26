@@ -78,7 +78,7 @@ Electron uses OS-protected key material and authenticated encrypted account stor
 
 ## Desktop builds and GitHub evidence
 
-The app is version **0.0.1**. Linux/Windows packaging stages Electron, a checksum-pinned official Node runtime, the web UI and backend. Provider tools remain separate. Package creation and publication are distinct actions.
+The app is version **0.0.2**. Linux/Windows packaging stages Electron, a checksum-pinned official Node runtime, the web UI and backend. Provider tools remain separate. Package creation and publication are distinct actions.
 
 | Check | Recorded result and evidence |
 | --- | --- |
@@ -89,7 +89,7 @@ The app is version **0.0.1**. Linux/Windows packaging stages Electron, a checksu
 | Local Arch installation | Updated package installed; the running app reports secure storage available via GNOME Keyring. [Evidence](docs/account-storage-acceptance.md). |
 | Distributed acceptance | [Recorded local, browser and live evidence](docs/distributed-acceptance.md), with fixtures and remaining live gates identified. |
 
-The stable [0.0.1 release](https://github.com/AdithyanandanArun/Mingle-dev/releases/tag/v0.0.1) contains `.deb`, `.exe`, `.tar.gz` and checksum files, published by `.github/workflows/publish-release.yml` from verified packaging runs. Earlier temporary prereleases remain until the owner removes them. Windows signing, automatic updates and public AUR publication remain unfinished. macOS distribution is unverified.
+The stable [0.0.2 release](https://github.com/AdithyanandanArun/Mingle-dev/releases/tag/v0.0.2) contains `.deb`, `.exe`, `.tar.gz` and checksum files, published by `.github/workflows/publish-release.yml` from verified packaging runs. Earlier temporary prereleases remain until the owner removes them. Windows signing, automatic updates and public AUR publication remain unfinished. macOS distribution is unverified.
 
 Earlier red publication runs are historical failures. The last failure used an API lookup that did not find the draft after upload. The corrected workflow uses draft-aware inspection. Publication reruns verify an existing prerelease without overwriting its assets; mismatches fail. Creating the tag/draft is an owner step. See [desktop distribution](docs/desktop-distribution.md).
 

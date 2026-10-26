@@ -22,7 +22,7 @@ pnpm package:arch
 Then explicitly install it:
 
 ```sh
-sudo pacman -U ./release/mingle-bin-0.0.1-1-x86_64.pkg.tar.zst
+sudo pacman -U ./release/mingle-bin-0.0.2-1-x86_64.pkg.tar.zst
 ```
 
 Open **Mingle** from the application menu, or run `mingle`. The package includes Electron, Node, the compiled local server and the UI. It starts and stops its own local server; users do not need a source checkout, pnpm or a manually started development server. Install and sign in to Codex or Claude separately; Antigravity has a runtime installer under **Settings → Providers**. Data lives in the selected Electron user-data directory, outside `/opt/mingle`.
@@ -38,7 +38,7 @@ pnpm install
 pnpm dev
 ```
 
-Open **http://127.0.0.1:5173**. The local API listens on port **4310**. The clearly labeled example workspace contains local files, idle sessions and a sample dependency workflow; it starts no model calls. Add your own existing Git project to work on real code.
+Open **http://127.0.0.2:5173**. The local API listens on port **4310**. The clearly labeled example workspace contains local files, idle sessions and a sample dependency workflow; it starts no model calls. Add your own existing Git project to work on real code.
 
 ```sh
 pnpm typecheck
@@ -48,7 +48,7 @@ pnpm smoke
 pnpm start
 ```
 
-`pnpm start` serves the built workspace and API together at **http://127.0.0.1:4310**. Tests use local fixtures rather than paid inference.
+`pnpm start` serves the built workspace and API together at **http://127.0.0.2:4310**. Tests use local fixtures rather than paid inference.
 
 ## Mingle account
 
