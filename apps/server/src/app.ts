@@ -194,6 +194,17 @@ export function createApplication(options: ApplicationOptions): MingleApplicatio
   groups.setTeamDispatchGuard((sessionId, groupId) => teamOrchestration.host.guardGroupDispatch(sessionId, groupId));
   groups.setTeamRunFinishedHook((input) => teamOrchestration.host.onGroupRunFinished(input));
   teamChat.setOrchestration(teamOrchestration.host);
+  teamChat.setSharedGroupSnapshotProvider(async (projectId) => {
+    // Publishing metadata must not synchronize the roster or acquire the host's
+    // mutation queue. TeamChatService fences the verified leader/device on both
+    // sides of this read; the join selects only its current host-owned group.
+    const current = store.db.prepare(`SELECT h.group_id FROM mingle_team_host_projects h
+      JOIN mingle_project_collaboration_sources s ON s.local_project_id=h.local_project_id
+        AND s.team_id=h.team_id AND s.shared_project_id=h.shared_project_id
+        AND s.owner_id=h.owner_account_id AND s.leader_device_id=h.host_device_id
+      WHERE h.local_project_id=? AND h.group_id!=''`).get(projectId) as { group_id: string } | undefined;
+    return current ? groups.get(current.group_id) : null;
+  });
   teamMcp.setDistributedTools({
     recoveryShape: RequestRemoteDelegationSchema.shape,
     members: async (context, sessionId) => {
