@@ -22,6 +22,8 @@ jobs:
         shell: pwsh
         run: Add-Content -Path $env:GITHUB_PATH -Value (Join-Path ${env:ProgramFiles(x86)} 'NSIS')
       - run: pnpm install --frozen-lockfile
+      - name: Verify Windows Git detection and invitation preflight
+        run: pnpm --filter @mingle/server exec vitest run src/git-null-path.test.ts src/project-collaboration-http.test.ts --maxWorkers=1
       - run: pnpm package:windows
       - uses: actions/upload-artifact@v4
         with:

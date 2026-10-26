@@ -4,10 +4,10 @@ Start here to use Mingle or set up a development checkout. For the project's cur
 
 ## Install the desktop app
 
-Download a package from [GitHub releases](https://github.com/AdithyanandanArun/Mingle-dev/releases). The [0.0.2 release](https://github.com/AdithyanandanArun/Mingle-dev/releases/tag/v0.0.2) contains a Debian/Ubuntu amd64 `.deb`, a Windows x64 setup `.exe`, a Linux x64 `.tar.gz`, and their SHA-256 files.
+Download a package from [GitHub releases](https://github.com/AdithyanandanArun/Mingle-dev/releases). The [0.0.3 release](https://github.com/AdithyanandanArun/Mingle-dev/releases/tag/v0.0.3) contains a Debian/Ubuntu amd64 `.deb`, a Windows x64 setup `.exe`, a Linux x64 `.tar.gz`, and their SHA-256 files.
 
-- Debian/Ubuntu: install the downloaded package with `sudo apt install ./mingle_0.0.2_amd64.deb`.
-- Windows: run `mingle-0.0.2-win32-x64-setup.exe`. Installation is per-user. The installer is unsigned, so Windows may show an unknown-publisher prompt.
+- Debian/Ubuntu: install the downloaded package with `sudo apt install ./mingle_0.0.3_amd64.deb`.
+- Windows: run `mingle-0.0.3-win32-x64-setup.exe`. Installation is per-user. The installer is unsigned, so Windows may show an unknown-publisher prompt.
 - Arch Linux: see [desktop distribution](docs/desktop-distribution.md) for building the package locally. An AUR package has not been published.
 
 Launch **Mingle** from the application menu. Desktop packages include Electron, Node, the local server and the UI. Coding-provider tools and accounts are configured separately. Signing in to a Mingle account is optional for local development sessions.
