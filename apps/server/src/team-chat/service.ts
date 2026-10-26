@@ -1109,6 +1109,11 @@ export class TeamChatService {
       if (shared.project?.teamId !== envelope.teamId || shared.project.sharedProjectId !== request.sharedProjectId) throw new HttpError(403, 'The sync request is outside this shared project binding.');
       // A valid redundant history request is consumed; retrying it would poison the durable inbox.
       if (!this.allowSyncRequest(envelope.teamId, request.sharedProjectId, envelope.fromDeviceId)) return;
+      // An upgraded, idle host may have no published view yet: opening the
+      // member conversation must seed it without starting a provider or needing
+      // the host to navigate to its separate team-chat API. Metadata failure
+      // must not prevent ordinary signed conversation history from syncing.
+      await this.publishSharedGroupView(localProjectId).catch(() => null);
       const rows = this.options.store.db.prepare(`SELECT * FROM team_chat_messages WHERE team_id=? AND shared_project_id=?
         AND author_device_id IS NOT NULL AND author_signature IS NOT NULL
         AND (? IS NULL OR created_at > ?) ORDER BY created_at,id LIMIT ?`).all(envelope.teamId, request.sharedProjectId,

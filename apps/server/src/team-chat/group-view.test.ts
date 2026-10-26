@@ -359,6 +359,29 @@ it('debounces group events, suppresses unchanged/feedback updates, backfills vie
   }
 });
 
+it('seeds an idle existing group when the member opens history without a host read or a new group event', async () => {
+  memberActive = true;
+  const host = node({ projectId: HOST_PROJECT, accountId: HOST_ACCOUNT, deviceId: HOST_DEVICE, role: 'host' });
+  const member = node({ projectId: MEMBER_PROJECT, accountId: MEMBER_ACCOUNT, deviceId: MEMBER_DEVICE, role: 'member' });
+  try {
+    const snapshot = sharedGroup(host);
+    host.service.setSharedGroupSnapshotProvider(async () => snapshot);
+    expect(host.outgoing).toHaveLength(0);
+    expect((await member.service.snapshot(MEMBER_PROJECT, { limit: 20 })).groupView).toBeFalsy();
+    await waitFor(() => member.outgoing.some((entry) => entry.kind === 'teamchat.sync.request'), 'member opening idle history');
+    await host.receive(member.outgoing.find((entry) => entry.kind === 'teamchat.sync.request')!);
+    const response = host.outgoing.find((entry) => entry.kind === 'teamchat.sync.response');
+    expect(response?.payload.messages.some((message: { kind?: string }) => message.kind === 'group-view')).toBe(true);
+    // Deliberately do not deliver the direct fan-out; the requested backfill
+    // alone must contain the current authenticated routing and result records.
+    await member.receive(response);
+    expect((await member.service.snapshot(MEMBER_PROJECT, { limit: 20 })).groupView).toMatchObject({
+      group: { id: snapshot.group.id }, routing: { defaultRecipientHandles: ['espresso-lead'] },
+      result: { status: 'review' },
+    });
+  } finally { await Promise.all([host.close(), member.close()]); }
+});
+
 it('recovers an unchanged view after failed fan-out through member-opened authenticated backfill without a host snapshot', async () => {
   memberActive = true;
   const host = node({ projectId: HOST_PROJECT, accountId: HOST_ACCOUNT, deviceId: HOST_DEVICE, role: 'host' });
