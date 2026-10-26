@@ -577,9 +577,13 @@ it('shares imported session history and team messages over HTTP and the encrypte
       const reply = transcript.json.messages.find((message: { body: string }) => message.body === 'Owner-signed direct remote completion.');
       return delivery?.status === 'completed' && delivery.failure_json === null && reply ? { delivery, reply } : null;
     }, 10_000, 'owner-signed direct reply and completed host notification');
+    await waitFor(() => teammate.app.store.db.prepare('SELECT run_state FROM team_chat_messages WHERE id=?').get(direct.json.id)
+      ?.run_state === 'completed', 10_000, 'member-visible direct-message completion state');
     expect(completedDirect.reply.author).toMatchObject({ kind: 'agent', agentId: teammateAgentId, ownerAccountId: users[1]!.id });
     expect(completedDirect.reply.authorDeviceId).toBe(teammate.app.distributed.transport.snapshot(join.json.teamId).deviceId);
+    expect(completedDirect.reply.authorSignature).toMatch(/^[A-Za-z0-9+/]{86}==$/);
     expect(leader.app.store.db.prepare('SELECT run_state FROM team_chat_messages WHERE id=?').get(direct.json.id)).toMatchObject({ run_state: 'completed' });
+    expect(teammate.app.store.db.prepare('SELECT run_state FROM team_chat_messages WHERE id=?').get(direct.json.id)).toMatchObject({ run_state: 'completed' });
     expect(leader.app.store.db.prepare('SELECT COUNT(*) AS count FROM team_chat_messages WHERE body=?').get('Owner-signed direct remote completion.')).toEqual({ count: 1 });
   } finally {
     while (apps.length) await apps.pop()!.cleanup();

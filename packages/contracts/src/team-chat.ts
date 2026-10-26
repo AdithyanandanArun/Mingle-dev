@@ -17,6 +17,11 @@ export const TeamChatSystemAuthorSchema = z.object({
 
 export const TeamChatAuthorSchema = z.discriminatedUnion('kind', [TeamChatHumanAuthorSchema, TeamChatAgentAuthorSchema, TeamChatSystemAuthorSchema]);
 export const TeamChatRunStateSchema = z.enum(['queued', 'running', 'awaiting-approval', 'completed', 'failed', 'interrupted']);
+/** Host-authenticated metadata update for an existing human-authored chat message. */
+export const TeamChatRunStateUpdateSchema = z.object({
+  sharedProjectId: z.string().uuid(), messageId: z.string().trim().min(1).max(100),
+  state: z.enum(['running', 'completed', 'failed']),
+}).strict();
 
 export const TeamChatGroupTaskStatusSchema = z.enum(['backlog', 'ready', 'running', 'blocked', 'review', 'done', 'unknown']);
 export const TeamChatGroupDeliveryStatusSchema = z.enum(['queued', 'running', 'completed', 'failed', 'interrupted', 'cancelled']);
@@ -129,6 +134,7 @@ export type TeamChatMessage = z.infer<typeof TeamChatMessageSchema>;
 export type TeamChatAuthor = z.infer<typeof TeamChatAuthorSchema>;
 export type TeamChatAgentAuthor = z.infer<typeof TeamChatAgentAuthorSchema>;
 export type TeamChatGroupView = z.infer<typeof TeamChatGroupViewSchema>;
+export type TeamChatRunStateUpdate = z.infer<typeof TeamChatRunStateUpdateSchema>;
 export type TeamChatRunState = z.infer<typeof TeamChatRunStateSchema>;
 export type SendTeamChatMessage = z.infer<typeof SendTeamChatMessageSchema>;
 export type TeamChatSyncRequest = z.infer<typeof TeamChatSyncRequestSchema>;

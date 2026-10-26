@@ -71,6 +71,8 @@ function fixture(withAgent = false) {
   const project = store.insertProject({ id: PROJECT, name: 'Shared', path: projectPath });
   store.db.exec(`CREATE TABLE mingle_project_collaboration_sources (local_project_id TEXT,owner_id TEXT,team_id TEXT,shared_project_id TEXT,leader_device_id TEXT);
     CREATE TABLE mingle_project_collaboration_joins (local_project_id TEXT,account_id TEXT,team_id TEXT,shared_project_id TEXT,device_id TEXT);
+    CREATE TABLE IF NOT EXISTS mingle_team_device_structures (shared_project_id TEXT PRIMARY KEY,team_id TEXT,host_device_id TEXT,structure_json TEXT,version INTEGER,received_at TEXT);
+    INSERT OR REPLACE INTO mingle_team_device_structures VALUES ('${SHARED}','${TEAM}','${PEER}','{}',1,'${new Date().toISOString()}');
     INSERT INTO mingle_project_collaboration_sources VALUES ('${PROJECT}','${ACCOUNT}','${TEAM}','${SHARED}','${DEVICE}');`);
   const session = withAgent ? store.insertSession({ projectId: project.id, name: 'Local agent', provider: 'claude', model: 'claude-sonnet-5-5', effort: 'high', policy: 'supervised', isolated: false, worktreePath: projectPath, branch: null }) : null;
   let receive: ((envelope: any) => Promise<void>) | null = null;
@@ -125,7 +127,7 @@ function fixture(withAgent = false) {
   const distributed = {
     transport,
     async authorizeTeam({ peerDeviceId }: { teamId: string; peerDeviceId?: string }) {
-      if (!allowPeer || (peerDeviceId && peerDeviceId !== PEER)) throw new Error('inactive peer membership');
+      if (!allowPeer || (peerDeviceId && ![PEER, OTHER_DEVICE].includes(peerDeviceId))) throw new Error('inactive peer membership');
     },
   };
   const service = new TeamChatService({ store, account: account as unknown as AccountService,
@@ -279,6 +281,55 @@ it('rejects forged backfill authors, unsolicited responses, and unrostered agent
   } finally { await f.close(); }
 });
 
+it('accepts only registered-host run-state updates for existing human messages without mutating signed authorship', async () => {
+  const f = fixture(true);
+  try {
+    const original = f.remoteMessage({
+      id: randomUUID(), teamId: TEAM, sharedProjectId: SHARED,
+      author: { kind: 'human', accountId: OTHER_ACCOUNT, displayName: 'Sam' }, body: 'Remote member request',
+      mentions: [], createdAt: new Date().toISOString(), deliveryState: 'sent', runState: null,
+    }, OTHER_DEVICE, OTHER_DEVICE_KEYS);
+    await f.receive({ id: randomUUID(), teamId: TEAM, fromDeviceId: OTHER_DEVICE, toDeviceId: DEVICE,
+      kind: 'teamchat.message', payload: original });
+    await f.service.setOrchestratedRunState({ messageId: original.id, state: 'running' });
+    expect(f.outgoing.find((entry) => entry.kind === 'teamchat.run-state')).toMatchObject({
+      kind: 'teamchat.run-state', payload: { sharedProjectId: SHARED, messageId: original.id, state: 'running' },
+    });
+    expect(f.outgoing.find((entry) => entry.kind === 'teamchat.run-state')?.payload)
+      .toEqual({ sharedProjectId: SHARED, messageId: original.id, state: 'running' });
+
+    const stateEnvelope = (fromDeviceId: string, payload: unknown, teamId = TEAM) => ({
+      id: randomUUID(), teamId, fromDeviceId, toDeviceId: DEVICE, kind: 'teamchat.run-state', payload,
+    });
+    const update = { sharedProjectId: SHARED, messageId: original.id, state: 'completed' as const };
+    await f.receive(stateEnvelope(PEER, update));
+    expect(f.store.db.prepare(`SELECT run_state,body,author_json,author_device_id,author_signature
+      FROM team_chat_messages WHERE id=?`).get(original.id)).toEqual({
+      run_state: 'completed', body: original.body,
+      author_json: JSON.stringify({ kind: 'human', accountId: OTHER_ACCOUNT, displayName: 'Sam' }),
+      author_device_id: OTHER_DEVICE, author_signature: original.authorSignature,
+    });
+
+    await f.receive(stateEnvelope(PEER, { ...update, state: 'running' }));
+    expect(f.store.db.prepare('SELECT run_state FROM team_chat_messages WHERE id=?').get(original.id)).toEqual({ run_state: 'completed' });
+
+    await expect(f.receive(stateEnvelope(OTHER_DEVICE, { ...update, state: 'failed' })))
+      .rejects.toThrow(/registered project-host device/);
+    await expect(f.receive(stateEnvelope(PEER, { ...update, sharedProjectId: randomUUID() })))
+      .rejects.toThrow(/active team membership/);
+    await expect(f.receive(stateEnvelope(PEER, update, '20000000-0000-4000-8000-000000000099')))
+      .rejects.toThrow(/active team membership/);
+    await expect(f.receive(stateEnvelope(PEER, { ...update, messageId: randomUUID() })))
+      .rejects.toMatchObject({ status: 409 });
+
+    const agentReply = await f.service.postAgentReply(PROJECT, f.session!.id, 'Agent-authored reply', original.id, 'run-state-kind-check');
+    await expect(f.receive(stateEnvelope(PEER, { ...update, messageId: agentReply.id, state: 'failed' })))
+      .rejects.toThrow(/human-authored chat messages/);
+    expect(f.store.db.prepare('SELECT run_state FROM team_chat_messages WHERE id=?').get(agentReply.id)).toEqual({ run_state: 'completed' });
+    expect(f.runtimeCalls).toHaveLength(0);
+  } finally { await f.close(); }
+});
+
 it('uses the published agent roster for agent metadata and enforces per-project history retention', async () => {
   const f = fixture(true);
   try {
@@ -391,8 +442,15 @@ it('routes enabled team-chat requests through the orchestration host and signs l
   });
   const human = await f.service.send(PROJECT, { body: 'Plan a small fix', mentions: [] });
   await until(() => routed.length === 1);
+  await until(() => f.outgoing.some((entry) => entry.kind === 'teamchat.message'
+    && (entry.payload as { id?: string; runState?: string }).id === human.id
+    && (entry.payload as { runState?: string }).runState === 'running'));
   expect(routed).toHaveLength(1);
   expect(routed[0]).toMatchObject({ projectId: PROJECT, message: { body: 'Plan a small fix', mentions: [] } });
+  const runningUpdate = f.outgoing.find((entry) => entry.kind === 'teamchat.message'
+    && (entry.payload as { id?: string; runState?: string }).id === human.id
+    && (entry.payload as { runState?: string }).runState === 'running');
+  expect(runningUpdate?.payload).toMatchObject({ authorDeviceId: DEVICE, authorSignature: human.authorSignature, body: human.body, runState: 'running' });
   expect(f.runtimeCalls).toEqual([]);
 
   await f.service.postOrchestratedAgentReply({ projectId: PROJECT, sourceMessageId: human.id, agentId: f.session!.id, deliveryId: 'example-orchestrated-delivery', content: 'I found the change.' });

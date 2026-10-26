@@ -5,7 +5,7 @@ import type {
   TeamChatAgent, TeamChatAuthor, TeamChatGroupView, TeamChatMessage, TeamChatPeer, TeamChatSnapshot, TeamChatSyncRequest, TeamChatSyncResponse,
 } from '../../../../packages/contracts/src/team-chat.ts';
 import {
-  SendTeamChatMessageSchema, TeamChatAuthorSchema, TeamChatGroupViewSchema, TeamChatMessageSchema, TeamChatSnapshotSchema, TeamChatSyncRequestSchema, TeamChatSyncResponseSchema,
+  SendTeamChatMessageSchema, TeamChatAuthorSchema, TeamChatGroupViewSchema, TeamChatMessageSchema, TeamChatRunStateUpdateSchema, TeamChatSnapshotSchema, TeamChatSyncRequestSchema, TeamChatSyncResponseSchema,
 } from '../../../../packages/contracts/src/team-chat.ts';
 import type { AccountService } from '../account/service.ts';
 import type { DistributedWorkspaceService } from '../distributed/service.ts';
@@ -689,8 +689,17 @@ export class TeamChatService {
     const persisted = this.setRunState(message.id, message.runState);
     if (!persisted) return;
     try {
+      const localDeviceId = this.options.distributed.transport.snapshot(message.teamId).deviceId;
+      if (persisted.author.kind === 'human' && persisted.authorDeviceId !== localDeviceId) {
+        const update = TeamChatRunStateUpdateSchema.parse({
+          sharedProjectId: persisted.sharedProjectId, messageId: persisted.id, state: persisted.runState,
+        });
+        await this.sendToPeers(persisted.teamId, persisted.sharedProjectId, 'teamchat.run-state', update,
+          `chat:${persisted.id}:state:${persisted.runState}`);
+        return;
+      }
       await this.sendToPeers(message.teamId, message.sharedProjectId, 'teamchat.message',
-        TeamChatMessageSchema.parse({ ...persisted, deliveryState: 'sent' }), `chat:${message.id}:state:${message.runState ?? 'none'}`);
+        TeamChatMessageSchema.parse({ ...persisted, deliveryState: 'sent' }), `chat:${persisted.id}:state:${persisted.runState ?? 'none'}`);
     } catch { /* Durable local state stays visible; a later history sync repairs remote state. */ }
   }
 
@@ -1045,7 +1054,7 @@ export class TeamChatService {
   }
 
   private onEnvelope(envelope: { id: string; teamId: string; fromDeviceId: string; toDeviceId: string; kind: string; payload: unknown }): Promise<void> {
-    if (!['teamchat.message', 'teamchat.group-view', 'teamchat.sync.request', 'teamchat.sync.response'].includes(envelope.kind)) return Promise.resolve();
+    if (!['teamchat.message', 'teamchat.run-state', 'teamchat.group-view', 'teamchat.sync.request', 'teamchat.sync.response'].includes(envelope.kind)) return Promise.resolve();
     return this.track(this.receiveEnvelope(envelope));
   }
 
@@ -1087,6 +1096,24 @@ export class TeamChatService {
         });
         if (routing === 'routed') await this.setOrchestratedRunState({ messageId: verified.id, state: 'running' });
       }
+      return;
+    }
+    if (envelope.kind === 'teamchat.run-state') {
+      const update = TeamChatRunStateUpdateSchema.parse(envelope.payload);
+      const { localProjectId } = await this.validateRemote(envelope, update.sharedProjectId, []);
+      const { shared } = await this.binding(localProjectId);
+      if (shared.project?.teamId !== envelope.teamId || shared.project.sharedProjectId !== update.sharedProjectId) {
+        throw new HttpError(403, 'The run-state update is outside this shared project binding.');
+      }
+      this.assertRegisteredHostDevice(envelope.teamId, update.sharedProjectId, envelope.fromDeviceId);
+      const row = this.options.store.db.prepare(`SELECT * FROM team_chat_messages WHERE id=? AND team_id=? AND shared_project_id=?`)
+        .get(update.messageId, envelope.teamId, update.sharedProjectId) as DbRow | undefined;
+      if (!row) throw new HttpError(409, 'The run-state update is waiting for its original chat message.');
+      const original = this.rowMessage(row);
+      if (original.author.kind !== 'human' || original.kind) {
+        throw new HttpError(403, 'Run-state updates are reserved for existing human-authored chat messages.');
+      }
+      this.setRunState(original.id, update.state);
       return;
     }
     if (envelope.kind === 'teamchat.sync.request') {
