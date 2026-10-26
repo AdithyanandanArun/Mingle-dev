@@ -1,6 +1,6 @@
 # Mingle project context
 
-Handoff updated **2026-10-24**. This file summarizes the integrated project for a new developer or coding agent. [ONBOARDING.md](ONBOARDING.md) covers setup; [AGENTS.md](AGENTS.md) supplies contributor instructions. Source and dated validation records take precedence over older roadmap prose.
+Handoff updated **2026-10-27**. This file summarizes the integrated project for a new developer or coding agent. [ONBOARDING.md](ONBOARDING.md) covers setup; [AGENTS.md](AGENTS.md) supplies contributor instructions. Source and dated validation records take precedence over older roadmap prose.
 
 ## Product and operating principles
 
@@ -78,10 +78,13 @@ Electron uses OS-protected key material and authenticated encrypted account stor
 
 ## Desktop builds and GitHub evidence
 
-The app is version **0.0.3**. Linux/Windows packaging stages Electron, a checksum-pinned official Node runtime, the web UI and backend. Provider tools remain separate. Package creation and publication are distinct actions.
+Team setup now shares the conversation open when Teammates is launched, automatically on invite. Standalone sessions use their existing agent as orchestrator; existing groups keep their lead and members. The setup panel keeps only the permission choice. The API validates all active local providers before publication and preserves the canonical shared group. See [current-session sharing acceptance](docs/current-session-sharing-acceptance.md).
+
+The app is version **0.0.4**. Linux/Windows packaging stages Electron, a checksum-pinned official Node runtime, the web UI and backend. Provider tools remain separate. Package creation and publication are distinct actions.
 
 | Check | Recorded result and evidence |
 | --- | --- |
+| Version 0.0.4 at `4a18836` | [Validation passed](https://github.com/AdithyanandanArun/Mingle-dev/actions/runs/40380615334): 407 backend tests passed, one platform test skipped; [Linux packages](https://github.com/AdithyanandanArun/Mingle-dev/actions/runs/40380654027) and [Windows installer](https://github.com/AdithyanandanArun/Mingle-dev/actions/runs/40380651392) passed native checks. |
 | Integrated validation at source `e5807fb` | [Passed: typecheck, backend tests, build and smoke](https://github.com/AdithyanandanArun/Mingle-dev/actions/runs/40089759157). |
 | Debian native packaging | [Passed on Ubuntu 22.04, secure sign-in update](https://github.com/AdithyanandanArun/Mingle-dev/actions/runs/40089759643): runtime, terminal, install, desktop rendering and removal checks. |
 | Windows native packaging | [Passed on Windows Server 2022, secure sign-in update](https://github.com/AdithyanandanArun/Mingle-dev/actions/runs/40089762279): runtime/ConPTY, silent install, installed desktop rendering and uninstall checks. |
@@ -89,7 +92,7 @@ The app is version **0.0.3**. Linux/Windows packaging stages Electron, a checksu
 | Local Arch installation | Updated package installed; the running app reports secure storage available via GNOME Keyring. [Evidence](docs/account-storage-acceptance.md). |
 | Distributed acceptance | [Recorded local, browser and live evidence](docs/distributed-acceptance.md), with fixtures and remaining live gates identified. |
 
-The stable [0.0.3 release](https://github.com/AdithyanandanArun/Mingle-dev/releases/tag/v0.0.3) contains `.deb`, `.exe`, `.tar.gz` and checksum files, published by `.github/workflows/publish-release.yml` from verified packaging runs. Earlier temporary prereleases remain until the owner removes them. Windows signing, automatic updates and public AUR publication remain unfinished. macOS distribution is unverified.
+The stable [0.0.4 release](https://github.com/AdithyanandanArun/Mingle-dev/releases/tag/v0.0.4) contains `.deb`, `.exe`, `.tar.gz` and checksum files, published by `.github/workflows/publish-release.yml` from verified packaging runs. Earlier temporary prereleases remain until the owner removes them. Windows signing, automatic updates and public AUR publication remain unfinished. macOS distribution is unverified.
 
 Earlier red publication runs are historical failures. The last failure used an API lookup that did not find the draft after upload. The corrected workflow uses draft-aware inspection. Publication reruns verify an existing prerelease without overwriting its assets; mismatches fail. Creating the tag/draft is an owner step. See [desktop distribution](docs/desktop-distribution.md).
 

@@ -1,6 +1,6 @@
 pkgbase = mingle-bin
 	pkgdesc = Local development workspace for independent coding-agent sessions
-	pkgver = 0.0.3
+	pkgver = 0.0.4
 	pkgrel = 1
 	url = https://github.com/AdithyanandanArun/Mingle-dev
 	arch = x86_64
@@ -38,7 +38,7 @@ pkgbase = mingle-bin
 	replaces = relay-workspace-bin
 	options = !strip
 	options = !debug
-	source = mingle-0.0.3-linux-x64.tar.gz::https://github.com/AdithyanandanArun/Mingle-dev/releases/download/v0.0.3/mingle-0.0.3-linux-x64.tar.gz
-	sha256sums = a9d512961fa351e264ee463175930969681b20acd7c0b55e5267bf1c64bc5be5
+	source = mingle-0.0.4-linux-x64.tar.gz::https://github.com/AdithyanandanArun/Mingle-dev/releases/download/v0.0.4/mingle-0.0.4-linux-x64.tar.gz
+	sha256sums = a383d3185694b3a7d00fae70ea6547b9e9c357ba221754d1b1fbcf87adfd35f6
 
 pkgname = mingle-bin

@@ -4,10 +4,10 @@ Start here to use Mingle or set up a development checkout. For the project's cur
 
 ## Install the desktop app
 
-Download a package from [GitHub releases](https://github.com/AdithyanandanArun/Mingle-dev/releases). The [0.0.3 release](https://github.com/AdithyanandanArun/Mingle-dev/releases/tag/v0.0.3) contains a Debian/Ubuntu amd64 `.deb`, a Windows x64 setup `.exe`, a Linux x64 `.tar.gz`, and their SHA-256 files.
+Download a package from [GitHub releases](https://github.com/AdithyanandanArun/Mingle-dev/releases). The [0.0.4 release](https://github.com/AdithyanandanArun/Mingle-dev/releases/tag/v0.0.4) contains a Debian/Ubuntu amd64 `.deb`, a Windows x64 setup `.exe`, a Linux x64 `.tar.gz`, and their SHA-256 files.
 
-- Debian/Ubuntu: install the downloaded package with `sudo apt install ./mingle_0.0.3_amd64.deb`.
-- Windows: run `mingle-0.0.3-win32-x64-setup.exe`. Installation is per-user. The installer is unsigned, so Windows may show an unknown-publisher prompt.
+- Debian/Ubuntu: install the downloaded package with `sudo apt install ./mingle_0.0.4_amd64.deb`.
+- Windows: run `mingle-0.0.4-win32-x64-setup.exe`. Installation is per-user. The installer is unsigned, so Windows may show an unknown-publisher prompt.
 - Arch Linux: see [desktop distribution](docs/desktop-distribution.md) for building the package locally. An AUR package has not been published.
 
 Launch **Mingle** from the application menu. Desktop packages include Electron, Node, the local server and the UI. Coding-provider tools and accounts are configured separately. Signing in to a Mingle account is optional for local development sessions.
@@ -59,7 +59,9 @@ Settings → Account shows whether sign-in is saved securely. On Linux, Mingle s
 
 For the project-first collaboration flow, open a Git project and choose **Add teammates** beside **Add agent**. Enter the teammate's email and send the invitation. They open **Join project** from the email, open installed Mingle, sign in with the invited account, select/clone the project locally and choose their first provider/model. They can choose a provider-supported permission mode, then select which local agents to share and the maximum team permission they allow. The agents are created idle; joining and sharing do not start model runs.
 
-The leader opens an ordinary session, chooses **Add agents**, and selects a teammate’s published agent alongside local providers. Adding a teammate converts that session into the project’s shared team session. Teammates open the same session from their sidebar and use its normal group conversation; there is no separate chat workspace to configure. An unaddressed message goes through the group’s selected coordination mode; an explicit @handle targets that agent. Mingle prepares team/project/device binding behind the scenes and limits invitation-based pairing to the leader and joining device. Existing **Settings → Team workspace** controls remain available for advanced setup and diagnostics.
+Open the conversation you want to share before choosing **Add teammates**. Sending an invitation makes that current conversation the shared team session and uses its agent as orchestrator, with no separate session or lead selection. Existing groups retain their configured lead and later invites retain the existing shared conversation. Choose **Supervised** or **Full access** in Teammates; raising permission requires the relevant owners to re-consent.
+
+Use **Add agents** to add a teammate's published agent alongside local providers. Teammates open the shared session from their sidebar and use its normal group conversation. An unaddressed message follows the group's coordination mode; an explicit @handle targets that agent. Advanced setup and diagnostics remain in **Settings → Team workspace** and **Team structure**.
 
 Email delivery needs the reviewed collaboration migration, deployed delivery function, sender secrets and a published HTTPS join page. A missing setup is shown explicitly; the app does not claim an email was sent. See [project teammates and sender setup](docs/project-teammates.md). The reviewed setup is deployed. On 2026-10-24, live Gmail receipt, installed Linux invitation opening, exact-account join and leader visibility of the recipient’s idle agent were verified using two accounts on one computer; see the [dated acceptance record](docs/project-collaboration-acceptance.md).
 Remote execution is reserved for exceptional recovery: qualifying local quota/provider failure with exhausted local alternatives, or an explicit human request to recover unpublished committed work. The destination owner must approve the exact request and provider use. Git transfer, merge, push and restricted remote commands have their own approvals. Uncommitted edits are not transferred by recovery. Follow the [two-device runbook](docs/distributed-workspaces.md); complete physical-device acceptance remains outstanding.

@@ -22,7 +22,7 @@ pnpm package:arch
 Then explicitly install it:
 
 ```sh
-sudo pacman -U ./release/mingle-bin-0.0.3-1-x86_64.pkg.tar.zst
+sudo pacman -U ./release/mingle-bin-0.0.4-1-x86_64.pkg.tar.zst
 ```
 
 Open **Mingle** from the application menu, or run `mingle`. The package includes Electron, Node, the compiled local server and the UI. It starts and stops its own local server; users do not need a source checkout, pnpm or a manually started development server. Install and sign in to Codex or Claude separately; Antigravity has a runtime installer under **Settings → Providers**. Data lives in the selected Electron user-data directory, outside `/opt/mingle`.
