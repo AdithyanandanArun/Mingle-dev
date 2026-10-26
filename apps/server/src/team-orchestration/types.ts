@@ -21,6 +21,8 @@ export interface TeamOrchestrationDeviceSide {
 }
 
 export interface TeamOrchestrationDeviceDependencies {
+  /** Durable runtime location for retained isolated remote-delivery worktrees. */
+  deliveryWorktreeRoot?: string;
   store: Store;
   runtime: SessionRuntime;
   hub: import('../hub.ts').Hub;

@@ -11,6 +11,7 @@ import type { RecoveryService } from '../recovery/service.ts';
 import type { Hub } from '../hub.ts';
 
 export interface TeamOrchestrationOptions {
+  deliveryWorktreeRoot?: string;
   store: Store;
   runtime: SessionRuntime;
   hub: Hub;
@@ -43,7 +44,7 @@ export function createTeamOrchestration(options: TeamOrchestrationOptions): {
     deviceSide = options.deviceSideFactory({
       store: options.store, runtime: options.runtime, hub: options.hub, transport: options.transport, account: options.account,
       distributed: options.distributed, collaboration: options.collaboration, teamChat: options.teamChat,
-      changed: options.changed ?? (() => undefined),
+      changed: options.changed ?? (() => undefined), deliveryWorktreeRoot: options.deliveryWorktreeRoot,
     });
   }
   const host = new TeamOrchestrationHost({
