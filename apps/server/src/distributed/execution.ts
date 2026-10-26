@@ -134,6 +134,11 @@ const REMOTE_TABLES = `
     UNIQUE(team_id, shared_project_id, device_id, session_id)
   );
   CREATE INDEX IF NOT EXISTS mingle_remote_agents_project ON mingle_remote_agents(team_id, shared_project_id, revoked_at);
+  CREATE TABLE IF NOT EXISTS mingle_remote_roster_versions (
+    team_id TEXT NOT NULL, shared_project_id TEXT NOT NULL, owner_id TEXT NOT NULL, device_id TEXT NOT NULL,
+    direction TEXT NOT NULL, version INTEGER, generated_at TEXT NOT NULL,
+    PRIMARY KEY(team_id, shared_project_id, owner_id, device_id, direction)
+  );
   CREATE TABLE IF NOT EXISTS mingle_remote_requests (
     id TEXT PRIMARY KEY, team_id TEXT NOT NULL, shared_project_id TEXT NOT NULL, source_device_id TEXT NOT NULL,
     source_owner_id TEXT NOT NULL, target_device_id TEXT NOT NULL, target_owner_id TEXT NOT NULL, source_session_id TEXT NOT NULL,
@@ -517,7 +522,8 @@ export class RemoteExecutionService {
       const at = nowIso();
       this.run(`UPDATE mingle_remote_agents SET revoked_at = ? WHERE team_id = ? AND shared_project_id = ? AND device_id = ? AND owner_id = ? AND revoked_at IS NULL
         AND session_id NOT IN (${parsed.sessionIds.map(() => '?').join(',')})`, at, parsed.teamId, parsed.sharedProjectId, identity.deviceId, identity.ownerId, ...parsed.sessionIds);
-      await this.sendToPeers(client, identity, parsed.sharedProjectId, 'execution.agents', { sharedProjectId: parsed.sharedProjectId, generatedAt: at, agents: outgoing }, `agents:${at}`);
+      const version = this.nextRosterVersion(identity, parsed.sharedProjectId, at);
+      await this.sendToPeers(client, identity, parsed.sharedProjectId, 'execution.agents', { sharedProjectId: parsed.sharedProjectId, version, generatedAt: at, agents: outgoing }, `agents:${parsed.sharedProjectId}:${version}`);
       this.recordEvent(identity, parsed.sharedProjectId, 'agents.published', `Published ${outgoing.length} explicit local agent session(s).`, { agentIds: outgoing.map((agent) => agent.id) });
       this.options.changed();
       return outgoing;
@@ -566,7 +572,8 @@ export class RemoteExecutionService {
         if (refreshed) agents.push(this.agentFromRow(refreshed, presence));
       }
       if (changed) {
-        await this.sendToPeers(client, identity, parsed.sharedProjectId, 'execution.agents', { sharedProjectId: parsed.sharedProjectId, generatedAt: at, agents }, `agents-refresh:${at}`);
+        const version = this.nextRosterVersion(identity, parsed.sharedProjectId, at);
+        await this.sendToPeers(client, identity, parsed.sharedProjectId, 'execution.agents', { sharedProjectId: parsed.sharedProjectId, version, generatedAt: at, agents }, `agents:${parsed.sharedProjectId}:${version}`);
         this.recordEvent(identity, parsed.sharedProjectId, 'agents.refreshed', `Refreshed ${agents.length} published agent metadata record(s).`, {
           agentIds: agents.map((agent) => agent.id), quotaProbed: false,
         });
@@ -574,6 +581,14 @@ export class RemoteExecutionService {
       }
       return agents;
     });
+  }
+
+  private nextRosterVersion(identity: Identity, sharedProjectId: string, at: string): number {
+    const row = this.get(`INSERT INTO mingle_remote_roster_versions(team_id,shared_project_id,owner_id,device_id,direction,version,generated_at)
+      VALUES (?,?,?,?,'outgoing',1,?) ON CONFLICT(team_id,shared_project_id,owner_id,device_id,direction)
+      DO UPDATE SET version=COALESCE(version,0)+1,generated_at=excluded.generated_at RETURNING version`,
+    identity.teamId, sharedProjectId, identity.ownerId, identity.deviceId, at);
+    return Number(row!.version);
   }
 
   async suggestFallback(input: unknown): Promise<{ eligible: boolean; reason: string | null; evidence: RemoteRecoveryEvidence | null; localAlternatives: LocalAlternative[]; candidates: RemoteAgent[] }> {
@@ -1121,6 +1136,8 @@ export class RemoteExecutionService {
     // withdrawals must name it explicitly so only that owner's project is cleared.
     const sharedProjectId = payload.sharedProjectId ?? (rawAgents.length ? RemoteAgentSchema.parse(rawAgents[0]).sharedProjectId : null);
     if (typeof sharedProjectId !== 'string' || !sharedProjectId.length || sharedProjectId.length > 100) throw new HttpError(400, 'Published agents must identify their shared project.');
+    const version = payload.version;
+    if (version !== undefined && (!Number.isSafeInteger(version) || Number(version) < 1)) throw new HttpError(400, 'Published roster version is invalid.');
     return this.withEnvelope(envelope, async (client, identity, remoteOwnerId) => {
       const binding = await this.binding(identity, sharedProjectId);
       const at = nowIso();
@@ -1131,8 +1148,23 @@ export class RemoteExecutionService {
         // observation into fresh evidence that this agent is currently idle.
         return agent;
       });
+      // Legacy peers did not send a sequence. Keep their signed generation time
+      // as a compatibility watermark; once a sequenced roster arrives, older
+      // versionless publications cannot replace it, including after a restart.
+      const generatedAt = iso(payload.generatedAt) ?? validated.map((agent) => agent.publishedAt).sort().at(-1);
+      if (!generatedAt) throw new HttpError(400, 'Published roster generation time is missing.');
       const accepted = this.transaction(() => {
         if (!this.recordEnvelope(envelope)) return false;
+        const previous = this.get(`SELECT version,generated_at FROM mingle_remote_roster_versions
+          WHERE team_id=? AND shared_project_id=? AND owner_id=? AND device_id=? AND direction='incoming'`,
+        identity.teamId, binding.sharedProjectId, remoteOwnerId, envelope.fromDeviceId);
+        if (previous && (version === undefined
+          ? previous.version !== null || Date.parse(generatedAt) <= Date.parse(String(previous.generated_at))
+          : previous.version !== null && Number(version) <= Number(previous.version))) return false;
+        this.run(`INSERT INTO mingle_remote_roster_versions(team_id,shared_project_id,owner_id,device_id,direction,version,generated_at)
+          VALUES (?,?,?,?,'incoming',?,?) ON CONFLICT(team_id,shared_project_id,owner_id,device_id,direction)
+          DO UPDATE SET version=excluded.version,generated_at=excluded.generated_at`,
+        identity.teamId, binding.sharedProjectId, remoteOwnerId, envelope.fromDeviceId, version === undefined ? null : Number(version), generatedAt);
         this.run('UPDATE mingle_remote_agents SET revoked_at = ? WHERE team_id = ? AND shared_project_id = ? AND device_id = ? AND owner_id = ?', at, identity.teamId, binding.sharedProjectId, envelope.fromDeviceId, remoteOwnerId);
         for (const agent of validated) this.run(`INSERT INTO mingle_remote_agents(id, team_id, shared_project_id, device_id, owner_id, session_id, name, provider, model, policy,
           config_digest, published_at, presence, presence_known, presence_observed_at, quota_state, quota_known, quota_observed_at, quota_reason, active_group_id, revoked_at)
@@ -1142,7 +1174,7 @@ export class RemoteExecutionService {
           presence=excluded.presence, presence_known=excluded.presence_known, presence_observed_at=excluded.presence_observed_at,
           quota_state=excluded.quota_state, quota_known=excluded.quota_known, quota_observed_at=excluded.quota_observed_at,
           quota_reason=excluded.quota_reason, active_group_id=excluded.active_group_id, revoked_at=NULL`, agent.id, agent.teamId, agent.sharedProjectId,
-        agent.deviceId, agent.ownerId, agent.sessionId, agent.name, agent.provider, agent.model, agent.policy, agent.configDigest, at,
+        agent.deviceId, agent.ownerId, agent.sessionId, agent.name, agent.provider, agent.model, agent.policy, agent.configDigest, agent.publishedAt,
          agent.presence, agent.presenceKnown ? 1 : 0, agent.presenceObservedAt, agent.quotaState, agent.quotaKnown ? 1 : 0, agent.quotaObservedAt,
          agent.quotaReason, agent.activeGroupId);
         this.recordEvent(identity, binding.sharedProjectId, 'agents.received', `Received ${validated.length} explicitly published agent session(s).`, { fromDeviceId: envelope.fromDeviceId });

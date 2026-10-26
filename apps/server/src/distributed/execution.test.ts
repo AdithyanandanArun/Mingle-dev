@@ -280,6 +280,8 @@ describe('RemoteExecutionService', () => {
   });
 
   it('withdraws the last shared agent on peers without clearing another owner or accepting an unscoped withdrawal', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-10-26T06:00:00Z'));
     const source = createFixture({ deviceId: DEVICE_A, peerId: DEVICE_B, ownerId: OWNER_A, projectId: 'withdraw_a', sessionId: 'withdraw_a', sessionName: 'Source', provider: 'codex' });
     const owner = createFixture({ deviceId: DEVICE_B, peerId: DEVICE_A, ownerId: OWNER_B, projectId: 'withdraw_b', sessionId: 'withdraw_b', sessionName: 'Owner', provider: 'codex' });
     await source.service.bindProject({ teamId: TEAM, sharedProjectId: SHARED_PROJECT, localProjectId: 'withdraw_a' });
@@ -296,6 +298,31 @@ describe('RemoteExecutionService', () => {
     const withdrawal = owner.transport.sent.at(-1)!;
     await source.service.onEnvelope(envelope(DEVICE_B, DEVICE_A, withdrawal.kind, withdrawal.payload));
     expect((await source.service.snapshot(TEAM)).agents).toMatchObject([{ deviceId: DEVICE_A }]);
+
+    // Publication and withdrawal can share a millisecond. A durable sender
+    // sequence orders them even across restart, redelivery and legacy messages.
+    expect(withdrawal.payload).toMatchObject({ version: 2 });
+    const receiverOptions = Reflect.get(source.service, 'options');
+    await source.service.close();
+    source.service = new RemoteExecutionService(receiverOptions);
+    services.push(source.service);
+    await source.service.onEnvelope(envelope(DEVICE_B, DEVICE_A, publication.kind, publication.payload));
+    const { version: _oldVersion, ...legacyPublication } = publication.payload as Record<string, unknown>;
+    await source.service.onEnvelope(envelope(DEVICE_B, DEVICE_A, publication.kind, legacyPublication));
+    expect((await source.service.snapshot(TEAM)).agents).toMatchObject([{ deviceId: DEVICE_A }]);
+
+    const ownerOptions = Reflect.get(owner.service, 'options');
+    await owner.service.close();
+    owner.service = new RemoteExecutionService(ownerOptions);
+    services.push(owner.service);
+    // A backwards clock doesn't prevent a genuinely newer publication.
+    vi.setSystemTime(new Date('2026-10-26T05:59:59Z'));
+    await owner.service.publishAgents({ teamId: TEAM, sharedProjectId: SHARED_PROJECT, sessionIds: ['withdraw_b'] });
+    const republished = owner.transport.sent.at(-1)!;
+    expect(republished.payload).toMatchObject({ version: 3 });
+    await source.service.onEnvelope(envelope(DEVICE_B, DEVICE_A, republished.kind, republished.payload));
+    await source.service.onEnvelope(envelope(DEVICE_B, DEVICE_A, withdrawal.kind, withdrawal.payload));
+    expect((await source.service.snapshot(TEAM)).agents).toHaveLength(2);
   });
 
   it('leaves an archived published session out of the snapshot until refresh revokes it', async () => {
