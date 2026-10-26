@@ -4,7 +4,7 @@ Goal: agents on different teammates' devices work together exactly like a local 
 
 ## Product rules
 
-1. **Team project toggle.** Making a shared project a team project (`POST /api/projects/:projectId/team-orchestration/enable`) records `leaderOrchestration` (on/off), a group-wide `permissionLevel` (`supervised` or `full-access`), the orchestrator agent and an optional ordered fallback list. It does not create a group; the first Add agents action creates the team session. Only the team lead or an admin, on the host device, can change these.
+1. **Current session by default.** Teammates setup shares the current conversation through `POST /api/projects/:projectId/team-orchestration/share-session`, using its agent as orchestrator. The setup panel asks only for the group-wide `permissionLevel` (`supervised` or `full-access`). Existing shared sessions stay authoritative. Advanced routing and fallback management remain in Team structure, and the older settings-only enable API remains compatible. Only the team lead or an admin on the host device can change host settings.
 2. **Group routing.** Team work is sent through the ordinary multi-agent session. The session's group mode routes untagged requests; an authenticated member-device message follows that same routing, and explicit mentions target the mentioned group members.
 3. **Full @mentions across devices.** `@handle` of any consented group member, local or remote, starts that member. Remote runs execute on the owner's device.
 4. **Consent instead of per-request approval.** When joining (or later from settings), a teammate chooses which of their agents to contribute and accepts `TEAM_CONSENT_DISCLAIMER`: the lead/admins get sandboxed access to those agents. Consent records the accepted permission level, settings version and disclaimer version. If the lead raises the level (supervised → full-access) or the disclaimer version changes, consent becomes `needs-reconsent` and the owner device rejects new deliveries until the owner re-accepts. Owners can pause or revoke at any time from their own device; this is always honoured locally.
@@ -44,6 +44,7 @@ Remote completion replies are signed by the owner device and use a stable delive
 
 | Method & path | Device | Who |
 | --- | --- | --- |
+| `POST /api/projects/:projectId/team-orchestration/share-session` | host | lead/admin |
 | `POST /api/projects/:projectId/team-orchestration/enable` | host | lead/admin |
 | `PATCH /api/projects/:projectId/team-orchestration` | host | lead/admin |
 | `GET /api/projects/:projectId/team-structure` | any member | any member |
