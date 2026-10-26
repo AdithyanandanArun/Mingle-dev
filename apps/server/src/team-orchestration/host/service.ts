@@ -75,6 +75,7 @@ type ProjectContext = ProjectCollaborationSnapshot & {
 
 const liveDelivery = (status: string) => ['queued', 'accepted', 'running', 'awaiting-approval'].includes(status);
 const rankPermission = (value: TeamPermissionLevel): number => value === 'full-access' ? 1 : 0;
+const publishableLocalProviders = new Set(['claude', 'codex', 'opencode']);
 const safeJson = <T>(text: string, fallback: T): T => { try { return JSON.parse(text) as T; } catch { return fallback; } };
 const safeArtifactText = (value: string, max: number): string => redactSecrets(value).replace(/[\u0000-\u001f\u007f]/g, ' ').slice(0, max);
 
@@ -691,6 +692,10 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
     const localAgentForSession = (sessionId: string) => context.agents.find((agent) => agent.deviceId === context.localDeviceId
       && agent.accountId === context.accountId && agent.projectId === context.localProjectId && agent.sessionId === sessionId);
     if (requiredSessionIds.some((sessionId) => !localAgentForSession(sessionId))) {
+      const unsupported = requiredSessions.find((candidate) => candidate && !publishableLocalProviders.has(candidate.provider));
+      if (unsupported) {
+        throw new HttpError(409, `${unsupported.provider} sessions cannot be published for remote team execution. Use Claude, Codex, or OpenCode sessions.`);
+      }
       if (!this.options.publishLocalAgents) throw new HttpError(409, 'This session could not be published for team orchestration.');
       const alreadyPublished = context.agents.filter((agent) => agent.deviceId === context.localDeviceId && agent.sessionId
         && agent.projectId === context.localProjectId && !this.isProxySession(agent.sessionId)).map((agent) => agent.sessionId!);

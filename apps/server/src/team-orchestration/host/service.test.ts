@@ -538,6 +538,30 @@ it('adopts an existing cowork group without adding an orchestrator or changing i
   expect(fx.group()).toEqual(original);
 });
 
+it('rejects a mixed-provider local group before partially publishing its supported anchor', async () => {
+  const fx = fixture();
+  const antigravityLead = fx.store.insertSession({ id: 'local-antigravity-lead', projectId: PROJECT, name: 'Antigravity lead', provider: 'antigravity', model: 'gemini-pro',
+    effort: 'high', policy: 'supervised', isolated: false, worktreePath: fx.project.path, branch: null });
+  const existing: GroupSnapshot = { group: { id: 'group_mixed_provider', projectId: PROJECT, title: 'Mixed-provider group', anchorSessionId: LOCAL_AGENT,
+    mode: 'orchestrated', orchestratorMemberId: 'member-antigravity-lead', paused: false, pauseReason: null, maxParallel: 2, maxTurns: 80, maxHops: 6,
+    createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }, members: [
+      { id: 'member-local-anchor', groupId: 'group_mixed_provider', sessionId: LOCAL_AGENT, handle: 'local-anchor', role: 'worker', held: false, joinedAt: new Date().toISOString(), removedAt: null },
+      { id: 'member-antigravity-lead', groupId: 'group_mixed_provider', sessionId: antigravityLead.id, handle: 'antigravity-lead', role: 'orchestrator', held: false, joinedAt: new Date().toISOString(), removedAt: null },
+    ], messages: [], requests: [], deliveries: [], assignments: [] };
+  fx.setGroup(existing);
+  const original = structuredClone(existing);
+  const publishCalls: string[][] = [];
+  fx.setPublisher(async (input) => { publishCalls.push(input.sessionIds); });
+
+  await expect(fx.host.shareSession(PROJECT, { sessionId: LOCAL_AGENT, permissionLevel: 'supervised' }))
+    .rejects.toMatchObject({ status: 409, message: expect.stringContaining('cannot be published') });
+
+  expect(publishCalls).toEqual([]);
+  expect(fx.agents.map((agent) => agent.sessionId)).toEqual([LOCAL_AGENT, 'owner-session-remote']);
+  expect(fx.group()).toEqual(original);
+  expect(fx.store.db.prepare('SELECT group_id FROM mingle_team_host_projects WHERE team_id=? AND shared_project_id=?').get(TEAM, SHARED)).toBeUndefined();
+});
+
 it('rejects other-project and proxy sessions, wrong host roles/devices, and stale expected versions', async () => {
   const fx = fixture();
   const otherRepo = makeRepo();
