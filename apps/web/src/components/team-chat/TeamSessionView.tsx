@@ -28,6 +28,35 @@ function canonicalHandle(agent: TeamChatAgent, member?: TeamStructureMember): st
   return slug || agent.id.slice(0, 24);
 }
 
+type TeamSessionTimelineRow =
+  | { type: 'team-chat'; createdAt: string; orderKey: string; message: TeamChatMessage }
+  | { type: 'group'; createdAt: string; orderKey: string; entry: TeamChatGroupView['messages'][number] };
+
+function isMirroredGroupEntry(entry: TeamChatGroupView['messages'][number], messages: readonly TeamChatMessage[]): boolean {
+  const authorKind = entry.kind === 'user' ? 'human' : entry.kind === 'agent' ? 'agent' : null;
+  if (!authorKind) return false;
+  const sourceMessageId = entry.kind === 'user' ? entry.id : entry.sourceMessageId;
+  return messages.some((message) => message.author.kind === authorKind && (
+    message.id === entry.id || Boolean(sourceMessageId && message.source?.messageId === sourceMessageId)
+  ));
+}
+
+function mergeTeamSessionTimeline(messages: readonly TeamChatMessage[], groupView: TeamChatGroupView | null): TeamSessionTimelineRow[] {
+  const rows: TeamSessionTimelineRow[] = messages.map((message) => ({
+    type: 'team-chat', createdAt: message.createdAt, orderKey: `team:${message.id}`, message,
+  }));
+  if (groupView) {
+    for (const entry of groupView.messages) {
+      if (isMirroredGroupEntry(entry, messages)) continue;
+      rows.push({ type: 'group', createdAt: entry.createdAt, orderKey: `group:${String(entry.seq).padStart(12, '0')}:${entry.id}`, entry });
+    }
+  }
+  return rows.sort((left, right) => {
+    const timeDifference = Date.parse(left.createdAt) - Date.parse(right.createdAt);
+    return (Number.isFinite(timeDifference) ? timeDifference : 0) || left.orderKey.localeCompare(right.orderKey);
+  });
+}
+
 function TeamMessage({ message, teamSession, agents, members }: {
   message: TeamChatMessage; teamSession: TeamSessionRef; agents: readonly TeamChatAgent[]; members: readonly TeamStructureMember[];
 }) {
@@ -367,12 +396,19 @@ export function TeamSessionView({ projectId, teamSession, structure }: {
   const snapshotMatchesProject = Boolean(structureSnapshot?.projectId === projectId && snapshot?.project.sharedProjectId === structureSnapshot.sharedProjectId);
   const activeSnapshot = snapshotMatchesProject ? snapshot : null;
   const messages = activeSnapshot?.messages ?? [];
+  const agents = activeSnapshot?.agents ?? [];
+  const members = structureSnapshot?.members ?? [];
+  const groupView = activeSnapshot?.groupView?.group.id === teamSession.groupId ? activeSnapshot.groupView : null;
+  const timeline = useMemo(() => mergeTeamSessionTimeline(messages, groupView), [messages, groupView]);
+  const latestTimelineRow = timeline.at(-1);
+  const latestTimelineContent = latestTimelineRow?.type === 'team-chat' ? latestTimelineRow.message.body : latestTimelineRow?.entry.content;
+  const latestTimelineRunState = latestTimelineRow?.type === 'team-chat' ? latestTimelineRow.message.runState : undefined;
   useLayoutEffect(() => {
     const node = scroller.current;
     if (!node) return;
     if (olderHeight.current !== null) { node.scrollTop += node.scrollHeight - olderHeight.current; olderHeight.current = null; }
     else if (follows.current) node.scrollTop = node.scrollHeight;
-  }, [messages.length, messages.at(-1)?.body, messages.at(-1)?.runState, activeSnapshot?.groupView?.version]);
+  }, [timeline.length, latestTimelineRow?.createdAt, latestTimelineContent, latestTimelineRunState, activeSnapshot?.groupView?.version]);
 
   const loadOlder = async () => {
     if (!activeSnapshot?.nextBefore || loadingOlder) return;
@@ -396,16 +432,11 @@ export function TeamSessionView({ projectId, teamSession, structure }: {
     finally { setLoadingOlder(false); }
   };
 
-  const agents = activeSnapshot?.agents ?? [];
-  const members = structureSnapshot?.members ?? [];
-  const groupView = activeSnapshot?.groupView?.group.id === teamSession.groupId ? activeSnapshot.groupView : null;
-  const groupEntries = groupView?.messages.filter((entry) => !messages.some((message) => message.body === entry.content
-    && ((entry.kind === 'user' && message.author.kind === 'human') || (entry.kind === 'agent' && message.author.kind === 'agent')))) ?? [];
   const teamStates = useMemo(() => Object.fromEntries(agents.flatMap((agent) => {
     const state = TeamAgentStateSchema.safeParse(agent.state);
     return state.success ? [[agent.id, state.data] as const] : [];
   })), [agents]);
-  const empty = !loading && !messages.length && !groupEntries.length;
+  const empty = !loading && !timeline.length && !groupView?.result;
   if (!project) return <div className="chat chat--group"><div className="chat__empty"><h3>Team session unavailable</h3><p>This project is no longer available.</p></div></div>;
 
   return <div className="chat chat--group chat--team-session">
@@ -421,18 +452,19 @@ export function TeamSessionView({ projectId, teamSession, structure }: {
               {activeSnapshot?.hasMore ? <button type="button" className="team-session__load-older" onClick={() => void loadOlder()} disabled={loadingOlder || connection !== 'online'}>{loadingOlder ? <Loader2 size={13} className="spin" /> : null}Load older messages</button> : null}
               {loading && !snapshot ? <div className="chat__empty" role="status"><Loader2 size={18} className="spin" /><p>Opening the shared session…</p></div> : null}
               {empty ? <div className="chat__empty"><h3>Start the team session</h3><p>Send a message to the orchestrator or mention a teammate’s agent.</p></div> : null}
-              {messages.map((message) => <TeamMessage key={message.id} message={message} teamSession={teamSession} agents={agents} members={members} />)}
               {groupView ? <>
                 <section className="team-session__group-routing" aria-label="Shared group routing">
                   <strong>{MODE_NAME[groupView.routing.mode]}</strong>
                   <span>Unaddressed messages → {groupView.routing.defaultRecipientHandles.length ? groupView.routing.defaultRecipientHandles.map((handle) => `@${handle}`).join(', ') : 'no default agent reported'}</span>
                   {groupView.group.paused ? <span className="team-session__paused">Paused · messages may wait for the host to resume the group</span> : null}
                 </section>
-                {groupEntries.length ? <section className="team-session__group-feed" aria-label="Shared group activity">
-                  {groupEntries.map((entry) => <SharedGroupEntry key={`group:${entry.id}`} entry={entry} view={groupView} members={members} agents={agents} />)}
+                {timeline.length ? <section className="team-session__group-feed" aria-label="Shared conversation timeline">
+                  {timeline.map((row) => row.type === 'team-chat'
+                    ? <TeamMessage key={`team:${row.message.id}`} message={row.message} teamSession={teamSession} agents={agents} members={members} />
+                    : <SharedGroupEntry key={`group:${row.entry.id}`} entry={row.entry} view={groupView} members={members} agents={agents} />)}
                 </section> : null}
                 {groupView.result ? <SharedGroupResult result={groupView.result} /> : null}
-              </> : null}
+              </> : messages.map((message) => <TeamMessage key={message.id} message={message} teamSession={teamSession} agents={agents} members={members} />)}
               {error && !activeSnapshot ? <div className="chat__error" role="alert"><strong>Team session unavailable</strong><span>{error}</span><button type="button" className="link-btn" onClick={() => { setLoading(true); void refresh().catch((cause) => setError(errorMessage(cause))).finally(() => setLoading(false)); }}>Retry</button></div> : null}
             </div>
           </div>

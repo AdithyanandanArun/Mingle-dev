@@ -31,6 +31,7 @@ export const TeamChatGroupViewSchema = z.object({
   members: z.array(z.object({ handle: z.string().trim().min(1).max(32), role: z.enum(['peer', 'orchestrator', 'worker']), removed: z.boolean() }).strict()).max(64),
   messages: z.array(z.object({
     id: z.string().trim().min(1).max(100), seq: z.number().int().nonnegative(), kind: z.enum(['user', 'agent', 'assignment', 'status', 'artifact']),
+    sourceMessageId: z.string().trim().min(1).max(100).nullable().optional(),
     senderHandle: z.string().trim().min(1).max(32).nullable(), recipientHandles: z.array(z.string().trim().min(1).max(32)).max(64),
     content: z.string().max(8_000), requestId: z.string().trim().min(1).max(100).nullable(), createdAt: z.string().datetime({ offset: true }),
   }).strict()).max(100),

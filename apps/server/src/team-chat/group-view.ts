@@ -117,6 +117,7 @@ export function projectGroupView(snapshot: GroupSnapshot, store: Store, version:
   });
   const messages: TeamChatGroupView['messages'] = snapshot.messages.slice(-50).map((message) => ({
     id: message.id, seq: message.seq, kind: message.kind,
+    sourceMessageId: message.sourceMessageId,
     senderHandle: message.senderMemberId ? memberById.get(message.senderMemberId)?.handle ?? null : null,
     recipientHandles: message.recipientMemberIds.flatMap((id) => {
       const member = memberById.get(id);

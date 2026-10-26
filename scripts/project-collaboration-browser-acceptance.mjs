@@ -142,12 +142,15 @@ function invitationPreview(email = INVITED_EMAIL) {
 }
 
 function memberTeamChatSnapshot() {
-  const now = new Date().toISOString();
+  const at = (offsetMs = 0) => new Date(Date.now() + offsetMs).toISOString();
+  const now = at();
+  const mirroredAgentBody = 'The shared assignment is in progress.';
   return {
     project: { teamId: TEAM_ID, sharedProjectId: SHARED_PROJECT_ID, name: 'Example invite checkout' },
     messages: [
-      { id: 'example-member-human-message', teamId: TEAM_ID, sharedProjectId: SHARED_PROJECT_ID, author: { kind: 'human', accountId: LEADER_ID, displayName: 'Example leader' }, body: 'Add a total to each order row.', mentions: [], createdAt: now, deliveryState: 'sent', runState: 'running' },
-      { id: 'example-member-agent-message', teamId: TEAM_ID, sharedProjectId: SHARED_PROJECT_ID, author: { kind: 'agent', agentId: 'example-host-agent', agentName: 'Example host lead', ownerAccountId: LEADER_ID, provider: 'claude', model: 'example-claude-model' }, body: 'The example order total is being checked against the shared task.', mentions: [], replyTo: 'example-member-human-message', createdAt: now, deliveryState: 'sent', runState: 'completed' },
+      { id: 'example-member-human-message', teamId: TEAM_ID, sharedProjectId: SHARED_PROJECT_ID, author: { kind: 'human', accountId: LEADER_ID, displayName: 'Example leader' }, body: 'Add a total to each order row.', mentions: [], source: { sessionId: 'example-host-session', messageId: 'example-group-request' }, createdAt: at(-420_000), deliveryState: 'sent', runState: 'running' },
+      { id: 'example-member-agent-message', teamId: TEAM_ID, sharedProjectId: SHARED_PROJECT_ID, author: { kind: 'agent', agentId: 'example-host-agent', agentName: 'Example host lead', ownerAccountId: LEADER_ID, provider: 'claude', model: 'example-claude-model' }, body: mirroredAgentBody, mentions: [], replyTo: 'example-member-human-message', source: { sessionId: 'example-host-session', messageId: 'example-group-agent-response' }, createdAt: at(-240_000), deliveryState: 'sent', runState: 'completed' },
+      { id: 'example-member-confirmation-message', teamId: TEAM_ID, sharedProjectId: SHARED_PROJECT_ID, author: { kind: 'human', accountId: LEADER_ID, displayName: 'Example leader' }, body: 'Host confirmation after the assignment progress.', mentions: [], createdAt: now, deliveryState: 'sent', runState: null },
     ],
     hasMore: false, nextBefore: null,
     members: [{ accountId: LEADER_ID, displayName: 'Example leader', role: 'leader' }, { accountId: 'example-invitee-account', displayName: 'Example invitee', role: 'member' }],
@@ -165,13 +168,14 @@ function memberTeamChatSnapshot() {
         { handle: 'example-invited-1', role: 'worker', removed: false },
       ],
       messages: [
-        { id: 'example-group-request', seq: 1, kind: 'user', senderHandle: null, recipientHandles: ['example-host-lead'], content: 'Add a total to each order row.', requestId: 'example-group-request-id', createdAt: now },
-        { id: 'example-group-assignment', seq: 2, kind: 'assignment', senderHandle: 'example-host-lead', recipientHandles: ['example-invited-1'], content: '', requestId: 'example-group-request-id', createdAt: now },
-        { id: 'example-group-progress', seq: 3, kind: 'status', senderHandle: 'example-invited-1', recipientHandles: [], content: memberGroupResultState === 'in-progress' ? 'The shared assignment is in progress.' : 'The task is ready for human review.', requestId: 'example-group-request-id', createdAt: now },
+        { id: 'example-group-request', seq: 1, kind: 'user', senderHandle: null, recipientHandles: ['example-host-lead'], content: 'Add a total to each order row.', requestId: 'example-group-request-id', createdAt: at(-420_000) },
+        { id: 'example-group-assignment', seq: 2, kind: 'assignment', senderHandle: 'example-host-lead', recipientHandles: ['example-invited-1'], content: '', requestId: 'example-group-request-id', createdAt: at(-360_000) },
+        { id: 'example-group-agent-entry', seq: 3, kind: 'agent', sourceMessageId: 'example-group-agent-response', senderHandle: 'example-host-lead', recipientHandles: [], content: mirroredAgentBody, requestId: 'example-group-request-id', createdAt: at(-240_000) },
+        { id: 'example-group-progress', seq: 4, kind: 'status', senderHandle: 'example-invited-1', recipientHandles: [], content: memberGroupResultState === 'in-progress' ? mirroredAgentBody : 'The task is ready for human review.', requestId: 'example-group-request-id', createdAt: at(-120_000) },
       ],
-      requests: [{ id: 'example-group-request-id', messageId: 'example-group-request', plannerHandle: 'example-host-lead', status: memberGroupResultState === 'in-progress' ? 'active' : 'completed', turnsUsed: 2, createdAt: now }],
-      deliveries: [{ id: 'example-group-delivery', requestId: 'example-group-request-id', messageId: 'example-group-assignment', handle: 'example-invited-1', kind: 'assignment', status: memberGroupResultState === 'in-progress' ? 'running' : 'completed', hop: 1, error: null, createdAt: now, updatedAt: now }],
-      assignments: [{ id: 'example-group-assignment-record', requestId: 'example-group-request-id', deliveryId: 'example-group-delivery', fromHandle: 'example-host-lead', toHandle: 'example-invited-1', taskId: 'example-group-task', title: 'Add order total', taskStatus: memberGroupResultState === 'in-progress' ? 'running' : 'review', scope: ['src/order.ts'], createdAt: now }],
+      requests: [{ id: 'example-group-request-id', messageId: 'example-group-request', plannerHandle: 'example-host-lead', status: memberGroupResultState === 'in-progress' ? 'active' : 'completed', turnsUsed: 2, createdAt: at(-420_000) }],
+      deliveries: [{ id: 'example-group-delivery', requestId: 'example-group-request-id', messageId: 'example-group-assignment', handle: 'example-invited-1', kind: 'assignment', status: memberGroupResultState === 'in-progress' ? 'running' : 'completed', hop: 1, error: null, createdAt: at(-360_000), updatedAt: at(-120_000) }],
+      assignments: [{ id: 'example-group-assignment-record', requestId: 'example-group-request-id', deliveryId: 'example-group-delivery', fromHandle: 'example-host-lead', toHandle: 'example-invited-1', taskId: 'example-group-task', title: 'Add order total', taskStatus: memberGroupResultState === 'in-progress' ? 'running' : 'review', scope: ['src/order.ts'], createdAt: at(-360_000) }],
       result: { requestId: 'example-group-request-id', status: memberGroupResultState, title: memberGroupResultState === 'in-progress' ? 'In progress' : 'Ready for review', summary: memberGroupResultState === 'in-progress' ? 'Shared group work is still running or queued; this result is partial.' : 'The shared task state is ready for human review.', facts: ['1 assigned task', memberGroupResultState === 'in-progress' ? '1 turn running' : '1 need review'], changedPaths: memberGroupResultState === 'in-progress' ? [] : ['src/order.ts'] },
       updatedAt: now,
     } : null,
@@ -763,6 +767,20 @@ async function main() {
     await page.getByText('Add order total', { exact: true }).waitFor();
     await page.getByRole('region', { name: 'Latest shared group result' }).locator('.team-session__result-head > span').getByText('In progress', { exact: true }).waitFor();
     assert.equal(await page.locator('.team-session__group-card').count(), 1, 'the assignment is a structured shared group card');
+    assert.equal(await page.locator('[data-group-message-id="example-group-request"]').count(), 0, 'the exact human group mirror is not repeated');
+    assert.equal(await page.locator('[data-group-message-id="example-group-agent-entry"]').count(), 0, 'the exact agent group mirror is not repeated');
+    assert.equal(await page.locator('[data-group-message-id="example-group-progress"]').count(), 1, 'same text from a different group author remains visible');
+    assert.equal(await page.locator('.chat__inner .md').evaluateAll((nodes) => nodes.filter((node) => node.textContent?.trim() === 'The shared assignment is in progress.').length), 2,
+      'identical text from the host agent and invited agent is not content-deduplicated');
+    const timelineRows = await page.locator('.chat__inner [data-message-id], .chat__inner [data-group-message-id]').evaluateAll((nodes) => nodes
+      .filter((node) => !node.parentElement?.closest('[data-message-id], [data-group-message-id]'))
+      .map((node) => ({ id: node.getAttribute('data-message-id') ?? node.getAttribute('data-group-message-id'), at: node.querySelector('time')?.getAttribute('datetime') }))
+      .filter((row) => row.at));
+    assert.deepEqual(timelineRows.map((row) => row.id), [
+      'example-member-human-message', 'example-group-assignment', 'example-member-agent-message',
+      'example-group-progress', 'example-member-confirmation-message',
+    ], 'late group activity is merged by timestamp before the latest team-chat confirmation');
+    assert.ok(timelineRows.every((row, index) => index === 0 || Date.parse(timelineRows[index - 1].at) <= Date.parse(row.at)), 'merged timeline timestamps are monotonic');
     assert.equal(await page.getByText('Orchestrated · default route', { exact: true }).count(), 1, 'the composer shows the actual shared group routing mode');
     assert.ok((await page.locator('.agent-presence__row').count()) >= 2, 'the visible agent dock shows this member’s agent and the host lead');
     assert.equal(await page.getByRole('button', { name: /Pause group|Stop active runs/ }).count(), 0, 'member group view adds no host pause/stop controls');
