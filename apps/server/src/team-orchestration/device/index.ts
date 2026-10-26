@@ -78,7 +78,6 @@ interface ActiveDelivery {
   heartbeatTimer: NodeJS.Timeout | null;
   heartbeatSequence: number;
   controller: AbortController;
-  replyPosted: boolean;
   artifactFailures: string[];
 }
 interface SharedBinding {
@@ -682,14 +681,40 @@ export function createDeviceSide(deps: DeviceSideDeps): {
   }
 
   async function sendStatusPayload(teamId: string, toDeviceId: string, payload: ReturnType<typeof TeamDeliveryStatusPayloadSchema.parse>): Promise<void> {
+    let replyPending = false;
+    try { await publishSavedCompletedReply(teamId, toDeviceId, payload); }
+    catch { replyPending = true; }
     try {
       await send(teamId, toDeviceId, 'teamgroup.delivery.status', payload, statusIdempotencyKey(payload));
+      if (replyPending) { scheduleTerminalStatusRetry(teamId, toDeviceId, payload); return; }
       const timer = terminalStatusRetries.get(payload.deliveryId);
       if (timer) clearTimeout(timer);
       terminalStatusRetries.delete(payload.deliveryId);
     } catch {
       scheduleTerminalStatusRetry(teamId, toDeviceId, payload);
     }
+  }
+
+  /** Recover the owner-signed reply from durable completion, including a crash before its first post. */
+  async function publishSavedCompletedReply(teamId: string, toDeviceId: string,
+    payload: ReturnType<typeof TeamDeliveryStatusPayloadSchema.parse>): Promise<void> {
+    if (closed || payload.status !== 'completed' || !payload.finalText) return;
+    const row = db.prepare(`SELECT request_json,session_id,run_id,status FROM mingle_team_device_deliveries WHERE delivery_id=?`)
+      .get(payload.deliveryId) as { request_json: string; session_id: string; run_id: string | null; status: string } | undefined;
+    if (!row || row.status !== 'completed' || row.run_id !== payload.runId) return;
+    const request = TeamDeliveryPayloadSchema.parse(JSON.parse(row.request_json));
+    if (request.deliveryId !== payload.deliveryId || request.sharedProjectId !== payload.sharedProjectId
+      || request.agentId !== payload.agentId || request.integrationDeviceId !== toDeviceId) return;
+    const shared = await findBindingBySharedProject(teamId, payload.sharedProjectId);
+    if (!shared || closed || await hostDeviceId(shared) !== toDeviceId) return;
+    const accountId = await currentAccountId();
+    const device = deps.transport.snapshot(teamId);
+    const agent = shared.agents.find((candidate) => candidate.id === payload.agentId && candidate.sessionId === row.session_id
+      && candidate.accountId === accountId && candidate.deviceId === device.deviceId);
+    if (closed || !agent || !device.devices.some((candidate) => candidate.id === device.deviceId
+      && candidate.ownerId === accountId && !candidate.revokedAt)) return;
+    // postAgentReply persists a signed row and deduplicates concurrent/restarted calls by delivery ID.
+    await deps.teamChat.postAgentReply(shared.projectId, agent.id, payload.finalText, request.requestId, request.deliveryId);
   }
 
   function statusIdempotencyKey(payload: ReturnType<typeof TeamDeliveryStatusPayloadSchema.parse>): string {
@@ -1064,7 +1089,7 @@ export function createDeviceSide(deps: DeviceSideDeps): {
         baseRevision: isolated.baseRevision, worktreePath: isolated.path, branch: isolated.branch,
         scope: payload.scope ? normalizeScopes(payload.scope) : null,
         entries: [requestEntry], text: '', activityState: 'working', activityWaiters: [],
-        timer: null, heartbeatTimer: null, heartbeatSequence: 0, controller, replyPosted: false, artifactFailures: [] };
+        timer: null, heartbeatTimer: null, heartbeatSequence: 0, controller, artifactFailures: [] };
       active.set(payload.deliveryId, live);
       live.heartbeatTimer = setInterval(() => { void track(sendHeartbeat(live!)); }, Math.max(1, deps.heartbeatIntervalMs ?? 15_000));
       live.heartbeatTimer.unref();
@@ -1102,12 +1127,6 @@ export function createDeviceSide(deps: DeviceSideDeps): {
           throw new Error('The completed team result could not be durably saved for host delivery.');
         }
         void sendActivity(live, 'idle').catch(() => undefined);
-        try {
-          if (finalText && !live.replyPosted) {
-            live.replyPosted = true;
-            await deps.teamChat.postAgentReply(shared.projectId, localAgent.id, finalText, payload.requestId, payload.deliveryId);
-          }
-        } catch { /* The result remains available to the host even if chat delivery is offline. */ }
       } else if (run.status === 'interrupted') {
         void sendActivity(live, 'paused').catch(() => undefined);
         db.prepare(`UPDATE mingle_team_device_deliveries SET status='interrupted',updated_at=? WHERE delivery_id=?`).run(ISO(), payload.deliveryId);

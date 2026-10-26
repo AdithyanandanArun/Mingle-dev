@@ -30,6 +30,7 @@ interface Fixture {
   projectId: string; root: string; repo: string; worktree: string; worktreeRoot: string; sent: Sent[]; roster: any[]; handler: ((envelope: any) => Promise<void>) | null;
   runtime: FakeRuntime; exportCalls: any[]; importCalls: any[]; executionOrder: string[]; chatReplies: any[]; members: any[]; setConsent(permission?: 'supervised' | 'full-access', settingsVersion?: number): Promise<any>;
   failTerminalStatusSends(count: number): void;
+  failChatReplies(count: number): void;
   holdImports(gate: Promise<void>): void;
   restartSide(): Promise<void>;
   deliver(overrides?: Record<string, unknown>, sender?: string): Promise<void>; close(): Promise<void>;
@@ -214,7 +215,11 @@ async function fixture(): Promise<Fixture> {
   runtime.store = store;
   runtime.executionOrder = executionOrder;
   const chatReplies: any[] = [];
-  const teamChat = { postAgentReply: async (...args: any[]) => { chatReplies.push(args); return { id: `chat-${chatReplies.length}` }; } };
+  let chatFailures = 0;
+  const teamChat = { postAgentReply: async (...args: any[]) => {
+    if (chatFailures > 0) { chatFailures--; throw new Error('Owner signing temporarily unavailable'); }
+    chatReplies.push(args); return { id: `chat-${chatReplies.length}` };
+  } };
   const routes: Fixture['routes'] = [];
   let side!: ReturnType<typeof createDeviceSide>;
   const startSide = () => {
@@ -227,6 +232,7 @@ async function fixture(): Promise<Fixture> {
   const result: Fixture = {
     store, get side() { return side; }, routes, projectId: project.id, root, repo, worktree, worktreeRoot, sent, roster, get handler() { return handler; }, runtime, exportCalls, importCalls, executionOrder, chatReplies, members,
     failTerminalStatusSends(count) { terminalStatusFailures = count; },
+    failChatReplies(count) { chatFailures = count; },
     holdImports(gate) { importGate = gate; },
     async restartSide() { await side.close(); routes.length = 0; startSide(); },
     async setConsent(permission = 'supervised', settingsVersion = 1) {
@@ -360,7 +366,7 @@ describe('owner-device team orchestration', () => {
     expect(f.runtime.startCount).toBe(0);
   });
 
-  it('accepts one delivery, runs in the isolated worktree, exports a commit, posts one chat reply and deduplicates delivery', async () => {
+  it('accepts one delivery, exports an isolated commit and reuses its chat reply identity across delivery retries', async () => {
     const f = await fixture();
     await sendStructure(f);
     await f.setConsent();
@@ -383,7 +389,8 @@ describe('owner-device team orchestration', () => {
     expect(f.store.db.prepare('SELECT worktree_path,branch FROM mingle_team_device_deliveries WHERE delivery_id=?').get(payload.deliveryId))
       .toMatchObject({ worktree_path: deliveryWorktree, branch: expect.stringMatching(/^mingle\/team-agent\//) });
     expect(f.exportCalls[0]).toMatchObject({ toDeviceId: HOST_DEVICE, deliveryId: payload.deliveryId, sourceWorktreePath: deliveryWorktree });
-    expect(f.chatReplies).toHaveLength(1);
+    expect(f.chatReplies).toHaveLength(2);
+    expect(new Set(f.chatReplies.map((args) => args[4])).size).toBe(1);
     expect(f.chatReplies[0]).toEqual([f.projectId, AGENT_ID, 'Final result: safe output', payload.requestId, payload.deliveryId]);
 
     const localSessionId = f.store.listSessions(f.projectId)[0]!.id;
@@ -600,6 +607,33 @@ describe('owner-device team orchestration', () => {
     const completedHeartbeatCount = heartbeatCount();
     await new Promise((resolve) => setTimeout(resolve, 40));
     expect(heartbeatCount()).toBe(completedHeartbeatCount);
+  });
+
+  it('recovers an unposted owner reply from saved completion without replaying its provider or changing its author', async () => {
+    const f = await fixture();
+    await sendStructure(f);
+    await f.setConsent();
+    f.failChatReplies(100);
+    const request = deliveryPayload({ deliveryId: `delivery-${randomUUID()}` });
+    await f.deliver(request);
+    await waitFor(() => f.store.db.prepare(`SELECT terminal_status_json FROM mingle_team_device_deliveries WHERE delivery_id=? AND status='completed'`)
+      .get(request.deliveryId)?.terminal_status_json, 4000, 'saved completed result before owner signing');
+    await waitFor(() => f.sent.some((entry) => entry.kind === 'teamgroup.delivery.status'
+      && entry.payload.deliveryId === request.deliveryId && entry.payload.status === 'completed'), 4000, 'status delivery independent of reply signing');
+    await f.side.close();
+    expect(f.chatReplies).toHaveLength(0);
+    const starts = f.runtime.startCount;
+    // A changed account/device owner must never acquire the original agent's saved output.
+    f.roster[0].accountId = OTHER;
+    f.failChatReplies(0);
+    await f.restartSide();
+    await waitFor(() => f.sent.some((entry) => entry.kind === 'teamgroup.delivery.status' && entry.payload.deliveryId === request.deliveryId && entry.payload.status === 'completed'));
+    expect(f.chatReplies).toHaveLength(0);
+    f.roster[0].accountId = ACCOUNT;
+    await f.restartSide();
+    await waitFor(() => f.chatReplies.length === 1, 4000, 'owner reply recovered from durable completion');
+    expect(f.chatReplies[0]).toEqual([f.projectId, AGENT_ID, 'Final result: safe output', request.requestId, request.deliveryId]);
+    expect(f.runtime.startCount).toBe(starts);
   });
 
   it('keeps awaiting owner approval alive with heartbeats and retries a failed terminal status enqueue', async () => {
