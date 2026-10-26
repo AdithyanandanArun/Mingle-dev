@@ -1,6 +1,7 @@
 import type {
   AcceptTeamConsent,
   EnableTeamOrchestration,
+  TeamPermissionLevel,
   TeamStructureSnapshot,
   UpdateTeamOrchestration,
 } from '@mingle/contracts';
@@ -50,6 +51,8 @@ export const teamOrchestrationApi = {
     call<unknown>(`${projectPath(projectId)}/team-orchestration/enable`, 'POST', input),
   updateSettings: (projectId: string, input: UpdateTeamOrchestration) =>
     call<unknown>(`${projectPath(projectId)}/team-orchestration`, 'PATCH', input),
+  shareSession: (projectId: string, input: { sessionId: string; permissionLevel: TeamPermissionLevel; expectedVersion?: number }) =>
+    call<TeamStructureSnapshot>(`${projectPath(projectId)}/team-orchestration/share-session`, 'POST', input),
   acceptConsent: (projectId: string, input: AcceptTeamConsent) =>
     call(`${projectPath(projectId)}/team-consent`, 'POST', input),
   updateConsent: (projectId: string, input: TeamConsentUpdate) =>

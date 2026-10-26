@@ -6,6 +6,14 @@
 .team-orch-settings__heading p, .team-orch-settings__field > p { margin: 3px 0 0; color: var(--fg-3); font-size: var(--text-xs); line-height: 1.5; }
 .team-orch-settings__summary, .team-orch-settings__status, .team-orch-settings__notice, .team-orch-settings__success, .team-orch-settings__error { display: flex; align-items: flex-start; gap: 7px; margin: 0; padding: 8px 9px; border: 1px solid var(--line-soft); border-radius: var(--radius-sm); background: var(--bg-surface); color: var(--fg-2); font-size: var(--text-xs); line-height: 1.5; }
 .team-orch-settings__summary svg, .team-orch-settings__error svg { flex: none; margin-top: 1px; }
+.team-orch-settings__session { display: flex; align-items: flex-start; gap: 8px; min-width: 0; padding: 9px; border: 1px solid var(--line-soft); border-radius: var(--radius-sm); background: var(--bg-surface); }
+.team-orch-settings__session > svg { flex: none; margin-top: 2px; color: var(--fg-2); }
+.team-orch-settings__session > span { display: grid; min-width: 0; gap: 3px; }
+.team-orch-settings__session strong { color: var(--fg-0); font-size: var(--text-xs); font-weight: 600; overflow-wrap: anywhere; }
+.team-orch-settings__session small { color: var(--fg-3); font-size: var(--text-2xs); }
+.team-orch-settings__no-session { display: grid; gap: 8px; padding: 9px; border: 1px solid var(--line-soft); border-radius: var(--radius-sm); background: var(--bg-surface); }
+.team-orch-settings__no-session p { margin: 0; color: var(--fg-2); font-size: var(--text-xs); line-height: 1.5; }
+.team-orch-settings__no-session .btn { justify-self: start; }
 .team-orch-settings__notice { border-color: color-mix(in srgb, var(--warn) 35%, var(--line)); color: var(--warn); }
 .team-orch-settings__success { background: var(--ok-soft); color: var(--fg-1); }
 .team-orch-settings__error { background: var(--err-soft); color: var(--fg-1); }

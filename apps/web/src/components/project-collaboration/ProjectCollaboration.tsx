@@ -13,6 +13,7 @@ import { projectCollaborationApi, CollaborationApiError, recordText, type Collab
 import { joinAgentPolicyChoices, joinSuccessCopy, resolveJoinCloneParent } from './join-flow';
 import { TeamConsentSheet } from '../team-orchestration/settings/TeamConsentSheet';
 import { TeamOrchestrationSettings } from '../team-orchestration/settings/TeamOrchestrationSettings';
+import { teamOrchestrationApi } from '../team-orchestration/settings/api';
 import '../../styles/project-collaboration.css';
 
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -52,6 +53,17 @@ function publishableSession(session: Session): boolean {
 
 export function ProjectTeammatesDialog({ project, onClose }: { project: Project; onClose: () => void }) {
   const boot = useMingle((state) => state.boot);
+  const [sessionContext] = useState(() => {
+    const state = useMingle.getState();
+    const selectedId = state.sessionByProject[project.id];
+    return {
+      projectId: project.id,
+      session: selectedId && !selectedId.startsWith('proxy_')
+        ? state.boot?.sessions.find((session) => session.id === selectedId && session.projectId === project.id) ?? null
+        : null,
+    };
+  });
+  const currentSession = sessionContext.projectId === project.id ? sessionContext.session : null;
   const localSessions = (boot?.sessions ?? []).filter((session) => session.projectId === project.id);
   const [snapshot, setSnapshot] = useState<ProjectCollaborationSnapshot | null>(null);
   const [loading, setLoading] = useState(true);
@@ -59,7 +71,7 @@ export function ProjectTeammatesDialog({ project, onClose }: { project: Project;
   const [email, setEmail] = useState('');
   const [role, setRole] = useState<'member' | 'admin'>('member');
   const [sending, setSending] = useState(false);
-  const [delivery, setDelivery] = useState<{ status: 'sent' | 'failed' | 'not_configured'; message: string; email: string; joinUrl?: string } | null>(null);
+  const [delivery, setDelivery] = useState<{ status: 'sent' | 'failed' | 'not_configured'; message: string; email: string; joinUrl?: string; teamSessionMessage?: string } | null>(null);
   const [account, setAccount] = useState<AccountState | null>(null);
   const [localSelection, setLocalSelection] = useState<string[] | null>(null);
   const [teamSettingsRevision, setTeamSettingsRevision] = useState(0);
@@ -69,6 +81,7 @@ export function ProjectTeammatesDialog({ project, onClose }: { project: Project;
   const [sharedAction, setSharedAction] = useState<string | null>(null);
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
   const requestId = useRef(0);
+  const invitationSequence = useRef(0);
 
   const refresh = async (signal?: AbortSignal) => {
     const id = ++requestId.current;
@@ -76,9 +89,9 @@ export function ProjectTeammatesDialog({ project, onClose }: { project: Project;
     setError(null);
     try {
       const result = await projectCollaborationApi.snapshot(project.id, signal);
-      if (id === requestId.current && !signal?.aborted) setSnapshot(result);
+      if (id === requestId.current && useMingle.getState().activeProjectId === project.id && !signal?.aborted) setSnapshot(result);
     } catch (cause) {
-      if (id === requestId.current && !signal?.aborted) setError(errorMessage(cause));
+      if (id === requestId.current && useMingle.getState().activeProjectId === project.id && !signal?.aborted) setError(errorMessage(cause));
     } finally {
       if (id === requestId.current && !signal?.aborted) setLoading(false);
     }
@@ -87,7 +100,7 @@ export function ProjectTeammatesDialog({ project, onClose }: { project: Project;
   useEffect(() => {
     const controller = new AbortController();
     void refresh(controller.signal);
-    return () => { requestId.current++; controller.abort(); };
+    return () => { requestId.current++; invitationSequence.current++; controller.abort(); };
     // `project.id` keys the dialog; use one bounded initial read per dialog.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [project.id]);
@@ -125,19 +138,70 @@ export function ProjectTeammatesDialog({ project, onClose }: { project: Project;
     event.preventDefault();
     const normalized = email.trim().toLowerCase();
     if (!EMAIL_PATTERN.test(normalized) || sending) return;
+    const sequence = ++invitationSequence.current;
     setSending(true);
     setError(null);
     setDelivery(null);
     try {
       const result = await projectCollaborationApi.invite(project.id, { email: normalized, role });
-      setDelivery({
+      if (sequence !== invitationSequence.current || useMingle.getState().activeProjectId !== project.id) return;
+      const delivered = {
         status: result.delivery.status,
         email: result.invitation.email || normalized,
         message: result.delivery.message ?? '',
         ...((result.joinUrl ?? result.invitation.joinUrl) ? { joinUrl: result.joinUrl ?? result.invitation.joinUrl } : {}),
-      });
+      } as const;
+      setDelivery(delivered);
       setEmail('');
-      await refresh();
+      let teamSessionMessage = '';
+      const invitationOutcome = delivered.status === 'sent' ? 'The invitation was sent' : 'The invitation was created';
+      try {
+        // Invitations can create the collaboration binding. Read it after the invite rather than
+        // assuming the snapshot from opening Teammates already contained a shared project.
+        const collaborationRequestId = ++requestId.current;
+        const latestCollaboration = await projectCollaborationApi.snapshot(project.id);
+        if (sequence !== invitationSequence.current || collaborationRequestId !== requestId.current || useMingle.getState().activeProjectId !== project.id) return;
+        setSnapshot(latestCollaboration);
+        const binding = latestCollaboration.project;
+        if (!binding || !binding.teamId || !binding.sharedProjectId) {
+          teamSessionMessage = `${invitationOutcome}, but the shared project binding could not be confirmed. Refresh the team panel, then use Share current session if setup is still needed. You do not need to send the invitation again.`;
+        } else {
+          const structure = await teamOrchestrationApi.structure(project.id);
+          if (sequence !== invitationSequence.current || useMingle.getState().activeProjectId !== project.id) return;
+          if (structure.projectId !== project.id || structure.teamId !== binding.teamId || structure.sharedProjectId !== binding.sharedProjectId) {
+            teamSessionMessage = `${invitationOutcome}, but the team binding changed before setup completed. Refresh the panel and use Share current session if needed. You do not need to send the invitation again.`;
+          } else if (structure.teamSession) {
+            const store = useMingle.getState();
+            store.setTeamSessionInfo(project.id, structure.teamSession, structure.host.isThisDevice);
+            await store.refreshNow();
+            if (sequence !== invitationSequence.current || useMingle.getState().activeProjectId !== project.id) return;
+            store.selectSession(structure.teamSession.sessionId);
+            teamSessionMessage = `${invitationOutcome}. The existing shared session “${structure.teamSession.title}” remains in use.`;
+          } else if (!currentSession || currentSession.projectId !== project.id) {
+            teamSessionMessage = `${invitationOutcome}, but no local session was selected when Teammates opened. Open ${project.name}, create or select a session, then use Share current session. You do not need to send the invitation again.`;
+          } else {
+            const shared = await teamOrchestrationApi.shareSession(project.id, {
+              sessionId: currentSession.id,
+              permissionLevel: structure.settings?.permissionLevel ?? 'supervised',
+              ...(structure.settings ? { expectedVersion: structure.settings.version } : {}),
+            });
+            if (sequence !== invitationSequence.current || useMingle.getState().activeProjectId !== project.id) return;
+            const store = useMingle.getState();
+            store.setTeamSessionInfo(project.id, shared.teamSession ?? null, shared.host.isThisDevice);
+            await store.refreshNow();
+            if (sequence !== invitationSequence.current || useMingle.getState().activeProjectId !== project.id) return;
+            store.selectSession(shared.teamSession?.sessionId ?? currentSession.id);
+            teamSessionMessage = `${invitationOutcome} and ${currentSession.name} is now shared with the team.`;
+          }
+        }
+      } catch (cause) {
+        const reason = errorMessage(cause);
+        teamSessionMessage = `${invitationOutcome}, but session sharing could not be completed: ${reason} Use Share current session below to retry setup; you do not need to send the invitation again.`;
+      }
+      if (sequence !== invitationSequence.current || useMingle.getState().activeProjectId !== project.id) return;
+      setDelivery((current) => current?.email === delivered.email ? { ...current, teamSessionMessage } : current);
+      setTeamSettingsRevision((revision) => revision + 1);
+      if (useMingle.getState().activeProjectId === project.id) await refresh();
     } catch (cause) { setError(errorMessage(cause)); }
     finally { setSending(false); }
   };
@@ -212,14 +276,14 @@ export function ProjectTeammatesDialog({ project, onClose }: { project: Project;
       </form>
       {delivery ? <div className={`pc-delivery pc-delivery--${delivery.status}`} role="status">
         {delivery.status === 'sent' ? <Check size={14} /> : <CircleAlert size={14} />}
-        <span>{delivery.status === 'sent' ? `Invitation email sent to ${delivery.email}.` : delivery.status === 'failed' ? `Invitation created, but email delivery failed for ${delivery.email}.` : `Invitation created, but no email was sent to ${delivery.email}.`}{delivery.message ? ` ${delivery.message}` : ''}</span>
+        <span>{delivery.status === 'sent' ? `Invitation email sent to ${delivery.email}.` : delivery.status === 'failed' ? `Invitation created, but email delivery failed for ${delivery.email}.` : `Invitation created, but no email was sent to ${delivery.email}.`}{delivery.message ? ` ${delivery.message}` : ''}{delivery.teamSessionMessage ? ` ${delivery.teamSessionMessage}` : ''}</span>
         {delivery.joinUrl ? <Button size="sm" onClick={() => void copyText(delivery.joinUrl!).then(() => useMingle.getState().toast('success', 'Join link copied.')).catch(() => setError('Could not copy the join link.'))}>Copy join link</Button> : null}
       </div> : null}
       <div className="pc-roster-head"><div><h3>Project agents</h3><p>Inspect local and teammate agents together. Remote owners keep control of their model, permissions, stop and spend approvals.</p></div><Button size="sm" variant="ghost" disabled={loading} onClick={() => void refresh()} aria-label="Refresh project agents"><RefreshCw size={13} />Refresh</Button></div>
       {loading && !snapshot ? <p className="pc-loading" role="status">Loading project roster…</p> : null}
       {snapshot?.project ? <p className="pc-project-ref"><Users size={13} /> {snapshot.project.name} <span>· shared project connected</span></p> : null}
       {!loading && snapshot && !snapshot.project ? <p className="pc-inline-note" role="status">This project’s collaboration workspace is being prepared. Refresh in a moment to see its roster.</p> : null}
-      {snapshot?.project ? <TeamOrchestrationSettings key={`${project.id}:${teamSettingsRevision}`} projectId={project.id} /> : null}
+      {snapshot?.project ? <TeamOrchestrationSettings key={`${project.id}:${teamSettingsRevision}`} projectId={project.id} currentSession={currentSession} onShared={() => void refresh()} onOpenProject={() => { useMingle.getState().selectProject(project.id); onClose(); }} /> : null}
       <div className="pc-agent-list" role="list" aria-label="Local and teammate agents">
         {localAgents.map((session) => <div className="pc-agent-row" role="listitem" key={`local-${session.id}`}>
           <input type="checkbox" aria-label={`Share ${session.name} with this project`} checked={selectedLocalIds.includes(session.id)} disabled={!snapshot?.project || !canManageRoster || !publishableSession(session)} title={!publishableSession(session) ? 'This provider cannot be shared for remote execution.' : undefined} onChange={(event) => setLocalSelection((current) => {

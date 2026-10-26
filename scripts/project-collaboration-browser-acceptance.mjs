@@ -53,6 +53,7 @@ let memberTeamSessionCreated = false;
 let memberGroupResultState = 'in-progress';
 let localSessions = [];
 let sourceBootstrap;
+let latestBootstrapFixture;
 let accountMode = 'signed-in';
 let deliveryMode = 'sent';
 let previewMode = 'valid';
@@ -62,6 +63,15 @@ let joinedSessions = [];
 let clonedProject = null;
 let collaborationSnapshot;
 let publishedTeamSessionIds = [];
+let orchestrationEnabled = false;
+let orchestrationPermission = 'supervised';
+let orchestrationVersion = 3;
+let sharedTeamSession = null;
+let collaborationBound = false;
+let hideProjectSessions = false;
+let addWrongProjectSession = false;
+let failShareSessionOnce = false;
+let rejectNextSettingsPatch = false;
 let collabGate = null;
 let delayCollaborationOnce = false;
 let collaborationReads = 0;
@@ -231,15 +241,18 @@ function teamStructureSnapshot(id = projectId) {
     projectId: id,
     teamId: TEAM_ID,
     sharedProjectId: SHARED_PROJECT_ID,
-    enabled: false,
-    settings: null,
+    enabled: orchestrationEnabled,
+    settings: orchestrationEnabled ? {
+      leaderOrchestration: true, permissionLevel: orchestrationPermission, orchestratorAgentId: null,
+      fallbackAgentIds: [], version: orchestrationVersion, updatedAt: new Date().toISOString(), updatedByAccountId: LEADER_ID,
+    } : null,
     host: { deviceId: 'example-leader-device', accountId: LEADER_ID, displayName: 'Example leader device', online: true, isThisDevice: true },
     canEdit: true,
     myConsent: null,
     members,
     leaderHistory: [],
     needsLeader: false,
-    teamSession: null,
+    teamSession: sharedTeamSession,
     observedAt: new Date().toISOString(),
     exampleFixture: true,
   };
@@ -255,6 +268,7 @@ function updateBootstrap() {
   const sampleSessions = sourceBootstrap.sessions.filter((session) => session.projectId === projectId).map((session, index) => ({
     ...session, name: index === 0 ? 'Example local Codex' : `Example local agent ${index + 1}`, provider: 'codex', model: 'example-codex-model', effort: 'medium', policy: 'supervised', status: 'idle',
   }));
+  if (hideProjectSessions) sampleSessions.length = 0;
   if (includeProxySession && sampleSessions.length) {
     sampleSessions.push({ ...sampleSessions[0], id: PROXY_SESSION_ID, name: 'Example remote Codex proxy', status: 'idle' });
     const createdAt = new Date().toISOString();
@@ -270,6 +284,21 @@ function updateBootstrap() {
   }
   const sessionsOutsideExample = sourceBootstrap.sessions.filter((session) => session.projectId !== projectId);
   boot.sessions = [...sessionsOutsideExample, ...sampleSessions, ...joinedSessions.filter((session) => session.projectId !== projectId)];
+  if (addWrongProjectSession) {
+    const otherProjectId = 'example-other-project';
+    if (!boot.projects.some((project) => project.id === otherProjectId)) boot.projects.push({ id: otherProjectId, name: 'Example other project', path: '/example/other', createdAt: new Date().toISOString(), isExample: false });
+    const other = sourceBootstrap.sessions.find((session) => session.projectId === projectId);
+    if (other && !boot.sessions.some((session) => session.id === 'example-other-project-session')) boot.sessions.push({ ...other, id: 'example-other-project-session', projectId: otherProjectId, name: 'Example other project session' });
+  }
+  if (sharedTeamSession && sharedTeamSession.sessionId && sharedTeamSession.groupId) {
+    const createdAt = new Date().toISOString();
+    const groups = (boot.groups ?? []).filter((group) => group.group.id !== sharedTeamSession.groupId);
+    boot.groups = [...groups, {
+      group: { id: sharedTeamSession.groupId, projectId, title: sharedTeamSession.title, anchorSessionId: sharedTeamSession.sessionId, mode: 'orchestrated', orchestratorMemberId: 'example-current-agent', paused: false, pauseReason: null, maxParallel: 3, maxTurns: 80, maxHops: 4, createdAt, updatedAt: createdAt },
+      members: [{ id: 'example-current-agent', groupId: sharedTeamSession.groupId, sessionId: sharedTeamSession.sessionId, handle: 'example-current', role: 'orchestrator', joinedAt: createdAt, removedAt: null }],
+      messages: [], requests: [], deliveries: [], assignments: [],
+    }];
+  }
   if (joinedSessions.length) {
     const internal = joinedSessions.flatMap((session, index) => [
       { id: `example-team-delivery-${index + 1}`, sessionId: session.id, role: 'user', kind: 'team-delivery', content: 'Human objective: add a total to each order row. Internal group routing rules: send a status report to the coordinator, do not expose this wrapper as a human message.', createdAt: new Date().toISOString() },
@@ -358,7 +387,8 @@ async function main() {
       localSessions = sourceBootstrap.sessions.filter((session) => session.projectId === projectId);
       assert.ok(projectId, 'fixture runtime supplies its example workspace');
       assert.ok(localSessions.length, 'fixture runtime supplies sample sessions');
-      await route.fulfill({ response, body: JSON.stringify(updateBootstrap()) });
+      latestBootstrapFixture = updateBootstrap();
+      await route.fulfill({ response, body: JSON.stringify(latestBootstrapFixture) });
       return;
     }
     if (url.pathname === '/api/account') {
@@ -400,12 +430,41 @@ async function main() {
         ],
         invitations: [], email: { configured: true }, exampleFixture: true,
       };
-      await jsonResponse(route, 200, collaborationSnapshot);
+      const collaborationView = structuredClone(collaborationSnapshot);
+      if (!collaborationBound) collaborationView.project = null;
+      await jsonResponse(route, 200, collaborationView);
       return;
     }
     if (/^\/api\/projects\/[^/]+\/team-structure$/.test(url.pathname) && method === 'GET') {
       teamStructureReads++;
       await jsonResponse(route, 200, teamStructureSnapshot(decodeURIComponent(url.pathname.split('/')[3])));
+      return;
+    }
+    if (/^\/api\/projects\/[^/]+\/team-orchestration\/share-session$/.test(url.pathname) && method === 'POST') {
+      const requestedProjectId = decodeURIComponent(url.pathname.split('/')[3]);
+      if (failShareSessionOnce) { failShareSessionOnce = false; await jsonResponse(route, 503, { error: 'Example fixture: team session setup temporarily unavailable.' }); return; }
+      const requestedSession = localSessions.find((session) => session.id === body.sessionId && session.projectId === requestedProjectId);
+      if (!requestedSession) { await jsonResponse(route, 400, { error: 'The selected session does not belong to this project.' }); return; }
+      if (body.expectedVersion !== undefined && body.expectedVersion !== orchestrationVersion) { await jsonResponse(route, 409, { error: 'Team settings changed; refresh and try again.' }); return; }
+      if (sharedTeamSession) { await jsonResponse(route, 409, { error: 'This project already has a shared session.' }); return; }
+      orchestrationEnabled = true;
+      orchestrationPermission = body.permissionLevel;
+      orchestrationVersion++;
+      sharedTeamSession = { groupId: 'example-shared-session-group', sessionId: requestedSession.id, title: requestedSession.name };
+      await jsonResponse(route, 200, teamStructureSnapshot(requestedProjectId));
+      return;
+    }
+    if (/^\/api\/projects\/[^/]+\/team-orchestration$/.test(url.pathname) && method === 'PATCH') {
+      if (rejectNextSettingsPatch) {
+        rejectNextSettingsPatch = false;
+        orchestrationVersion++;
+        await jsonResponse(route, 409, { error: 'Example fixture: the canonical group is busy.' });
+        return;
+      }
+      if (body.expectedVersion !== orchestrationVersion) { await jsonResponse(route, 409, { error: 'Team settings changed; refresh and try again.' }); return; }
+      orchestrationPermission = body.permissionLevel;
+      orchestrationVersion++;
+      await jsonResponse(route, 200, { ok: true, exampleFixture: true });
       return;
     }
     if (/^\/api\/projects\/[^/]+\/team-chat$/.test(url.pathname) && method === 'GET') {
@@ -419,6 +478,7 @@ async function main() {
     }
     if (/^\/api\/projects\/[^/]+\/collaboration\/invitations$/.test(url.pathname) && method === 'POST') {
       const id = `example-invitation-${collaborationSnapshot.invitations.length + 1}`;
+      collaborationBound = true;
       const status = deliveryMode;
       const invitation = { id, email: body.email, role: body.role ?? 'member', status: 'pending', expiresAt: new Date(Date.now() + 7 * 86_400_000).toISOString() };
       collaborationSnapshot.invitations.unshift(invitation);
@@ -514,11 +574,16 @@ async function main() {
     await teammates.click();
     await page.getByRole('dialog', { name: 'Teammates' }).waitFor();
     await page.getByLabel('Teammate email', { exact: true }).fill('new-person@example.invalid');
+    const selectedSessionId = await page.evaluate((id) => JSON.parse(localStorage.getItem('relay.ui.v2') ?? '{}').sessionByProject?.[id], projectId);
+    assert.equal(await page.locator('.team-orch-settings').count(), 0, 'a new project has no team settings panel before its invitation creates a binding');
     await page.locator('.pc-field--role select').selectOption('admin');
     await page.getByRole('button', { name: 'Send invite', exact: true }).click();
     await page.getByRole('status').filter({ hasText: /Invitation email sent to new-person@example.invalid/ }).waitFor();
+    await page.getByRole('status').filter({ hasText: /now shared with the team/ }).waitFor();
     const post = requests.findLast((item) => item.method === 'POST' && item.pathname === `/api/projects/${projectId}/collaboration/invitations`);
     assert.deepEqual(post?.body, { email: 'new-person@example.invalid', role: 'admin' });
+    const automaticShare = requests.findLast((item) => item.method === 'POST' && item.pathname === `/api/projects/${projectId}/team-orchestration/share-session`);
+    assert.deepEqual(automaticShare?.body, { sessionId: selectedSessionId, permissionLevel: 'supervised' }, 'successful invite setup attaches the frozen active session without asking for a session choice');
     assert.equal(requests.some((item) => item.method === 'POST' && item.pathname === '/api/sessions'), false, 'inviting does not create a provider session');
     await page.screenshot({ path: screenshots.invite, fullPage: true });
     await page.evaluate((token) => window.mingleProjectInvitations.emit(token), TOKEN);
@@ -546,15 +611,25 @@ async function main() {
     await page.locator('.toast').filter({ hasText: 'Join link copied.' }).waitFor();
   });
 
-  await test('combined local/team roster excludes remote proxies, refreshes orchestration, and supports owner-scoped actions', async () => {
+  await test('onboarding shares the active session directly and the roster stays separate from session/orchestrator controls', async () => {
     includeProxySession = true;
     publishedTeamSessionIds = [];
+    orchestrationEnabled = false;
+    orchestrationPermission = 'supervised';
+    orchestrationVersion = 3;
+    sharedTeamSession = null;
     await page.reload({ waitUntil: 'domcontentloaded' });
     await page.getByRole('button', { name: 'Add teammates', exact: true }).waitFor();
+    await page.locator('.sitem').filter({ hasText: 'Example local agent 2' }).click();
     const dialog = await ensureTeammatesDialog();
-    await dialog.getByText('This shared project is not yet a team-orchestrated project.').waitFor();
+    await dialog.getByRole('button', { name: 'Share current session', exact: true }).waitFor();
     assert.ok(requests.some((item) => item.method === 'GET' && item.pathname === `/api/projects/${projectId}/team-structure`), 'the settings panel receives a typed team-structure fixture rather than the generic array fallback');
     assert.equal(await dialog.getByRole('alert').count(), 0, 'the team settings panel renders without a malformed-snapshot error');
+    const onboarding = dialog.locator('.team-orch-settings');
+    await onboarding.getByText('Example local agent 2', { exact: true }).waitFor();
+    assert.equal(await onboarding.locator('select').count(), 0, 'onboarding offers no session, orchestrator, or fallback picker');
+    assert.equal(await onboarding.getByRole('switch').count(), 0, 'onboarding offers no leader-orchestration switch');
+    assert.equal(await onboarding.getByRole('button', { name: /fallback|leader/i }).count(), 0, 'onboarding exposes no fallback or leader-selection action');
     assert.equal(await dialog.locator('.pc-agent-row').filter({ hasText: 'Example remote Codex proxy' }).count(), 0, 'a proxy session recorded in group membership is not shown as a local project agent');
     assert.equal(await dialog.getByRole('checkbox', { name: /Share Example remote Codex proxy with this project/ }).count(), 0, 'a remote proxy cannot be selected for republication');
     await dialog.locator('.pc-agent-row').filter({ hasText: 'Example local Codex' }).waitFor();
@@ -564,7 +639,13 @@ async function main() {
     await teammate.getByRole('button').click();
     await dialog.getByRole('button', { name: 'Open recovery controls' }).waitFor();
     assert.match(await teammate.innerText(), /claude.*example-claude-model.*example-teammate-device/i);
-    assert.equal(await dialog.locator('#team-orchestrator-agent option').filter({ hasText: 'No roster agents available' }).count(), 1, 'the fixture starts with no agents in the orchestration roster');
+    const activeSessionId = await page.evaluate((id) => JSON.parse(localStorage.getItem('relay.ui.v2') ?? '{}').sessionByProject?.[id], projectId);
+    const shareCallsBefore = requests.filter((item) => item.method === 'POST' && item.pathname === `/api/projects/${projectId}/team-orchestration/share-session`).length;
+    await onboarding.getByRole('button', { name: 'Share current session', exact: true }).click();
+    await waitFor(() => requests.filter((item) => item.method === 'POST' && item.pathname === `/api/projects/${projectId}/team-orchestration/share-session`).length === shareCallsBefore + 1, 'active session share request');
+    const sessionShare = requests.findLast((item) => item.method === 'POST' && item.pathname === `/api/projects/${projectId}/team-orchestration/share-session`);
+    assert.deepEqual(sessionShare?.body, { sessionId: activeSessionId, permissionLevel: 'supervised' }, 'empty roster still shares the current session and uses its agent as the automatic lead');
+    await dialog.locator('.team-orch-settings__session').getByText('already shared', { exact: false }).waitFor();
     const check = dialog.getByRole('checkbox', { name: /Share Example local agent 2 with this project/ }).first();
     await check.check();
     const structureReadsBeforePublish = teamStructureReads;
@@ -573,9 +654,8 @@ async function main() {
     assert.ok(Array.isArray(publish?.body.sessionIds));
     assert.equal(publish.body.sessionIds.includes(PROXY_SESSION_ID), false, 'the publish API never receives the remote proxy session ID');
     await waitFor(async () => teamStructureReads > structureReadsBeforePublish
-      && await dialog.locator('#team-orchestrator-agent option').filter({ hasText: 'Example local agent 2' }).count() > 0, 'team orchestration settings refresh after the roster changes');
+      && await dialog.locator('.team-orch-settings__session').filter({ hasText: 'Example local agent 2' }).count() > 0, 'team orchestration settings refresh after the roster changes');
     assert.ok(teamStructureReads > structureReadsBeforePublish, 'team orchestration settings refetch after the roster changes');
-    assert.equal(await dialog.locator('#team-orchestrator-agent option').filter({ hasText: 'No roster agents available' }).count(), 0, 'the stale empty-roster option is replaced without reopening Teammates');
     await dialog.getByLabel('Share a project note').fill('Example team note');
     await dialog.getByRole('button', { name: 'Share note', exact: true }).click();
     assert.ok(requests.some((item) => item.pathname === '/api/distributed/messages' && item.body.content === 'Example team note'));
@@ -597,6 +677,124 @@ async function main() {
     await page.getByRole('button', { name: 'Add teammates', exact: true }).waitFor();
     includeProxySession = false;
     publishedTeamSessionIds = [];
+  });
+
+  await test('legacy enabled project keeps full access on invite, reports setup failure truthfully, and retries sharing without resending', async () => {
+    orchestrationEnabled = true;
+    orchestrationPermission = 'full-access';
+    orchestrationVersion = 15;
+    sharedTeamSession = null;
+    hideProjectSessions = false;
+    addWrongProjectSession = false;
+    failShareSessionOnce = true;
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    await page.getByRole('button', { name: 'Add teammates', exact: true }).waitFor();
+    await page.locator('.sitem').filter({ hasText: 'Example local agent 2' }).click();
+    const dialog = await ensureTeammatesDialog();
+    const onboarding = dialog.locator('.team-orch-settings');
+    await onboarding.getByRole('alert').filter({ hasText: /Full access requires every teammate/ }).waitFor();
+    const selectedSessionId = await page.evaluate((id) => JSON.parse(localStorage.getItem('relay.ui.v2') ?? '{}').sessionByProject?.[id], projectId);
+    const invitationsBefore = requests.filter((item) => item.method === 'POST' && item.pathname === `/api/projects/${projectId}/collaboration/invitations`).length;
+    const shareCallsBefore = requests.filter((item) => item.method === 'POST' && item.pathname === `/api/projects/${projectId}/team-orchestration/share-session`).length;
+    await dialog.getByLabel('Teammate email', { exact: true }).fill('setup-retry@example.invalid');
+    await dialog.getByRole('button', { name: 'Send invite', exact: true }).click();
+    await dialog.getByRole('status').filter({ hasText: /Invitation email sent to setup-retry@example.invalid/ }).filter({ hasText: /could not be completed/ }).waitFor();
+    const automaticShare = requests.findLast((item) => item.method === 'POST' && item.pathname === `/api/projects/${projectId}/team-orchestration/share-session`);
+    assert.deepEqual(automaticShare?.body, { sessionId: selectedSessionId, permissionLevel: 'full-access', expectedVersion: 15 }, 'legacy enabled/no-group setup preserves its existing permission and optimistic version');
+    assert.equal(await dialog.getByRole('button', { name: 'Share current session', exact: true }).isEnabled(), true, 'the panel offers share-only recovery after setup fails');
+    await dialog.getByRole('button', { name: 'Share current session', exact: true }).click();
+    await waitFor(() => requests.filter((item) => item.method === 'POST' && item.pathname === `/api/projects/${projectId}/team-orchestration/share-session`).length === shareCallsBefore + 2, 'share-only retry');
+    const retry = requests.findLast((item) => item.method === 'POST' && item.pathname === `/api/projects/${projectId}/team-orchestration/share-session`);
+    assert.deepEqual(retry?.body, { sessionId: selectedSessionId, permissionLevel: 'full-access', expectedVersion: 15 });
+    assert.equal(requests.filter((item) => item.method === 'POST' && item.pathname === `/api/projects/${projectId}/collaboration/invitations`).length, invitationsBefore + 1, 'retrying setup never resends the invitation email');
+    orchestrationEnabled = false;
+    orchestrationPermission = 'supervised';
+    orchestrationVersion = 3;
+    sharedTeamSession = null;
+  });
+
+  await test('an established shared session takes precedence and is never rebound by an invitation', async () => {
+    orchestrationEnabled = true;
+    orchestrationPermission = 'supervised';
+    orchestrationVersion = 28;
+    sharedTeamSession = { groupId: 'example-established-group', sessionId: localSessions[0].id, title: 'Example established shared session' };
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    await page.getByRole('button', { name: 'Add teammates', exact: true }).waitFor();
+    await page.locator('.sitem').filter({ hasText: 'Example local agent 2' }).click();
+    const dialog = await ensureTeammatesDialog();
+    const summary = dialog.locator('.team-orch-settings__session');
+    await summary.getByText('Example local Codex', { exact: true }).waitFor();
+    await summary.getByText('already shared', { exact: false }).waitFor();
+    assert.equal(await dialog.getByRole('button', { name: 'Share current session', exact: true }).count(), 0, 'a bound canonical session has no rebind action');
+    const shareCount = requests.filter((item) => item.method === 'POST' && item.pathname === `/api/projects/${projectId}/team-orchestration/share-session`).length;
+    await dialog.getByLabel('Teammate email', { exact: true }).fill('existing-session@example.invalid');
+    await dialog.getByRole('button', { name: 'Send invite', exact: true }).click();
+    await dialog.getByRole('status').filter({ hasText: /existing shared session.*remains in use/ }).waitFor();
+    assert.equal(requests.filter((item) => item.method === 'POST' && item.pathname === `/api/projects/${projectId}/team-orchestration/share-session`).length, shareCount, 'invitation setup leaves the established shared group attached');
+    assert.equal((await summary.innerText()).includes('Example local agent 2'), false, 'a changed active session cannot replace the canonical shared session');
+  });
+
+  await test('permission edits use only the versioned permission patch and preserve advanced leader settings', async () => {
+    orchestrationEnabled = true;
+    orchestrationPermission = 'supervised';
+    orchestrationVersion = 41;
+    sharedTeamSession = { groupId: 'example-permission-group', sessionId: localSessions[0].id, title: 'Example permission group' };
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    await page.getByRole('button', { name: 'Add teammates', exact: true }).waitFor();
+    const dialog = await ensureTeammatesDialog();
+    const onboarding = dialog.locator('.team-orch-settings');
+    await onboarding.getByRole('radio', { name: 'Full access', exact: true }).click();
+    await onboarding.getByRole('button', { name: 'Save permission level', exact: true }).click();
+    await onboarding.getByRole('status').filter({ hasText: 'Team permission level saved.' }).waitFor();
+    const update = requests.findLast((item) => item.method === 'PATCH' && item.pathname === `/api/projects/${projectId}/team-orchestration`);
+    assert.deepEqual(update?.body, { permissionLevel: 'full-access', expectedVersion: 41 }, 'permission-only save does not reset leader orchestration, orchestrator, or fallback settings');
+    assert.equal(requests.some((item) => item.method === 'POST' && item.pathname === `/api/projects/${projectId}/team-orchestration/share-session`), false, 'permission editing does not call the binding endpoint');
+    sharedTeamSession = null;
+    orchestrationEnabled = false;
+    orchestrationPermission = 'supervised';
+    orchestrationVersion = 3;
+  });
+
+  await test('permission conflicts preserve the backend reason and refresh guidance', async () => {
+    orchestrationEnabled = true;
+    orchestrationPermission = 'supervised';
+    orchestrationVersion = 52;
+    sharedTeamSession = { groupId: 'example-conflict-group', sessionId: localSessions[0].id, title: 'Example conflict group' };
+    rejectNextSettingsPatch = true;
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    await page.getByRole('button', { name: 'Add teammates', exact: true }).waitFor();
+    const dialog = await ensureTeammatesDialog();
+    const onboarding = dialog.locator('.team-orch-settings');
+    await onboarding.getByRole('radio', { name: 'Full access', exact: true }).click();
+    await onboarding.getByRole('button', { name: 'Save permission level', exact: true }).click();
+    const error = onboarding.getByRole('alert').filter({ hasText: /canonical group is busy/ });
+    await error.waitFor();
+    assert.match(await error.innerText(), /Refresh team settings and try again after resolving the issue/);
+    assert.doesNotMatch(await error.innerText(), /permissions changed elsewhere/i, 'a non-version conflict is not mislabeled as a permission edit');
+    sharedTeamSession = null;
+    orchestrationEnabled = false;
+    orchestrationPermission = 'supervised';
+    orchestrationVersion = 3;
+  });
+
+  await test('missing local session never borrows another project session', async () => {
+    hideProjectSessions = true;
+    addWrongProjectSession = true;
+    sharedTeamSession = null;
+    orchestrationEnabled = false;
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    await page.getByRole('button', { name: 'Add teammates', exact: true }).waitFor();
+    const persistedSelection = await page.evaluate((id) => JSON.parse(localStorage.getItem('relay.ui.v2') ?? '{}').sessionByProject?.[id], projectId);
+    assert.equal(persistedSelection, undefined, 'the selected project has no local-session selection');
+    assert.ok(latestBootstrapFixture.sessions.some((session) => session.projectId !== projectId), 'bootstrap still contains another project’s session');
+    const dialog = await ensureTeammatesDialog();
+    const onboarding = dialog.locator('.team-orch-settings');
+    await onboarding.getByText(/No local session is open for this project/).waitFor();
+    await onboarding.getByRole('button', { name: 'Open this project', exact: true }).waitFor();
+    assert.equal(await onboarding.getByRole('button', { name: 'Share current session', exact: true }).isDisabled(), true, 'sharing stays disabled without a session from this project');
+    assert.equal(await onboarding.locator('.team-orch-settings__session').count(), 0, 'a session from another project is never auto-selected');
+    hideProjectSessions = false;
+    addWrongProjectSession = false;
   });
 
   await test('cold ?join link clears from address/history and resumes after in-place sign-in', async () => {

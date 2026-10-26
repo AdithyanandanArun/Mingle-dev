@@ -1,193 +1,194 @@
-import { useEffect, useMemo, useState } from 'react';
-import { ArrowDown, ArrowUp, CircleAlert, Crown, RefreshCw, Users } from 'lucide-react';
-import type { TeamPermissionLevel, TeamStructureSnapshot, UpdateTeamOrchestration } from '@mingle/contracts';
-import { Button, Segmented, Switch } from '../../ui';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { AlertTriangle, CircleAlert, Crown, RefreshCw, Users } from 'lucide-react';
+import type { Session, TeamPermissionLevel, TeamStructureSnapshot, UpdateTeamOrchestration } from '@mingle/contracts';
+import { useMingle } from '../../../store/store';
+import { Button, Segmented } from '../../ui';
 import { TeamOrchestrationApiError, teamOrchestrationApi } from './api';
 import './team-orchestration-settings.css';
 
-interface DraftSettings {
-  leaderOrchestration: boolean;
-  permissionLevel: TeamPermissionLevel;
-  orchestratorAgentId: string;
-  fallbackAgentIds: string[];
-}
-
-const EMPTY_DRAFT: DraftSettings = {
-  leaderOrchestration: true,
-  permissionLevel: 'supervised',
-  orchestratorAgentId: '',
-  fallbackAgentIds: [],
-};
-
-export function TeamOrchestrationSettings({ projectId }: { projectId: string }) {
+export function TeamOrchestrationSettings({ projectId, currentSession, onShared, onOpenProject }: {
+  projectId: string;
+  /** Captured when the Teammates dialog opens; never follows later workspace navigation. */
+  currentSession: Session | null;
+  onShared?: () => void;
+  onOpenProject?: () => void;
+}) {
+  const activeProjectId = useMingle((state) => state.activeProjectId);
   const [snapshot, setSnapshot] = useState<TeamStructureSnapshot | null>(null);
-  const [draft, setDraft] = useState<DraftSettings>(EMPTY_DRAFT);
+  const [permissionLevel, setPermissionLevel] = useState<TeamPermissionLevel>('supervised');
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const [conflict, setConflict] = useState(false);
-  const [saved, setSaved] = useState(false);
+  const [saved, setSaved] = useState<'shared' | 'permission' | null>(null);
+  const operation = useRef(0);
+  const currentProjectId = useRef(projectId);
+  currentProjectId.current = projectId;
+
+  const hasCanonicalSession = Boolean(snapshot?.teamSession);
+  const sharedSession = useMemo(() => {
+    if (snapshot?.teamSession) {
+      const ref = snapshot.teamSession;
+      const session = useMingle.getState().boot?.sessions.find((item) => item.id === ref.sessionId && item.projectId === projectId);
+      return {
+        id: ref.sessionId,
+        name: session?.name ?? ref.title,
+        detail: session ? `${session.provider} · ${session.model}` : 'Shared project session',
+      };
+    }
+    if (currentSession?.projectId === projectId) return {
+      id: currentSession.id,
+      name: currentSession.name,
+      detail: `${currentSession.provider} · ${currentSession.model}`,
+    };
+    return null;
+  }, [currentSession, projectId, snapshot?.teamSession]);
+
+  const canApply = (sequence: number, signal?: AbortSignal) => sequence === operation.current
+    && currentProjectId.current === projectId
+    && useMingle.getState().activeProjectId === projectId
+    && !signal?.aborted;
+  const canFinish = (sequence: number) => sequence === operation.current && currentProjectId.current === projectId;
 
   const load = async (signal?: AbortSignal) => {
+    const sequence = ++operation.current;
     setLoading(true);
     setError('');
     try {
       const next = await teamOrchestrationApi.structure(projectId, signal);
-      if (signal?.aborted) return;
+      if (!canApply(sequence, signal)) return;
       setSnapshot(next);
-      setDraft(next.settings ? {
-        leaderOrchestration: next.settings.leaderOrchestration,
-        permissionLevel: next.settings.permissionLevel,
-        orchestratorAgentId: next.settings.orchestratorAgentId ?? '',
-        fallbackAgentIds: [...next.settings.fallbackAgentIds],
-      } : { ...EMPTY_DRAFT, orchestratorAgentId: next.members[0]?.agentId ?? '' });
+      setPermissionLevel(next.settings?.permissionLevel ?? 'supervised');
     } catch (cause) {
-      if (!signal?.aborted) setError(cause instanceof Error ? cause.message : 'Could not load team settings.');
+      if (canApply(sequence, signal)) setError(cause instanceof Error ? cause.message : 'Could not load team settings.');
     } finally {
-      if (!signal?.aborted) setLoading(false);
+      if (canFinish(sequence)) setLoading(false);
     }
   };
 
   useEffect(() => {
     const controller = new AbortController();
     setSnapshot(null);
+    setPermissionLevel('supervised');
     void load(controller.signal);
-    return () => controller.abort();
+    return () => { operation.current++; controller.abort(); };
     // projectId identifies this dialog's backing project.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectId]);
 
-  const members = snapshot?.members ?? [];
-  const roster = useMemo(() => new Map(members.map((member) => [member.agentId, member])), [members]);
-  const orchestrator = draft.orchestratorAgentId ? roster.get(draft.orchestratorAgentId) : undefined;
-  const canEdit = Boolean(snapshot?.canEdit && snapshot.host.online);
-  const enabled = Boolean(snapshot?.enabled && snapshot.settings);
-  const choosingFullAccess = draft.permissionLevel === 'full-access';
+  const canEdit = Boolean(snapshot?.canEdit && snapshot.host.online && snapshot.host.isThisDevice);
+  const projectIsActive = activeProjectId === projectId;
+  const hasSessionForProject = Boolean(sharedSession);
+  const choosingFullAccess = permissionLevel === 'full-access';
+
+  const refreshAfterShare = async (latest: TeamStructureSnapshot, targetSessionId: string, navigate: boolean, sequence: number) => {
+    if (!canApply(sequence)) return;
+    setSnapshot(latest);
+    setPermissionLevel(latest.settings?.permissionLevel ?? permissionLevel);
+    const store = useMingle.getState();
+    store.setTeamSessionInfo(projectId, latest.teamSession ?? null, latest.host.isThisDevice);
+    await store.refreshNow();
+    if (!canApply(sequence)) return;
+    if (navigate && targetSessionId) store.selectSession(targetSessionId);
+  };
 
   const save = async () => {
-    if (!snapshot || !canEdit || saving) return;
+    if (!snapshot || !canEdit || !sharedSession || !projectIsActive || saving) return;
+    const sequence = ++operation.current;
+    const bindingSessionId = sharedSession.id;
+    const bindSession = !hasCanonicalSession;
     setSaving(true);
     setError('');
     setConflict(false);
-    setSaved(false);
+    setSaved(null);
     try {
-      if (!snapshot.enabled || !snapshot.settings) {
-        if (!draft.orchestratorAgentId) throw new Error('Choose an orchestrator agent before enabling this project.');
-        await teamOrchestrationApi.enable(projectId, {
-          leaderOrchestration: draft.leaderOrchestration,
-          permissionLevel: draft.permissionLevel,
-          orchestratorAgentId: draft.orchestratorAgentId,
-          fallbackAgentIds: draft.fallbackAgentIds.filter((id) => id !== draft.orchestratorAgentId),
+      let latest: TeamStructureSnapshot;
+      if (bindSession) {
+        latest = await teamOrchestrationApi.shareSession(projectId, {
+          sessionId: bindingSessionId,
+          permissionLevel,
+          ...(snapshot.settings ? { expectedVersion: snapshot.settings.version } : {}),
         });
       } else {
+        if (!snapshot.settings) throw new Error('Team settings are unavailable. Refresh before changing the permission level.');
         const update: UpdateTeamOrchestration = {
-          leaderOrchestration: draft.leaderOrchestration,
-          permissionLevel: draft.permissionLevel,
-          fallbackAgentIds: draft.fallbackAgentIds.filter((id) => id !== snapshot.settings?.orchestratorAgentId),
+          permissionLevel,
           expectedVersion: snapshot.settings.version,
         };
         await teamOrchestrationApi.updateSettings(projectId, update);
+        latest = await teamOrchestrationApi.structure(projectId);
       }
-      const latest = await teamOrchestrationApi.structure(projectId);
-      setSnapshot(latest);
-      setDraft(latest.settings ? {
-        leaderOrchestration: latest.settings.leaderOrchestration,
-        permissionLevel: latest.settings.permissionLevel,
-        orchestratorAgentId: latest.settings.orchestratorAgentId ?? '',
-        fallbackAgentIds: [...latest.settings.fallbackAgentIds],
-      } : EMPTY_DRAFT);
-      setSaved(true);
+      if (!canApply(sequence)) return;
+      if (bindSession) await refreshAfterShare(latest, latest.teamSession?.sessionId ?? bindingSessionId, true, sequence);
+      else {
+        setSnapshot(latest);
+        setPermissionLevel(latest.settings?.permissionLevel ?? permissionLevel);
+      }
+      if (!canApply(sequence)) return;
+      setSaved(bindSession ? 'shared' : 'permission');
+      if (bindSession) onShared?.();
     } catch (cause) {
+      if (!canApply(sequence)) return;
       if (cause instanceof TeamOrchestrationApiError && cause.status === 409) {
         setConflict(true);
+        setError(`${cause.message} Refresh team settings and try again after resolving the issue.`);
         try {
           const latest = await teamOrchestrationApi.structure(projectId);
-          setSnapshot(latest);
-          setDraft(latest.settings ? {
-            leaderOrchestration: latest.settings.leaderOrchestration,
-            permissionLevel: latest.settings.permissionLevel,
-            orchestratorAgentId: latest.settings.orchestratorAgentId ?? '',
-            fallbackAgentIds: [...latest.settings.fallbackAgentIds],
-          } : EMPTY_DRAFT);
+          if (canApply(sequence)) {
+            setSnapshot(latest);
+            setPermissionLevel(latest.settings?.permissionLevel ?? 'supervised');
+          }
         } catch (refreshCause) {
-          setError(refreshCause instanceof Error ? refreshCause.message : 'Could not refresh the latest team settings.');
+          if (canApply(sequence)) setError(refreshCause instanceof Error ? refreshCause.message : 'Could not refresh the latest team settings.');
         }
       } else setError(cause instanceof Error ? cause.message : 'Could not save team settings.');
-    } finally { setSaving(false); }
+    } finally {
+      if (canFinish(sequence)) setSaving(false);
+    }
   };
 
-  const addFallback = (agentId: string) => {
-    if (!agentId || draft.fallbackAgentIds.length >= 4 || draft.fallbackAgentIds.includes(agentId) || agentId === draft.orchestratorAgentId) return;
-    setDraft((current) => ({ ...current, fallbackAgentIds: [...current.fallbackAgentIds, agentId] }));
-  };
-
-  const moveFallback = (index: number, direction: -1 | 1) => {
-    setDraft((current) => {
-      const nextIndex = index + direction;
-      if (nextIndex < 0 || nextIndex >= current.fallbackAgentIds.length) return current;
-      const fallbackAgentIds = [...current.fallbackAgentIds];
-      [fallbackAgentIds[index], fallbackAgentIds[nextIndex]] = [fallbackAgentIds[nextIndex]!, fallbackAgentIds[index]!];
-      return { ...current, fallbackAgentIds };
-    });
+  const openProject = () => {
+    if (onOpenProject) onOpenProject();
+    else {
+      const store = useMingle.getState();
+      store.selectProject(projectId);
+    }
   };
 
   return <section className="team-orch-settings" aria-labelledby="team-orch-settings-title" aria-busy={loading || saving}>
     <header className="team-orch-settings__heading">
       <span className="team-orch-settings__icon"><Crown size={16} /></span>
-      <div><h3 id="team-orch-settings-title">Make this a team project</h3><p>Coordinate consented agents across teammate devices.</p></div>
+      <div><h3 id="team-orch-settings-title">Share a session with the team</h3><p>The current session’s agent coordinates team work automatically.</p></div>
       <Button size="sm" variant="ghost" disabled={loading || saving} onClick={() => void load()} aria-label="Refresh team orchestration settings"><RefreshCw size={13} /></Button>
     </header>
     {loading && !snapshot ? <p className="team-orch-settings__status" role="status">Loading team settings…</p> : null}
     {error ? <p className="team-orch-settings__error" role="alert"><CircleAlert size={14} />{error}</p> : null}
-    {conflict ? <p className="team-orch-settings__notice" role="status">These settings changed elsewhere. The latest version is shown; review it and save again if needed.</p> : null}
-    {saved ? <p className="team-orch-settings__success" role="status">Team project settings saved.</p> : null}
+    {conflict ? <p className="team-orch-settings__notice" role="status">The latest team settings are loaded. Resolve the reported issue, then try again.</p> : null}
+    {saved ? <p className="team-orch-settings__success" role="status">{saved === 'shared' ? 'Current session shared with the team.' : 'Team permission level saved.'}</p> : null}
     {snapshot ? <>
-      {!snapshot.host.online ? <p className="team-orch-settings__notice" role="status">The lead’s device is offline. Team orchestration settings can’t be changed until it reconnects.</p>
-        : !snapshot.host.isThisDevice ? <p className="team-orch-settings__notice" role="status">This device is not the project host. Only the lead’s device can change team orchestration settings.</p>
-          : !snapshot.canEdit ? <p className="team-orch-settings__notice" role="status">Only the team lead or an admin on the lead’s device can change these settings.</p> : null}
-      {snapshot.enabled && snapshot.settings ? <p className="team-orch-settings__summary"><Users size={14} /> Team orchestration is on · {snapshot.settings.permissionLevel === 'supervised' ? 'Supervised' : 'Full access'} · {snapshot.members.length} roster agents</p>
-        : <p className="team-orch-settings__summary"><Users size={14} /> This shared project is not yet a team-orchestrated project.</p>}
-      {!canEdit && snapshot.enabled && snapshot.settings ? <div className="team-orch-settings__readonly" aria-label="Read-only team orchestration settings">
-        <p><strong>Leader orchestration</strong><span>{draft.leaderOrchestration ? 'On · untagged team messages go to the orchestrator' : 'Off · only @mentions start agents'}</span></p>
-        <p><strong>Group permission level</strong><span>{draft.permissionLevel === 'supervised' ? 'Supervised' : 'Full access'}</span></p>
-        <p><strong>Orchestrator agent</strong><span>{orchestrator ? `${orchestrator.name} · ${orchestrator.ownerDisplayName} · ${orchestrator.deviceName}` : 'Not assigned'}</span></p>
-        <p><strong>Fallback leaders</strong><span>{draft.fallbackAgentIds.map((id) => roster.get(id)?.name ?? 'Unavailable agent').join(' → ') || 'None selected'}</span></p>
-      </div> : !canEdit ? <p className="team-orch-settings__notice" role="status">Team orchestration is not enabled. Only the team lead or an admin on the lead’s device can enable it.</p> : null}
-      {canEdit ? <fieldset className="team-orch-settings__controls" aria-label="Edit team orchestration settings">
-      <Switch checked={draft.leaderOrchestration} onChange={(value) => { setDraft((current) => ({ ...current, leaderOrchestration: value })); setSaved(false); }} label="Leader orchestration" description="When on, untagged messages go to the orchestrator agent. When off, only @mentions start agents." id="team-leader-orchestration" />
-      <div className="team-orch-settings__field">
-        <strong>Group permission level</strong>
-        <Segmented value={draft.permissionLevel} onChange={(value) => { setDraft((current) => ({ ...current, permissionLevel: value })); setSaved(false); }} label="Group permission level" options={[
-          { value: 'supervised', label: 'Supervised' }, { value: 'full-access', label: 'Full access' },
-        ]} />
-        <p>Supervised runs ask the agent owner before file or command actions. Full access allows remote runs with full local tool permission in an isolated worktree; the owner device still controls its own credentials and can pause or revoke access.</p>
-        {choosingFullAccess ? <p className="team-orch-settings__warning" role="alert"><CircleAlert size={14} />Choosing Full access means all teammates must consent at this level. Raising a project from Supervised to Full access requires every teammate to re-consent before new work is delivered.</p> : null}
-      </div>
-      <div className="team-orch-settings__field">
-        <label htmlFor="team-orchestrator-agent">Orchestrator agent</label>
-        {snapshot.enabled && snapshot.settings ? <p className="team-orch-settings__value">{orchestrator?.name ?? 'No orchestrator assigned'}{orchestrator ? ` · ${orchestrator.ownerDisplayName} · ${orchestrator.deviceName}` : ''}. Change the active leader in Team structure.</p> : <>
-          <select id="team-orchestrator-agent" value={draft.orchestratorAgentId} disabled={!canEdit || !members.length} onChange={(event) => setDraft((current) => ({ ...current, orchestratorAgentId: event.target.value, fallbackAgentIds: current.fallbackAgentIds.filter((id) => id !== event.target.value) }))}>
-            <option value="">{members.length ? 'Choose an agent…' : 'No roster agents available'}</option>
-            {members.map((member) => <option key={member.agentId} value={member.agentId}>{member.name} · {member.ownerDisplayName} · {member.deviceName}</option>)}
-          </select>
-          {!members.length ? <p>Share an agent to the project roster before enabling orchestration. Agents on any teammate device can be selected.</p> : null}
-        </>}
-      </div>
-      <div className="team-orch-settings__field">
-        <strong>Fallback leaders <span>(optional · up to 4)</span></strong>
-        <p>If the orchestrator goes offline or exhausts quota, Mingle tries these agents in order.</p>
-        {draft.fallbackAgentIds.length ? <ol className="team-orch-settings__fallbacks">{draft.fallbackAgentIds.map((id, index) => {
-          const member = roster.get(id);
-          return <li key={id}><span><b>{index + 1}.</b> {member?.name ?? 'Agent unavailable'} <small>{member ? `${member.ownerDisplayName} · ${member.deviceName}` : id}</small></span>
-            <div><Button size="sm" variant="ghost" disabled={!canEdit || index === 0} aria-label={`Move ${member?.name ?? 'fallback'} up`} onClick={() => moveFallback(index, -1)}><ArrowUp size={13} /></Button><Button size="sm" variant="ghost" disabled={!canEdit || index === draft.fallbackAgentIds.length - 1} aria-label={`Move ${member?.name ?? 'fallback'} down`} onClick={() => moveFallback(index, 1)}><ArrowDown size={13} /></Button><Button size="sm" variant="ghost" disabled={!canEdit} onClick={() => setDraft((current) => ({ ...current, fallbackAgentIds: current.fallbackAgentIds.filter((item) => item !== id) }))}>Remove</Button></div>
-          </li>;
-        })}</ol> : <p className="team-orch-settings__empty">No fallback leaders selected.</p>}
-        {draft.fallbackAgentIds.length < 4 ? <label className="team-orch-settings__add-fallback">Add fallback agent
-          <select value="" disabled={!canEdit || members.length === 0} onChange={(event) => addFallback(event.target.value)}><option value="">Choose an agent…</option>{members.filter((member) => member.agentId !== draft.orchestratorAgentId && !draft.fallbackAgentIds.includes(member.agentId)).map((member) => <option key={member.agentId} value={member.agentId}>{member.name} · {member.ownerDisplayName} · {member.deviceName}</option>)}</select>
-        </label> : null}
-      </div>
+      {!snapshot.host.online ? <p className="team-orch-settings__notice" role="status">The lead’s device is offline. Team sharing can’t be changed until it reconnects.</p>
+        : !snapshot.host.isThisDevice ? <p className="team-orch-settings__notice" role="status">This device is not the project host. Only the lead’s device can share a session or change its permission level.</p>
+          : !snapshot.canEdit ? <p className="team-orch-settings__notice" role="status">Only the team lead or an admin on the lead’s device can share a session or change its permission level.</p> : null}
+      {!projectIsActive ? <p className="team-orch-settings__notice" role="status">The active project changed. Close Teammates and reopen it before sharing or changing permissions.</p> : null}
+      {sharedSession ? <div className="team-orch-settings__session" aria-label="Current shared session">
+        <Users size={14} /><span><strong>{sharedSession.name}</strong><small>{sharedSession.detail}{hasCanonicalSession ? ' · already shared' : ' · selected session on this device'}</small></span>
+      </div> : <div className="team-orch-settings__no-session" role="status">
+        <p>No local session is open for this project. Open the project and create or select a session, then reopen Teammates to share it.</p>
+        <Button size="sm" variant="ghost" disabled={saving} onClick={openProject}>Open this project</Button>
+      </div>}
+      {snapshot.enabled && snapshot.settings && !snapshot.teamSession ? <p className="team-orch-settings__notice" role="status">Share this session to finish team setup.</p> : null}
+      {!canEdit && snapshot.settings ? <p className="team-orch-settings__summary"><Users size={14} /> Team permission: {snapshot.settings.permissionLevel === 'supervised' ? 'Supervised' : 'Full access'}</p> : null}
+      {canEdit && hasSessionForProject ? <fieldset className="team-orch-settings__controls" aria-label="Team permission level" disabled={saving}>
+        <div className="team-orch-settings__field">
+          <strong>Maximum permission for teammate runs</strong>
+          <Segmented value={permissionLevel} onChange={(value) => { setPermissionLevel(value); setSaved(null); }} label="Team permission level" options={[
+            { value: 'supervised', label: 'Supervised' }, { value: 'full-access', label: 'Full access' },
+          ]} />
+          <p>Teammate agents run on their owners’ devices with the owners’ provider accounts, in isolated worktrees; Mingle never pushes their changes. Owners must consent to the selected level and can pause or revoke access at any time.</p>
+          {choosingFullAccess ? <p className="team-orch-settings__warning" role="alert"><AlertTriangle size={14} />Full access requires every teammate to consent at this level. Raising a project from Supervised to Full access requires teammates to re-consent before new work is delivered.</p> : null}
+        </div>
       </fieldset> : null}
-      {canEdit ? <div className="team-orch-settings__actions"><Button variant="primary" size="sm" disabled={saving || (!snapshot.enabled && (!draft.orchestratorAgentId || !members.length))} busy={saving} onClick={() => void save()}>{enabled ? 'Save team settings' : 'Enable team project'}</Button></div> : null}
+      {canEdit ? <div className="team-orch-settings__actions"><Button variant="primary" size="sm" disabled={saving || loading || !projectIsActive || !hasSessionForProject || (!hasCanonicalSession && currentSession?.projectId !== projectId)} busy={saving} onClick={() => void save()}>{hasCanonicalSession ? 'Save permission level' : 'Share current session'}</Button></div> : null}
     </> : null}
   </section>;
 }
