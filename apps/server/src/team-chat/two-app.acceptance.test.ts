@@ -10,8 +10,11 @@ import { FakeProviders, makeRepo, runGit, startTestApp, tmpDir, waitFor, type Te
 import { ProjectInvitationCloudFixture } from '../project-collaboration-cloud.test-utils.ts';
 
 const FULL_ACCESS_POLICIES = ['supervised', 'balanced', 'auto', 'full-access'] as const;
+const toolTimings: Array<{ name: string; startedAt: number; repliedAt?: number; closedAt?: number }> = [];
 
 async function callTeamTool(connection: TeamMcpConnection, name: string, args: Record<string, unknown> = {}): Promise<any> {
+  const timing = { name, startedAt: Date.now() } as typeof toolTimings[number];
+  toolTimings.push(timing);
   const client = new Client({ name: 'mingle-two-app-acceptance', version: '1.0.0' }, { capabilities: {} });
   const transport = new StreamableHTTPClientTransport(new URL(connection.url), {
     requestInit: { headers: { Authorization: `Bearer ${connection.token}` } },
@@ -19,11 +22,12 @@ async function callTeamTool(connection: TeamMcpConnection, name: string, args: R
   await client.connect(transport);
   try {
     const result = await client.callTool({ name, arguments: args });
+    timing.repliedAt = Date.now();
     const text = (result.content as Array<{ type: string; text?: string }>).find((item) => item.type === 'text')?.text;
     if (result.isError) throw new Error(`${name} failed: ${text ?? 'no error details'}`);
     if (!text) return null;
     return JSON.parse(text);
-  } finally { await client.close(); }
+  } finally { await client.close(); timing.closedAt = Date.now(); }
 }
 
 function fullAccessFakeProviders(): FakeProviders {
@@ -434,11 +438,16 @@ it('shares imported session history and team messages over HTTP and the encrypte
     });
     expect(request.status, JSON.stringify(request.json)).toBe(202);
     try {
-      await waitFor(async () => {
-        await teammate.app.distributed.transport.sync();
-        await leader.app.distributed.transport.sync();
-        return workerRuns.length === 2;
-      }, 15_000, 'both delegated remote worker runs');
+      // These assignments run sequentially: the second depends on the first's
+      // committed artifacts and coordinator review. Keep a bounded deadline for
+      // each worker rather than charging both workflows to one worker's budget.
+      for (const expectedWorkerRuns of [1, 2]) {
+        await waitFor(async () => {
+          await teammate.app.distributed.transport.sync();
+          await leader.app.distributed.transport.sync();
+          return workerRuns.length >= expectedWorkerRuns;
+        }, 15_000, `delegated remote worker run ${expectedWorkerRuns}`);
+      }
     } catch (error) {
       const current = leader.app.groups.get(teamGroupId);
       const activeAssignment = current.assignments.find((assignment) => assignment.taskId === assignmentTaskIds[0]);
@@ -446,6 +455,15 @@ it('shares imported session history and team messages over HTTP and the encrypte
         workerRuns: workerRuns.length,
         leaderRuns: leader.fake.runs.length,
         teammateRuns: teammate.fake.runs.length,
+        recentToolTimings: toolTimings.slice(-8).map(({ name, startedAt, repliedAt, closedAt }) => ({ name,
+          elapsedMs: Date.now() - startedAt, replyMs: repliedAt === undefined ? null : repliedAt - startedAt,
+          closeMs: closedAt === undefined ? null : closedAt - startedAt })),
+        ownerToolInbox: teammate.app.store.db.prepare(`SELECT idempotency_key,status,error FROM mingle_transport_inbox
+          WHERE kind='teamgroup.tool.result' ORDER BY received_at DESC LIMIT 3`).all(),
+        hostToolOutbox: leader.app.store.db.prepare(`SELECT idempotency_key,status,error FROM mingle_transport_outbox
+          WHERE kind='teamgroup.tool.result' ORDER BY created_at DESC LIMIT 3`).all(),
+        ownerToolOutbox: teammate.app.store.db.prepare(`SELECT idempotency_key,status,error FROM mingle_transport_outbox
+          WHERE kind='teamgroup.tool.call' ORDER BY created_at DESC LIMIT 3`).all(),
         hostDeliveries: leader.app.store.db.prepare(`SELECT delivery_id,status,failure_json FROM mingle_team_host_deliveries WHERE shared_project_id=?`)
           .all(join.json.sharedProjectId),
         ownerDeliveries: teammate.app.store.db.prepare(`SELECT delivery_id,status,error,json_extract(request_json,'$.inputArtifacts') AS inputs
