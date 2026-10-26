@@ -34,7 +34,7 @@ interface ProxyBinding {
   inFlight: number;
   controllers: Set<AbortController>;
   /** Transfers an owner-local artifact before the host validates/records its typed handoff. */
-  prepareArtifact?: (input: TeamArtifactInput) => Promise<TeamArtifactRef>;
+  prepareArtifact?: (input: TeamArtifactInput, signal: AbortSignal) => Promise<TeamArtifactRef>;
 }
 
 interface PendingCall {
@@ -122,17 +122,24 @@ export class TeamMcpProxy {
     finally { this.starting = null; }
   }
 
-  private async call(binding: ProxyBinding, tool: 'team_members' | 'team_inbox' | 'team_assign' | 'team_message' | 'team_artifact' | 'team_status', args: Record<string, unknown>): Promise<unknown> {
-    if (binding.closed) throw new Error('This team tool connection has expired.');
+  private assertCallLive(binding: ProxyBinding, signal: AbortSignal): void {
+    if (binding.closed || signal.aborted) throw new Error('This team delivery has ended.');
+  }
+
+  private async call(binding: ProxyBinding, signal: AbortSignal,
+    tool: 'team_members' | 'team_inbox' | 'team_assign' | 'team_message' | 'team_artifact' | 'team_status', args: Record<string, unknown>): Promise<unknown> {
+    this.assertCallLive(binding, signal);
     let forwardedArgs = args;
     if (tool === 'team_artifact' && binding.prepareArtifact) {
       const artifact = TeamArtifactSchema.parse(args);
-      const transfer = TeamArtifactRefSchema.parse(await binding.prepareArtifact(artifact));
+      const transfer = TeamArtifactRefSchema.parse(await binding.prepareArtifact(artifact, signal));
+      this.assertCallLive(binding, signal);
       if (transfer.path !== artifact.path || transfer.taskId !== artifact.taskId || transfer.revision.toLowerCase() !== artifact.revision.toLowerCase()) {
         throw new Error('The owner-device artifact transfer did not match the requested path, task, and commit.');
       }
       forwardedArgs = { ...artifact, __mingleArtifactTransfer: transfer };
     }
+    this.assertCallLive(binding, signal);
     const payload = TeamToolCallPayloadSchema.parse({ sharedProjectId: binding.sharedProjectId,
       deliveryId: binding.deliveryId, callId: randomUUID(), agentId: binding.agentId, tool, args: forwardedArgs });
     const result = new Promise<{ ok: boolean; result?: unknown; error?: string }>((resolve) => {
@@ -143,15 +150,29 @@ export class TeamMcpProxy {
       timer.unref();
       this.pending.set(payload.callId, { binding, timer, resolve });
     });
+    const abortPending = () => {
+      const current = this.pending.get(payload.callId);
+      if (!current) return;
+      clearTimeout(current.timer);
+      this.pending.delete(payload.callId);
+      current.resolve({ ok: false, error: 'This team delivery has ended.' });
+    };
+    signal.addEventListener('abort', abortPending, { once: true });
     try {
+      this.assertCallLive(binding, signal);
       await this.transport.send({ teamId: binding.teamId, toDeviceId: binding.hostDeviceId,
         kind: 'teamgroup.tool.call', payload, idempotencyKey: `teamtool:${binding.deliveryId}:${payload.callId}` });
+      this.assertCallLive(binding, signal);
       await this.transport.sync();
+      this.assertCallLive(binding, signal);
     } catch (error) {
       const pending = this.pending.get(payload.callId);
       if (pending) { clearTimeout(pending.timer); this.pending.delete(payload.callId); pending.resolve({ ok: false, error: redactSecrets(error instanceof Error ? error.message : String(error)).slice(0, 1000) }); }
+    } finally {
+      signal.removeEventListener('abort', abortPending);
     }
     const reply = await result;
+    this.assertCallLive(binding, signal);
     if (!reply.ok) throw new Error(reply.error ?? 'The team tool call failed on the host.');
     return reply.result ?? null;
   }
@@ -165,7 +186,7 @@ export class TeamMcpProxy {
     const register = (name: ProxyTool, shape: z.ZodRawShape, description: string, parse: (input: unknown) => Record<string, unknown>) => {
       server.registerTool(name, { description, inputSchema: shape }, async (args) => {
         if (signal.aborted || binding.closed) return output('This team delivery has ended.', true);
-        try { return output(await this.call(binding, name, parse(args))); }
+        try { return output(await this.call(binding, signal, name, parse(args))); }
         catch (error) { return output(redactSecrets(error instanceof Error ? error.message : String(error)).slice(0, 1000), true); }
       });
     };

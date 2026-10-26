@@ -658,6 +658,17 @@ export function createDeviceSide(deps: DeviceSideDeps): {
     }
   }
 
+  async function sendInterruptedDelivery(activeDelivery: ActiveDelivery, reason: string): Promise<void> {
+    const changed = db.prepare(`UPDATE mingle_team_device_deliveries SET status='interrupted',error=?,updated_at=?
+      WHERE delivery_id=? AND status IN ('accepted','running','awaiting-approval')`)
+      .run(safeText(reason, 1000), ISO(), activeDelivery.payload.deliveryId);
+    if (Number(changed.changes) !== 1) return;
+    const shared = await findBindingBySharedProject(activeDelivery.teamId, activeDelivery.payload.sharedProjectId);
+    const host = shared ? await hostDeviceId(shared) : null;
+    if (host) await sendStatus(activeDelivery.teamId, host, { sharedProjectId: activeDelivery.payload.sharedProjectId,
+      deliveryId: activeDelivery.payload.deliveryId, agentId: activeDelivery.payload.agentId, status: 'interrupted', runId: activeDelivery.runId });
+  }
+
   function scheduleTerminalStatusRetry(teamId: string, toDeviceId: string, payload: ReturnType<typeof TeamDeliveryStatusPayloadSchema.parse>): void {
     if (closed) return;
     const prior = terminalStatusRetries.get(payload.deliveryId);
@@ -821,6 +832,7 @@ export function createDeviceSide(deps: DeviceSideDeps): {
 
   async function commitEligibleChanges(activeDelivery: ActiveDelivery): Promise<void> {
     try {
+      if (activeDelivery.controller.signal.aborted) throw new Error('The team delivery was interrupted before local artifact preparation.');
       const worktreePath = activeDelivery.worktreePath;
       const [tracked, untracked] = await Promise.all([
         git(worktreePath, ['diff', '--no-renames', '--name-only', '-z', 'HEAD', '--'], { maxBuffer: 8 * 1024 * 1024 }),
@@ -853,13 +865,16 @@ export function createDeviceSide(deps: DeviceSideDeps): {
         activeDelivery.artifactFailures.push(note);
       }
       if (!paths.length) return;
+      if (activeDelivery.controller.signal.aborted) throw new Error('The team delivery was interrupted before its file snapshot could be committed.');
       const head = trimmed(await git(worktreePath, ['rev-parse', '--verify', 'HEAD']));
       const branch = activeDelivery.branch;
       if (!branch) throw new Error('The isolated delivery worktree has no branch for a controlled artifact commit.');
       const commit = await createCommit(worktreePath, branch, head, paths, `Mingle team delivery ${activeDelivery.payload.deliveryId}`, {
         sign: await signingConfigured(worktreePath),
         beforeCommit: async () => {
-          if (cancelled.has(activeDelivery.payload.deliveryId)) throw new Error('The team delivery was cancelled before its file snapshot could be committed.');
+          if (cancelled.has(activeDelivery.payload.deliveryId) || activeDelivery.controller.signal.aborted) {
+            throw new Error('The team delivery was cancelled before its file snapshot could be committed.');
+          }
         },
       });
       activeDelivery.entries.push(TeamAgentActivityEntrySchema.parse({ id: randomUUID(), runId: activeDelivery.runId,
@@ -872,11 +887,11 @@ export function createDeviceSide(deps: DeviceSideDeps): {
     }
   }
 
-  async function prepareArtifactTransfer(activeDelivery: ActiveDelivery, rawInput: unknown): Promise<TeamArtifactRef> {
+  async function prepareArtifactTransfer(activeDelivery: ActiveDelivery, rawInput: unknown, signal: AbortSignal): Promise<TeamArtifactRef> {
     const input = TeamArtifactSchema.parse(rawInput);
     const live = active.get(activeDelivery.payload.deliveryId);
     if (!live || live.runId !== activeDelivery.runId || live.sessionId !== activeDelivery.sessionId
-      || live.controller.signal.aborted || !deps.runtime.isActive(live.sessionId)) {
+      || signal.aborted || live.controller.signal.aborted || !deps.runtime.isActive(live.sessionId)) {
       throw new HttpError(409, 'A team artifact must be published by its active owner-device run.');
     }
     const row = db.prepare(`SELECT request_json,status,run_id,session_id FROM mingle_team_device_deliveries WHERE delivery_id=?`)
@@ -918,10 +933,25 @@ export function createDeviceSide(deps: DeviceSideDeps): {
       throw new HttpError(400, 'A team artifact must be a regular committed file in the active delivery worktree.');
     }
 
+    if (signal.aborted || live.controller.signal.aborted || active.get(activeDelivery.payload.deliveryId) !== live
+      || !deps.runtime.isActive(live.sessionId) || deliveryStartRejection(persisted)) {
+      throw new HttpError(409, 'The owner-device delivery stopped before its artifact could be transferred.');
+    }
     const transferred = await deps.distributed.git.exportTeamArtifact({ teamId: activeDelivery.teamId,
       sharedProjectId: persisted.sharedProjectId, sourceWorktreePath: live.worktreePath, revision: input.revision,
       ...(live.baseRevision ? { baseRevision: live.baseRevision } : {}), toDeviceId: persisted.integrationDeviceId,
-      deliveryId: persisted.deliveryId, ...(expectedTaskId ? { taskId: expectedTaskId } : {}), path: pathValue });
+      deliveryId: persisted.deliveryId, ...(expectedTaskId ? { taskId: expectedTaskId } : {}), path: pathValue,
+      purpose: 'mcp', signal });
+    const afterTransfer = db.prepare(`SELECT request_json,status,run_id,session_id FROM mingle_team_device_deliveries WHERE delivery_id=?`)
+      .get(activeDelivery.payload.deliveryId) as { request_json: string; status: string; run_id: string | null; session_id: string } | undefined;
+    if (!afterTransfer || afterTransfer.status !== 'running' || afterTransfer.run_id !== activeDelivery.runId
+      || afterTransfer.session_id !== activeDelivery.sessionId || afterTransfer.request_json !== row.request_json
+      || signal.aborted || live.controller.signal.aborted
+      || active.get(activeDelivery.payload.deliveryId) !== live || !deps.runtime.isActive(live.sessionId)) {
+      throw new HttpError(409, 'The owner-device delivery ended during artifact transfer.');
+    }
+    const afterRejection = deliveryStartRejection(persisted);
+    if (afterRejection) throw new HttpError(403, `Team consent or settings no longer authorize artifact transfer (${afterRejection}).`);
     const parsedTransfer = TeamArtifactRefSchema.parse(transferred);
     if (parsedTransfer.revision.toLowerCase() !== input.revision.toLowerCase() || parsedTransfer.path !== pathValue
       || parsedTransfer.taskId !== expectedTaskId || !parsedTransfer.transferId) {
@@ -931,7 +961,9 @@ export function createDeviceSide(deps: DeviceSideDeps): {
   }
 
   async function exportCommits(activeDelivery: ActiveDelivery): Promise<Array<{ revision: string; transferId?: string; taskId?: string; ref?: string }>> {
+    if (activeDelivery.controller.signal.aborted) return [];
     await commitEligibleChanges(activeDelivery);
+    if (activeDelivery.controller.signal.aborted) return [];
     const head = trimmed(await git(activeDelivery.worktreePath, ['rev-parse', '--verify', 'HEAD']));
     if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(head) || head === activeDelivery.baseRevision) return [];
     const args = activeDelivery.baseRevision
@@ -958,7 +990,8 @@ export function createDeviceSide(deps: DeviceSideDeps): {
         const artifact = await deps.distributed.git.exportTeamArtifact({ teamId: activeDelivery.teamId,
           sharedProjectId: activeDelivery.payload.sharedProjectId, toDeviceId: activeDelivery.payload.integrationDeviceId,
           deliveryId: activeDelivery.payload.deliveryId, revision, baseRevision: activeDelivery.baseRevision ?? undefined,
-          sourceWorktreePath: activeDelivery.worktreePath, taskId: activeDelivery.payload.taskId });
+          sourceWorktreePath: activeDelivery.worktreePath, taskId: activeDelivery.payload.taskId,
+          purpose: 'terminal', signal: activeDelivery.controller.signal });
         artifacts.push(artifact);
         activeDelivery.entries.push(TeamAgentActivityEntrySchema.parse({ id: randomUUID(), runId: activeDelivery.runId,
           at: ISO(), kind: 'artifact', text: `Committed artifact ${revision.slice(0, 12)} was sent to the integration device as ${artifact.ref}.` }));
@@ -984,10 +1017,10 @@ export function createDeviceSide(deps: DeviceSideDeps): {
       const isolated = await isolatedWorktree(shared, payload, sessionId);
       const proxyConnection = await proxy.create({ teamId: shared.teamId, sharedProjectId: shared.sharedProjectId,
         hostDeviceId: (await hostDeviceId(shared))!, deliveryId: payload.deliveryId, agentId: payload.agentId,
-        prepareArtifact: async (artifact) => {
+        prepareArtifact: async (artifact, signal) => {
           const current = active.get(payload.deliveryId);
           if (!current) throw new HttpError(409, 'The owner-device team run is not active for artifact publication.');
-          return prepareArtifactTransfer(current, artifact);
+          return prepareArtifactTransfer(current, artifact, signal);
         } });
       const beforeStart = deliveryStartRejection(payload);
       if (cancelled.has(payload.deliveryId) || beforeStart || !isAcceptedDelivery(payload.deliveryId)) {
@@ -1043,10 +1076,18 @@ export function createDeviceSide(deps: DeviceSideDeps): {
       const run = await waitForRun(sessionId, runId);
       if (!run) throw new Error('The team delivery did not reach a terminal provider state before its execution deadline.');
       if (run.status === 'completed') {
+        if (live.controller.signal.aborted) {
+          await sendInterruptedDelivery(live, 'Team sharing was interrupted before the artifact transfer completed.');
+          return;
+        }
         const initialFinalText = safeText(deps.store.listMessages(sessionId, { limit: 2000 })
           .filter((message) => message.runId === runId && message.role === 'assistant' && message.kind !== 'streaming')
           .map((message) => message.content).join('\n\n').trim(), 50_000);
         const artifacts = await exportCommits(live);
+        if (live.controller.signal.aborted) {
+          await sendInterruptedDelivery(live, 'Team sharing was interrupted before terminal artifacts were delivered.');
+          return;
+        }
         const artifactIssues = live.artifactFailures.length
           ? `\n\nArtifact preparation/transfer issues:\n${live.artifactFailures.map((failure) => `- ${failure}`).join('\n')}` : '';
         const finalText = safeText(`${initialFinalText}${artifactIssues}`, 50_000);

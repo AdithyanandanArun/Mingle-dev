@@ -30,6 +30,8 @@ export interface WorkspaceResolver { getProject(id: string): WorkspaceProject | 
 export interface GitRepositoryExecutor { runGit(cwd: string, args: string[], options?: GitRunOptions): Promise<GitProcessResult> }
 export interface TeamArtifactAuthorization {
   teamId: string; sharedProjectId: string; deliveryId: string; peerDeviceId: string; direction: 'export' | 'import';
+  purpose: 'mcp' | 'terminal' | 'input' | 'input-source'; stage: 'bundle' | 'consume';
+  transferId?: string; revision?: string; path?: string; taskId?: string;
 }
 export interface DistributedServiceOptions {
   store: { db: DatabaseSync } | DatabaseSync;

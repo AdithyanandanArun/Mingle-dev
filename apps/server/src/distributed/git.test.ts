@@ -111,6 +111,77 @@ describe('GitSyncService', () => {
     expect(importRunGit(destination.root, ['rev-parse', 'HEAD']).trim()).toBe(sourceHead);
   });
 
+  it('cancels an in-flight MCP artifact after interruption and removes receiver chunks that cannot be completed', async () => {
+    const { source, destination } = prepareClones();
+    writeFileSync(path.join(source.root, 'large-mcp-output.bin'), randomBytes(320 * 1024));
+    importRunGit(source.root, ['add', 'large-mcp-output.bin']);
+    importRunGit(source.root, ['commit', '-q', '-m', 'large MCP output']);
+    const pair = await bindPair(source, destination);
+    const revision = importRunGit(source.root, ['rev-parse', 'HEAD']).trim();
+    const controller = new AbortController();
+    let receiverActive = true;
+    let firstChunkStored!: () => void;
+    let releaseChunkSend!: () => void;
+    const chunkStored = new Promise<void>((resolve) => { firstChunkStored = resolve; });
+    const chunkGate = new Promise<void>((resolve) => { releaseChunkSend = resolve; });
+    const send = source.options.transport.send.bind(source.options.transport);
+    source.options.transport.send = async (message) => {
+      await send(message);
+      if (message.kind.startsWith('git.team-artifact.')) {
+        await pair.destinationService.onEnvelope(envelope({ teamId: pair.teamId, fromDeviceId: source.deviceFor(pair.teamId),
+          toDeviceId: destination.deviceFor(pair.teamId), kind: message.kind, payload: message.payload }));
+      }
+      if (message.kind === 'git.team-artifact.chunk' && (message.payload as { index: number }).index === 0) {
+        firstChunkStored();
+        await chunkGate;
+      }
+      return { accepted: true };
+    };
+    const authorize = destination.options.authorizeTeamArtifact!;
+    destination.options.authorizeTeamArtifact = async (input) => {
+      if (input.purpose === 'mcp' && !receiverActive) throw new Error('The explicit artifact delivery was interrupted.');
+      await authorize(input);
+    };
+    const transfer = pair.sourceService.exportTeamArtifact({ teamId: pair.teamId, sharedProjectId: pair.sharedProjectId,
+      sourceWorktreePath: source.root, revision, toDeviceId: destination.deviceFor(pair.teamId), deliveryId: 'delivery-mcp-cancel',
+      path: 'large-mcp-output.bin', taskId: 'task-mcp-cancel', purpose: 'mcp', signal: controller.signal });
+    await chunkStored;
+    receiverActive = false;
+    controller.abort();
+    releaseChunkSend();
+    await expect(transfer).rejects.toThrow(/cancelled/i);
+    const offerMessage = source.messages.find((message) => message.kind === 'git.team-artifact.offer')!;
+    const offer = offerMessage.payload as { transferId: string; chunkCount: number };
+    expect(offer.chunkCount).toBeGreaterThan(1);
+    const outgoing = source.db.prepare('SELECT status,bundle_blob FROM mingle_git_team_artifacts WHERE transfer_id=?')
+      .get(offer.transferId) as { status: string; bundle_blob: Uint8Array | null };
+    expect(outgoing.status).toBe('cancelled');
+    expect(outgoing.bundle_blob).toBeNull();
+    expect(source.messages.filter((message) => message.kind === 'git.team-artifact.chunk')).toHaveLength(1);
+
+    await expect(pair.destinationService.onEnvelope(envelope({ teamId: pair.teamId, fromDeviceId: source.deviceFor(pair.teamId),
+      toDeviceId: destination.deviceFor(pair.teamId), kind: 'git.team-artifact.chunk', payload: {
+        transferId: offer.transferId, index: 1, chunkCount: offer.chunkCount, data: Buffer.alloc(128 * 1024).toString('base64'),
+      } }))).rejects.toThrow(/interrupted/i);
+    expect(destination.db.prepare('SELECT COUNT(*) AS count FROM mingle_git_team_artifact_chunks WHERE transfer_id=?')
+      .get(offer.transferId)).toEqual({ count: 1 });
+
+    const session = destination.store.insertSession({ id: 'cancelled-session', projectId: destination.projectId, name: 'Cancelled artifact receiver',
+      provider: 'codex', model: 'test-model', effort: 'high', policy: 'supervised', isolated: false, worktreePath: destination.root, branch: null });
+    const at = new Date().toISOString();
+    destination.db.prepare(`INSERT INTO mingle_team_host_deliveries(delivery_id,team_id,shared_project_id,group_id,request_id,agent_id,session_id,
+      owner_account_id,owner_device_id,run_id,status,content,artifacts_json,issued_at,timeout_at,updated_at)
+      VALUES(?,?,?,?,?,?,?,?,?,?,'interrupted','cancelled','[]',?,?,?)`)
+      .run('delivery-mcp-cancel', pair.teamId, pair.sharedProjectId, 'cancelled-group', 'cancelled-request', 'cancelled-agent', session.id,
+        destination.userId, destination.deviceFor(pair.teamId), 'cancelled-run', at, Date.now(), at);
+    await pair.destinationService.discardUnpublishedMcpArtifacts({ teamId: pair.teamId, sharedProjectId: pair.sharedProjectId,
+      deliveryId: 'delivery-mcp-cancel' });
+    expect(destination.db.prepare('SELECT COUNT(*) AS count FROM mingle_git_team_artifacts WHERE transfer_id=?')
+      .get(offer.transferId)).toEqual({ count: 0 });
+    expect(destination.db.prepare('SELECT COUNT(*) AS count FROM mingle_git_team_artifact_chunks WHERE transfer_id=?')
+      .get(offer.transferId)).toEqual({ count: 0 });
+  });
+
   it('rejects committed protected history on export and again before receiver import', async () => {
     const { parent, source, destination } = prepareClones();
     const baseRevision = importRunGit(source.root, ['rev-parse', 'HEAD']).trim();

@@ -1,8 +1,10 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import WebSocket from 'ws';
+import { DatabaseSync as NativeDatabaseSync } from 'node:sqlite';
 import { EXAMPLE_CLIENT_SESSION_ID } from '../example.ts';
 import { startTestApp, waitFor, type TestApp } from '../test-utils.ts';
 import type { RemoteExecutionProgress } from './execution.ts';
+import { DistributedWorkspaceService } from './service.ts';
 
 const apps: TestApp[] = [];
 afterEach(async () => {
@@ -100,4 +102,46 @@ it('cannot bypass remote owner authorization through the ordinary native approva
   await t.app.runtime.interrupt(EXAMPLE_CLIENT_SESSION_ID);
   await waitFor(() => !t.app.runtime.isActive(EXAMPLE_CLIENT_SESSION_ID));
   expect(decisions).toEqual([false]);
+});
+
+it('rechecks delivery, owner consent, and exact terminal completion authority at the artifact receiver', async () => {
+  const db = new NativeDatabaseSync(':memory:');
+  const store = { db };
+  try {
+    store.db.exec(`CREATE TABLE mingle_team_host_projects(team_id TEXT,shared_project_id TEXT,host_device_id TEXT,owner_account_id TEXT);
+      CREATE TABLE mingle_team_host_deliveries(delivery_id TEXT,team_id TEXT,shared_project_id TEXT,group_id TEXT,session_id TEXT,
+        agent_id TEXT,owner_account_id TEXT,owner_device_id TEXT,status TEXT,run_id TEXT,failure_json TEXT);
+      CREATE TABLE mingle_team_host_roster(team_id TEXT,shared_project_id TEXT,agent_id TEXT,removed_at TEXT);
+      CREATE TABLE mingle_team_host_consents(team_id TEXT,shared_project_id TEXT,agent_id TEXT,state TEXT,owner_account_id TEXT,owner_device_id TEXT);`);
+    store.db.prepare('INSERT INTO mingle_team_host_projects VALUES(?,?,?,?)').run('team-auth', 'project-auth', 'host-device', 'host-owner');
+    store.db.prepare('INSERT INTO mingle_team_host_deliveries VALUES(?,?,?,?,?,?,?,?,?,?,?)')
+      .run('delivery-auth', 'team-auth', 'project-auth', 'group-auth', 'session-auth', 'agent-auth', 'owner-auth', 'owner-device', 'running', 'run-auth', null);
+    store.db.prepare('INSERT INTO mingle_team_host_roster VALUES(?,?,?,NULL)').run('team-auth', 'project-auth', 'agent-auth');
+    store.db.prepare('INSERT INTO mingle_team_host_consents VALUES(?,?,?,?,?,?)')
+      .run('team-auth', 'project-auth', 'agent-auth', 'granted', 'owner-auth', 'owner-device');
+    const receiver = Object.create(DistributedWorkspaceService.prototype) as DistributedWorkspaceService;
+    Object.assign(receiver, {
+      options: { store }, transport: { snapshot: () => ({ deviceId: 'host-device' }) }, authorizeTeam: async () => undefined,
+    });
+    const authorize = Reflect.get(receiver, 'authorizeTeamArtifact').bind(receiver) as (input: Record<string, unknown>) => Promise<void>;
+    const mcp = { teamId: 'team-auth', sharedProjectId: 'project-auth', deliveryId: 'delivery-auth', peerDeviceId: 'owner-device',
+      direction: 'import', purpose: 'mcp', stage: 'bundle' };
+    await expect(authorize(mcp)).resolves.toBeUndefined();
+    store.db.prepare("UPDATE mingle_team_host_deliveries SET status='interrupted' WHERE delivery_id=?").run('delivery-auth');
+    await expect(authorize(mcp)).rejects.toThrow(/delivery ended/i);
+    store.db.prepare("UPDATE mingle_team_host_deliveries SET status='running' WHERE delivery_id=?").run('delivery-auth');
+    store.db.prepare("UPDATE mingle_team_host_consents SET state='revoked' WHERE agent_id=?").run('agent-auth');
+    await expect(authorize(mcp)).rejects.toThrow(/active owner device/i);
+    store.db.prepare("UPDATE mingle_team_host_consents SET state='granted' WHERE agent_id=?").run('agent-auth');
+
+    const terminal = { ...mcp, purpose: 'terminal', transferId: 'a'.repeat(64), revision: 'b'.repeat(40), path: 'out.ts', taskId: 'task-auth' };
+    await expect(authorize({ ...terminal, stage: 'bundle' })).resolves.toBeUndefined();
+    await expect(authorize({ ...terminal, stage: 'consume' })).rejects.toThrow(/not part of this delivery/);
+    const completionIntent = { kind: 'team-completion', artifacts: [{ source: {
+      transferId: terminal.transferId, revision: terminal.revision, path: terminal.path, taskId: terminal.taskId,
+    } }] };
+    store.db.prepare('UPDATE mingle_team_host_deliveries SET failure_json=? WHERE delivery_id=?')
+      .run(JSON.stringify(completionIntent), 'delivery-auth');
+    await expect(authorize({ ...terminal, stage: 'consume' })).resolves.toBeUndefined();
+  } finally { db.close(); }
 });

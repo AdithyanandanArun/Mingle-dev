@@ -170,6 +170,7 @@ export class DistributedWorkspaceService {
     if (!localDeviceId) throw new HttpError(403, 'Register this device before transferring team artifacts.');
 
     const hostDelivery = this.options.store.db.prepare(`SELECT d.owner_device_id,d.owner_account_id,d.agent_id,d.shared_project_id,d.team_id,
+        d.status,d.run_id,d.failure_json,
         p.host_device_id,r.agent_id AS roster_agent_id,r.removed_at,c.state AS consent_state,
         c.owner_account_id AS consent_owner_account_id,c.owner_device_id AS consent_owner_device_id
       FROM mingle_team_host_deliveries d
@@ -185,17 +186,37 @@ export class DistributedWorkspaceService {
         || hostDelivery.consent_owner_device_id !== input.peerDeviceId) {
         throw new HttpError(403, 'The artifact sender is not the active owner device for this team delivery.');
       }
+      const status = String(hostDelivery.status);
+      if (input.purpose === 'input-source') {
+        if (!['accepted', 'running', 'awaiting-approval', 'completed'].includes(status)) {
+          throw new HttpError(403, 'The source delivery for this imported group artifact is no longer valid.');
+        }
+      } else if (!['accepted', 'running', 'awaiting-approval'].includes(status)) {
+        throw new HttpError(403, 'The team artifact delivery ended before the transfer was authorized.');
+      }
+      if (input.purpose === 'mcp' && (status !== 'running' || Boolean(this.completionIntentValue(hostDelivery.failure_json)))) {
+        throw new HttpError(403, 'An explicit team artifact transfer requires the currently running provider delivery.');
+      }
+      if (input.purpose === 'terminal' && input.stage === 'bundle' && this.completionIntentValue(hostDelivery.failure_json)
+        && !this.completionIntentHasArtifact(hostDelivery.failure_json, input)) {
+        throw new HttpError(403, 'The terminal bundle is not part of this delivery’s completion result.');
+      }
+      if (input.purpose === 'terminal' && input.stage === 'consume'
+        && !this.completionIntentHasArtifact(hostDelivery.failure_json, input)) {
+        throw new HttpError(403, 'The terminal artifact is not part of this delivery’s durable completion result.');
+      }
       return;
     }
 
-    const deviceDelivery = this.options.store.db.prepare(`SELECT shared_project_id,agent_id,request_json FROM mingle_team_device_deliveries
+    const deviceDelivery = this.options.store.db.prepare(`SELECT shared_project_id,agent_id,request_json,status,run_id FROM mingle_team_device_deliveries
       WHERE delivery_id=? AND shared_project_id=? LIMIT 1`).get(input.deliveryId, input.sharedProjectId) as
-      { shared_project_id: string; agent_id: string; request_json: string } | undefined;
+      { shared_project_id: string; agent_id: string; request_json: string; status: string; run_id: string | null } | undefined;
     if (!deviceDelivery && input.direction === 'import') {
       // Artifact envelopes are queued immediately before their teamgroup.delivery. At this point the
       // durable owner-side delivery row does not exist yet, so accept only from the current host and
       // only for a local, currently consented roster. importTeamArtifact rechecks the exact delivery
       // and integrationDeviceId after the delivery row has been persisted, before exposing the commit.
+      if (input.purpose !== 'input') throw new HttpError(403, 'This team artifact purpose requires a persisted active owner-device delivery.');
       const earlyStructure = await this.deviceStructureForArtifact(input.teamId, input.sharedProjectId);
       const localAgents = earlyStructure?.members.filter((member) => member.deviceId === localDeviceId && member.consent === 'granted') ?? [];
       const consent = this.options.store.db.prepare(`SELECT consent_json FROM mingle_team_device_consents WHERE shared_project_id=? AND device_id=? ORDER BY updated_at DESC LIMIT 1`)
@@ -219,6 +240,12 @@ export class DistributedWorkspaceService {
       || delivery.data.agentId !== deviceDelivery.agent_id || delivery.data.integrationDeviceId !== input.peerDeviceId) {
       throw new HttpError(403, 'The artifact peer is not the integration device recorded for this delivery.');
     }
+    if (input.purpose === 'mcp' && (deviceDelivery.status !== 'running' || !deviceDelivery.run_id)) {
+      throw new HttpError(403, 'The owner-side MCP artifact transfer is no longer running.');
+    }
+    if (input.purpose === 'terminal' && !['running', 'awaiting-approval'].includes(deviceDelivery.status)) {
+      throw new HttpError(403, 'The owner-side terminal artifact transfer is no longer active.');
+    }
     const structure = await this.deviceStructureForArtifact(input.teamId, input.sharedProjectId);
     if (!structure || structure.host?.deviceId !== input.peerDeviceId
       || !structure.members.some((member) => member.agentId === deviceDelivery.agent_id && member.deviceId === localDeviceId && member.consent === 'granted')) {
@@ -233,6 +260,29 @@ export class DistributedWorkspaceService {
       } catch { return false; }
     });
     if (!hasConsent) throw new HttpError(403, 'The owner has not granted current consent for this team artifact delivery.');
+  }
+
+  private completionIntentValue(raw: unknown): Record<string, unknown> | null {
+    if (typeof raw !== 'string') return null;
+    try {
+      const value = JSON.parse(raw) as unknown;
+      return value && typeof value === 'object' && !Array.isArray(value)
+        && (value as Record<string, unknown>).kind === 'team-completion' ? value as Record<string, unknown> : null;
+    } catch { return null; }
+  }
+
+  private completionIntentHasArtifact(raw: unknown, input: TeamArtifactAuthorization): boolean {
+    const intent = this.completionIntentValue(raw);
+    if (!intent || !Array.isArray(intent.artifacts)) return false;
+    return intent.artifacts.some((entry) => {
+      if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return false;
+      const source = (entry as Record<string, unknown>).source;
+      if (!source || typeof source !== 'object' || Array.isArray(source)) return false;
+      const artifact = source as Record<string, unknown>;
+      return artifact.transferId === input.transferId && typeof artifact.revision === 'string'
+        && artifact.revision.toLowerCase() === input.revision?.toLowerCase()
+        && artifact.path === input.path && (artifact.taskId ?? undefined) === input.taskId;
+    });
   }
 
   private async deviceStructureForArtifact(teamId: string, sharedProjectId: string): Promise<ReturnType<typeof TeamStructurePayloadSchema.parse> | null> {
@@ -320,6 +370,14 @@ export class DistributedWorkspaceService {
     const binding = snapshot.bindings.find((candidate) => candidate.teamId === input.teamId && candidate.sharedProjectId === input.sharedProjectId);
     if (!binding) throw new HttpError(409, 'Bind this shared project before importing a team artifact.');
     return this.options.repository.withExternalRefMutation(binding.localProjectId, () => this.git.importTeamArtifact(input));
+  }
+
+  /** Cancellation cleanup removes only unrecorded MCP transfers; already-published group handoffs remain durable. */
+  async discardUnpublishedMcpArtifacts(input: { teamId: string; sharedProjectId: string; deliveryId: string }): Promise<void> {
+    const snapshot = await this.git.snapshot(input.teamId);
+    const binding = snapshot.bindings.find((candidate) => candidate.teamId === input.teamId && candidate.sharedProjectId === input.sharedProjectId);
+    if (!binding) return;
+    await this.options.repository.withExternalRefMutation(binding.localProjectId, () => this.git.discardUnpublishedMcpArtifacts(input));
   }
 
   /** Integrate verified remote commits into a group worktree under the repository's mutation lease. */

@@ -18,7 +18,7 @@ import {
   ensureCommonTables, fingerprintRepository, insertAudit, MAX_BUNDLE_BYTES, parseJson, resolveProjectBinding,
   repositoryGit, validateEnvelope,
 } from './git-common.ts';
-import type { DistributedServiceOptions } from './git-common.ts';
+import type { DistributedServiceOptions, TeamArtifactAuthorization } from './git-common.ts';
 
 const TABLE = 'mingle_git_requests';
 const AUDIT = 'mingle_git_audit';
@@ -28,6 +28,7 @@ const TeamArtifactOfferSchema = z.object({
   transferId: z.string().regex(/^[0-9a-f]{64}$/), sharedProjectId: z.string().trim().min(1).max(200),
   deliveryId: z.string().trim().min(1).max(100), revision: z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i),
   baseRevision: z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i).nullable(),
+  purpose: z.enum(['mcp', 'terminal', 'input']).default('terminal'),
   taskId: z.string().trim().min(1).max(100).optional(), path: z.string().min(1).max(4096).optional(),
   bundleSha256: z.string().regex(/^[0-9a-f]{64}$/i), bundleSizeBytes: z.number().int().positive().max(MAX_BUNDLE_BYTES),
   chunkCount: z.number().int().positive().max(128),
@@ -40,6 +41,13 @@ const TeamArtifactRetrySchema = z.object({ transferId: z.string().regex(/^[0-9a-
 const TeamArtifactRetryResultSchema = z.object({ transferId: z.string().regex(/^[0-9a-f]{64}$/), error: z.string().min(1).max(500) }).strict();
 type TeamArtifactOffer = z.infer<typeof TeamArtifactOfferSchema>;
 type TeamArtifactRef = z.infer<typeof TeamArtifactRefSchema>;
+type TeamArtifactPurpose = TeamArtifactOffer['purpose'];
+interface ExportTeamArtifactInput {
+  teamId: string; sharedProjectId: string; sourceWorktreePath: string; revision: string; baseRevision?: string; sessionStartRevision?: string;
+  toDeviceId: string; deliveryId: string; taskId?: string; path?: string; purpose?: TeamArtifactPurpose; signal?: AbortSignal;
+  /** Only host-side handoff forwarding may use a previously imported exact artifact ref. */
+  sourceTransferId?: string;
+}
 type TeamArtifactRow = {
   transfer_id: string; team_id: string; shared_project_id: string; delivery_id: string; source_device_id: string;
   peer_device_id: string; direction: 'incoming' | 'outgoing'; owner_id: string; status: string; offer_json: string;
@@ -60,6 +68,9 @@ interface TransferOfferPayload {
 }
 
 const MAX_TEAM_ARTIFACT_HISTORY_COMMITS = 10_000;
+function assertArtifactTransferLive(signal?: AbortSignal): void {
+  if (signal?.aborted) throw conflict('The team artifact transfer was cancelled because its delivery ended.');
+}
 
 async function assertTeamArtifactHistorySafe(repository: DistributedServiceOptions['repository'], root: string,
   revision: string, baseRevision: string | null): Promise<void> {
@@ -407,38 +418,53 @@ export class GitSyncService {
    * The bundle advertises the best shared prerequisite known to the sender; a receiver that lacks it can
    * request one bounded root-history retry.
    */
-  async exportTeamArtifact(input: {
-    teamId: string; sharedProjectId: string; sourceWorktreePath: string; revision: string; baseRevision?: string; sessionStartRevision?: string;
-    toDeviceId: string; deliveryId: string; taskId?: string; path?: string;
-  }): Promise<TeamArtifactRef> {
+  async exportTeamArtifact(input: ExportTeamArtifactInput): Promise<TeamArtifactRef> {
+    const purpose = input.purpose ?? 'terminal';
+    assertArtifactTransferLive(input.signal);
     const revisionInput = normalizeObjectId(input.revision, 'revision');
-    const requestedBaseRevision = input.baseRevision ? normalizeObjectId(input.baseRevision, 'base revision') : null;
     const owner = await currentUser(this.options.account);
+    assertArtifactTransferLive(input.signal);
     const localDeviceId = this.localDeviceId(input.teamId);
     if (input.toDeviceId === localDeviceId) throw conflict('A team artifact must target another linked device.');
     await this.authorizeTeamArtifact({ teamId: input.teamId, sharedProjectId: input.sharedProjectId,
-      deliveryId: input.deliveryId, peerDeviceId: input.toDeviceId, direction: 'export' });
+      deliveryId: input.deliveryId, peerDeviceId: input.toDeviceId, direction: 'export', purpose, stage: 'bundle' });
+    assertArtifactTransferLive(input.signal);
     const binding = await resolveProjectBinding(this.options, this.db,
       { teamId: input.teamId, sharedProjectId: input.sharedProjectId, peerDeviceId: input.toDeviceId }, owner.id);
+    assertArtifactTransferLive(input.signal);
     const sourcePath = await realpath(input.sourceWorktreePath);
     await this.assertSameRepository(binding.canonicalPath, sourcePath);
+    assertArtifactTransferLive(input.signal);
     const resolved = await repositoryGit(this.options.repository, sourcePath,
       ['rev-parse', '--verify', '--end-of-options', `${revisionInput}^{commit}`], { maxOutputBytes: 4096 });
     const revision = normalizeObjectId(line(resolved.stdout), 'resolved revision');
     if (revision !== revisionInput) throw conflict('The team artifact revision did not resolve to the claimed commit.');
+    assertArtifactTransferLive(input.signal);
+    let importedSource: { row: TeamArtifactRow; offer: TeamArtifactOffer } | null = null;
+    if (input.sourceTransferId) {
+      importedSource = await this.requireImportedArtifactSource({ ...input, sourcePath, revision, ownerId: owner.id });
+      assertArtifactTransferLive(input.signal);
+    }
     const reachable = await repositoryGit(this.options.repository, sourcePath,
       ['merge-base', '--is-ancestor', revision, 'HEAD'], { allowFailure: true, maxOutputBytes: 4096 });
-    if (reachable.code !== 0) throw conflict('The team artifact commit is not reachable from the producing worktree HEAD.');
+    if (reachable.code !== 0) {
+      if (reachable.code !== 1 || !importedSource) throw conflict('The team artifact commit is not reachable from the producing worktree HEAD.');
+    }
+    const requestedBaseRevision = input.baseRevision
+      ? normalizeObjectId(input.baseRevision, 'base revision')
+      : importedSource?.offer.baseRevision ?? null;
     const baseRevision = await this.selectTeamArtifactBase(sourcePath, revision, requestedBaseRevision, input.sessionStartRevision);
+    assertArtifactTransferLive(input.signal);
     await assertTeamArtifactHistorySafe(this.options.repository, sourcePath, revision, baseRevision);
 
-    const transferId = createHash('sha256').update(`${input.teamId}\0${input.sharedProjectId}\0${input.deliveryId}\0${input.toDeviceId}\0${revision}\0${input.taskId ?? ''}\0${input.path ?? ''}`).digest('hex');
+    const transferId = createHash('sha256').update(`${input.teamId}\0${input.sharedProjectId}\0${input.deliveryId}\0${input.toDeviceId}\0${revision}\0${input.taskId ?? ''}\0${input.path ?? ''}\0${purpose}`).digest('hex');
     const refName = teamArtifactRef(input.sharedProjectId, input.deliveryId, revision);
     const existing = this.teamArtifactRow(transferId);
     if (existing) {
       const offer = TeamArtifactOfferSchema.parse(parseJson<unknown>(existing.offer_json, 'team artifact offer'));
       if (existing.direction !== 'outgoing' || existing.peer_device_id !== input.toDeviceId || offer.revision !== revision
-        || offer.deliveryId !== input.deliveryId || offer.sharedProjectId !== input.sharedProjectId || offer.taskId !== input.taskId || offer.path !== input.path) {
+        || offer.deliveryId !== input.deliveryId || offer.sharedProjectId !== input.sharedProjectId || offer.taskId !== input.taskId
+        || offer.path !== input.path || offer.purpose !== purpose) {
         throw conflict('This team artifact transfer ID is already bound to different content or delivery authority.');
       }
       if (existing.status !== 'sent') throw conflict('The prior team artifact transfer has an uncertain or failed delivery state; it will not be replayed automatically.');
@@ -447,10 +473,12 @@ export class GitSyncService {
 
     const sourceRef = `refs/mingle/team-export/${randomUUID().replaceAll('-', '')}`;
     const bundle = await this.createTeamArtifactBundle(sourcePath, revision, baseRevision, sourceRef);
+    assertArtifactTransferLive(input.signal);
     const offer = TeamArtifactOfferSchema.parse({ transferId, sharedProjectId: input.sharedProjectId, deliveryId: input.deliveryId,
-      revision, baseRevision, ...(input.taskId ? { taskId: input.taskId } : {}), ...(input.path ? { path: input.path } : {}),
+      revision, baseRevision, purpose, ...(input.taskId ? { taskId: input.taskId } : {}), ...(input.path ? { path: input.path } : {}),
       bundleSha256: createHash('sha256').update(bundle).digest('hex'),
       bundleSizeBytes: bundle.length, chunkCount: Math.ceil(bundle.length / BUNDLE_CHUNK_BYTES) });
+    assertArtifactTransferLive(input.signal);
     const at = nowIso();
     this.db.prepare(`INSERT INTO ${TEAM_ARTIFACT_TABLE}(transfer_id,team_id,shared_project_id,delivery_id,source_device_id,peer_device_id,
       direction,owner_id,status,offer_json,bundle_blob,ref_name,created_at,updated_at) VALUES(?,?,?,?,?,?,'outgoing',?,'sending',?,?,?, ?,?)`)
@@ -458,29 +486,83 @@ export class GitSyncService {
         owner.id, JSON.stringify(offer), bundle, refName, at, at);
     try {
       await this.sendTeamArtifactBundle({ teamId: input.teamId, sharedProjectId: input.sharedProjectId, deliveryId: input.deliveryId,
-        toDeviceId: input.toDeviceId, bundle, offer });
+        toDeviceId: input.toDeviceId, bundle, offer, signal: input.signal });
+      assertArtifactTransferLive(input.signal);
       this.db.prepare(`UPDATE ${TEAM_ARTIFACT_TABLE} SET status='sent',updated_at=? WHERE transfer_id=?`).run(nowIso(), transferId);
     } catch (error) {
-      this.db.prepare(`UPDATE ${TEAM_ARTIFACT_TABLE} SET status='unknown',updated_at=? WHERE transfer_id=?`).run(nowIso(), transferId);
+      if (input.signal?.aborted) {
+        this.db.prepare(`UPDATE ${TEAM_ARTIFACT_TABLE} SET status='cancelled',bundle_blob=NULL,updated_at=? WHERE transfer_id=?`).run(nowIso(), transferId);
+      } else {
+        this.db.prepare(`UPDATE ${TEAM_ARTIFACT_TABLE} SET status='unknown',updated_at=? WHERE transfer_id=?`).run(nowIso(), transferId);
+      }
       throw error;
     }
     this.options.changed?.();
     return TeamArtifactRefSchema.parse({ revision, ...(input.path ? { path: input.path } : {}), ...(input.taskId ? { taskId: input.taskId } : {}), transferId, ref: refName });
   }
 
+  private async requireImportedArtifactSource(input: ExportTeamArtifactInput & { sourcePath: string; revision: string; ownerId: string }): Promise<{
+    row: TeamArtifactRow; offer: TeamArtifactOffer;
+  }> {
+    if (!input.sourceTransferId || !input.path) throw conflict('A forwarded artifact must name an exact imported transfer and file path.');
+    const row = this.teamArtifactRow(input.sourceTransferId);
+    if (!row || row.direction !== 'incoming' || row.status !== 'imported' || row.owner_id !== input.ownerId
+      || row.team_id !== input.teamId || row.shared_project_id !== input.sharedProjectId || row.peer_device_id !== this.localDeviceId(input.teamId)) {
+      throw conflict('The forwarded artifact is not an imported ref owned by this authenticated host.');
+    }
+    const offer = TeamArtifactOfferSchema.parse(parseJson<unknown>(row.offer_json, 'team artifact offer'));
+    const expectedRef = teamArtifactRef(input.sharedProjectId, row.delivery_id, offer.revision);
+    if (offer.transferId !== row.transfer_id || offer.deliveryId !== row.delivery_id || offer.sharedProjectId !== input.sharedProjectId
+      || offer.revision.toLowerCase() !== input.revision.toLowerCase() || offer.path !== input.path || offer.taskId !== input.taskId
+      || row.ref_name !== expectedRef) {
+      throw conflict('The imported artifact source does not match the exact handoff revision, task, path, and isolated ref.');
+    }
+    await this.authorizeTeamArtifact({ teamId: row.team_id, sharedProjectId: row.shared_project_id, deliveryId: row.delivery_id,
+      peerDeviceId: row.source_device_id, direction: 'import', purpose: 'input-source', stage: 'consume', transferId: row.transfer_id,
+      revision: offer.revision, path: offer.path, taskId: offer.taskId });
+    const projectBinding = await resolveProjectBinding(this.options, this.db,
+      { teamId: row.team_id, sharedProjectId: row.shared_project_id, peerDeviceId: row.source_device_id }, input.ownerId);
+    await this.assertSameRepository(projectBinding.canonicalPath, input.sourcePath);
+    const [ref, entry] = await Promise.all([
+      repositoryGit(this.options.repository, input.sourcePath, ['rev-parse', '--verify', `${expectedRef}^{commit}`], { maxOutputBytes: 4096 }),
+      repositoryGit(this.options.repository, input.sourcePath, ['ls-tree', '-z', expectedRef, '--', input.path], { allowFailure: true, maxOutputBytes: 4096 }),
+    ]);
+    if (line(ref.stdout).toLowerCase() !== offer.revision.toLowerCase()) throw conflict('The imported source artifact ref no longer resolves to its authenticated revision.');
+    const records = entry.stdout.toString('utf8').split('\0').filter(Boolean);
+    const match = records.length === 1 ? /^(\d{6}) blob ([0-9a-f]{40,64})\t(.+)$/.exec(records[0]!) : null;
+    if (!match || match[1] === '120000' || match[3] !== input.path) throw conflict('The imported source ref does not contain the exact regular handoff file.');
+    await assertTeamArtifactHistorySafe(this.options.repository, projectBinding.canonicalPath, offer.revision, offer.baseRevision);
+    const hostDelivery = this.db.prepare(`SELECT d.group_id,d.session_id FROM mingle_team_host_deliveries d
+      WHERE d.delivery_id=? AND d.team_id=? AND d.shared_project_id=?`).get(row.delivery_id, row.team_id, row.shared_project_id) as
+      { group_id: string; session_id: string } | undefined;
+    if (!hostDelivery) throw conflict('The imported source artifact has no matching host delivery record.');
+    const published = this.db.prepare(`SELECT 1 AS found FROM group_artifacts a
+      JOIN group_members m ON m.id=a.from_member_id
+      WHERE a.group_id=? AND m.session_id=? AND a.commit_id=? AND a.path=?
+        AND ((a.task_id IS NULL AND ? IS NULL) OR a.task_id=?) LIMIT 1`)
+      .get(hostDelivery.group_id, hostDelivery.session_id, offer.revision, input.path, input.taskId ?? null, input.taskId ?? null);
+    if (!published) throw conflict('Only an artifact already recorded as a group handoff can be forwarded to another remote assignment.');
+    return { row, offer };
+  }
+
   private async sendTeamArtifactBundle(input: { teamId: string; sharedProjectId: string; deliveryId: string; toDeviceId: string;
-    bundle: Buffer; offer: TeamArtifactOffer }): Promise<void> {
+    bundle: Buffer; offer: TeamArtifactOffer; signal?: AbortSignal }): Promise<void> {
+    assertArtifactTransferLive(input.signal);
     await this.authorizeTeamArtifact({ teamId: input.teamId, sharedProjectId: input.sharedProjectId,
-      deliveryId: input.deliveryId, peerDeviceId: input.toDeviceId, direction: 'export' });
+      deliveryId: input.deliveryId, peerDeviceId: input.toDeviceId, direction: 'export', purpose: input.offer.purpose, stage: 'bundle' });
+    assertArtifactTransferLive(input.signal);
     await this.options.transport.send({ teamId: input.teamId, toDeviceId: input.toDeviceId, kind: 'git.team-artifact.offer',
       payload: input.offer, idempotencyKey: `team-artifact:${input.offer.transferId}:${input.offer.baseRevision ? 'offer' : 'offer:root'}` });
+    assertArtifactTransferLive(input.signal);
     for (let index = 0; index < input.offer.chunkCount; index++) {
       await this.authorizeTeamArtifact({ teamId: input.teamId, sharedProjectId: input.sharedProjectId,
-        deliveryId: input.deliveryId, peerDeviceId: input.toDeviceId, direction: 'export' });
+        deliveryId: input.deliveryId, peerDeviceId: input.toDeviceId, direction: 'export', purpose: input.offer.purpose, stage: 'bundle' });
+      assertArtifactTransferLive(input.signal);
       const chunk = input.bundle.subarray(index * BUNDLE_CHUNK_BYTES, Math.min(input.bundle.length, (index + 1) * BUNDLE_CHUNK_BYTES));
       await this.options.transport.send({ teamId: input.teamId, toDeviceId: input.toDeviceId, kind: 'git.team-artifact.chunk',
         payload: { transferId: input.offer.transferId, index, chunkCount: input.offer.chunkCount, data: chunk.toString('base64') },
         idempotencyKey: `team-artifact:${input.offer.transferId}:${input.offer.baseRevision ? '' : 'root:'}chunk:${index}` });
+      assertArtifactTransferLive(input.signal);
     }
   }
 
@@ -491,6 +573,9 @@ export class GitSyncService {
     if (!row || row.direction !== 'outgoing' || row.team_id !== envelope.teamId || row.owner_id !== ownerId
       || row.peer_device_id !== envelope.fromDeviceId || row.status !== 'sent') throw conflict('The team artifact retry does not match a completed outgoing transfer.');
     const prior = TeamArtifactOfferSchema.parse(parseJson<unknown>(row.offer_json, 'team artifact offer'));
+    await this.authorizeTeamArtifact({ teamId: row.team_id, sharedProjectId: row.shared_project_id, deliveryId: row.delivery_id,
+      peerDeviceId: row.peer_device_id, direction: 'export', purpose: prior.purpose, stage: 'bundle', transferId: row.transfer_id,
+      revision: prior.revision, path: prior.path, taskId: prior.taskId });
     if (!prior.baseRevision) throw conflict('The team artifact already used its one root-history bundle attempt.');
     const claimed = this.db.prepare(`UPDATE ${TEAM_ARTIFACT_TABLE} SET status='retrying',updated_at=? WHERE transfer_id=? AND status='sent'`)
       .run(nowIso(), row.transfer_id);
@@ -529,8 +614,10 @@ export class GitSyncService {
     const row = this.teamArtifactRow(parsed.data.transferId);
     if (!row || row.direction !== 'incoming' || row.team_id !== envelope.teamId || row.owner_id !== ownerId
       || row.source_device_id !== envelope.fromDeviceId || row.status !== 'retrying') return;
+    const offer = TeamArtifactOfferSchema.parse(parseJson<unknown>(row.offer_json, 'team artifact offer'));
     await this.authorizeTeamArtifact({ teamId: row.team_id, sharedProjectId: row.shared_project_id,
-      deliveryId: row.delivery_id, peerDeviceId: row.source_device_id, direction: 'import' });
+      deliveryId: row.delivery_id, peerDeviceId: row.source_device_id, direction: 'import', purpose: offer.purpose, stage: 'bundle',
+      transferId: row.transfer_id, revision: offer.revision, path: offer.path, taskId: offer.taskId });
     this.db.prepare(`UPDATE ${TEAM_ARTIFACT_TABLE} SET status='failed',retry_error=?,updated_at=? WHERE transfer_id=? AND status='retrying'`)
       .run(parsed.data.error, nowIso(), row.transfer_id);
     this.options.changed?.();
@@ -538,43 +625,57 @@ export class GitSyncService {
 
   /** Verify a received artifact and install its tip only under a deterministic isolated ref. */
   async importTeamArtifact(input: {
-    teamId: string; sharedProjectId: string; deliveryId: string; artifact: unknown; sourceDeviceId?: string;
+    teamId: string; sharedProjectId: string; deliveryId: string; artifact: unknown; sourceDeviceId?: string; signal?: AbortSignal;
   }): Promise<TeamArtifactRef> {
+    assertArtifactTransferLive(input.signal);
     const artifact = TeamArtifactRefSchema.parse(input.artifact);
     if (!artifact.transferId) throw conflict('A team artifact reference is missing its transfer ID.');
     const owner = await currentUser(this.options.account);
+    assertArtifactTransferLive(input.signal);
     let row = this.teamArtifactRow(artifact.transferId);
     if (!row || row.direction !== 'incoming' || row.team_id !== input.teamId || row.shared_project_id !== input.sharedProjectId
       || row.delivery_id !== input.deliveryId || row.owner_id !== owner.id || (input.sourceDeviceId && row.source_device_id !== input.sourceDeviceId)) {
       throw conflict('The team artifact transfer does not match this project, delivery, or authenticated sender.');
     }
-    await this.authorizeTeamArtifact({ teamId: row.team_id, sharedProjectId: row.shared_project_id,
-      deliveryId: row.delivery_id, peerDeviceId: row.source_device_id, direction: 'import' });
     let offer = TeamArtifactOfferSchema.parse(parseJson<unknown>(row.offer_json, 'team artifact offer'));
-    if (row.status === 'retrying') {
-      row = await this.waitForTeamArtifactRetry(artifact.transferId);
-      await this.authorizeTeamArtifact({ teamId: row.team_id, sharedProjectId: row.shared_project_id,
-        deliveryId: row.delivery_id, peerDeviceId: row.source_device_id, direction: 'import' });
-      offer = TeamArtifactOfferSchema.parse(parseJson<unknown>(row.offer_json, 'team artifact offer'));
-    }
     if (artifact.revision.toLowerCase() !== offer.revision.toLowerCase() || offer.deliveryId !== input.deliveryId
       || offer.sharedProjectId !== input.sharedProjectId || artifact.path !== offer.path || artifact.taskId !== offer.taskId) {
       throw conflict('The team artifact reference differs from its authenticated transfer offer.');
+    }
+    await this.authorizeTeamArtifact({ teamId: row.team_id, sharedProjectId: row.shared_project_id,
+      deliveryId: row.delivery_id, peerDeviceId: row.source_device_id, direction: 'import', purpose: offer.purpose, stage: 'consume',
+      transferId: row.transfer_id, revision: offer.revision, path: offer.path, taskId: offer.taskId });
+    assertArtifactTransferLive(input.signal);
+    if (row.status === 'retrying') {
+      row = await this.waitForTeamArtifactRetry(artifact.transferId);
+      assertArtifactTransferLive(input.signal);
+      offer = TeamArtifactOfferSchema.parse(parseJson<unknown>(row.offer_json, 'team artifact offer'));
+      if (artifact.revision.toLowerCase() !== offer.revision.toLowerCase() || offer.deliveryId !== input.deliveryId
+        || offer.sharedProjectId !== input.sharedProjectId || artifact.path !== offer.path || artifact.taskId !== offer.taskId) {
+        throw conflict('The team artifact retry offer differs from its original authenticated transfer.');
+      }
+      await this.authorizeTeamArtifact({ teamId: row.team_id, sharedProjectId: row.shared_project_id,
+        deliveryId: row.delivery_id, peerDeviceId: row.source_device_id, direction: 'import', purpose: offer.purpose, stage: 'consume',
+        transferId: row.transfer_id, revision: offer.revision, path: offer.path, taskId: offer.taskId });
+      assertArtifactTransferLive(input.signal);
     }
     const refName = teamArtifactRef(input.sharedProjectId, input.deliveryId, offer.revision);
     if (artifact.ref && artifact.ref !== refName) throw conflict('The team artifact reference names an unexpected isolated ref.');
     if (row.status === 'failed') throw conflict(row.retry_error ?? 'The complete verified team artifact bundle could not be received.');
     if (row.status !== 'ready' && row.status !== 'imported') throw conflict('The complete verified team artifact bundle has not arrived yet.');
     const binding = await resolveProjectBinding(this.options, this.db, { teamId: row.team_id, sharedProjectId: row.shared_project_id, peerDeviceId: row.source_device_id }, owner.id);
+    assertArtifactTransferLive(input.signal);
     if (row.status === 'imported') {
       const imported = await repositoryGit(this.options.repository, binding.canonicalPath,
         ['rev-parse', '--verify', `${refName}^{commit}`], { maxOutputBytes: 4096 });
       if (line(imported.stdout).toLowerCase() !== offer.revision.toLowerCase()) throw conflict('The previously imported team artifact ref no longer resolves to its recorded tip.');
       await assertTeamArtifactHistorySafe(this.options.repository, binding.canonicalPath, offer.revision, offer.baseRevision);
+      assertArtifactTransferLive(input.signal);
       return TeamArtifactRefSchema.parse({ ...artifact, ref: refName });
     }
     const temp = await mkdtemp(path.join(os.tmpdir(), 'mingle-team-artifact-import-'));
     const bundlePath = path.join(temp, 'received.bundle');
+    let createdRef = false;
     try {
       const bundle = Buffer.from(row.bundle_blob ?? []);
       if (bundle.length !== offer.bundleSizeBytes || createHash('sha256').update(bundle).digest('hex') !== offer.bundleSha256) {
@@ -582,12 +683,14 @@ export class GitSyncService {
       }
       await writeFile(bundlePath, bundle, { mode: 0o600, flag: 'wx' });
       await this.verifyTeamArtifactBundle(binding.canonicalPath, bundlePath, offer);
+      assertArtifactTransferLive(input.signal);
       const currentRef = await repositoryGit(this.options.repository, binding.canonicalPath,
         ['show-ref', '--verify', '--quiet', refName], { allowFailure: true, maxOutputBytes: 4096 });
-      let createdRef = false;
+      assertArtifactTransferLive(input.signal);
       if (currentRef.code === 0) {
         const currentTip = await repositoryGit(this.options.repository, binding.canonicalPath,
           ['rev-parse', '--verify', `${refName}^{commit}`], { maxOutputBytes: 4096 });
+        assertArtifactTransferLive(input.signal);
         if (line(currentTip.stdout).toLowerCase() !== offer.revision.toLowerCase()) throw conflict('The isolated team artifact ref already exists with a different tip.');
       } else {
         await repositoryGit(this.options.repository, binding.canonicalPath,
@@ -597,19 +700,18 @@ export class GitSyncService {
       }
       const imported = await repositoryGit(this.options.repository, binding.canonicalPath,
         ['rev-parse', '--verify', `${refName}^{commit}`], { maxOutputBytes: 4096 });
+      assertArtifactTransferLive(input.signal);
       if (line(imported.stdout).toLowerCase() !== offer.revision.toLowerCase()) throw conflict('Imported team artifact ref does not resolve to the exact advertised revision.');
-      try {
-        await assertTeamArtifactHistorySafe(this.options.repository, binding.canonicalPath, offer.revision, offer.baseRevision);
-      } catch (error) {
-        if (createdRef) {
-          await repositoryGit(this.options.repository, binding.canonicalPath, ['update-ref', '-d', refName], { maxOutputBytes: 4096 }).catch(() => undefined);
-        }
-        throw error;
-      }
-      this.db.prepare(`UPDATE ${TEAM_ARTIFACT_TABLE} SET status='imported',ref_name=?,updated_at=? WHERE transfer_id=? AND status='ready'`)
+      await assertTeamArtifactHistorySafe(this.options.repository, binding.canonicalPath, offer.revision, offer.baseRevision);
+      assertArtifactTransferLive(input.signal);
+      const importedRow = this.db.prepare(`UPDATE ${TEAM_ARTIFACT_TABLE} SET status='imported',ref_name=?,updated_at=? WHERE transfer_id=? AND status='ready'`)
         .run(refName, nowIso(), artifact.transferId);
+      if (Number(importedRow.changes) !== 1) throw conflict('The team artifact transfer ended before its imported ref could be authorized.');
       this.options.changed?.();
       return TeamArtifactRefSchema.parse({ ...artifact, ref: refName });
+    } catch (error) {
+      if (createdRef) await repositoryGit(this.options.repository, binding.canonicalPath, ['update-ref', '-d', refName], { maxOutputBytes: 4096 }).catch(() => undefined);
+      throw error;
     } finally { await rm(temp, { recursive: true, force: true }); }
   }
 
@@ -625,9 +727,10 @@ export class GitSyncService {
       || row.shared_project_id !== input.sharedProjectId || row.delivery_id !== input.deliveryId || row.owner_id !== owner.id) {
       throw conflict('The imported team artifact does not match this authenticated project and delivery.');
     }
-    await this.authorizeTeamArtifact({ teamId: row.team_id, sharedProjectId: row.shared_project_id,
-      deliveryId: row.delivery_id, peerDeviceId: row.source_device_id, direction: 'import' });
     const offer = TeamArtifactOfferSchema.parse(parseJson<unknown>(row.offer_json, 'team artifact offer'));
+    await this.authorizeTeamArtifact({ teamId: row.team_id, sharedProjectId: row.shared_project_id,
+      deliveryId: row.delivery_id, peerDeviceId: row.source_device_id, direction: 'import', purpose: offer.purpose, stage: 'consume',
+      transferId: row.transfer_id, revision: offer.revision, path: offer.path, taskId: offer.taskId });
     const refName = teamArtifactRef(input.sharedProjectId, input.deliveryId, offer.revision);
     if (artifact.revision.toLowerCase() !== offer.revision.toLowerCase() || artifact.ref !== refName
       || row.ref_name !== refName || artifact.path !== offer.path || artifact.taskId !== offer.taskId) {
@@ -665,6 +768,55 @@ export class GitSyncService {
     return { beforeRevision, revision, integrated: beforeRevision !== revision };
   }
 
+  /** Remove abandoned early-MCP bundles after cancellation while retaining handoffs already recorded by the group. */
+  async discardUnpublishedMcpArtifacts(input: { teamId: string; sharedProjectId: string; deliveryId: string }): Promise<void> {
+    const owner = await currentUser(this.options.account);
+    const rows = this.db.prepare(`SELECT * FROM ${TEAM_ARTIFACT_TABLE}
+      WHERE team_id=? AND shared_project_id=? AND delivery_id=? AND direction='incoming'`).all(input.teamId, input.sharedProjectId, input.deliveryId) as TeamArtifactRow[];
+    for (const row of rows) {
+      if (row.owner_id !== owner.id) continue;
+      let offer: TeamArtifactOffer;
+      try { offer = TeamArtifactOfferSchema.parse(parseJson<unknown>(row.offer_json, 'team artifact offer')); }
+      catch { continue; }
+      if (!['mcp', 'terminal'].includes(offer.purpose) || offer.transferId !== row.transfer_id) continue;
+      const delivery = this.db.prepare(`SELECT group_id,session_id,failure_json FROM mingle_team_host_deliveries WHERE delivery_id=?`)
+        .get(input.deliveryId) as { group_id: string; session_id: string; failure_json: string | null } | undefined;
+      if (offer.purpose === 'terminal' && delivery?.failure_json) {
+        try {
+          const intent = JSON.parse(delivery.failure_json) as Record<string, unknown>;
+          if (intent.kind === 'team-completion') continue;
+        } catch { /* malformed status is not a durable completion intent */ }
+      }
+      const alreadyPublished = delivery && this.db.prepare(`SELECT 1 AS found FROM group_artifacts a
+        JOIN group_members m ON m.id=a.from_member_id
+        WHERE a.group_id=? AND m.session_id=? AND lower(a.commit_id)=lower(?) AND a.path=?
+          AND ((a.task_id IS NULL AND ? IS NULL) OR a.task_id=?) LIMIT 1`)
+        .get(delivery.group_id, delivery.session_id, offer.revision, offer.path ?? '', offer.taskId ?? null, offer.taskId ?? null);
+      if (alreadyPublished) continue;
+      const refName = teamArtifactRef(input.sharedProjectId, input.deliveryId, offer.revision);
+      if (row.status === 'imported' && row.ref_name === refName) {
+        const sharedRef = this.db.prepare(`SELECT 1 AS found FROM ${TEAM_ARTIFACT_TABLE}
+          WHERE direction='incoming' AND status='imported' AND ref_name=? AND transfer_id<>? LIMIT 1`).get(refName, row.transfer_id);
+        if (!sharedRef) {
+          const binding = await resolveProjectBinding(this.options, this.db, { ...input, peerDeviceId: row.source_device_id }, owner.id);
+          const current = await repositoryGit(this.options.repository, binding.canonicalPath,
+            ['rev-parse', '--verify', `${refName}^{commit}`], { allowFailure: true, maxOutputBytes: 4096 });
+          if (current.code === 0 && line(current.stdout).toLowerCase() === offer.revision.toLowerCase()) {
+            await repositoryGit(this.options.repository, binding.canonicalPath, ['update-ref', '-d', refName], { maxOutputBytes: 4096 });
+          }
+        }
+      }
+      this.db.prepare(`DELETE FROM ${TEAM_ARTIFACT_CHUNK_TABLE} WHERE transfer_id=?`).run(row.transfer_id);
+      this.db.prepare(`DELETE FROM ${TEAM_ARTIFACT_TABLE} WHERE transfer_id=? AND direction='incoming' AND status<> 'imported'`)
+        .run(row.transfer_id);
+      if (row.status === 'imported') {
+        this.db.prepare(`DELETE FROM ${TEAM_ARTIFACT_TABLE} WHERE transfer_id=? AND direction='incoming' AND status='imported'`)
+          .run(row.transfer_id);
+      }
+    }
+    this.options.changed?.();
+  }
+
   private async waitForTeamArtifactRetry(transferId: string): Promise<TeamArtifactRow> {
     const expiresAt = Date.now() + 60_000;
     while (Date.now() < expiresAt) {
@@ -681,17 +833,20 @@ export class GitSyncService {
     if (!parsed.success) throw new Error('Malformed team artifact offer.');
     const offer = parsed.data;
     if (offer.chunkCount !== Math.ceil(offer.bundleSizeBytes / BUNDLE_CHUNK_BYTES)) throw conflict('Team artifact chunk dimensions do not match its bounded size.');
-    await this.authorizeTeamArtifact({ teamId: envelope.teamId, sharedProjectId: offer.sharedProjectId,
-      deliveryId: offer.deliveryId, peerDeviceId: envelope.fromDeviceId, direction: 'import' });
+    const authority = { teamId: envelope.teamId, sharedProjectId: offer.sharedProjectId,
+      deliveryId: offer.deliveryId, peerDeviceId: envelope.fromDeviceId, direction: 'import', purpose: offer.purpose, stage: 'bundle',
+      transferId: offer.transferId, revision: offer.revision, path: offer.path, taskId: offer.taskId } as const;
+    await this.authorizeTeamArtifact(authority);
     await resolveProjectBinding(this.options, this.db,
       { teamId: envelope.teamId, sharedProjectId: offer.sharedProjectId, peerDeviceId: envelope.fromDeviceId }, ownerId);
+    await this.authorizeTeamArtifact(authority);
     const existing = this.teamArtifactRow(offer.transferId);
     if (existing) {
       const prior = TeamArtifactOfferSchema.parse(parseJson<unknown>(existing.offer_json, 'team artifact offer'));
       if (existing.direction !== 'incoming' || existing.source_device_id !== envelope.fromDeviceId
         || existing.team_id !== envelope.teamId || existing.owner_id !== ownerId || prior.transferId !== offer.transferId
         || prior.sharedProjectId !== offer.sharedProjectId || prior.deliveryId !== offer.deliveryId || prior.revision !== offer.revision
-        || prior.taskId !== offer.taskId || prior.path !== offer.path) {
+        || prior.taskId !== offer.taskId || prior.path !== offer.path || prior.purpose !== offer.purpose) {
         throw conflict('A duplicate team artifact offer changed its authenticated payload.');
       }
       if (existing.status === 'retrying' && prior.baseRevision && !offer.baseRevision) {
@@ -718,11 +873,14 @@ export class GitSyncService {
     const chunk = parsed.data;
     const row = this.teamArtifactRow(chunk.transferId);
     if (!row || row.direction !== 'incoming' || row.owner_id !== ownerId || row.source_device_id !== envelope.fromDeviceId) throw conflict('Team artifact chunk has no matching authenticated offer.');
-    await this.authorizeTeamArtifact({ teamId: row.team_id, sharedProjectId: row.shared_project_id,
-      deliveryId: row.delivery_id, peerDeviceId: envelope.fromDeviceId, direction: 'import' });
+    const offer = TeamArtifactOfferSchema.parse(parseJson<unknown>(row.offer_json, 'team artifact offer'));
+    const authority = { teamId: row.team_id, sharedProjectId: row.shared_project_id,
+      deliveryId: row.delivery_id, peerDeviceId: envelope.fromDeviceId, direction: 'import', purpose: offer.purpose, stage: 'bundle',
+      transferId: row.transfer_id, revision: offer.revision, path: offer.path, taskId: offer.taskId } as const;
+    await this.authorizeTeamArtifact(authority);
     await resolveProjectBinding(this.options, this.db, { teamId: row.team_id, sharedProjectId: row.shared_project_id,
       peerDeviceId: envelope.fromDeviceId }, ownerId);
-    const offer = TeamArtifactOfferSchema.parse(parseJson<unknown>(row.offer_json, 'team artifact offer'));
+    await this.authorizeTeamArtifact(authority);
     if (chunk.chunkCount !== offer.chunkCount || chunk.index >= offer.chunkCount) throw conflict('Team artifact chunk dimensions differ from the authenticated offer.');
     const bytes = Buffer.from(chunk.data, 'base64');
     if (!bytes.length || bytes.length > BUNDLE_CHUNK_BYTES || bytes.toString('base64') !== chunk.data) throw new Error('Team artifact chunk is not canonical bounded base64.');
@@ -738,6 +896,7 @@ export class GitSyncService {
       return;
     }
     if (row.status !== 'receiving') throw conflict('The team artifact transfer is no longer receiving chunks.');
+    await this.authorizeTeamArtifact(authority);
     this.db.prepare(`INSERT INTO ${TEAM_ARTIFACT_CHUNK_TABLE}(transfer_id,chunk_index,data) VALUES(?,?,?)`).run(chunk.transferId, chunk.index, bytes);
     const chunks = this.db.prepare(`SELECT chunk_index,data FROM ${TEAM_ARTIFACT_CHUNK_TABLE} WHERE transfer_id=? ORDER BY chunk_index`)
       .all(chunk.transferId) as Array<{ chunk_index: number; data: Uint8Array }>;
@@ -749,11 +908,13 @@ export class GitSyncService {
     }
     const binding = await resolveProjectBinding(this.options, this.db, { teamId: row.team_id, sharedProjectId: row.shared_project_id,
       peerDeviceId: envelope.fromDeviceId }, ownerId);
+    await this.authorizeTeamArtifact(authority);
     const temp = await mkdtemp(path.join(os.tmpdir(), 'mingle-team-artifact-verify-'));
     const bundlePath = path.join(temp, 'received.bundle');
     try {
       await writeFile(bundlePath, bundle, { mode: 0o600, flag: 'wx' });
       await this.verifyTeamArtifactBundle(binding.canonicalPath, bundlePath, offer);
+      await this.authorizeTeamArtifact(authority);
       this.db.prepare(`UPDATE ${TEAM_ARTIFACT_TABLE} SET status='ready',bundle_blob=?,updated_at=? WHERE transfer_id=? AND status='receiving'`)
         .run(bundle, nowIso(), chunk.transferId);
     } catch (error) {
@@ -801,7 +962,7 @@ export class GitSyncService {
     if (expected !== actual) throw conflict('Team artifact source worktree does not belong to the owner-bound shared project repository.');
   }
 
-  private async authorizeTeamArtifact(input: { teamId: string; sharedProjectId: string; deliveryId: string; peerDeviceId: string; direction: 'export' | 'import' }): Promise<void> {
+  private async authorizeTeamArtifact(input: TeamArtifactAuthorization): Promise<void> {
     await this.options.authorizeTeam({ teamId: input.teamId, peerDeviceId: input.peerDeviceId });
     if (!this.options.authorizeTeamArtifact) throw conflict('Team artifact delivery ownership could not be verified on this device.');
     await this.options.authorizeTeamArtifact(input);

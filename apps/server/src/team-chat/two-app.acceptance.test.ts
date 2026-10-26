@@ -197,6 +197,8 @@ it('shares imported session history and team messages over HTTP and the encrypte
     expect(addSecondAgent.status, JSON.stringify(addSecondAgent.json)).toBe(200);
     const proxySessionId = (leader.app.store.db.prepare(`SELECT session_id FROM mingle_team_proxy_sessions
       WHERE team_id=? AND shared_project_id=? AND agent_id=?`).get(join.json.teamId, join.json.sharedProjectId, secondAgentId) as { session_id: string }).session_id;
+    const firstProxySessionId = (leader.app.store.db.prepare(`SELECT session_id FROM mingle_team_proxy_sessions
+      WHERE team_id=? AND shared_project_id=? AND agent_id=?`).get(join.json.teamId, join.json.sharedProjectId, teammateAgentId) as { session_id: string }).session_id;
     await teammate.app.distributed.transport.sync();
     const hostStructure = await leader.api('GET', `/api/projects/${projects[0]}/team-structure`);
     const memberStructure = await teammate.api('GET', `/api/projects/${projects[1]}/team-structure`);
@@ -352,10 +354,11 @@ it('shares imported session history and team messages over HTTP and the encrypte
         leadReviews.push({ head, html, css, workerAsked: inbox.messages.some((message: { content: string }) => message.content.includes('ready for review')) });
         if (!html.includes('Welcome to Northstar') || !css.includes('.hero')) throw new Error('The remote files were not integrated before orchestrator review.');
         const assigned = await callTeamTool(options.teamMcp, 'team_assign', {
-          recipient: secondAgent.handle, title: 'Polish the landing page button',
+          recipient: firstHostAgent.handle, title: 'Polish the landing page button',
           objective: 'Add a visible hover treatment to the primary landing-page button.',
           acceptanceCriteria: 'The primary button has an accessible, visible hover treatment in styles.css.',
-          scope: ['styles.css'],
+          scope: ['styles.css'], dependsOn: [assignmentTaskIds[0]!],
+          inputArtifacts: [{ taskId: assignmentTaskIds[0]!, path: 'index.html' }],
         });
         assignmentTaskIds.push(assigned.taskId);
         orchestratorAssignments += 1;
@@ -402,7 +405,8 @@ it('shares imported session history and team messages over HTTP and the encrypte
       const artifactRevision = runGit(worktreePath, 'rev-parse', '--verify', 'HEAD').trim();
       for (const artifactPath of artifactPaths) {
         const published = await callTeamTool(options.teamMcp, 'team_artifact', {
-          recipient: hostOwnMember.handle, path: artifactPath, revision: artifactRevision, taskId,
+          recipient: runIndex === 0 ? firstHostAgent.handle : hostOwnMember.handle,
+          path: artifactPath, revision: artifactRevision, taskId,
           note: 'Committed handoff for the active assignment.',
         });
         if (!published.artifactId || published.revision !== artifactRevision || published.path !== artifactPath || published.taskId !== taskId) {
@@ -443,6 +447,10 @@ it('shares imported session history and team messages over HTTP and the encrypte
         leaderRuns: leader.fake.runs.length,
         teammateRuns: teammate.fake.runs.length,
         assignments: current.assignments.map(({ deliveryId, taskId, scope, toMemberId }) => ({ deliveryId, taskId, scope, toMemberId })),
+        groupArtifacts: leader.app.store.db.prepare(`SELECT a.group_id,a.from_member_id,a.to_member_id,a.task_id,a.path,a.commit_id
+          FROM group_artifacts a WHERE a.group_id=? ORDER BY a.created_at`).all(teamGroupId),
+        assignmentInputs: leader.app.store.db.prepare(`SELECT a.id AS assignment_id,a.task_id,a.to_member_id,i.task_id AS input_task_id,i.path,i.artifact_id
+          FROM group_assignments a JOIN group_assignment_inputs i ON i.assignment_id=a.id WHERE a.group_id=?`).all(teamGroupId),
         deliveries: current.deliveries.map(({ id, kind, status, runId, error: message, memberId }) => ({ id, kind, status, runId, error: message, memberId })),
         tasks: leader.app.store.listTasks(projects[0]).map(({ id, title, status }) => ({ id, title, status })),
         hostDelivery: activeAssignment ? leader.app.store.db.prepare(`SELECT delivery_id,status,run_id,agent_id,owner_account_id,owner_device_id,session_id
@@ -493,6 +501,23 @@ it('shares imported session history and team messages over HTTP and the encrypte
     const firstWorkerRevision = runGit(workerRuns[0]!.worktreePath, 'rev-parse', '--verify', 'HEAD').trim();
     const secondWorkerRevision = runGit(workerRuns[1]!.worktreePath, 'rev-parse', '--verify', 'HEAD').trim();
     expect(workerRuns[1]!.baseRevision).toBe(firstWorkerRevision);
+    const successorAssignment = leader.app.groups.get(teamGroupId).assignments.find((assignment) => assignment.taskId === assignmentTaskIds[1])!;
+    const ownerDelivery = teammate.app.store.db.prepare(`SELECT request_json FROM mingle_team_device_deliveries WHERE delivery_id=?`)
+      .get(successorAssignment.deliveryId) as { request_json: string };
+    const ownerDeliveryPayload = JSON.parse(ownerDelivery.request_json) as { baseRevision: string; inputArtifacts: Array<Record<string, unknown>> };
+    expect(ownerDeliveryPayload.baseRevision).toBe(firstWorkerRevision);
+    expect(ownerDeliveryPayload.inputArtifacts).toHaveLength(2);
+    expect(ownerDeliveryPayload.inputArtifacts).toEqual(expect.arrayContaining([expect.objectContaining({
+      revision: firstWorkerRevision, path: 'index.html', taskId: assignmentTaskIds[0], transferId: expect.any(String), ref: expect.any(String),
+    }), expect.objectContaining({
+      revision: firstWorkerRevision, path: 'styles.css', taskId: assignmentTaskIds[0], transferId: expect.any(String), ref: expect.any(String),
+    })]));
+    const forwardedInputOffers = leader.app.store.db.prepare(`SELECT offer_json FROM mingle_git_team_artifacts
+      WHERE team_id=? AND shared_project_id=? AND delivery_id=? AND direction='outgoing'`)
+      .all(join.json.teamId, join.json.sharedProjectId, successorAssignment.deliveryId) as Array<{ offer_json: string }>;
+    expect(forwardedInputOffers.map((row) => JSON.parse(row.offer_json))).toContainEqual(expect.objectContaining({
+      purpose: 'input', revision: firstWorkerRevision, path: 'index.html', taskId: assignmentTaskIds[0],
+    }));
     expect(leadReviews).toHaveLength(1);
     expect(leadReviews[0]).toMatchObject({ head: firstWorkerRevision, workerAsked: true });
     expect(leadReviews[0]!.html).toContain('Welcome to Northstar');
@@ -504,12 +529,14 @@ it('shares imported session history and team messages over HTTP and the encrypte
     expect(teammate.fake.runs).toHaveLength(2);
     expect(leader.fake.runs).toHaveLength(4);
 
-    const completedRemoteRuns = leader.app.store.bootstrapRuns().filter((run) => run.sessionId === proxySessionId && run.status === 'completed')
+    const remoteProxyIds = new Set([proxySessionId, firstProxySessionId]);
+    const completedRemoteRuns = leader.app.store.bootstrapRuns().filter((run) => remoteProxyIds.has(run.sessionId) && run.status === 'completed')
       .sort((left, right) => Date.parse(left.startedAt) - Date.parse(right.startedAt));
     expect(completedRemoteRuns).toHaveLength(2);
     expect(completedRemoteRuns[0]!.changes?.files.map((file) => file.path)).toEqual(['index.html', 'styles.css']);
     expect(completedRemoteRuns[1]!.changes?.files.map((file) => file.path)).toEqual(['styles.css']);
-    const remoteProxyMessages = leader.app.store.listMessages(proxySessionId, { limit: 20 }).filter((message) => message.role === 'assistant');
+    const remoteProxyMessages = [...remoteProxyIds].flatMap((remoteProxyId) => leader.app.store.listMessages(remoteProxyId, { limit: 20 }))
+      .filter((message) => message.role === 'assistant');
     expect(remoteProxyMessages.some((message) => message.content.includes('published its scoped artifacts before completion'))).toBe(true);
     expect(remoteProxyMessages.some((message) => message.content.includes('Integrated into the host group workspace')
       && message.content.includes('index.html') && message.content.includes('styles.css'))).toBe(true);

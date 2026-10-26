@@ -17,18 +17,20 @@ afterEach(async () => {
   while (proxies.length) await proxies.pop()!.close();
 });
 
-async function connect(timeoutMs: number, respond: boolean, prepareArtifact?: (input: any) => Promise<any>) {
+async function connect(timeoutMs: number, respond: boolean, prepareArtifact?: (input: any, signal: AbortSignal) => Promise<any>, sendGate?: () => Promise<void>) {
   let proxy!: TeamMcpProxy;
   const calls: any[] = [];
+  let syncCount = 0;
   proxy = new TeamMcpProxy({
     async send(input) {
       calls.push(input);
+      await sendGate?.();
       if (respond) queueMicrotask(() => proxy.resolve({ id: randomUUID(), teamId: TEAM, fromDeviceId: HOST, toDeviceId: randomUUID(),
         kind: 'teamgroup.tool.result', payload: { sharedProjectId: SHARED, deliveryId: DELIVERY,
           callId: (input.payload as any).callId, ok: true, result: { task: 'queued' } } }));
       return 'sent';
     },
-    async sync() {},
+    async sync() { syncCount += 1; },
   }, timeoutMs);
   proxies.push(proxy);
   const connection = await proxy.create({ teamId: TEAM, sharedProjectId: SHARED, hostDeviceId: HOST, deliveryId: DELIVERY, agentId: AGENT, prepareArtifact });
@@ -38,7 +40,7 @@ async function connect(timeoutMs: number, respond: boolean, prepareArtifact?: (i
     requestInit: { headers: { Authorization: `Bearer ${connection.token}` } },
   });
   await client.connect(clientTransport);
-  return { proxy, connection, client, calls };
+  return { proxy, connection, client, calls, syncCount: () => syncCount };
 }
 
 describe('device team MCP proxy', () => {
@@ -76,5 +78,44 @@ describe('device team MCP proxy', () => {
       __mingleArtifactTransfer: { transferId: 'transfer-owner', path: 'index.html', taskId: 'task-1' },
     } } });
     expect(result.isError).toBeFalsy();
+  });
+
+  it('does not relay a prepared artifact after its delivery is interrupted during export', async () => {
+    let entered!: () => void;
+    let release!: () => void;
+    const started = new Promise<void>((resolve) => { entered = resolve; });
+    const exporting = new Promise<void>((resolve) => { release = resolve; });
+    const { proxy, client, calls } = await connect(500, true, async (_input, signal) => {
+      entered();
+      await exporting;
+      expect(signal.aborted).toBe(true);
+      return { revision: 'a'.repeat(40), path: 'index.html', transferId: 'cancelled-transfer' };
+    });
+    const result = client.callTool({ name: 'team_artifact', arguments: { recipient: 'lead', path: 'index.html', revision: 'a'.repeat(40) } });
+    await started;
+    proxy.closeDelivery(DELIVERY);
+    release();
+    const cancelled = await result;
+    expect(cancelled.isError).toBe(true);
+    expect(calls).toHaveLength(0);
+  });
+
+  it('does not continue mailbox synchronization after interruption during transport send', async () => {
+    let entered!: () => void;
+    let release!: () => void;
+    const started = new Promise<void>((resolve) => { entered = resolve; });
+    const sending = new Promise<void>((resolve) => { release = resolve; });
+    const { proxy, client, calls, syncCount } = await connect(500, true, undefined, async () => {
+      entered();
+      await sending;
+    });
+    const result = client.callTool({ name: 'team_members', arguments: {} });
+    await started;
+    proxy.closeDelivery(DELIVERY);
+    release();
+    const cancelled = await result;
+    expect(cancelled.isError).toBe(true);
+    expect(calls).toHaveLength(1);
+    expect(syncCount()).toBe(0);
   });
 });

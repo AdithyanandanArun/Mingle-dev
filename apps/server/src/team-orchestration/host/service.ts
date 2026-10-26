@@ -26,7 +26,8 @@ import { captureRunTree, compareRunTrees, type RunTreeSnapshot } from '../../run
 import { redactSecrets } from '../../providers/common.ts';
 import type { ProjectCollaborationSnapshot } from '../../../../../packages/contracts/src/project-collaboration.ts';
 import { KeyedLock } from '../../repository/lock.ts';
-import { safeArtifactPath } from '../../groups/routing.ts';
+import { normalizeScopes, safeArtifactPath } from '../../groups/routing.ts';
+import { isDeniedName } from '../../paths.ts';
 
 type Row = Record<string, unknown>;
 type HostRow = {
@@ -43,6 +44,11 @@ type DeliveryRow = {
   agent_id: string; session_id: string; owner_account_id: string; owner_device_id: string; run_id: string;
   remote_run_id: string | null; status: string; content: string; source_chat_message_id: string | null;
   artifacts_json: string; failure_json: string | null; issued_at: string; timeout_at: number; updated_at: string;
+};
+type ArtifactAuthorityRow = {
+  delivery_id: string; team_id: string; shared_project_id: string; group_id: string; session_id: string; run_id: string;
+  agent_id: string; owner_account_id: string; owner_device_id: string; task_id: string | null; scope_json: string;
+  base_revision: string | null; kind: string;
 };
 const CompletionArtifactSchema = z.object({
   source: TeamArtifactRefSchema,
@@ -94,7 +100,8 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
 
   constructor(private readonly options: {
     store: Store;
-    git?: Pick<GitSyncService, 'exportTeamArtifact' | 'importTeamArtifact'>;
+    git?: Pick<GitSyncService, 'exportTeamArtifact' | 'importTeamArtifact'>
+      & Partial<Pick<GitSyncService, 'discardUnpublishedMcpArtifacts'>>;
     integrateTeamArtifact?: (input: { localProjectId: string; teamId: string; sharedProjectId: string; deliveryId: string;
       worktreePath: string; artifact: TeamArtifactRef }) => Promise<{ beforeRevision: string; revision: string; integrated: boolean }>;
     account: TeamOrchestrationAccount;
@@ -116,6 +123,13 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
     this.deliveryTimeoutMs = Math.min(15 * 60_000, Math.max(1_000, options.deliveryTimeoutMs ?? 90_000));
     this.deliveryMaxDurationMs = Math.min(24 * 60 * 60_000,
       Math.max(this.deliveryTimeoutMs, options.deliveryMaxDurationMs ?? 2 * 60 * 60_000));
+    this.hostRows.exec(`CREATE TABLE IF NOT EXISTS mingle_team_host_artifact_authority (
+      delivery_id TEXT PRIMARY KEY, team_id TEXT NOT NULL, shared_project_id TEXT NOT NULL, group_id TEXT NOT NULL,
+      session_id TEXT NOT NULL, run_id TEXT NOT NULL, agent_id TEXT NOT NULL, owner_account_id TEXT NOT NULL,
+      owner_device_id TEXT NOT NULL, task_id TEXT, scope_json TEXT NOT NULL, base_revision TEXT, kind TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    ); CREATE INDEX IF NOT EXISTS mingle_team_host_artifact_authority_project
+      ON mingle_team_host_artifact_authority(team_id,shared_project_id,delivery_id);`);
     this.unsubscribe = options.transport.onMessage((message) => this.onEnvelope(message));
     this.unsubscribeStore = options.store.subscribe((event) => {
       if (!event) return;
@@ -1227,6 +1241,16 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
           const head = (await git(groupWorkspace?.worktreePath ?? input.session.worktreePath, ['rev-parse', '--verify', 'HEAD'])).stdout.trim();
           if (/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(head)) baseRevision = head;
         } catch { /* A delivery can proceed without a transfer base when Git state is unavailable. */ }
+        const trustedScope = assignment?.scope.length ? normalizeScopes(assignment.scope) : null;
+        const trustedTaskId = assignment?.taskId ?? basePayload.taskId ?? null;
+        this.hostRows.prepare(`INSERT INTO mingle_team_host_artifact_authority(delivery_id,team_id,shared_project_id,group_id,session_id,
+          run_id,agent_id,owner_account_id,owner_device_id,task_id,scope_json,base_revision,kind,created_at)
+          VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(delivery_id) DO UPDATE SET team_id=excluded.team_id,
+            shared_project_id=excluded.shared_project_id,group_id=excluded.group_id,session_id=excluded.session_id,run_id=excluded.run_id,
+            agent_id=excluded.agent_id,owner_account_id=excluded.owner_account_id,owner_device_id=excluded.owner_device_id,
+            task_id=excluded.task_id,scope_json=excluded.scope_json,base_revision=excluded.base_revision,kind=excluded.kind,created_at=excluded.created_at`)
+          .run(context.deliveryId, proxy.team_id, proxy.shared_project_id, context.groupId, input.session.id, input.runId, proxy.agent_id,
+            proxy.owner_account_id, proxy.owner_device_id, trustedTaskId, JSON.stringify(trustedScope), baseRevision ?? null, basePayload.kind, at);
         const inputArtifacts = await this.exportHandoffArtifacts(input.consumedHandoffs ?? [], input.session.projectId,
           proxy.team_id, proxy.shared_project_id, context.deliveryId, proxy.owner_device_id, input.options.taskId);
         const artifactContext = inputArtifacts.length
@@ -1278,14 +1302,34 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
       if (!source || source.projectId !== projectId) throw new HttpError(409, 'A handoff source is outside the shared project.');
       const sessionBase = this.hostRows.prepare('SELECT base_revision FROM session_worktree_bases WHERE session_id=?')
         .get(source.id) as { base_revision: string | null } | undefined;
+      const artifactTaskId = handoff.taskId ?? taskId;
+      const sourceTransferId = this.importedTransferForHandoff(teamId, sharedProjectId, handoff, artifactTaskId);
       artifacts.push(await this.options.git.exportTeamArtifact({
         teamId, sharedProjectId,
         sourceWorktreePath: source.worktreePath, revision: handoff.revision, toDeviceId, deliveryId,
         ...(sessionBase?.base_revision ? { sessionStartRevision: sessionBase.base_revision } : {}),
-        taskId: handoff.taskId ?? taskId, path: handoff.path,
+        ...(artifactTaskId ? { taskId: artifactTaskId } : {}), path: handoff.path, purpose: 'input', ...(sourceTransferId ? { sourceTransferId } : {}),
       }));
     }
     return artifacts;
+  }
+
+  private importedTransferForHandoff(teamId: string, sharedProjectId: string,
+    handoff: { path: string; revision: string; taskId?: string }, taskId?: string): string | undefined {
+    let rows: Array<{ transfer_id: string; offer_json: string }>;
+    try {
+      rows = this.hostRows.prepare(`SELECT transfer_id,offer_json FROM mingle_git_team_artifacts
+        WHERE team_id=? AND shared_project_id=? AND direction='incoming' AND status='imported' ORDER BY created_at DESC LIMIT 500`)
+        .all(teamId, sharedProjectId) as Array<{ transfer_id: string; offer_json: string }>;
+    } catch { return undefined; }
+    for (const row of rows) {
+      try {
+        const offer = JSON.parse(row.offer_json) as Record<string, unknown>;
+        if (offer.transferId === row.transfer_id && offer.revision === handoff.revision && offer.path === handoff.path
+          && (offer.taskId ?? undefined) === taskId) return row.transfer_id;
+      } catch { /* An invalid import row is not proof for forwarding a handoff. */ }
+    }
+    return undefined;
   }
 
   interrupt(sessionId: string): boolean {
@@ -1453,6 +1497,14 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
         this.options.groups.syncTeamRosterMembers(project.group_id, members, this.managedTeamSessionIds(syncContext));
       }
     });
+    if (!eligible) {
+      const active = this.hostRows.prepare(`SELECT delivery_id,team_id,shared_project_id FROM mingle_team_host_deliveries
+        WHERE team_id=? AND shared_project_id=? AND owner_device_id=? AND status IN ('accepted','running','awaiting-approval')`)
+        .all(envelope.teamId, sharedProjectId, envelope.fromDeviceId) as Array<{
+          delivery_id: string; team_id: string; shared_project_id: string;
+        }>;
+      for (const delivery of active) this.discardMcpArtifacts(delivery);
+    }
     if (!project) {
       this.options.store.touch();
       return;
@@ -1694,6 +1746,8 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
               throw new Error(`Commit ${progress.source.revision.slice(0, 12)} was imported as ${progress.imported?.ref ?? 'an isolated ref'} but the host group workspace is unavailable for integration.`);
             }
             const importedArtifact: TeamArtifactRef = intent.artifacts[index]!.imported!;
+            await this.validateArtifactHistory(delivery, this.artifactAuthority(delivery), importedArtifact, workspace.worktreePath, false);
+            this.assertCompletionStillLive(deliveryId);
             const integrationResult = await this.options.integrateTeamArtifact({ localProjectId: workspace.projectId, teamId: delivery.team_id,
               sharedProjectId: delivery.shared_project_id, deliveryId, worktreePath: workspace.worktreePath, artifact: importedArtifact });
             if (integrationResult.revision.toLowerCase() !== importedArtifact.revision.toLowerCase()) {
@@ -1769,7 +1823,7 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
     const project = this.readHost(delivery.team_id, delivery.shared_project_id);
     if (delivery.source_chat_message_id && this.chat && project && intent.finalContent) {
       await this.chat.postOrchestratedAgentReply({ projectId: project.local_project_id, sourceMessageId: delivery.source_chat_message_id,
-        agentId: delivery.agent_id, content: intent.finalContent });
+        agentId: delivery.agent_id, deliveryId: delivery.delivery_id, content: intent.finalContent });
       const otherLive = this.hostRows.prepare(`SELECT 1 AS found FROM mingle_team_host_deliveries
         WHERE source_chat_message_id=? AND delivery_id<>? AND status IN ('queued','accepted','running','awaiting-approval') LIMIT 1`)
         .get(delivery.source_chat_message_id, delivery.delivery_id);
@@ -1913,10 +1967,18 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
     this.options.store.recordEvent({ projectId: this.options.store.getSession(delivery.session_id, true)?.projectId ?? null, sessionId: delivery.session_id,
       type: `team.delivery.${outcome}`, summary: `Remote team delivery ${outcome}`, payload: { deliveryId, agentId: delivery.agent_id, failure: failure ?? null } });
     this.options.store.touch();
+    if (outcome !== 'completed') this.discardMcpArtifacts(delivery);
     if (failure?.kind === 'quota_exhausted' && (!nextActive || nextActive.runId === delivery.run_id)) {
       this.options.store.updateSession(delivery.session_id, { error: failure.message });
     }
     if (delivery.source_chat_message_id) this.finishChatDelivery(delivery.delivery_id, delivery.source_chat_message_id, outcome);
+  }
+
+  private discardMcpArtifacts(delivery: Pick<DeliveryRow, 'team_id' | 'shared_project_id' | 'delivery_id'>): void {
+    const discard = this.options.git?.discardUnpublishedMcpArtifacts;
+    if (!discard) return;
+    this.track(discard.call(this.options.git, { teamId: delivery.team_id, sharedProjectId: delivery.shared_project_id,
+      deliveryId: delivery.delivery_id }).catch(() => undefined));
   }
 
   private releaseProxyRun(delivery: DeliveryRow): void {
@@ -1986,6 +2048,70 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
       .then(() => wasLeader && deviceOffline ? this.promoteFallback(delivery.team_id, delivery.shared_project_id, 'fallback-offline') : undefined);
   }
 
+  private artifactAuthority(delivery: DeliveryRow): ArtifactAuthorityRow {
+    const authority = this.hostRows.prepare('SELECT * FROM mingle_team_host_artifact_authority WHERE delivery_id=?')
+      .get(delivery.delivery_id) as ArtifactAuthorityRow | undefined;
+    if (!authority || authority.team_id !== delivery.team_id || authority.shared_project_id !== delivery.shared_project_id
+      || authority.group_id !== delivery.group_id || authority.session_id !== delivery.session_id || authority.run_id !== delivery.run_id
+      || authority.agent_id !== delivery.agent_id || authority.owner_account_id !== delivery.owner_account_id
+      || authority.owner_device_id !== delivery.owner_device_id) {
+      throw new HttpError(403, 'Host-owned task, scope, and base authority are unavailable for this artifact delivery.');
+    }
+    return authority;
+  }
+
+  private async validateArtifactHistory(delivery: DeliveryRow, authority: ArtifactAuthorityRow, artifact: TeamArtifactRef,
+    worktreePath: string, requireDeclaredPath: boolean): Promise<void> {
+    if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(artifact.revision) || !artifact.ref) {
+      throw new HttpError(403, 'A transferred artifact must identify a full revision and verified isolated ref.');
+    }
+    if ((artifact.taskId ?? null) !== authority.task_id) throw new HttpError(403, 'The transferred artifact task differs from the host-owned delivery task.');
+    let scope: string[] | null;
+    try {
+      const raw = JSON.parse(authority.scope_json) as unknown;
+      scope = raw === null ? null : normalizeScopes(Array.isArray(raw) && raw.every((entry) => typeof entry === 'string') ? raw : []);
+    } catch { throw new HttpError(403, 'The host-owned artifact scope is invalid.'); }
+    if (authority.kind === 'assignment' && !scope?.length) throw new HttpError(403, 'The host assignment has no verified edit scope.');
+    const base = authority.base_revision;
+    if (authority.kind === 'assignment' && !base) throw new HttpError(409, 'The host cannot verify assignment scope without its recorded base revision.');
+    if (base && !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(base)) throw new HttpError(403, 'The host-owned artifact base revision is invalid.');
+    const resolved = await git(worktreePath, ['rev-parse', '--verify', '--end-of-options', `${artifact.ref}^{commit}`]);
+    if (resolved.stdout.trim().toLowerCase() !== artifact.revision.toLowerCase()) throw new HttpError(403, 'The transferred ref does not resolve to the exact artifact revision.');
+    let range = artifact.revision;
+    if (base) {
+      const ancestor = await git(worktreePath, ['merge-base', '--is-ancestor', base, artifact.revision], { allowFailure: true });
+      if (ancestor.code !== 0) throw new HttpError(403, 'The transferred artifact is not descended from the host-recorded assignment base.');
+      range = `${base}..${artifact.revision}`;
+    }
+    const count = Number((await git(worktreePath, ['rev-list', '--count', range])).stdout.trim());
+    if (!Number.isSafeInteger(count) || count > 10_000) throw new HttpError(403, 'Transferred artifact history exceeds the host verification limit.');
+    const output = count ? await git(worktreePath,
+      ['log', '--format=', '--name-only', '--no-renames', '--root', '-m', '-z', range], { maxBuffer: 8 * 1024 * 1024 }) : { stdout: '' };
+    const changedPaths = [...new Set(output.stdout.split('\0').filter(Boolean))];
+    const normalizedChanges = changedPaths.map((file) => {
+      let normalized: string;
+      try { normalized = safeArtifactPath(file); } catch { throw new HttpError(403, 'The transferred history contains an unsafe path.'); }
+      if (file.split('/').some(isDeniedName)) throw new HttpError(403, 'The transferred history contains a protected path.');
+      if (scope && !isPathWithinArtifactScope(normalized, scope)) throw new HttpError(403, `The transferred history changes out-of-scope path ${normalized}.`);
+      return normalized;
+    });
+    if (requireDeclaredPath) {
+      if (!artifact.path) throw new HttpError(403, 'An explicit team artifact must name its committed file.');
+      const declared = safeArtifactPath(artifact.path);
+      if (!normalizedChanges.includes(declared)) throw new HttpError(403, 'The declared artifact path is not changed in this transferred history.');
+      if (scope && !isPathWithinArtifactScope(declared, scope)) throw new HttpError(403, 'The declared artifact path is outside the host-owned assignment scope.');
+    }
+  }
+
+  private assertToolCallStillActive(deliveryId: string, active: { runId: string; controller: AbortController }): DeliveryRow {
+    const delivery = this.delivery(deliveryId);
+    if (!delivery || !liveDelivery(delivery.status) || this.completionIntent(delivery) || delivery.run_id !== active.runId
+      || this.active.get(delivery.session_id) !== active || active.controller.signal.aborted) {
+      throw new HttpError(409, 'The team tool call was cancelled because its delivery is no longer active.');
+    }
+    return delivery;
+  }
+
   private async receiveToolCall(envelope: import('@mingle/contracts').AuthenticatedTransportMessage): Promise<void> {
     const parsed = TeamToolCallPayloadSchema.safeParse(envelope.payload);
     if (!parsed.success) throw new HttpError(400, 'Team tool call payload is invalid.');
@@ -1999,6 +2125,7 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
     this.extendDeliveryTimeout(delivery.delivery_id);
     const active = this.active.get(delivery.session_id);
     if (!active || active.runId !== delivery.run_id) throw new HttpError(409, 'The team tool call run is no longer active.');
+    this.assertToolCallStillActive(delivery.delivery_id, active);
     let result: unknown;
     let error: string | undefined;
     try {
@@ -2006,6 +2133,7 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
       if (parsed.data.tool === 'team_artifact') {
         const { __mingleArtifactTransfer, ...artifactArgs } = args;
         const artifact = TeamArtifactSchema.parse(artifactArgs);
+        const authority = this.artifactAuthority(delivery);
         const assignment = this.options.groups.get(delivery.group_id).assignments.find((candidate) => candidate.deliveryId === delivery.delivery_id);
         const artifactPath = safeArtifactPath(artifact.path);
         if (assignment) {
@@ -2013,25 +2141,37 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
           const withinScope = assignment.scope.some((scope) => artifactPath === scope || artifactPath.startsWith(`${scope}/`));
           if (!withinScope) throw new HttpError(403, 'The artifact path is outside its assigned scope.');
         }
-        if (__mingleArtifactTransfer !== undefined) {
-          const transfer = TeamArtifactRefSchema.parse(__mingleArtifactTransfer);
-          if (transfer.revision.toLowerCase() !== artifact.revision.toLowerCase() || transfer.path !== artifactPath
-            || transfer.taskId !== artifact.taskId) {
-            throw new HttpError(403, 'The owner-device artifact transfer differs from its active handoff request.');
-          }
-          if (!this.options.git) throw new HttpError(409, 'The owner-device artifact cannot be imported because team Git transfer is unavailable.');
-          await this.options.authorizeTeam({ teamId: delivery.team_id, peerDeviceId: delivery.owner_device_id });
-          const imported = await this.options.git.importTeamArtifact({ teamId: delivery.team_id,
-            sharedProjectId: delivery.shared_project_id, deliveryId: delivery.delivery_id, artifact: transfer,
-            sourceDeviceId: delivery.owner_device_id });
-          if (imported.revision.toLowerCase() !== artifact.revision.toLowerCase() || imported.path !== transfer.path
-            || imported.taskId !== transfer.taskId) throw new HttpError(409, 'The imported team artifact differs from its active handoff request.');
+        if (__mingleArtifactTransfer === undefined) throw new HttpError(403, 'A remote artifact must include its authenticated owner-device transfer.');
+        const transfer = TeamArtifactRefSchema.parse(__mingleArtifactTransfer);
+        if (transfer.revision.toLowerCase() !== artifact.revision.toLowerCase() || transfer.path !== artifactPath
+          || transfer.taskId !== artifact.taskId) {
+          throw new HttpError(403, 'The owner-device artifact transfer differs from its active handoff request.');
         }
+        if (!this.options.git) throw new HttpError(409, 'The owner-device artifact cannot be imported because team Git transfer is unavailable.');
+        this.assertToolCallStillActive(delivery.delivery_id, active);
+        await this.options.authorizeTeam({ teamId: delivery.team_id, peerDeviceId: delivery.owner_device_id });
+        this.assertToolCallStillActive(delivery.delivery_id, active);
+        const imported = await this.options.git.importTeamArtifact({ teamId: delivery.team_id,
+          sharedProjectId: delivery.shared_project_id, deliveryId: delivery.delivery_id, artifact: transfer,
+          sourceDeviceId: delivery.owner_device_id, signal: active.controller.signal });
+        this.assertToolCallStillActive(delivery.delivery_id, active);
+        await this.assertCompletionAuthority(delivery);
+        this.assertToolCallStillActive(delivery.delivery_id, active);
+        if (imported.revision.toLowerCase() !== artifact.revision.toLowerCase() || imported.path !== transfer.path
+          || imported.taskId !== transfer.taskId) throw new HttpError(409, 'The imported team artifact differs from its active handoff request.');
+        const workspace = this.groupWorkspace(delivery.group_id);
+        if (!workspace) throw new HttpError(409, 'The host group workspace is unavailable for artifact verification.');
+        await this.validateArtifactHistory(delivery, authority, imported, workspace.worktreePath, true);
+        this.assertToolCallStillActive(delivery.delivery_id, active);
         args = artifactArgs;
       }
       result = await this.options.teamMcp.callRemote(delivery.run_id, delivery.session_id, parsed.data.tool, args);
+      if (parsed.data.tool === 'team_artifact') this.assertToolCallStillActive(delivery.delivery_id, active);
     }
-    catch (cause) { error = redactSecrets(cause instanceof Error ? cause.message : 'Team tool call failed').slice(0, 2_000); }
+    catch (cause) {
+      error = redactSecrets(cause instanceof Error ? cause.message : 'Team tool call failed').slice(0, 2_000);
+      if (parsed.data.tool === 'team_artifact') this.discardMcpArtifacts(delivery);
+    }
     const payload = TeamToolResultPayloadSchema.parse({ sharedProjectId: delivery.shared_project_id, deliveryId: delivery.delivery_id,
       callId: parsed.data.callId, ok: error === undefined, ...(error === undefined ? { result } : { error }) });
     await this.options.transport.send({ teamId: delivery.team_id, toDeviceId: delivery.owner_device_id, kind: 'teamgroup.tool.result', payload,
@@ -2221,4 +2361,12 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
     }
     await Promise.allSettled([...this.pending]);
   }
+}
+
+function isPathWithinArtifactScope(file: string, scopes: string[]): boolean {
+  const normalized = file.toLocaleLowerCase();
+  return scopes.some((scope) => {
+    const entry = scope.toLocaleLowerCase();
+    return normalized === entry || normalized.startsWith(`${entry}/`);
+  });
 }

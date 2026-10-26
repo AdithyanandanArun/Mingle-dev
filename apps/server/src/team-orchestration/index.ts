@@ -51,6 +51,7 @@ export function createTeamOrchestration(options: TeamOrchestrationOptions): {
     store: options.store, git: {
       exportTeamArtifact: (input) => options.distributed.git.exportTeamArtifact(input),
       importTeamArtifact: (input) => options.distributed.importTeamArtifact(input),
+      discardUnpublishedMcpArtifacts: (input) => options.distributed.discardUnpublishedMcpArtifacts(input),
     }, account: options.account, transport: options.transport,
     authorizeTeam: (input) => options.distributed.authorizeTeam(input), collaboration: options.collaboration,
     groups: options.groups, teamMcp: options.teamMcp, recovery: options.recovery,
