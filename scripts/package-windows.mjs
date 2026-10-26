@@ -5,6 +5,7 @@ import { spawn } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
+import { verifyGitRepositoryDetection } from './git-repository-smoke.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const release = join(root, 'release');
@@ -121,6 +122,8 @@ async function smokeRuntime(smokeRoot) {
     if (!bootstrapResponse.ok) throw new Error(`Staged bootstrap returned HTTP ${bootstrapResponse.status}.`);
     const bootstrap = await bootstrapResponse.json();
     if (!Array.isArray(bootstrap.projects) || !Array.isArray(bootstrap.sessions)) throw new Error('Staged bootstrap omitted the project/session collections.');
+
+    await verifyGitRepositoryDetection(baseUrl, join(smokeRoot, 'git-repository-check'));
 
     // Keep native ConPTY cleanup handles out of the packaging process. The probe
     // exits only after its real command has exited and its output is verified.

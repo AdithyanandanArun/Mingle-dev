@@ -10,6 +10,7 @@ import type {
 import { CreateProjectInvitationSchema, JoinProjectInvitationSchema, PreviewProjectInvitationSchema } from '../../../../packages/contracts/src/project-collaboration.ts';
 import { resolveRunConfig } from '../session-config.ts';
 import { runGit } from '../distributed/git-common.ts';
+import { failureSummary } from '../repository/scrub.ts';
 import type { AccountService } from '../account/service.ts';
 import type { DistributedWorkspaceService } from '../distributed/service.ts';
 import type { Store } from '../store.ts';
@@ -266,7 +267,15 @@ export class ProjectCollaborationService {
     let root: string;
     try { root = await realpath(project.path); } catch { throw new HttpError(409, 'The local project folder is no longer available.'); }
     const topResult = await runGit(root, ['rev-parse', '--show-toplevel'], { allowFailure: true, maxOutputBytes: 4096 });
-    if (topResult.code !== 0) throw new HttpError(409, 'This project is not an existing Git repository.');
+    if (topResult.code !== 0) {
+      const detail = topResult.stderr.toString('utf8');
+      if (/detected dubious ownership/i.test(detail)) {
+        throw new HttpError(409, 'Git does not trust this folder’s ownership. Review the repository ownership and Git trust settings before joining.');
+      }
+      if (/not a git repository/i.test(detail)) throw new HttpError(409, 'This project is not an existing Git repository.');
+      if (/must be run in a work tree/i.test(detail)) throw new HttpError(409, 'Select a Git working checkout. A bare repository cannot be used as a project workspace.');
+      throw new HttpError(409, `Git could not inspect this project folder. ${failureSummary(detail) || 'Check Git installation, configuration and folder permissions, then retry.'}`);
+    }
     const top = topResult.stdout.toString('utf8').replace(/\r?\n$/, '');
     let canonicalTop: string;
     try { canonicalTop = await realpath(top); } catch { throw new HttpError(409, 'The Git repository root is unavailable.'); }

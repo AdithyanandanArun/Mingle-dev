@@ -3,6 +3,7 @@ import { spawn } from 'node:child_process';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const stage = resolve(process.argv[2] ?? 'release/mingle-0.0.1-linux-x64');
 const scratch = await mkdtemp(join(tmpdir(), 'mingle-package-check-'));
@@ -34,6 +35,8 @@ try {
     else assert.doesNotThrow(() => JSON.parse(body));
   }
   assert.ok(app.store);
+  const { verifyGitRepositoryDetection } = await import(pathToFileURL(${JSON.stringify(fileURLToPath(new URL('./git-repository-smoke.mjs', import.meta.url)))}));
+  await verifyGitRepositoryDetection(app.url, join(process.argv[3], 'git-repository-check'));
   console.log('Packaged Node, native PTY, SQLite, HTTP API and built UI passed.');
 } finally { await app.close(); }
 `);

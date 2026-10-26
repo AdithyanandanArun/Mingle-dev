@@ -1,4 +1,6 @@
-import { rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { afterEach, expect, it } from 'vitest';
 import { JoinProjectInvitationSchema } from '@mingle/contracts';
 import { makeRepo, runGit, startTestApp, type TestApp } from './test-utils.ts';
@@ -70,4 +72,44 @@ it('rejects foreign origins and malformed invitation payloads at the real HTTP b
   }
   expect(t.fake.runs).toEqual([]);
   expect(t.app.store.listSessions()).toEqual([]);
+});
+
+it('recognizes a freshly cloned checkout throughout Git state and invitation join preflight', async () => {
+  const { t, projectId } = await boot();
+  const source = t.app.store.getProject(projectId)!.path;
+  const parent = mkdtempSync(path.join(os.tmpdir(), 'mingle-clone-detection-'));
+  repos.push(parent);
+  const checkout = path.join(parent, 'Shared café project');
+  runGit(parent, 'clone', '--quiet', '--no-hardlinks', '--', source, checkout);
+  runGit(checkout, 'remote', 'set-url', 'origin', 'https://github.com/example/explicit-test-project.git');
+  const opened = await t.api('POST', '/api/projects', { name: 'Cloned checkout', path: checkout });
+  expect(opened.status).toBe(201);
+  const id = opened.json.id;
+  for (const endpoint of ['git', 'repository']) {
+    const result = await t.api('GET', `/api/projects/${id}/${endpoint}`);
+    expect(result.status).toBe(200);
+    expect(result.json.isRepo, endpoint).toBe(true);
+  }
+  const joined = await t.api('POST', '/api/project-invitations/join', {
+    token, localProjectId: id,
+    agent: { provider: 'claude', model: 'claude-sonnet-5-5', effort: 'high', policy: 'supervised' },
+  });
+  expect(joined.status).toBe(401);
+  expect(joined.json.error).not.toMatch(/not.*(?:Git|repository)/i);
+  expect(t.fake.runs).toEqual([]);
+});
+
+it('reports Git inspection errors separately from folders without a repository', async () => {
+  const { t, projectId } = await boot();
+  const checkout = t.app.store.getProject(projectId)!.path;
+  writeFileSync(path.join(checkout, '.git', 'config'), 'broken fixture config\n');
+  const joined = await t.api('POST', '/api/project-invitations/join', {
+    token, localProjectId: projectId,
+    agent: { provider: 'claude', model: 'claude-sonnet-5-5', effort: 'high', policy: 'supervised' },
+  });
+  expect(joined.status).toBe(409);
+  expect(joined.json.error).toContain('Git could not inspect this project folder.');
+  expect(joined.json.error).toMatch(/bad config/i);
+  expect(joined.json.error).not.toContain('not an existing Git repository');
+  expect(t.fake.runs).toEqual([]);
 });
