@@ -100,20 +100,15 @@ export function ProjectTeammatesDialog({ project, onClose }: { project: Project;
   const [sharedAction, setSharedAction] = useState<string | null>(null);
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
   const requestId = useRef(0);
-  const liveRefreshId = useRef(0);
   const invitationSequence = useRef(0);
 
   const refresh = async (signal?: AbortSignal, { quiet = false }: { quiet?: boolean } = {}) => {
-    const id = quiet ? ++liveRefreshId.current : ++requestId.current;
-    const requestSequence = requestId.current;
+    const id = ++requestId.current;
     if (!quiet) {
-      liveRefreshId.current++;
       setLoading(true);
       setError(null);
     }
-    const isCurrent = () => (quiet
-      ? id === liveRefreshId.current && requestSequence === requestId.current
-      : id === requestId.current)
+    const isCurrent = () => id === requestId.current
       && useMingle.getState().activeProjectId === project.id
       && !signal?.aborted;
     try {
@@ -125,7 +120,7 @@ export function ProjectTeammatesDialog({ project, onClose }: { project: Project;
     } catch (cause) {
       if (isCurrent()) setError(errorMessage(cause));
     } finally {
-      if (!quiet && id === requestId.current && !signal?.aborted) setLoading(false);
+      if (id === requestId.current && !signal?.aborted) setLoading(false);
     }
   };
 
@@ -197,11 +192,15 @@ export function ProjectTeammatesDialog({ project, onClose }: { project: Project;
       try {
         // Invitations can create the collaboration binding. Read it after the invite rather than
         // assuming the snapshot from opening Teammates already contained a shared project.
-        liveRefreshId.current++;
         const collaborationRequestId = ++requestId.current;
-        const latestCollaboration = await projectCollaborationApi.snapshot(project.id);
-        if (sequence !== invitationSequence.current || collaborationRequestId !== requestId.current || useMingle.getState().activeProjectId !== project.id) return;
-        setSnapshot(latestCollaboration);
+        let latestCollaboration: ProjectCollaborationSnapshot;
+        try {
+          latestCollaboration = await projectCollaborationApi.snapshot(project.id);
+        } finally {
+          if (collaborationRequestId === requestId.current) setLoading(false);
+        }
+        if (sequence !== invitationSequence.current || useMingle.getState().activeProjectId !== project.id) return;
+        if (collaborationRequestId === requestId.current) setSnapshot(latestCollaboration);
         const binding = latestCollaboration.project;
         if (!binding || !binding.teamId || !binding.sharedProjectId) {
           teamSessionMessage = `${invitationOutcome}, but the shared project binding could not be confirmed. Refresh the team panel, then use Share current session if setup is still needed. You do not need to send the invitation again.`;

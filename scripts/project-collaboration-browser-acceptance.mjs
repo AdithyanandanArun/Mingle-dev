@@ -91,6 +91,7 @@ let failShareSessionOnce = false;
 let rejectNextSettingsPatch = false;
 let collabGate = null;
 let delayCollaborationOnce = false;
+let holdNextCollaborationRead = null;
 let collaborationReads = 0;
 let teamStructureReads = 0;
 let passed = 0;
@@ -262,6 +263,12 @@ function accountState(status, email = INVITED_EMAIL) {
 
 function jsonResponse(route, status, body) {
   return route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) });
+}
+
+function createDeferred() {
+  let resolve;
+  const promise = new Promise((done) => { resolve = done; });
+  return { promise, resolve };
 }
 
 function invitationPreview(email = INVITED_EMAIL) {
@@ -576,7 +583,14 @@ async function main() {
       };
       const collaborationView = structuredClone(collaborationSnapshot);
       if (!collaborationBound) collaborationView.project = null;
+      const heldRead = holdNextCollaborationRead;
+      if (heldRead) {
+        holdNextCollaborationRead = null;
+        heldRead.started = true;
+        await heldRead.release.promise;
+      }
       await jsonResponse(route, 200, collaborationView);
+      if (heldRead) heldRead.completed = true;
       return;
     }
     if (/^\/api\/projects\/[^/]+\/team-structure$/.test(url.pathname) && method === 'GET') {
@@ -735,9 +749,32 @@ async function main() {
     const selectedSessionId = await page.evaluate((id) => JSON.parse(localStorage.getItem('relay.ui.v2') ?? '{}').sessionByProject?.[id], projectId);
     assert.equal(await page.locator('.team-orch-settings').count(), 0, 'a new project has no team settings panel before its invitation creates a binding');
     await page.locator('.pc-field--role select').selectOption('admin');
-    await page.getByRole('button', { name: 'Send invite', exact: true }).click();
+    const readsBeforeInviteSetup = collaborationReads;
+    const structuresBeforeInviteSetup = teamStructureReads;
+    const heldInviteRead = { release: createDeferred(), started: false, completed: false };
+    holdNextCollaborationRead = heldInviteRead;
+    try {
+      await page.getByRole('button', { name: 'Send invite', exact: true }).click();
+      await waitFor(() => heldInviteRead.started, 'post-invite collaboration read to pause before binding setup');
+      await page.evaluate(async (id) => {
+        const { dispatchTeamUpdate } = await import('/src/lib/team-live-updates.ts');
+        dispatchTeamUpdate({ type: 'team.structure.updated', projectId: id });
+      }, projectId);
+      await waitFor(() => collaborationReads >= readsBeforeInviteSetup + 2, 'quiet roster read during post-invite binding lookup');
+      await page.getByRole('dialog', { name: 'Teammates' }).locator('.pc-project-ref').waitFor();
+      const delayedInviteResponse = page.waitForResponse((response) => new URL(response.url()).pathname === `/api/projects/${projectId}/collaboration`
+        && response.request().method() === 'GET');
+      heldInviteRead.release.resolve();
+      await delayedInviteResponse;
+      await waitFor(() => heldInviteRead.completed, 'post-invite collaboration read to complete');
+    } finally {
+      heldInviteRead.release.resolve();
+      if (holdNextCollaborationRead === heldInviteRead) holdNextCollaborationRead = null;
+      if (heldInviteRead.started && !heldInviteRead.completed) await waitFor(() => heldInviteRead.completed, 'post-invite read cleanup').catch(() => {});
+    }
     await page.getByRole('status').filter({ hasText: /Invitation email sent to new-person@example.invalid/ }).waitFor();
     await page.getByRole('status').filter({ hasText: /now shared with the team/ }).waitFor();
+    assert.ok(teamStructureReads > structuresBeforeInviteSetup, 'invite setup continues through current server structure validation after a newer roster read');
     const post = requests.findLast((item) => item.method === 'POST' && item.pathname === `/api/projects/${projectId}/collaboration/invitations`);
     assert.deepEqual(post?.body, { email: 'new-person@example.invalid', role: 'admin' });
     const automaticShare = requests.findLast((item) => item.method === 'POST' && item.pathname === `/api/projects/${projectId}/team-orchestration/share-session`);
@@ -800,20 +837,48 @@ async function main() {
     } finally { await page.setViewportSize({ width: 1280, height: 900 }); }
 
     const liveOwnerId = 'example-live-roster-owner';
-    collaborationSnapshot.members.push({ accountId: liveOwnerId, email: 'live-owner@example.invalid', displayName: 'Example live owner', role: 'member', status: 'active' });
-    collaborationSnapshot.agents.push({ id: 'example-live-roster-agent', name: 'Example live inbound agent', accountId: liveOwnerId, deviceId: 'example-live-roster-device', deviceName: 'Example live device', projectId, sessionId: null, provider: 'claude', model: 'example-claude-model', state: 'idle' });
-    const readsBeforeLiveStructure = collaborationReads;
-    await dialog.getByLabel('Teammate email', { exact: true }).fill('live-update-preserves-form@example.invalid');
-    await page.evaluate(async (id) => {
-      const { dispatchTeamUpdate } = await import('/src/lib/team-live-updates.ts');
-      dispatchTeamUpdate({ type: 'team.structure.updated', projectId: id });
-    }, projectId);
-    await waitFor(() => collaborationReads > readsBeforeLiveStructure, 'project collaboration snapshot refresh after the normal structure event');
-    await dialog.locator('.pc-agent-row--remote').filter({ hasText: 'Example live inbound agent' }).waitFor();
-    assert.equal(await dialog.getByLabel('Teammate email', { exact: true }).inputValue(), 'live-update-preserves-form@example.invalid', 'quiet live refresh preserves invitation form state');
-    assert.equal(await dialog.locator('.pc-dialog').getAttribute('aria-busy'), 'false', 'live refresh does not replace the dialog with its loading state');
+    const liveAgentId = 'example-live-roster-agent';
+    const liveAgentName = 'Example live inbound agent';
     collaborationSnapshot.members = collaborationSnapshot.members.filter((member) => member.accountId !== liveOwnerId);
-    collaborationSnapshot.agents = collaborationSnapshot.agents.filter((agent) => agent.id !== 'example-live-roster-agent');
+    collaborationSnapshot.agents = collaborationSnapshot.agents.filter((agent) => agent.id !== liveAgentId);
+    await dialog.getByRole('button', { name: 'Close dialog', exact: true }).click();
+    const readsBeforeLiveStructure = collaborationReads;
+    const heldInitialRead = { release: createDeferred(), started: false, completed: false };
+    holdNextCollaborationRead = heldInitialRead;
+    try {
+      await page.getByRole('button', { name: 'Add teammates', exact: true }).click();
+      const liveDialog = page.getByRole('dialog', { name: 'Teammates' });
+      await liveDialog.waitFor();
+      await waitFor(() => heldInitialRead.started, 'initial collaboration read to capture the old roster and pause');
+      await liveDialog.getByLabel('Teammate email', { exact: true }).fill('live-update-preserves-form@example.invalid');
+
+      collaborationSnapshot.members.push({ accountId: liveOwnerId, email: 'live-owner@example.invalid', displayName: 'Example live owner', role: 'member', status: 'active' });
+      collaborationSnapshot.agents.push({ id: liveAgentId, name: liveAgentName, accountId: liveOwnerId, deviceId: 'example-live-roster-device', deviceName: 'Example live device', projectId, sessionId: null, provider: 'claude', model: 'example-claude-model', state: 'idle' });
+      await page.evaluate(async (id) => {
+        const { dispatchTeamUpdate } = await import('/src/lib/team-live-updates.ts');
+        dispatchTeamUpdate({ type: 'team.structure.updated', projectId: id });
+      }, projectId);
+      await waitFor(() => collaborationReads >= readsBeforeLiveStructure + 2, 'quiet collaboration read after the structure event');
+      await liveDialog.locator('.pc-agent-row--remote').filter({ hasText: liveAgentName }).waitFor();
+      assert.equal(await liveDialog.getByLabel('Teammate email', { exact: true }).inputValue(), 'live-update-preserves-form@example.invalid', 'quiet live refresh preserves invitation form state');
+      assert.equal(await liveDialog.locator('.pc-dialog').getAttribute('aria-busy'), 'false', 'quiet refresh settles loading after superseding the initial read');
+
+      const delayedInitialResponse = page.waitForResponse((response) => new URL(response.url()).pathname === `/api/projects/${projectId}/collaboration`
+        && response.request().method() === 'GET');
+      heldInitialRead.release.resolve();
+      await delayedInitialResponse;
+      await waitFor(() => heldInitialRead.completed, 'captured initial collaboration read to finish');
+      await delay(80);
+      await liveDialog.locator('.pc-agent-row--remote').filter({ hasText: liveAgentName }).waitFor();
+      assert.equal(await liveDialog.getByLabel('Teammate email', { exact: true }).inputValue(), 'live-update-preserves-form@example.invalid', 'the older initial response cannot replace the latest roster or form state');
+      assert.equal(await liveDialog.locator('.pc-dialog').getAttribute('aria-busy'), 'false', 'the superseded initial response cannot restore loading');
+    } finally {
+      heldInitialRead.release.resolve();
+      if (holdNextCollaborationRead === heldInitialRead) holdNextCollaborationRead = null;
+      if (heldInitialRead.started && !heldInitialRead.completed) await waitFor(() => heldInitialRead.completed, 'held initial read cleanup').catch(() => {});
+      collaborationSnapshot.members = collaborationSnapshot.members.filter((member) => member.accountId !== liveOwnerId);
+      collaborationSnapshot.agents = collaborationSnapshot.agents.filter((agent) => agent.id !== liveAgentId);
+    }
     await dialog.getByLabel('Teammate email', { exact: true }).fill('');
     const teammate = dialog.locator('.pc-agent-row--remote').filter({ hasText: 'Example teammate' });
     await teammate.getByRole('button').click();
