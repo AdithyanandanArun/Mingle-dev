@@ -78,11 +78,17 @@ it.each([false, true])('invites and joins through two real HTTP applications, Po
       await leader.app.distributed.transport.sync();
     } else {
       await waitFor(() => leader.app.store.db.prepare('SELECT id FROM mingle_remote_agents WHERE session_id=? AND revoked_at IS NULL').get(joined[0]!.json.sessionId));
+      // Before a canonical group is configured, the open Teammates dialog still
+      // needs the project-scoped event that drives its live roster refresh.
+      const initialInvalidation = await waitFor(() => leader.app.store.listEvents({ projectId: projectIds[0] })
+        .find((event) => event.type === 'team.structure.updated'));
       const renamedAt = performance.now();
       const renamed = await teammate.api('PATCH', `/api/sessions/${joined[0]!.json.sessionId}`, { name: 'Example Codex 1 renamed' });
       expect(renamed.status, JSON.stringify(renamed.json)).toBe(200);
       await waitFor(() => leader.app.store.db.prepare('SELECT id FROM mingle_remote_agents WHERE session_id=? AND name=? AND revoked_at IS NULL')
         .get(joined[0]!.json.sessionId, 'Example Codex 1 renamed'));
+      await waitFor(() => leader.app.store.listEvents({ projectId: projectIds[0], after: initialInvalidation.id })
+        .some((event) => event.type === 'team.structure.updated'));
       const elapsed = performance.now() - renamedAt;
       expect(elapsed, `Local two-app metadata propagation took ${Math.round(elapsed)}ms`).toBeLessThan(1_000);
       expect(cloud.wakeTimings.some((timing) => timing.deliveredAt !== null)).toBe(true);
