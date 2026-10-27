@@ -9,7 +9,7 @@ import { openDatabase } from '../db.ts';
 import { Store } from '../store.ts';
 import { WorkspaceService } from '../workspace.ts';
 import { ProviderService } from '../provider-service.ts';
-import { FakeProviders, makeRepo, runGit } from '../test-utils.ts';
+import { FakeProviders, makeRepo, runGit, waitFor } from '../test-utils.ts';
 import { normalizeRepositoryUrl, ProjectCollaborationService } from './service.ts';
 
 const ACCOUNT = '10000000-0000-4000-8000-000000000001';
@@ -63,8 +63,12 @@ it('serializes matching joins, resumes after roster failure without duplicate se
   const accepted = new Set<string>();
   let failNextPublish = true;
   let createCount = 0;
+  let cloudCalls = 0;
+  let now = Date.now();
+  const rosterListeners = new Set<(teamId: string, sharedProjectId: string) => void>();
   const client = {
     async rpc(name: string, args: Record<string, string>) {
+      cloudCalls++;
       if (name === 'preview_mingle_project_invitation' || name === 'accept_mingle_project_invitation') {
         const tokenHash = args.p_token_hash!;
         const kind = createHash('sha256').update(TOKENS.first).digest('hex') === tokenHash ? 'first' : 'second';
@@ -92,12 +96,16 @@ it('serializes matching joins, resumes after roster failure without duplicate se
     const values = tableRows[table] ?? { single: null, rows: [] };
     const builder: Record<string, unknown> = {
       select: () => builder, eq: () => builder, is: () => builder, order: () => builder, limit: () => builder,
-      maybeSingle: async () => ({ data: values.single, error: null }),
-      then: (resolve: (value: unknown) => unknown, reject: (error: unknown) => unknown) => Promise.resolve({ data: values.rows, error: null }).then(resolve, reject),
+      maybeSingle: async () => { cloudCalls++; return { data: values.single, error: null }; },
+      then: (resolve: (value: unknown) => unknown, reject: (error: unknown) => unknown) => {
+        cloudCalls++;
+        return Promise.resolve({ data: values.rows, error: null }).then(resolve, reject);
+      },
     };
     return builder;
   };
   const account = {
+    snapshot: () => ({ status: 'signed-in', user: { id: ACCOUNT } }),
     withAuthenticatedClient: async <T>(callback: (client: SupabaseClient, user: User) => Promise<T>) => callback(client, user),
   };
   const distributed = {
@@ -113,6 +121,7 @@ it('serializes matching joins, resumes after roster failure without duplicate se
       }
     },
     execution: {
+      subscribeRosterChanges: (listener: (teamId: string, sharedProjectId: string) => void) => { rosterListeners.add(listener); return () => { rosterListeners.delete(listener); }; },
       snapshot: async () => ({
         bindings: structuredClone(bindings),
         agents: [...published.values()].map((row) => ({ ...row, presence: 'idle' })),
@@ -131,6 +140,7 @@ it('serializes matching joins, resumes after roster failure without duplicate se
   };
   const service = new ProjectCollaborationService({
     store, account: account as never, distributed: distributed as never, workspace, providers,
+    now: () => new Date(now),
      emailSender: { status: async () => { throw new Error('Injected email-readiness failure'); },
        send: async () => ({ status: 'not_configured', message: 'test' }) },
   });
@@ -177,11 +187,54 @@ it('serializes matching joins, resumes after roster failure without duplicate se
     }
     assert.equal(snapshot.agents.some((agent) => agent.sessionId === privateSession.id), false,
       'private local sessions do not appear as shared agents until explicitly published');
+
+    const coldCallCount = cloudCalls;
+    const cacheHit = await service.snapshot(project.id);
+    assert.deepEqual(cacheHit, snapshot, 'a warm persisted snapshot is served without rebuilding cloud membership or invitations');
+    assert.equal(cloudCalls, coldCallCount, 'cache hits do not call the fake cloud');
+    const restarted = new ProjectCollaborationService({ store, account: account as never, distributed: distributed as never, workspace, providers,
+      now: () => new Date(now) });
+    const restartedSnapshot = await restarted.snapshot(project.id);
+    assert.deepEqual(restartedSnapshot, snapshot, 'the SQLite read model survives service recreation');
+    assert.equal(cloudCalls, coldCallCount, 'a persisted cache hit after service recreation still avoids cloud calls');
+    await restarted.close();
+
+    const snapshotEventCount = () => store.listEvents({ projectId: project.id }).filter((event) => event.type === 'team.structure.updated').length;
+    const eventsBeforeUnchangedRefresh = snapshotEventCount();
+    await service.refreshSnapshot(project.id);
+    assert.equal(snapshotEventCount(), eventsBeforeUnchangedRefresh, 'an unchanged refresh emits no team live-update event');
+    tableRows.mingle_project_member_profiles.rows = [{ team_id: TEAM, user_id: ACCOUNT, email: 'invitee@example.test', display_name: 'Invitee renamed' }];
+    await service.refreshSnapshot(project.id);
+    assert.equal(snapshotEventCount(), eventsBeforeUnchangedRefresh + 1, 'a changed cached snapshot emits one existing team event');
+    await service.refreshSnapshot(project.id);
+    assert.equal(snapshotEventCount(), eventsBeforeUnchangedRefresh + 1, 'repeated identical refreshes do not emit duplicate events');
+
+    const beforeTtlRefresh = cloudCalls;
+    now += 31_000;
+    await service.snapshot(project.id);
+    await waitFor(() => cloudCalls > beforeTtlRefresh, 2_000);
+    assert.ok(cloudCalls > beforeTtlRefresh, 'an expired snapshot refreshes in the background after returning cached data');
+
+    const beforeRosterInvalidation = cloudCalls;
+    assert.ok(rosterListeners.size, 'the collaboration cache subscribes to execution roster changes');
+    assert.ok(store.db.prepare('SELECT 1 FROM mingle_project_collaboration_joins WHERE local_project_id=? AND team_id=? AND shared_project_id=?')
+      .get(project.id, TEAM, SHARED_PROJECT));
+    for (const listener of rosterListeners) listener(TEAM, SHARED_PROJECT);
+    await service.snapshot(project.id);
+    await waitFor(() => cloudCalls > beforeRosterInvalidation, 2_000);
+    assert.ok(cloudCalls > beforeRosterInvalidation, 'an inbound roster invalidation forces a coalesced refresh');
     await assert.rejects(service.createInvitation(project.id, { email: 'new@example.test', role: 'member' }),
       (error: unknown) => error instanceof Error && 'status' in error && error.status === 403,
       'a joined teammate cannot bootstrap a second team or invite more people');
     assert.equal(store.db.prepare('SELECT 1 FROM mingle_project_collaboration_sources WHERE local_project_id=?').get(project.id), undefined,
       'joining does not create a leader/source-team mapping for the invitee');
+
+    tableRows.mingle_members.single = null;
+    tableRows.mingle_members.rows = [];
+    for (const listener of rosterListeners) listener(TEAM, SHARED_PROJECT);
+    const revokedMemberSnapshot = await service.snapshot(project.id);
+    assert.equal(revokedMemberSnapshot.project, null, 'a removed member loses the cached project binding after refresh');
+    assert.deepEqual(revokedMemberSnapshot.members, []);
   } finally {
     await service.close();
     store.db.close();

@@ -187,6 +187,7 @@ const REMOTE_TABLES = `
  */
 export class RemoteExecutionService {
   private readonly unsubscribeTransport: () => void;
+  private readonly rosterListeners = new Set<(teamId: string, sharedProjectId: string) => void>();
   private readonly progressUnsubscribers = new Map<string, () => void>();
   private readonly pendingProgress = new Set<Promise<unknown>>();
   private readonly pendingAcknowledgements = new Set<Promise<unknown>>();
@@ -225,6 +226,18 @@ export class RemoteExecutionService {
 
   private assertOpen(): void {
     if (this.closed) throw new HttpError(503, 'Remote execution service is closed.');
+  }
+
+  /** Listen for durable roster writes accepted or published by this device. */
+  subscribeRosterChanges(listener: (teamId: string, sharedProjectId: string) => void): () => void {
+    this.rosterListeners.add(listener);
+    return () => this.rosterListeners.delete(listener);
+  }
+
+  private rosterChanged(teamId: string, sharedProjectId: string): void {
+    for (const listener of this.rosterListeners) {
+      try { listener(teamId, sharedProjectId); } catch { /* Read-model listeners cannot fail roster persistence. */ }
+    }
   }
 
   private trackProgress<T>(work: Promise<T>): void {
@@ -374,6 +387,35 @@ export class RemoteExecutionService {
       }
       return RemoteExecutionSnapshotSchema.parse(combined);
     });
+  }
+
+  /**
+   * Read just the explicitly published roster from this device's durable local
+   * replica. This is for team read models; authorization-sensitive operations
+   * continue to use snapshot()/withTeam() and its fresh cloud checks.
+   */
+  async publishedAgents(teamId: string, sharedProjectId: string): Promise<RemoteAgent[]> {
+    const transport = await this.options.transport.snapshot(teamId);
+    const rows = this.all(`SELECT * FROM mingle_remote_agents WHERE team_id=? AND shared_project_id=? AND revoked_at IS NULL
+      ORDER BY published_at DESC`, teamId, sharedProjectId);
+    const devices = new Map(transport.devices.map((device) => [device.id, device]));
+    const result: RemoteAgent[] = [];
+    for (const row of rows) {
+      const deviceId = String(row.device_id);
+      if (deviceId === transport.localDeviceId) {
+        let session: Session;
+        try { session = this.localSession(String(row.session_id)); } catch { continue; }
+        const presence: RemotePresence = this.options.runtime.isActive(session.id) || ['running', 'waiting'].includes(session.status) ? 'busy' : 'idle';
+        result.push(this.agentFromRow(row, presence));
+        continue;
+      }
+      const device = devices.get(deviceId);
+      if (device?.revokedAt) continue;
+      const presence: RemotePresence | undefined = !device || !device.linked || device.online === false ? 'offline'
+        : device.online === true ? undefined : 'unknown';
+      result.push(this.agentFromRow(row, presence));
+    }
+    return result;
   }
 
   private async snapshotFor(identity: Identity, client: AuthenticatedClient, devices: RemoteTransportDevice[]): Promise<RemoteExecutionSnapshot> {
@@ -543,6 +585,7 @@ export class RemoteExecutionService {
       await this.sendRosterToLinkedPeers(client, identity, parsed.sharedProjectId, version, at, outgoing);
       this.recordEvent(identity, parsed.sharedProjectId, 'agents.published', `Published ${outgoing.length} explicit local agent session(s).`, { agentIds: outgoing.map((agent) => agent.id) });
       this.options.changed();
+      this.rosterChanged(identity.teamId, parsed.sharedProjectId);
       return outgoing;
     });
   }
@@ -594,6 +637,7 @@ export class RemoteExecutionService {
           agentIds: agents.map((agent) => agent.id), quotaProbed: false,
         });
         this.options.changed();
+        this.rosterChanged(identity.teamId, parsed.sharedProjectId);
       }
       // Enrollment may happen before the host device is linked or has completed its
       // local binding. Keep replaying the latest full roster until each linked peer
@@ -1246,7 +1290,10 @@ export class RemoteExecutionService {
          if (version !== undefined) acknowledgeVersion = Number(version);
          return true;
       });
-       if (accepted) this.options.changed();
+        if (accepted) {
+          this.options.changed();
+          this.rosterChanged(identity.teamId, binding.sharedProjectId);
+        }
        if (acknowledgeVersion !== null) {
          this.queueRosterAcknowledgement(identity.teamId, envelope.fromDeviceId, binding.sharedProjectId, acknowledgeVersion, identity.deviceId, envelope.id);
        }

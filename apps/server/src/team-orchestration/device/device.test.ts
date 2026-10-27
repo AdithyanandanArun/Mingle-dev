@@ -28,7 +28,9 @@ interface Sent { teamId: string; toDeviceId: string; kind: string; payload: any;
 interface Fixture {
   store: Store; side: ReturnType<typeof createDeviceSide>; routes: Array<{ method: string; path: string; handler: (ctx: any) => unknown }>;
   projectId: string; root: string; repo: string; worktree: string; worktreeRoot: string; sent: Sent[]; roster: any[]; handler: ((envelope: any) => Promise<void>) | null;
-  runtime: FakeRuntime; exportCalls: any[]; importCalls: any[]; executionOrder: string[]; chatReplies: any[]; members: any[]; setConsent(permission?: 'supervised' | 'full-access', settingsVersion?: number): Promise<any>;
+  runtime: FakeRuntime; exportCalls: any[]; importCalls: any[]; executionOrder: string[]; chatReplies: any[]; members: any[];
+  collaborationRefreshCount(): number; revokeDevice(deviceId: string): void;
+  setConsent(permission?: 'supervised' | 'full-access', settingsVersion?: number): Promise<any>;
   failTerminalStatusSends(count: number): void;
   failChatReplies(count: number): void;
   holdImports(gate: Promise<void>): void;
@@ -157,8 +159,9 @@ async function fixture(): Promise<Fixture> {
     { accountId: ACCOUNT, role: 'member', displayName: 'Owner' },
     { accountId: OTHER, role: 'member', displayName: 'Other' },
   ];
+  let collaborationRefreshes = 0;
   let handler: ((envelope: any) => Promise<void>) | null = null;
-  const devices = [
+  const devices: Array<{ id: string; teamId: string; ownerId: string; name: string; revokedAt: string | null; status: string }> = [
     { id: OWN_DEVICE, teamId: TEAM, ownerId: ACCOUNT, name: 'Owner', revokedAt: null, status: 'online' },
     { id: HOST_DEVICE, teamId: TEAM, ownerId: LEAD, name: 'Lead', revokedAt: null, status: 'online' },
     { id: OTHER_DEVICE, teamId: TEAM, ownerId: OTHER, name: 'Teammate', revokedAt: null, status: 'online' },
@@ -187,6 +190,10 @@ async function fixture(): Promise<Fixture> {
       agents: roster.map((agent) => ({ ...agent, projectId, state: 'idle' })),
       invitations: [], email: { configured: false },
     }),
+    refreshSnapshot: async (projectId: string) => {
+      collaborationRefreshes++;
+      return collaboration.snapshot(projectId);
+    },
   };
   const exportCalls: any[] = [];
   const importCalls: any[] = [];
@@ -231,6 +238,8 @@ async function fixture(): Promise<Fixture> {
   startSide();
   const result: Fixture = {
     store, get side() { return side; }, routes, projectId: project.id, root, repo, worktree, worktreeRoot, sent, roster, get handler() { return handler; }, runtime, exportCalls, importCalls, executionOrder, chatReplies, members,
+    collaborationRefreshCount: () => collaborationRefreshes,
+    revokeDevice(deviceId) { const device = devices.find((candidate) => candidate.id === deviceId); if (device) device.revokedAt = new Date().toISOString(); },
     failTerminalStatusSends(count) { terminalStatusFailures = count; },
     failChatReplies(count) { chatFailures = count; },
     holdImports(gate) { importGate = gate; },
@@ -394,8 +403,31 @@ describe('owner-device team orchestration', () => {
     await f.deliver({ ...payload, deliveryId: `delivery-${randomUUID()}`, settingsVersion: 1 });
     expect(f.sent.at(-1)?.payload).toMatchObject({ status: 'rejected', rejection: 'invalid' });
 
+    const beforeUnknownAgent = f.collaborationRefreshCount();
     await f.deliver({ ...payload, deliveryId: `delivery-${randomUUID()}`, agentId: 'agent-unknown' });
     expect(f.sent.at(-1)?.payload).toMatchObject({ status: 'rejected', rejection: 'agent-unavailable' });
+    expect(f.collaborationRefreshCount()).toBeGreaterThan(beforeUnknownAgent);
+    expect(f.runtime.startCount).toBe(0);
+  });
+
+  it('forces a refresh for an unknown sender and rejects revoked membership or a revoked host device', async () => {
+    const f = await fixture();
+    await sendStructure(f);
+    await f.setConsent();
+    const payload = deliveryPayload();
+
+    const beforeRemovedMember = f.collaborationRefreshCount();
+    f.members.splice(0, 1);
+    await f.deliver(payload, OTHER_DEVICE);
+    expect(f.collaborationRefreshCount()).toBeGreaterThan(beforeRemovedMember);
+    expect(f.sent.at(-1)?.payload).toMatchObject({ status: 'rejected', rejection: 'invalid' });
+
+    f.members.unshift({ accountId: LEAD, role: 'leader', displayName: 'Lead' });
+    f.revokeDevice(HOST_DEVICE);
+    const beforeRevokedDevice = f.collaborationRefreshCount();
+    await f.deliver({ ...payload, deliveryId: `delivery-${randomUUID()}` });
+    expect(f.collaborationRefreshCount()).toBe(beforeRevokedDevice);
+    expect(f.sent.at(-1)?.payload).toMatchObject({ status: 'rejected', rejection: 'invalid' });
     expect(f.runtime.startCount).toBe(0);
   });
 

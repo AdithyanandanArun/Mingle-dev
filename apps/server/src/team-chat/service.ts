@@ -267,13 +267,26 @@ export class TeamChatService {
     if (this.closed) throw new HttpError(503, 'Team chat is closing.');
   }
 
-  private async binding(projectId: string) {
+  private async binding(projectId: string, refresh = false) {
     this.ensureOpen();
     const project = this.options.store.getProject(projectId);
     if (!project) throw notFound('Project not found.');
-    const shared = await this.options.collaboration.snapshot(projectId);
+    const shared = refresh && this.options.collaboration.refreshSnapshot
+      ? await this.options.collaboration.refreshSnapshot(projectId) : await this.options.collaboration.snapshot(projectId);
     if (!shared.project) throw new HttpError(409, 'Set up teammate sharing for this project before opening team chat.');
     return { localProject: project, shared };
+  }
+
+  private async refreshUnknownAuthors(projectId: string, shared: SharedSnapshot, messages: TeamChatMessage[]): Promise<SharedSnapshot> {
+    const unknown = messages.some((message) => {
+      const author = message.author;
+      if (author.kind === 'human') return !shared.members.some((member) => member.accountId === author.accountId);
+      if (author.kind === 'agent') return !shared.agents.some((agent) => (agent.id === author.agentId || agent.sessionId === author.agentId)
+        && agent.accountId === author.ownerAccountId && agent.deviceId === message.authorDeviceId);
+      return false;
+    });
+    if (!unknown || !this.options.collaboration.refreshSnapshot) return shared;
+    return this.options.collaboration.refreshSnapshot(projectId);
   }
 
   /** Resolves only persisted local authority so accepting a message never waits for cloud verification. */
@@ -1077,10 +1090,11 @@ export class TeamChatService {
         throw new HttpError(400, 'The shared group-view identity does not match its group.');
       }
       const { localProjectId, senderOwnerId } = await this.validateRemote(envelope, message.sharedProjectId, []);
-      const { shared } = await this.binding(localProjectId);
+      let { shared } = await this.binding(localProjectId);
       if (shared.project?.teamId !== envelope.teamId || shared.project.sharedProjectId !== message.sharedProjectId) {
         throw new HttpError(403, 'The shared group view is outside this shared project binding.');
       }
+      shared = await this.refreshUnknownAuthors(localProjectId, shared, [message]);
       const [verified] = await this.verifyMessageProvenance([message], shared, envelope, senderOwnerId, true);
       if (verified?.kind !== 'group-view' || verified.author.kind !== 'system') throw new HttpError(403, 'The shared group view was not verified.');
       this.persist({ ...verified, deliveryState: 'sent' }, 'sent');
@@ -1092,8 +1106,9 @@ export class TeamChatService {
       if (message.kind === 'group-view' || message.author.kind === 'system') throw new HttpError(403, 'Shared group-view records use their host-authorized transport channel.');
       const claimedOwner = message.author.kind === 'human' ? message.author.accountId : message.author.ownerAccountId;
       const { localProjectId, senderOwnerId } = await this.validateRemote(envelope, message.sharedProjectId, [claimedOwner]);
-      const { shared } = await this.binding(localProjectId);
+      let { shared } = await this.binding(localProjectId);
       if (shared.project?.teamId !== envelope.teamId || shared.project.sharedProjectId !== message.sharedProjectId) throw new HttpError(403, 'The message is outside this shared project binding.');
+      shared = await this.refreshUnknownAuthors(localProjectId, shared, [message]);
       const [verified] = await this.verifyMessageProvenance([message], shared, envelope, senderOwnerId, true);
       this.persist({ ...verified!, deliveryState: 'sent' }, 'sent');
       if (verified && verified.author.kind !== 'system' && this.orchestration) {
@@ -1175,11 +1190,12 @@ export class TeamChatService {
       const authors = response.messages.flatMap((message) => message.author.kind === 'human' ? [message.author.accountId]
         : message.author.kind === 'agent' ? [message.author.ownerAccountId] : []);
       const { localProjectId, senderOwnerId } = await this.validateRemote(envelope, response.sharedProjectId, authors);
-      const { shared } = await this.binding(localProjectId);
+      let { shared } = await this.binding(localProjectId);
       if (shared.project?.teamId !== envelope.teamId || shared.project.sharedProjectId !== response.sharedProjectId) throw new HttpError(403, 'The sync response is outside this shared project binding.');
       for (const message of response.messages) {
         if (message.teamId !== envelope.teamId || message.sharedProjectId !== response.sharedProjectId) throw new HttpError(400, 'A backfill message has mismatched project authority.');
       }
+      shared = await this.refreshUnknownAuthors(localProjectId, shared, response.messages);
       const verified = await this.verifyMessageProvenance(response.messages, shared, envelope, senderOwnerId, false);
       if (!this.allowSyncResponse(envelope.teamId, envelope.fromDeviceId)) throw new HttpError(429, 'This peer sent too many team-chat sync batches.');
       for (const message of verified) this.persist({ ...message, deliveryState: 'sent' }, 'sent');

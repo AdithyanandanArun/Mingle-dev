@@ -354,12 +354,22 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
     if (migrated) setTimeout(() => { void this.broadcastStructure(context, migrated).catch(() => undefined); }, 0);
   }
 
-  private async context(projectId: string): Promise<ProjectContext> {
+  private localAccountId(): string | null {
+    const account = this.options.account.snapshot?.();
+    return account?.status === 'signed-in' ? account.user?.id ?? null : null;
+  }
+
+  private async context(projectId: string, refreshAuthority = false): Promise<ProjectContext> {
     const localProject = this.options.store.getProject(projectId);
     if (!localProject) throw new HttpError(404, 'Project not found.');
+    const localAccountId = this.localAccountId();
+    const accountIdWork = refreshAuthority || !this.options.account.snapshot
+      ? this.options.account.withAuthenticatedClient(async (_client, user) => user.id)
+      : Promise.resolve(localAccountId ?? this.options.account.withAuthenticatedClient(async (_client, user) => user.id));
     const [shared, accountId] = await Promise.all([
-      this.options.collaboration.snapshot(projectId),
-      this.options.account.withAuthenticatedClient(async (_client, user) => user.id),
+      refreshAuthority && this.options.collaboration.refreshSnapshot
+        ? this.options.collaboration.refreshSnapshot(projectId) : this.options.collaboration.snapshot(projectId),
+      accountIdWork,
     ]);
     if (!shared.project) throw new HttpError(409, 'Set up teammate sharing for this project first.');
     const deviceSnapshot = this.options.transport.snapshot(shared.project.teamId);
@@ -395,7 +405,7 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
   }
 
   private async requireEditor(projectId: string): Promise<ProjectContext> {
-    const context = await this.context(projectId);
+    const context = await this.context(projectId, true);
     const member = context.members.find((candidate) => candidate.accountId === context.accountId);
     if (!member || !['leader', 'admin'].includes(member.role)) throw new HttpError(403, 'Only a team lead or admin can change team orchestration.');
     if (!context.isHost) throw new HttpError(403, 'Team orchestration settings can be changed only on the host device.');
@@ -527,21 +537,22 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
   async availableAgents(projectId: string): Promise<TeamAvailableAgentsSnapshot> {
     const project = this.options.store.getProject(projectId);
     if (!project) throw new HttpError(404, 'Project not found.');
-    const [shared, accountId] = await Promise.all([
+    const accountId = this.localAccountId();
+    const [shared, resolvedAccountId] = await Promise.all([
       this.options.collaboration.snapshot(projectId),
-      this.options.account.withAuthenticatedClient(async (_client, user) => user.id),
+      accountId ?? this.options.account.withAuthenticatedClient(async (_client, user) => user.id),
     ]);
     if (!shared.project) return { projectId, teamId: null, sharedProjectId: null, canAdd: false, reason: 'This project is not shared with a team.', permissionLevel: null, teamSession: null, agents: [] };
     const sharedProject = shared.project;
     const { teamId, sharedProjectId } = sharedProject;
     const transport = this.options.transport.snapshot(teamId);
     const localDeviceId = transport.deviceId ?? '';
-    const member = shared.members.find((candidate) => candidate.accountId === accountId);
+    const member = shared.members.find((candidate) => candidate.accountId === resolvedAccountId);
     const source = this.hostRows.prepare(`SELECT owner_id,leader_device_id FROM mingle_project_collaboration_sources WHERE local_project_id=?`)
       .get(projectId) as Row | undefined;
     const hostDeviceId = source && typeof source.leader_device_id === 'string'
       ? source.leader_device_id : this.options.deviceSide?.latestStructure(sharedProjectId)?.host?.deviceId ?? '';
-    const isHost = Boolean(localDeviceId && hostDeviceId === localDeviceId && source && String(source.owner_id) === accountId);
+    const isHost = Boolean(localDeviceId && hostDeviceId === localDeviceId && source && String(source.owner_id) === resolvedAccountId);
     const canAdd = isHost && Boolean(member && ['leader', 'admin'].includes(member.role));
     const reason = canAdd ? null : !member ? 'Join the shared project team before adding teammates’ agents.'
       : !isHost ? 'Only the lead/admin on the team host device can add teammates’ agents.'
@@ -566,7 +577,7 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
       const consentRow = this.hostRows.prepare(`SELECT state FROM mingle_team_host_consents WHERE team_id=? AND shared_project_id=? AND agent_id=?`)
         .get(teamId, sharedProjectId, agent.id) as { state?: string } | undefined;
       if (hostRow && consentRow) consent = this.consentFor({ ...shared, project: sharedProject, localProjectId: projectId,
-        accountId, localDeviceId, hostDeviceId, hostAccountId: String(hostRow.owner_account_id), hostDisplayName: 'Team lead', isHost }, agent.id);
+        accountId: resolvedAccountId, localDeviceId, hostDeviceId, hostAccountId: String(hostRow.owner_account_id), hostDisplayName: 'Team lead', isHost }, agent.id);
       else if (peerMembers.get(agent.id)?.consent) consent = peerMembers.get(agent.id)!.consent!;
       else if (consentRow?.state && ['granted', 'needs-reconsent', 'paused', 'revoked'].includes(consentRow.state)) consent = consentRow.state as TeamConsentState;
       const proxy = this.hostRows.prepare(`SELECT session_id FROM mingle_team_proxy_sessions WHERE team_id=? AND shared_project_id=? AND agent_id=?`)
@@ -1717,6 +1728,7 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
         this.hostRows.prepare(`INSERT OR IGNORE INTO mingle_team_host_pending_consents
           (envelope_id,team_id,shared_project_id,owner_account_id,owner_device_id,payload_json,received_at) VALUES(?,?,?,?,?,?,?)`)
           .run(envelope.id, envelope.teamId, sharedProjectId, owner, envelope.fromDeviceId, JSON.stringify(parsed.data), receivedAt);
+        this.options.collaboration.invalidateSnapshot?.(localProjectId);
         this.options.store.touch();
         return;
       }
@@ -1773,11 +1785,13 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
       for (const delivery of active) this.discardMcpArtifacts(delivery);
     }
     if (!project) {
+      this.options.collaboration.invalidateSnapshot?.(localProjectId);
       this.options.store.touch();
       return;
     }
     this.hostRows.prepare('DELETE FROM mingle_team_host_pending_consents WHERE envelope_id=?').run(envelope.id);
     if (!broadcast) {
+      this.options.collaboration.invalidateSnapshot?.(localProjectId);
       this.options.store.touch();
       if (eligible && this.groupOrNull(project.group_id)) this.options.groups.pumpTeamGroup(project.group_id);
       return;

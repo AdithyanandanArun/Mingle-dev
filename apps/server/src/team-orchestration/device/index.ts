@@ -230,10 +230,11 @@ export function createDeviceSide(deps: DeviceSideDeps): {
       .run(consent.sharedProjectId, consent.accountId, consent.deviceId, JSON.stringify(consent), updatedAt);
   }
 
-  async function binding(projectId: string): Promise<SharedBinding> {
+  async function binding(projectId: string, refresh = false): Promise<SharedBinding> {
     const project = deps.store.getProject(projectId);
     if (!project) throw new HttpError(404, 'Project not found.');
-    const snapshot = await deps.collaboration.snapshot(projectId);
+    const snapshot = refresh && deps.collaboration.refreshSnapshot
+      ? await deps.collaboration.refreshSnapshot(projectId) : await deps.collaboration.snapshot(projectId);
     if (!snapshot.project) throw new HttpError(409, 'Set up teammate sharing for this project before managing team agents.');
     return { projectId, teamId: snapshot.project.teamId, sharedProjectId: snapshot.project.sharedProjectId,
       members: snapshot.members, agents: snapshot.agents };
@@ -259,14 +260,39 @@ export function createDeviceSide(deps: DeviceSideDeps): {
     return candidates[0]?.id ?? null;
   }
 
-  async function authorizedHost(envelope: AuthenticatedEnvelope, shared: SharedBinding): Promise<{ ownerId: string; role: string } | null> {
+  async function authorizedHost(envelope: AuthenticatedEnvelope, original: SharedBinding): Promise<{ ownerId: string; role: string } | null> {
+    let shared = original;
     if (envelope.teamId !== shared.teamId || envelope.toDeviceId !== deps.transport.snapshot(shared.teamId).deviceId) return null;
-    const expectedHost = await hostDeviceId(shared);
-    if (!expectedHost || envelope.fromDeviceId !== expectedHost) return null;
-    const snapshot = deps.transport.snapshot(shared.teamId);
-    const device = snapshot.devices.find((candidate) => candidate.id === envelope.fromDeviceId && !candidate.revokedAt);
-    if (!device) return null;
-    const member = shared.members.find((candidate) => candidate.accountId === device.ownerId);
+    let refreshed = false;
+    const refreshShared = async (): Promise<boolean> => {
+      if (!deps.collaboration.refreshSnapshot) return false;
+      const current = await deps.collaboration.refreshSnapshot(shared.projectId).catch(() => null);
+      if (!current?.project || current.project.teamId !== shared.teamId || current.project.sharedProjectId !== shared.sharedProjectId) return false;
+      shared = { ...shared, members: current.members, agents: current.agents };
+      refreshed = true;
+      return true;
+    };
+    let expectedHost = await hostDeviceId(shared);
+    if (!expectedHost || envelope.fromDeviceId !== expectedHost) {
+      if (!await refreshShared()) return null;
+      expectedHost = await hostDeviceId(shared);
+      if (!expectedHost || envelope.fromDeviceId !== expectedHost) return null;
+    }
+    let snapshot = deps.transport.snapshot(shared.teamId);
+    let device = snapshot.devices.find((candidate) => candidate.id === envelope.fromDeviceId);
+    let member = device && !device.revokedAt ? shared.members.find((candidate) => candidate.accountId === device!.ownerId) : undefined;
+    if (!device && !refreshed) {
+      if (!await refreshShared()) return null;
+      expectedHost = await hostDeviceId(shared);
+      if (!expectedHost || envelope.fromDeviceId !== expectedHost) return null;
+      snapshot = deps.transport.snapshot(shared.teamId);
+      device = snapshot.devices.find((candidate) => candidate.id === envelope.fromDeviceId);
+      member = device && !device.revokedAt ? shared.members.find((candidate) => candidate.accountId === device!.ownerId) : undefined;
+    } else if (device && !device.revokedAt && (!member || !['leader', 'admin'].includes(member.role)) && !refreshed) {
+      if (!await refreshShared()) return null;
+      member = shared.members.find((candidate) => candidate.accountId === device!.ownerId);
+    }
+    if (!device || device.revokedAt) return null;
     if (!member || !['leader', 'admin'].includes(member.role)) return null;
     return { ownerId: device.ownerId, role: member.role };
   }
@@ -305,8 +331,13 @@ export function createDeviceSide(deps: DeviceSideDeps): {
       }
       return session;
     });
-    const roster = await deps.distributed.execution.snapshot(shared.teamId);
-    const ownPublished = roster.agents.filter((agent) => agent.sharedProjectId === shared.sharedProjectId && agent.deviceId === deviceId
+    const execution = deps.distributed.execution as typeof deps.distributed.execution & {
+      publishedAgents?: (teamId: string, sharedProjectId: string) => Promise<import('../../../../../packages/contracts/src/remote-execution.ts').RemoteAgent[]> | import('../../../../../packages/contracts/src/remote-execution.ts').RemoteAgent[];
+    };
+    const publishedAgents = execution.publishedAgents
+      ? await execution.publishedAgents.call(execution, shared.teamId, shared.sharedProjectId)
+      : (await execution.snapshot(shared.teamId)).agents;
+    const ownPublished = publishedAgents.filter((agent) => agent.sharedProjectId === shared.sharedProjectId && agent.deviceId === deviceId
       && agent.ownerId === accountId).map((agent) => agent.sessionId);
     const toPublish = [...new Set([...ownPublished, ...input.sessionIds])];
     const published = await deps.distributed.execution.publishAgents({ teamId: shared.teamId, sharedProjectId: shared.sharedProjectId, sessionIds: toPublish });
@@ -458,10 +489,18 @@ export function createDeviceSide(deps: DeviceSideDeps): {
   async function receiveActivity(envelope: AuthenticatedEnvelope): Promise<void> {
     const parsed = TeamActivityPayloadSchema.safeParse(envelope.payload);
     if (!parsed.success) return;
-    const shared = await findBindingBySharedProject(envelope.teamId, parsed.data.sharedProjectId);
+    let shared = await findBindingBySharedProject(envelope.teamId, parsed.data.sharedProjectId);
     if (!shared || envelope.toDeviceId !== deps.transport.snapshot(envelope.teamId).deviceId) return;
-    const rosterAgent = shared.agents.find((agent) => agent.id === parsed.data.agentId && agent.deviceId === envelope.fromDeviceId)
+    let rosterAgent = shared.agents.find((agent) => agent.id === parsed.data.agentId && agent.deviceId === envelope.fromDeviceId)
       ?? shared.agents.find((agent) => agent.sessionId === parsed.data.agentId && agent.deviceId === envelope.fromDeviceId);
+    if (!rosterAgent && deps.collaboration.refreshSnapshot) {
+      const refreshed = await deps.collaboration.refreshSnapshot(shared.projectId).catch(() => null);
+      if (refreshed?.project?.teamId === shared.teamId && refreshed.project.sharedProjectId === shared.sharedProjectId) {
+        shared = { ...shared, members: refreshed.members, agents: refreshed.agents };
+        rosterAgent = shared.agents.find((agent) => agent.id === parsed.data.agentId && agent.deviceId === envelope.fromDeviceId)
+          ?? shared.agents.find((agent) => agent.sessionId === parsed.data.agentId && agent.deviceId === envelope.fromDeviceId);
+      }
+    }
     if (!rosterAgent || !shared.members.some((member) => member.accountId === rosterAgent.accountId)
       || rosterAgent.accountId === deps.account.snapshot().user?.id && envelope.fromDeviceId === deps.transport.snapshot(envelope.teamId).deviceId) return;
     const safeEntries = parsed.data.entries.flatMap((entry) => {
@@ -617,12 +656,20 @@ export function createDeviceSide(deps: DeviceSideDeps): {
   }
 
   async function validateDelivery(envelope: AuthenticatedEnvelope, payload: TeamDeliveryPayload): Promise<{ shared: SharedBinding; agent: SharedBinding['agents'][number]; sessionId: string } | { rejection: 'no-consent' | 'needs-reconsent' | 'paused' | 'agent-unavailable' | 'busy' | 'invalid' }> {
-    const shared = await findBindingBySharedProject(envelope.teamId, payload.sharedProjectId);
+    let shared = await findBindingBySharedProject(envelope.teamId, payload.sharedProjectId);
     if (!shared || payload.sharedProjectId !== shared.sharedProjectId || !await authorizedHost(envelope, shared)
       || payload.integrationDeviceId !== await hostDeviceId(shared)) return { rejection: 'invalid' };
     const localDeviceId = deps.transport.snapshot(shared.teamId).deviceId;
-    const agent = shared.agents.find((candidate) => candidate.id === payload.agentId && candidate.deviceId === localDeviceId)
+    let agent = shared.agents.find((candidate) => candidate.id === payload.agentId && candidate.deviceId === localDeviceId)
       ?? shared.agents.find((candidate) => candidate.sessionId === payload.agentId && candidate.deviceId === localDeviceId);
+    if (!agent && deps.collaboration.refreshSnapshot) {
+      const refreshed = await deps.collaboration.refreshSnapshot(shared.projectId).catch(() => null);
+      if (refreshed?.project?.teamId === shared.teamId && refreshed.project.sharedProjectId === shared.sharedProjectId) {
+        shared = { ...shared, members: refreshed.members, agents: refreshed.agents };
+        agent = shared.agents.find((candidate) => candidate.id === payload.agentId && candidate.deviceId === localDeviceId)
+          ?? shared.agents.find((candidate) => candidate.sessionId === payload.agentId && candidate.deviceId === localDeviceId);
+      }
+    }
     if (!agent || !agent.sessionId) return { rejection: 'agent-unavailable' };
     if (payload.scope) {
       try { normalizeScopes(payload.scope); }

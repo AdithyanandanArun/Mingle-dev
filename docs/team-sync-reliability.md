@@ -50,6 +50,57 @@ and presence-refresh fallback; it is no longer the only way to publish edits.
 Browser team updates coalesce in a bounded 80 ms window. Continuous activity no
 longer postpones the UI refresh indefinitely by resetting a trailing debounce.
 
+## Local team read model and authority freshness
+
+The active local workspace database persists `mingle_project_team_read_model`
+idempotently, without advancing the shared schema version. Each row is scoped to
+one local project and signed-in account and contains only the shared project
+binding, active member identities/display names/roles, published agent metadata,
+invitations and presentation-only invitation email readiness. It contains no
+Supabase credentials, device signing keys or delivery authority. A warm read of
+collaboration, team structure or teammate agents uses this local snapshot; the
+first read is allowed to populate it from Supabase. Snapshots older than 30 seconds
+are returned immediately and refreshed in the background while the local service
+is running. Concurrent refreshes share one flight. Durable incoming roster,
+structure and consent changes and local roster publication/join/invitation writes
+invalidate the affected project and refresh it; refresh completion emits the
+existing project-scoped `team.structure.updated` event only when the saved snapshot
+actually changed.
+
+The read model is a performance cache, not an authority grant:
+
+- Owner consent is checked from the owner's durable local consent record for every
+  remote delivery. Pause and revocation therefore apply immediately on the owner
+  device and interrupt existing work as before.
+- A successful roster refresh replaces the cached active member set and published
+  agents. A removed member, withdrawn agent or revoked invitation stops being
+  accepted as soon as that refresh is observed. Device revocation is checked by
+  the transport/device-trust path and takes effect as soon as that path observes
+  it. Ordinary cached membership may be at most 30 seconds old; writes that
+  change team structure force a fresh collaboration snapshot before role/host
+  authorization.
+- A delivery or signed team-chat author/device missing from the local read model
+  triggers a coalesced forced refresh before rejection. If refresh fails, the
+  unknown identity is rejected; it is never promoted based on the unverified
+  message. Known team-chat device registrations, mutual links, signatures and
+  device trust still pass the existing fresh cloud/device verification checks.
+- Transport authentication, delivery settings/consent-version checks, local agent
+  ownership/session checks and host-side consent/revocation fences remain in place.
+  Once a refresh has removed authority, no delivery or routing path accepts that
+  identity from the stale snapshot.
+
+Read-model refresh is silent when the snapshot is unchanged: it does not call
+`Store.touch()` or emit `state.changed` while the app is idle. Realtime remains a
+hint; the persisted 30-second active-service TTL refresh and stale-read refresh
+recover missed cloud changes.
+
+The cache regression tests cover cold/warm reads, persistence across service
+recreation, TTL refresh, inbound roster invalidation, and forced refresh for an
+unknown sender before rejection. The two-application endpoint latency check
+measured one local sample at **5 ms each** for team structure, teammate agents and
+collaboration, with zero fake-cloud/PostgREST calls after the cache was warm. This
+is local fixture evidence, not an internet-latency guarantee.
+
 ## Roster and consent recovery
 
 Each published roster version is tracked per recipient device until acknowledged.

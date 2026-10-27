@@ -14,6 +14,7 @@ it.each([false, true])('invites and joins through two real HTTP applications, Po
   const accounts = new Map<string, typeof users[number]>();
   const apps: TestApp[] = [], repos: string[] = [];
   let invitationToken = '';
+  let accountLookups = 0;
   try {
     await cloud.initialize(users);
     const nativeSnapshot = AccountService.prototype.snapshot;
@@ -23,6 +24,7 @@ it.each([false, true])('invites and joins through two real HTTP applications, Po
       return user ? { ...state, configured: true, status: 'signed-in', user: { id: user.id, email: user.email, name: 'Example account' } } : state;
     });
     vi.spyOn(AccountService.prototype, 'withAuthenticatedClient').mockImplementation((async function<T>(this: AccountService, work: (client: SupabaseClient, user: User) => Promise<T>) {
+      accountLookups++;
       const user = accounts.get(Reflect.get(this, 'dataDir'));
       if (!user) throw new Error('Explicit fixture account required');
       return work(cloud.client(user.id), { ...user, aud: 'authenticated', created_at: '2026-01-01T00:00:00Z', email_confirmed_at: '2026-01-01T00:00:00Z', is_anonymous: false, app_metadata: { providers: ['google'] }, user_metadata: { full_name: 'Example account' } } as User);
@@ -109,6 +111,32 @@ it.each([false, true])('invites and joins through two real HTTP applications, Po
     expect(inviteeRoster.json.project?.sharedProjectId).toBe(joined[0]!.json.sharedProjectId);
     expect(inviteeRoster.json.members).toHaveLength(2);
     expect(inviteeRoster.json.agents.some((agent: { sessionId: string }) => agent.sessionId === joined[0]!.json.sessionId)).toBe(true);
+
+    const sharedSession = await leader.api('POST', `/api/projects/${projectIds[0]}/team-orchestration/share-session`, {
+      sessionId: privateAgent.json.id, permissionLevel: 'supervised',
+    });
+    expect(sharedSession.status, JSON.stringify(sharedSession.json)).toBe(200);
+    const teamReadPaths = [
+      `/api/projects/${projectIds[0]}/team-structure`,
+      `/api/projects/${projectIds[0]}/team-agents`,
+      `/api/projects/${projectIds[0]}/collaboration`,
+    ];
+    const warmReads = await Promise.all(teamReadPaths.map((route) => leader.api('GET', route)));
+    expect(warmReads.map((result) => result.status), JSON.stringify(warmReads.map((result) => result.json))).toEqual([200, 200, 200]);
+    await leader.app.projectCollaboration.refreshSnapshot(projectIds[0]);
+    const cloudBaseline = cloud.cloudCalls;
+    const lookupBaseline = accountLookups;
+    const cachedReads = await Promise.all(teamReadPaths.map(async (route) => {
+      const startedAt = performance.now();
+      const result = await leader.api('GET', route);
+      return { result, elapsedMs: performance.now() - startedAt };
+    }));
+    expect(cachedReads.map((read) => read.result.status), JSON.stringify(cachedReads.map((read) => read.result.json))).toEqual([200, 200, 200]);
+    expect(cloud.cloudCalls - cloudBaseline, 'cached team endpoints must not issue PostgREST or RPC calls').toBe(0);
+    expect(accountLookups - lookupBaseline, 'cached team endpoints must not revalidate Supabase auth').toBe(0);
+    expect(cachedReads.every((read) => read.elapsedMs < 150), `Cached endpoint timings: ${cachedReads.map((read) => Math.round(read.elapsedMs)).join(', ')}ms`).toBe(true);
+    console.info(`Example cached endpoint timings (structure/agents/collaboration): ${cachedReads.map((read) => Math.round(read.elapsedMs)).join('/')}ms; zero Supabase calls`);
+
     const links = await cloud.pg.query('SELECT * FROM public.mingle_device_links');
     expect(links.rows).toHaveLength(2);
     expect(apps.every(app => app.fake.runs.length === 0)).toBe(true);

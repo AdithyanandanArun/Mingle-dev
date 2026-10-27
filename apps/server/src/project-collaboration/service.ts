@@ -19,6 +19,7 @@ import type { ProviderService } from '../provider-service.ts';
 import { HttpError, conflict, notFound } from '../util.ts';
 
 const INVITATION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const TEAM_READ_MODEL_TTL_MS = 30_000;
 const REMOTE_ROSTER_PROVIDERS = new Set(['claude', 'codex', 'opencode']);
 const PROVIDER_DISPLAY_NAMES = { claude: 'Claude', codex: 'Codex', opencode: 'OpenCode' } as const;
 type Row = Record<string, unknown>;
@@ -179,6 +180,12 @@ function defaultEmailSender(): ProjectInvitationEmailSender {
 export class ProjectCollaborationService {
   private closed = false;
   private readonly pending = new Set<Promise<unknown>>();
+  private readonly refreshFlights = new Map<string, Promise<ProjectCollaborationSnapshot>>();
+  private readonly invalidatedProjects = new Set<string>();
+  private readonly invalidationGenerations = new Map<string, number>();
+  private readonly unsubscribeStore: () => void;
+  private readonly unsubscribeRoster: () => void;
+  private readonly refreshTimer: ReturnType<typeof setInterval>;
   private readonly joinFlights = new Map<string, { intent: string; promise: Promise<ProjectInvitationJoinResult> }>();
   private joinQueue: Promise<void> = Promise.resolve();
   private readonly emailSender: ProjectInvitationEmailSender;
@@ -204,6 +211,17 @@ export class ProjectCollaborationService {
     this.now = options.now ?? (() => new Date());
     this.tokenFactory = options.token ?? (() => randomBytes(32).toString('base64url'));
     this.ensureLocalTables();
+    this.unsubscribeStore = options.store.subscribe((event) => {
+      if (!event || event.payload.readModelRefresh === true) return;
+      if (event.type === 'team.structure.updated' || event.type === 'team.session.updated') {
+        if (event.projectId) this.invalidateSnapshot(event.projectId);
+      }
+    });
+    this.unsubscribeRoster = options.distributed.execution.subscribeRosterChanges?.((teamId, sharedProjectId) => {
+      this.invalidateSharedProject(teamId, sharedProjectId);
+    }) ?? (() => undefined);
+    this.refreshTimer = setInterval(() => this.refreshExpiredSnapshots(), TEAM_READ_MODEL_TTL_MS);
+    this.refreshTimer.unref();
   }
 
   private readonly tokenFactory: () => string;
@@ -238,6 +256,9 @@ export class ProjectCollaborationService {
         (account_id,device_id,local_project_id,team_id,shared_project_id,ordinal,session_id,provider,model,effort,created_at)
         SELECT account_id,device_id,local_project_id,team_id,shared_project_id,0,session_id,provider,model,effort,created_at
         FROM mingle_project_collaboration_joins;
+      CREATE TABLE IF NOT EXISTS mingle_project_team_read_model (
+        local_project_id TEXT PRIMARY KEY, account_id TEXT NOT NULL, snapshot_json TEXT NOT NULL, refreshed_at INTEGER NOT NULL
+      );
     `);
   }
 
@@ -300,7 +321,6 @@ export class ProjectCollaborationService {
       if (this.emailReadinessGeneration === generation) {
         this.emailReadinessAt = this.now().getTime();
         if (this.emailReadinessWork === tracked) this.emailReadinessWork = null;
-        if (!this.closed) this.options.store.touch();
       }
     });
     this.emailReadinessWork = tracked;
@@ -445,93 +465,189 @@ export class ProjectCollaborationService {
     }));
   }
 
+  private accountIdSnapshot(): string | null {
+    const account = this.options.account.snapshot?.();
+    return account?.status === 'signed-in' ? account.user?.id ?? null : null;
+  }
+
+  private readCachedSnapshot(projectId: string, accountId: string): { snapshot: ProjectCollaborationSnapshot; refreshedAt: number } | null {
+    const row = this.options.store.db.prepare(`SELECT account_id,snapshot_json,refreshed_at FROM mingle_project_team_read_model
+      WHERE local_project_id=?`).get(projectId) as Row | undefined;
+    if (!row || row.account_id !== accountId || typeof row.snapshot_json !== 'string') return null;
+    try {
+      return { snapshot: JSON.parse(row.snapshot_json) as ProjectCollaborationSnapshot, refreshedAt: Number(row.refreshed_at) };
+    } catch { return null; }
+  }
+
+  private cachedBindingMatches(projectId: string, accountId: string, snapshot: ProjectCollaborationSnapshot): boolean {
+    const source = this.mapping(projectId, accountId);
+    if (source) return snapshot.project?.teamId === source.teamId && snapshot.project.sharedProjectId === source.sharedProjectId;
+    if (!snapshot.project) return true;
+    const joins = this.options.store.db.prepare(`SELECT team_id,shared_project_id,device_id FROM mingle_project_collaboration_joins
+      WHERE local_project_id=? AND account_id=? AND team_id=? AND shared_project_id=? ORDER BY created_at DESC`)
+      .all(projectId, accountId, snapshot.project.teamId, snapshot.project.sharedProjectId) as Row[];
+    return joins.some((row) => this.options.distributed.transport.snapshot(String(row.team_id)).deviceId === row.device_id);
+  }
+
   snapshot(projectId: string): Promise<ProjectCollaborationSnapshot> {
     return this.runTracked(async () => {
       const local = this.localProject(projectId);
-      const { project, repository } = await this.repository(projectId);
-      const collab = await this.withClient(async (client, user) => {
-        this.scheduleEmailReadiness(client, user.id);
-        let binding = this.mapping(projectId, user.id);
-        if (!binding) {
-          const joins = this.options.store.db.prepare(`SELECT account_id,device_id,local_project_id,team_id,shared_project_id
-            FROM mingle_project_collaboration_joins WHERE local_project_id=? AND account_id=? ORDER BY created_at DESC`)
-            .all(projectId, user.id) as Row[];
-          for (const row of joins) {
-            const teamId = text(row, 'team_id');
-            const deviceId = text(row, 'device_id');
-            if (this.options.distributed.transport.snapshot(teamId).deviceId !== deviceId) continue;
-            const member = await client.from('mingle_members').select('role').eq('team_id', teamId).eq('user_id', user.id).is('revoked_at', null).maybeSingle();
-            if (member.error) failCloud(member.error, 'The joined project membership could not be checked.');
-            if (!member.data) continue;
-            binding = {
-              projectId, ownerId: user.id, teamId, sharedProjectId: text(row, 'shared_project_id'),
-              leaderDeviceId: null, leaderFingerprint: null,
-            };
-            break;
-          }
+      const accountId = this.accountIdSnapshot();
+      const cached = accountId ? this.readCachedSnapshot(local.id, accountId) : null;
+      if (cached && !this.invalidatedProjects.has(local.id) && this.cachedBindingMatches(local.id, accountId!, cached.snapshot)) {
+        if (this.now().getTime() - cached.refreshedAt >= TEAM_READ_MODEL_TTL_MS) {
+          void this.refreshSnapshot(local.id).catch(() => undefined);
         }
-        if (!binding) return { binding: null, members: [], invitations: [] as ProjectCollaborationInvitation[], project: null as ProjectCollaborationProject | null };
-        const [sharedResult, memberResult, profileResult, inviteResult] = await Promise.all([
-          client.from('mingle_projects').select('id,team_id,name,repository_url').eq('id', binding.sharedProjectId).eq('team_id', binding.teamId).maybeSingle(),
-          client.from('mingle_members').select('team_id,user_id,role,created_at').eq('team_id', binding.teamId).is('revoked_at', null).order('created_at', { ascending: true }).limit(500),
-          client.from('mingle_project_member_profiles').select('team_id,user_id,email,display_name').eq('team_id', binding.teamId).limit(500),
-          client.from('mingle_project_invitations').select('id,team_id,shared_project_id,email,role,invited_by,expires_at,accepted_at,accepted_by,revoked_at,created_at')
-            .eq('team_id', binding.teamId).eq('shared_project_id', binding.sharedProjectId).order('created_at', { ascending: false }).limit(500),
-        ]);
-        if (sharedResult.error) failCloud(sharedResult.error, 'The shared project could not be loaded.');
-        if (!sharedResult.data) throw notFound('The shared project is no longer available to this team.');
-        const members = Array.isArray(memberResult.data) ? memberResult.data as Row[] : [];
-        const profiles = Array.isArray(profileResult.data) ? profileResult.data as Row[] : [];
-        const invitations = Array.isArray(inviteResult.data) ? inviteResult.data as Row[] : [];
-        if (memberResult.error) failCloud(memberResult.error, 'The project teammate roster could not be loaded.');
-        if (profileResult.error) failCloud(profileResult.error, 'The project teammate profiles could not be loaded.');
-        if (inviteResult.error) failCloud(inviteResult.error, 'Project invitations could not be loaded.');
-        const byUser = new Map(profiles.map((row) => [String(row.user_id), row]));
-        const memberViews: ProjectCollaborationMember[] = members.map((row) => {
-          const profile = byUser.get(String(row.user_id));
-          const role = row.role === 'owner' ? 'leader' : row.role === 'admin' ? 'admin' : 'member';
-          return {
-            accountId: text(row, 'user_id'), email: profile ? nullableText(profile, 'email') : null,
-            displayName: profile ? nullableText(profile, 'display_name') : null,
-            role, status: 'active',
-          };
-        });
-        const invitationViews: ProjectCollaborationInvitation[] = invitations.map((row) => ({
-          id: text(row, 'id'), email: text(row, 'email'), role: row.role === 'admin' ? 'admin' : 'member',
-          status: invitationStatus(row as unknown as InvitationRow, this.now().getTime()),
-          createdAt: text(row, 'created_at'), expiresAt: text(row, 'expires_at'), invitedByAccountId: text(row, 'invited_by'),
-        }));
-        const shared = sharedResult.data as Row;
-        if (typeof shared.repository_url !== 'string' || normalizeRepositoryUrl(shared.repository_url).identity !== repository.identity) {
-          throw conflict('The local checkout no longer matches the shared project repository. Review the project invitation or select the correct checkout.');
-        }
-        const snapshotProject: ProjectCollaborationProject = {
-          teamId: binding.teamId, sharedProjectId: binding.sharedProjectId,
-          name: text(shared, 'name'), repositoryUrl: repository.url,
-        };
-        return { binding, members: memberViews, invitations: invitationViews, project: snapshotProject, userId: user.id };
-      });
-      const email = this.emailReadinessCache ?? { configured: false, message: 'Email sender status is being checked separately from team roster data.' };
-      if (!collab.binding || !collab.project) return { project: null, members: [], agents: [], invitations: [], email };
-      const device = this.options.distributed.transport.snapshot(collab.binding.teamId);
-      const roster = await this.options.distributed.execution.snapshot(collab.binding.teamId);
-      const ownPublished = new Map(roster.agents
-        .filter((agent) => agent.sharedProjectId === collab.binding!.sharedProjectId && agent.deviceId === device.deviceId && agent.ownerId === collab.userId)
-        .map((agent) => [agent.sessionId, agent.id] as const));
-      const localAgents: ProjectCollaborationAgent[] = this.options.store.listSessions(local.id)
-        .filter((session) => ownPublished.has(session.id)).map((session) => ({
-        id: ownPublished.get(session.id)!, name: session.name, accountId: collab.userId!, deviceId: device.deviceId ?? '', projectId: local.id,
-        sessionId: session.id, provider: session.provider, model: session.model,
-        state: session.status === 'error' ? 'error' : session.status,
-      }));
-      const remoteAgents: ProjectCollaborationAgent[] = roster.agents
-        .filter((agent) => agent.sharedProjectId === collab.binding!.sharedProjectId)
-        .filter((agent) => !(agent.deviceId === device.deviceId && localAgents.some((localAgent) => localAgent.sessionId === agent.sessionId)))
-        .map((agent) => ({ id: agent.id, name: agent.name, accountId: agent.ownerId, deviceId: agent.deviceId,
-          projectId: local.id, sessionId: agent.sessionId, provider: agent.provider,
-          model: agent.model, state: agent.presence }));
-      return { project: collab.project, members: collab.members, agents: [...localAgents, ...remoteAgents], invitations: collab.invitations, email };
+        return structuredClone({ ...cached.snapshot, email: this.emailReadinessCache ?? cached.snapshot.email });
+      }
+      return this.refreshSnapshot(local.id);
     });
+  }
+
+  /** Force an authoritative cloud refresh. Unknown inbound identities use this before rejection. */
+  refreshSnapshot(projectId: string): Promise<ProjectCollaborationSnapshot> {
+    this.ensureOpen();
+    const existing = this.refreshFlights.get(projectId);
+    if (existing) return existing;
+    const flight = this.runTracked(async () => {
+      let accountId = '';
+      let snapshot!: ProjectCollaborationSnapshot;
+      let generation: number;
+      do {
+        generation = this.invalidationGenerations.get(projectId) ?? 0;
+        ({ accountId, snapshot } = await this.fetchSnapshot(projectId));
+      } while ((this.invalidationGenerations.get(projectId) ?? 0) !== generation);
+      const prior = this.options.store.db.prepare(`SELECT account_id,snapshot_json FROM mingle_project_team_read_model WHERE local_project_id=?`)
+        .get(projectId) as Row | undefined;
+      const priorSnapshot = prior?.account_id === accountId && typeof prior.snapshot_json === 'string'
+        ? (() => { try { return JSON.parse(String(prior.snapshot_json)) as ProjectCollaborationSnapshot; } catch { return null; } })() : null;
+      const changed = priorSnapshot !== null && JSON.stringify(priorSnapshot) !== JSON.stringify(snapshot);
+      this.options.store.db.prepare(`INSERT INTO mingle_project_team_read_model(local_project_id,account_id,snapshot_json,refreshed_at)
+        VALUES(?,?,?,?) ON CONFLICT(local_project_id) DO UPDATE SET account_id=excluded.account_id,snapshot_json=excluded.snapshot_json,
+        refreshed_at=excluded.refreshed_at`).run(projectId, accountId, JSON.stringify(snapshot), this.now().getTime());
+      this.invalidatedProjects.delete(projectId);
+      if (changed) this.options.store.recordEvent({ projectId, type: 'team.structure.updated', summary: 'Shared project roster refreshed',
+        payload: { readModelRefresh: true } });
+      return structuredClone(snapshot);
+    });
+    this.refreshFlights.set(projectId, flight);
+    void flight.finally(() => {
+      if (this.refreshFlights.get(projectId) === flight) this.refreshFlights.delete(projectId);
+    }).catch(() => undefined);
+    return flight;
+  }
+
+  /** Invalidate after durable local team changes and refresh in the background while this app is active. */
+  invalidateSnapshot(projectId: string): void {
+    if (this.closed || !this.options.store.getProject(projectId)) return;
+    this.invalidatedProjects.add(projectId);
+    this.invalidationGenerations.set(projectId, (this.invalidationGenerations.get(projectId) ?? 0) + 1);
+    void this.refreshSnapshot(projectId).catch(() => undefined);
+  }
+
+  private invalidateSharedProject(teamId: string, sharedProjectId: string): void {
+    const rows = this.options.store.db.prepare(`SELECT local_project_id FROM mingle_project_collaboration_sources
+      WHERE team_id=? AND shared_project_id=? UNION ALL SELECT local_project_id FROM mingle_project_collaboration_joins
+      WHERE team_id=? AND shared_project_id=?`).all(teamId, sharedProjectId, teamId, sharedProjectId) as Array<{ local_project_id: string }>;
+    for (const row of rows) this.invalidateSnapshot(row.local_project_id);
+  }
+
+  private refreshExpiredSnapshots(): void {
+    if (this.closed) return;
+    const accountId = this.accountIdSnapshot();
+    if (!accountId) return;
+    const rows = this.options.store.db.prepare(`SELECT local_project_id,refreshed_at FROM mingle_project_team_read_model WHERE account_id=?`)
+      .all(accountId) as Array<{ local_project_id: string; refreshed_at: number }>;
+    const now = this.now().getTime();
+    for (const row of rows) {
+      if (this.options.store.getProject(row.local_project_id) && now - Number(row.refreshed_at) >= TEAM_READ_MODEL_TTL_MS) {
+        void this.refreshSnapshot(row.local_project_id).catch(() => undefined);
+      }
+    }
+  }
+
+  private async fetchSnapshot(projectId: string): Promise<{ accountId: string; snapshot: ProjectCollaborationSnapshot }> {
+    const local = this.localProject(projectId);
+    const { project, repository } = await this.repository(projectId);
+    const collab = await this.withClient(async (client, user) => {
+      this.scheduleEmailReadiness(client, user.id);
+      let binding = this.mapping(projectId, user.id);
+      if (!binding) {
+        const joins = this.options.store.db.prepare(`SELECT account_id,device_id,local_project_id,team_id,shared_project_id
+          FROM mingle_project_collaboration_joins WHERE local_project_id=? AND account_id=? ORDER BY created_at DESC`)
+          .all(projectId, user.id) as Row[];
+        for (const row of joins) {
+          const teamId = text(row, 'team_id');
+          const deviceId = text(row, 'device_id');
+          if (this.options.distributed.transport.snapshot(teamId).deviceId !== deviceId) continue;
+          const member = await client.from('mingle_members').select('role').eq('team_id', teamId).eq('user_id', user.id).is('revoked_at', null).maybeSingle();
+          if (member.error) failCloud(member.error, 'The joined project membership could not be checked.');
+          if (!member.data) continue;
+          binding = { projectId, ownerId: user.id, teamId, sharedProjectId: text(row, 'shared_project_id'), leaderDeviceId: null, leaderFingerprint: null };
+          break;
+        }
+      }
+      if (!binding) return { accountId: user.id, binding: null, members: [], invitations: [] as ProjectCollaborationInvitation[], project: null as ProjectCollaborationProject | null };
+      const [sharedResult, memberResult, profileResult, inviteResult] = await Promise.all([
+        client.from('mingle_projects').select('id,team_id,name,repository_url').eq('id', binding.sharedProjectId).eq('team_id', binding.teamId).maybeSingle(),
+        client.from('mingle_members').select('team_id,user_id,role,created_at').eq('team_id', binding.teamId).is('revoked_at', null).order('created_at', { ascending: true }).limit(500),
+        client.from('mingle_project_member_profiles').select('team_id,user_id,email,display_name').eq('team_id', binding.teamId).limit(500),
+        client.from('mingle_project_invitations').select('id,team_id,shared_project_id,email,role,invited_by,expires_at,accepted_at,accepted_by,revoked_at,created_at')
+          .eq('team_id', binding.teamId).eq('shared_project_id', binding.sharedProjectId).order('created_at', { ascending: false }).limit(500),
+      ]);
+      if (sharedResult.error) failCloud(sharedResult.error, 'The shared project could not be loaded.');
+      if (!sharedResult.data) throw notFound('The shared project is no longer available to this team.');
+      const members = Array.isArray(memberResult.data) ? memberResult.data as Row[] : [];
+      const profiles = Array.isArray(profileResult.data) ? profileResult.data as Row[] : [];
+      const invitations = Array.isArray(inviteResult.data) ? inviteResult.data as Row[] : [];
+      if (memberResult.error) failCloud(memberResult.error, 'The project teammate roster could not be loaded.');
+      if (profileResult.error) failCloud(profileResult.error, 'The project teammate profiles could not be loaded.');
+      if (inviteResult.error) failCloud(inviteResult.error, 'Project invitations could not be loaded.');
+      const byUser = new Map(profiles.map((row) => [String(row.user_id), row]));
+      const memberViews: ProjectCollaborationMember[] = members.map((row) => {
+        const profile = byUser.get(String(row.user_id));
+        return { accountId: text(row, 'user_id'), email: profile ? nullableText(profile, 'email') : null,
+          displayName: profile ? nullableText(profile, 'display_name') : null,
+          role: row.role === 'owner' ? 'leader' : row.role === 'admin' ? 'admin' : 'member', status: 'active' };
+      });
+      const invitationViews: ProjectCollaborationInvitation[] = invitations.map((row) => ({
+        id: text(row, 'id'), email: text(row, 'email'), role: row.role === 'admin' ? 'admin' : 'member',
+        status: invitationStatus(row as unknown as InvitationRow, this.now().getTime()), createdAt: text(row, 'created_at'),
+        expiresAt: text(row, 'expires_at'), invitedByAccountId: text(row, 'invited_by'),
+      }));
+      const shared = sharedResult.data as Row;
+      if (typeof shared.repository_url !== 'string' || normalizeRepositoryUrl(shared.repository_url).identity !== repository.identity) {
+        throw conflict('The local checkout no longer matches the shared project repository. Review the project invitation or select the correct checkout.');
+      }
+      return { accountId: user.id, binding, members: memberViews, invitations: invitationViews, project: {
+        teamId: binding.teamId, sharedProjectId: binding.sharedProjectId, name: text(shared, 'name'), repositoryUrl: repository.url,
+      } satisfies ProjectCollaborationProject };
+    });
+    const email = this.emailReadinessCache ?? { configured: false, message: 'Email sender status is being checked separately from team roster data.' };
+    if (!collab.binding || !collab.project) return { accountId: collab.accountId,
+      snapshot: { project: null, members: [], agents: [], invitations: [], email } };
+    const device = this.options.distributed.transport.snapshot(collab.binding.teamId);
+    const execution = this.options.distributed.execution as typeof this.options.distributed.execution & {
+      publishedAgents?: (teamId: string, sharedProjectId: string) => Promise<import('../../../../packages/contracts/src/remote-execution.ts').RemoteAgent[]> | import('../../../../packages/contracts/src/remote-execution.ts').RemoteAgent[];
+    };
+    const rosterAgents = execution.publishedAgents
+      ? await execution.publishedAgents.call(execution, collab.binding.teamId, collab.binding.sharedProjectId)
+      : (await execution.snapshot(collab.binding.teamId)).agents;
+    const activeMembers = new Set(collab.members.map((member) => member.accountId));
+    const roster = rosterAgents.filter((agent) => agent.sharedProjectId === collab.binding!.sharedProjectId && activeMembers.has(agent.ownerId));
+    const ownPublished = new Map(roster.filter((agent) => agent.deviceId === device.deviceId && agent.ownerId === collab.accountId)
+      .map((agent) => [agent.sessionId, agent.id] as const));
+    const localAgents: ProjectCollaborationAgent[] = this.options.store.listSessions(local.id).filter((session) => ownPublished.has(session.id)).map((session) => ({
+      id: ownPublished.get(session.id)!, name: session.name, accountId: collab.accountId, deviceId: device.deviceId ?? '', projectId: local.id,
+      sessionId: session.id, provider: session.provider, model: session.model, state: session.status === 'error' ? 'error' : session.status,
+    }));
+    const remoteAgents: ProjectCollaborationAgent[] = roster.filter((agent) => !(agent.deviceId === device.deviceId
+      && localAgents.some((localAgent) => localAgent.sessionId === agent.sessionId))).map((agent) => ({
+      id: agent.id, name: agent.name, accountId: agent.ownerId, deviceId: agent.deviceId, projectId: local.id,
+      sessionId: agent.sessionId, provider: agent.provider, model: agent.model, state: agent.presence,
+    }));
+    return { accountId: collab.accountId, snapshot: { project: collab.project, members: collab.members,
+      agents: [...localAgents, ...remoteAgents], invitations: collab.invitations, email } };
   }
 
   createInvitation(projectId: string, input: CreateProjectInvitationInput): Promise<ProjectInvitationCreateResult> {
@@ -542,7 +658,7 @@ export class ProjectCollaborationService {
       const token = this.tokenFactory();
       const tokenHash = this.tokenHash(token);
       if (!/^[A-Za-z0-9_-]{43,128}$/.test(token)) throw new Error('Token generator returned an invalid token.');
-      return this.withClient(async (client, user) => {
+      const result = await this.withClient(async (client, user) => {
         if (!user.email || !user.email_confirmed_at) throw new HttpError(403, 'A verified account email is required to invite project collaborators.');
         const member = await client.from('mingle_members').select('role').eq('team_id', binding.teamId).eq('user_id', user.id).is('revoked_at', null).maybeSingle();
         if (member.error || !member.data || member.data.role !== 'owner') throw new HttpError(403, 'Only the active project leader can invite teammates.');
@@ -560,6 +676,8 @@ export class ProjectCollaborationService {
         this.options.store.touch();
         return { invitation, delivery, ...(delivery.status === 'sent' ? {} : { joinUrl: this.makeJoinUrl(token, attempt.joinUrlBase) }) };
       });
+      this.invalidateSnapshot(project.id);
+      return result;
     });
   }
 
@@ -579,7 +697,7 @@ export class ProjectCollaborationService {
       const token = this.tokenFactory();
       const tokenHash = this.tokenHash(token);
       if (!/^[A-Za-z0-9_-]{43,128}$/.test(token)) throw new Error('Token generator returned an invalid token.');
-      return this.withClient(async (client, user) => {
+      const result = await this.withClient(async (client, user) => {
         const before = await client.from('mingle_project_invitations').select('id,email,role,expires_at,created_at,invited_by,accepted_at,revoked_at')
           .eq('id', invitationId).eq('team_id', binding.teamId).eq('shared_project_id', binding.sharedProjectId).maybeSingle();
         const current = requireRow(before.data, before.error, 'The project invitation could not be loaded.');
@@ -597,6 +715,8 @@ export class ProjectCollaborationService {
         this.options.store.touch();
         return { invitation, delivery, ...(delivery.status === 'sent' ? {} : { joinUrl: this.makeJoinUrl(token, attempt.joinUrlBase) }) };
       });
+      this.invalidateSnapshot(project.id);
+      return result;
     });
   }
 
@@ -615,6 +735,7 @@ export class ProjectCollaborationService {
         if (data !== true) throw new HttpError(502, 'The invitation service did not confirm revocation.');
       });
       this.options.store.touch();
+      this.invalidateSnapshot(project.id);
       return { ok: true };
     });
   }
@@ -735,11 +856,13 @@ export class ProjectCollaborationService {
         WHERE account_id=? AND device_id=? AND local_project_id=? AND team_id=? AND shared_project_id=? LIMIT 1`).get(...joinIdentity);
       if (existingInvitation) {
         const sessionIds = checkedExistingSessions().map((session) => session!.id);
+        this.invalidateSnapshot(localProject.id);
         return { projectId: localProject.id, sessionId: sessionIds[0]!, sessionIds, teamId, sharedProjectId, alreadyJoined: true };
       }
       if (priorSessionIds.length && completedProjectJoin) {
         const sessionIds = checkedExistingSessions().map((session) => session!.id);
         await this.completeAndBindEnrollment({ invitationId, teamId, sharedProjectId, localProjectId: localProject.id, ownerId: accepted.userId, device });
+        this.invalidateSnapshot(localProject.id);
         return { projectId: localProject.id, sessionId: sessionIds[0]!, sessionIds, teamId, sharedProjectId, alreadyJoined: true };
       }
       await this.completeAndBindEnrollment({ invitationId, teamId, sharedProjectId, localProjectId: localProject.id, ownerId: accepted.userId, device });
@@ -779,8 +902,12 @@ export class ProjectCollaborationService {
         throw conflict('A matching project join was completed concurrently. Refresh and continue with its existing agents.');
       }
       const resolvedSessions = savedSessions as Array<Awaited<ReturnType<WorkspaceService['createSession']>>>;
-      const currentRoster = await this.options.distributed.execution.snapshot(teamId);
-      const publishedSessionIds = currentRoster.agents
+      const execution = this.options.distributed.execution as typeof this.options.distributed.execution & {
+        publishedAgents?: (currentTeamId: string, currentSharedProjectId: string) => Promise<import('../../../../packages/contracts/src/remote-execution.ts').RemoteAgent[]> | import('../../../../packages/contracts/src/remote-execution.ts').RemoteAgent[];
+      };
+      const currentAgents = execution.publishedAgents ? await execution.publishedAgents.call(execution, teamId, sharedProjectId)
+        : (await execution.snapshot(teamId)).agents;
+      const publishedSessionIds = currentAgents
         .filter((candidate) => candidate.sharedProjectId === sharedProjectId && candidate.deviceId === device.id
           && candidate.ownerId === accepted.userId && !resolvedSessions.some((session) => candidate.sessionId === session.id))
         .map((candidate) => candidate.sessionId);
@@ -798,9 +925,11 @@ export class ProjectCollaborationService {
         const saved = existingSessions();
         if (!saved.length) throw error;
         const savedSessionIds = checkedExistingSessions().map((session) => session!.id);
+        this.invalidateSnapshot(localProject.id);
         return { projectId: localProject.id, sessionId: savedSessionIds[0]!, sessionIds: savedSessionIds, teamId, sharedProjectId, alreadyJoined: true };
       }
       this.options.store.touch();
+      this.invalidateSnapshot(localProject.id);
       const sessionIdsCreated = resolvedSessions.map((session) => session.id);
       return { projectId: localProject.id, sessionId: sessionIdsCreated[0]!, sessionIds: sessionIdsCreated, teamId, sharedProjectId, alreadyJoined: alreadyJoined || accepted.row.already_accepted === true };
   }
@@ -836,6 +965,9 @@ export class ProjectCollaborationService {
 
   async close(): Promise<void> {
     this.closed = true;
+    clearInterval(this.refreshTimer);
+    this.unsubscribeStore();
+    this.unsubscribeRoster();
     await Promise.allSettled([...this.pending]);
   }
 }

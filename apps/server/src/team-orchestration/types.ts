@@ -65,10 +65,13 @@ export interface TeamOrchestrationGroups {
 
 export interface TeamOrchestrationCollaboration {
   snapshot(projectId: string): Promise<ProjectCollaborationSnapshot>;
+  refreshSnapshot?(projectId: string): Promise<ProjectCollaborationSnapshot>;
+  invalidateSnapshot?(projectId: string): void;
 }
 
 export interface TeamOrchestrationAccount {
   withAuthenticatedClient<T>(callback: (client: import('@supabase/supabase-js').SupabaseClient, user: import('@supabase/supabase-js').User) => Promise<T>): Promise<T>;
+  snapshot?(): { status: string; user?: { id?: string } | null };
 }
 
 export interface TeamProxyStartInput {

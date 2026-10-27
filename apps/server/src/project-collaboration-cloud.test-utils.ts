@@ -13,6 +13,7 @@ const identifier = (value: string): string => {
 export class ProjectInvitationCloudFixture {
   readonly pg = new PGlite();
   readonly errors: Array<{ table: string; code: unknown; message: unknown }> = [];
+  private calls = 0;
   private queue: Promise<unknown> = Promise.resolve();
   private readonly clients = new Map<string, SupabaseClient>();
   private readonly channels = new Set<{
@@ -22,6 +23,8 @@ export class ProjectInvitationCloudFixture {
   readonly wakeTimings: Array<{ sentAt: number; deliveredAt: number | null }> = [];
 
   constructor(private readonly options: { realtime?: boolean; wakeDelayMs?: number } = {}) {}
+
+  get cloudCalls(): number { return this.calls; }
 
   async initialize(users: Array<{ id: string; email: string }>) {
     await this.pg.exec(`
@@ -53,7 +56,7 @@ export class ProjectInvitationCloudFixture {
     const cached = this.clients.get(userId);
     if (cached) return cached;
     const client = {
-      from: (table: string) => new FixtureQuery(this, userId, table),
+      from: (table: string) => { this.calls++; return new FixtureQuery(this, userId, table); },
       ...(this.options.realtime ? {
         // Only payload-free hints are simulated. All message bytes and authorization
         // still travel through the real encrypted mailbox and PostgreSQL policies.
@@ -91,6 +94,7 @@ export class ProjectInvitationCloudFixture {
         removeChannel: async (channel: { unsubscribe(): Promise<string> }) => channel.unsubscribe(),
       } : {}),
       rpc: async (name: string, args: Row = {}) => {
+        this.calls++;
         try {
           return await this.asUser(userId, async () => {
             const parameters = Object.entries(args);
