@@ -1,4 +1,3 @@
-import { useMemo } from 'react';
 import type { AgentConfiguration, Provider } from '@mingle/contracts';
 import { useMingle } from '../../store/store';
 import {
@@ -6,7 +5,7 @@ import {
 } from '../../lib/groups';
 import { Field } from '../ui';
 import { SelectMenu } from '../SelectMenu';
-import { providerModelChoices } from '../../lib/providers';
+import { ModelPicker } from '../ModelPicker';
 
 /** One agent's provider, model, effort, permissions and service tier, offering only what each provider currently advertises. */
 export function ConfigFields({ value, onChange, idPrefix, lockProvider = false, disabled = false, legend }: {
@@ -21,9 +20,6 @@ export function ConfigFields({ value, onChange, idPrefix, lockProvider = false, 
   const policies = policyChoices(info, model);
   const availability = providers ? providerAvailability(providers, value.provider) : { available: false, reason: 'Provider status is loading.' };
 
-  const modelOptions = useMemo(() => {
-    return providerModelChoices(info, value.model).map((item) => ({ value: item.id, label: item.name }));
-  }, [info, model, value.model]);
   if (!providers || !settings) return null;
   const patch = (change: Partial<AgentConfiguration>) => onChange(normalizeConfig({ ...value, ...change }, providers, settings));
   const policyOptions = policies;
@@ -32,14 +28,10 @@ export function ConfigFields({ value, onChange, idPrefix, lockProvider = false, 
     <fieldset className="cfg" disabled={disabled}>
       {legend ? <legend className="sr-only">{legend}</legend> : null}
       <div className="cfg__grid">
-        <Field label="Provider" htmlFor={`${idPrefix}-provider`}>
-          <SelectMenu id={`${idPrefix}-provider`} label="Provider" value={value.provider} disabled={disabled || lockProvider}
-            title={lockProvider ? 'A provider conversation already exists, so its provider cannot change.' : undefined}
-            options={providers.map((provider) => ({ value: provider.id, label: provider.name, description: provider.available ? provider.version ? `Available · ${provider.version}` : 'Available' : provider.reason ?? 'Needs setup', disabled: !provider.available && provider.id !== value.provider }))}
-            onChange={(next) => patch({ provider: next as Provider })} />
-        </Field>
         <Field label="Model" htmlFor={`${idPrefix}-model`}>
-          <SelectMenu id={`${idPrefix}-model`} label="Model" value={model?.id ?? value.model} disabled={disabled || modelOptions.length === 0} options={modelOptions} onChange={(next) => patch({ model: next })} />
+          <ModelPicker id={`${idPrefix}-model`} label="Model" value={{ provider: value.provider, model: model?.id ?? value.model }} providers={providers}
+            disabled={disabled} lockProvider={lockProvider} className="cfg__model-picker"
+            onChange={({ provider, model: modelId }) => patch({ provider: provider as Provider, model: modelId })} />
         </Field>
         <Field label="Reasoning effort" htmlFor={`${idPrefix}-effort`}>
           <SelectMenu id={`${idPrefix}-effort`} label="Reasoning effort" value={value.effort} disabled={disabled || efforts.length === 0}

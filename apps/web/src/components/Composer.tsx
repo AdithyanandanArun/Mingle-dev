@@ -6,9 +6,9 @@ import { api, errorMessage, type ProviderCatalog, type SessionPatch } from '../l
 import { MOD, PROVIDER_NAME } from './ui';
 import { cx } from '../lib/format';
 import { SelectMenu } from './SelectMenu';
+import { ModelPicker } from './ModelPicker';
 import { UsagePanel } from './UsagePanel';
 import { GitBar } from './git/GitBar';
-import { providerModelChoices } from '../lib/providers';
 import { AttachmentDrafts, AttachmentTray, useAttachmentDraft } from './AttachmentDrafts';
 import { usePresence } from '../lib/motion';
 import {
@@ -285,7 +285,6 @@ export function Composer({ session }: { session: Session }) {
     }
   };
   const disabled = running || sending || updating || connection !== 'online';
-  const modelGroups = (providers ?? []).filter((p) => !session.providerSessionId || p.id === session.provider);
   const currentProvider = providers?.find((p) => p.id === session.provider);
   const modelData = (currentProvider?.models ?? []) as ProviderModel[];
   const currentModel = modelData.find((m) => m.id === session.model || m.aliases?.includes(session.model));
@@ -409,10 +408,6 @@ export function Composer({ session }: { session: Session }) {
   useEffect(() => {
     document.getElementById(`${pickerId}-option-${activeSuggestion}`)?.scrollIntoView({ block: 'nearest' });
   }, [activeSuggestion, pickerId, suggestion]);
-  const modelOptions = modelGroups.flatMap((p) => {
-    return providerModelChoices(p, p.id === session.provider ? session.model : undefined).map((m) => ({ value: JSON.stringify([p.id, m.id]), label: m.name, group: p.name }));
-  });
-
   return (
     <div className="composer-wrap">
       <div className={cx('composer', blocker && 'is-blocked')}>
@@ -485,13 +480,10 @@ export function Composer({ session }: { session: Session }) {
             <button type="button" className={cx('composer__plan-toggle', planningMode && 'is-active')} aria-pressed={planningMode} disabled={disabled} title="Ask the provider for a native read-only plan" onClick={() => { setPlanningMode((value) => !value); setSelectedSkills([]); setError(null); }}>
               {planningMode ? 'Planning on' : 'Plan'}
             </button>
-            <SelectMenu triggerRef={modelControl} openRequest={modelOpenRequest} className="composer__select composer__select--model" label="Model"
-              value={JSON.stringify([session.provider, selectedModelId])} disabled={disabled || modelOptions.length === 0}
-              options={modelOptions} placement="top"
-              onChange={(value) => {
-                const [provider, model] = JSON.parse(value) as [Session['provider'], string];
-                void configure({ provider, model });
-              }} />
+            <ModelPicker triggerRef={modelControl} openRequest={modelOpenRequest} className="composer__model-picker" label="Model"
+              value={{ provider: session.provider, model: selectedModelId }} providers={providers ?? []}
+              lockProvider={Boolean(session.providerSessionId)} disabled={disabled} placement="top"
+              onChange={({ provider, model }) => { void configure({ provider, model }); }} />
             <SelectMenu triggerRef={reasoningControl} className="composer__select" label="Reasoning effort and service tier" value={combinedValue} selectedValues={combinedSelectedValues} displayValue={combinedDisplay} openRequest={reasoningOpenRequest} disabled={disabled}
               options={combinedOptions}
               onChange={(value) => { const [kind, option] = value.split(':'); if (kind === 'effort') void configure({ effort: option }); else if (kind === 'tier') void configure({ serviceTier: option }); }} placement="top" />
