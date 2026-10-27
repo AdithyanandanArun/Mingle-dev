@@ -52,7 +52,7 @@ try {
   }
   let view;
   for (let attempt = 0; attempt < 60; attempt++) {
-    view = await evaluate('({ title: document.title, text: document.body.innerText, mounted: document.querySelector("#root")?.childElementCount > 0 })');
+    view = await evaluate('({ title: document.title, text: document.body?.innerText ?? "", mounted: document.querySelector("#root")?.childElementCount > 0 })');
     if (view.mounted && view.text.length > 100) break;
     await new Promise(resolvePromise => setTimeout(resolvePromise, 500));
   }
