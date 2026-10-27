@@ -2,15 +2,15 @@ import { rmSync } from 'node:fs';
 import type { SupabaseClient, User } from '@supabase/supabase-js';
 import { expect, it, vi } from 'vitest';
 import { AccountService } from './account/service.ts';
-import { makeRepo, runGit, startTestApp, tmpDir, type TestApp } from './test-utils.ts';
+import { makeRepo, runGit, startTestApp, tmpDir, waitFor, type TestApp } from './test-utils.ts';
 import { ProjectInvitationCloudFixture } from './project-collaboration-cloud.test-utils.ts';
 
-it('invites and joins through two real HTTP applications, actual PostgreSQL policies and encrypted transport without inference', async () => {
+it.each([false, true])('invites and joins through two real HTTP applications, PostgreSQL policies and encrypted transport (Realtime fixture: %s)', async (realtime) => {
   const users = [
     { id: '21000000-0000-4000-8000-000000000001', email: 'leader@example.test' },
     { id: '21000000-0000-4000-8000-000000000002', email: 'teammate@example.test' },
   ];
-  const cloud = new ProjectInvitationCloudFixture();
+  const cloud = new ProjectInvitationCloudFixture({ realtime, wakeDelayMs: 25 });
   const accounts = new Map<string, typeof users[number]>();
   const apps: TestApp[] = [], repos: string[] = [];
   let invitationToken = '';
@@ -60,18 +60,34 @@ it('invites and joins through two real HTTP applications, actual PostgreSQL poli
       { provider: 'claude', model: 'claude-sonnet-5-5', effort: 'medium', policy: 'supervised' },
       { provider: 'claude', model: 'claude-sonnet-5-5', effort: 'high', policy: 'supervised' },
     ] };
+    // Subscribe the registered host before the member publishes. No real cloud,
+    // email or model inference is involved in this explicitly local fixture.
+    if (realtime) await leader.app.distributed.transport.sync();
     const joined = await Promise.all([teammate.api('POST', '/api/project-invitations/join', join), teammate.api('POST', '/api/project-invitations/join', join)]);
     for (const result of joined) expect(result.status, JSON.stringify(result.json)).toBe(200);
     expect(joined[0]!.json.sessionId).toBe(joined[1]!.json.sessionId);
     expect(joined[0]!.json.sessionIds).toHaveLength(2);
     expect(joined[0]!.json.sessionIds).toEqual(joined[1]!.json.sessionIds);
     expect(teammate.app.store.listSessions(projectIds[1])).toHaveLength(2);
-    // Model a lost acknowledgement after PostgreSQL accepted the envelope.
-    teammate.app.store.db.prepare("UPDATE mingle_transport_outbox SET status='queued',next_attempt_at=0 WHERE kind='execution.agents'").run();
-    await teammate.app.distributed.transport.sync();
-    expect(teammate.app.store.db.prepare('SELECT status FROM mingle_transport_outbox').all()).toEqual([{ status: 'delivered' }]);
-    expect((await cloud.pg.query('SELECT id FROM public.mingle_envelopes')).rows).toHaveLength(1);
-    await leader.app.distributed.transport.sync();
+    if (!realtime) {
+      // Model a lost acknowledgement after PostgreSQL accepted the envelope.
+      teammate.app.store.db.prepare("UPDATE mingle_transport_outbox SET status='queued',next_attempt_at=0 WHERE kind='execution.agents'").run();
+      await teammate.app.distributed.transport.sync();
+      expect(teammate.app.store.db.prepare('SELECT status FROM mingle_transport_outbox').all()).toEqual([{ status: 'delivered' }]);
+      expect((await cloud.pg.query('SELECT id FROM public.mingle_envelopes')).rows).toHaveLength(1);
+      await leader.app.distributed.transport.sync();
+    } else {
+      await waitFor(() => leader.app.store.db.prepare('SELECT id FROM mingle_remote_agents WHERE session_id=? AND revoked_at IS NULL').get(joined[0]!.json.sessionId));
+      const renamedAt = performance.now();
+      const renamed = await teammate.api('PATCH', `/api/sessions/${joined[0]!.json.sessionId}`, { name: 'Example Codex 1 renamed' });
+      expect(renamed.status, JSON.stringify(renamed.json)).toBe(200);
+      await waitFor(() => leader.app.store.db.prepare('SELECT id FROM mingle_remote_agents WHERE session_id=? AND name=? AND revoked_at IS NULL')
+        .get(joined[0]!.json.sessionId, 'Example Codex 1 renamed'));
+      const elapsed = performance.now() - renamedAt;
+      expect(elapsed, `Local two-app metadata propagation took ${Math.round(elapsed)}ms`).toBeLessThan(1_000);
+      expect(cloud.wakeTimings.some((timing) => timing.deliveredAt !== null)).toBe(true);
+      console.info(`Example two-app metadata propagation: ${Math.round(elapsed)}ms (25ms simulated wake delay; no internet latency measured)`);
+    }
     const roster = await leader.api('GET', `/api/projects/${projectIds[0]}/collaboration`);
     expect(roster.status, JSON.stringify(roster.json)).toBe(200);
     expect(roster.json.agents.some((agent: { accountId: string }) => agent.accountId === users[1]!.id), JSON.stringify({

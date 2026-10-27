@@ -14,6 +14,14 @@ export class ProjectInvitationCloudFixture {
   readonly pg = new PGlite();
   readonly errors: Array<{ table: string; code: unknown; message: unknown }> = [];
   private queue: Promise<unknown> = Promise.resolve();
+  private readonly clients = new Map<string, SupabaseClient>();
+  private readonly channels = new Set<{
+    name: string; event: string | null; listener: (() => void) | null;
+    status: ((state: string) => void) | null; subscribed: boolean;
+  }>();
+  readonly wakeTimings: Array<{ sentAt: number; deliveredAt: number | null }> = [];
+
+  constructor(private readonly options: { realtime?: boolean; wakeDelayMs?: number } = {}) {}
 
   async initialize(users: Array<{ id: string; email: string }>) {
     await this.pg.exec(`
@@ -42,8 +50,46 @@ export class ProjectInvitationCloudFixture {
   }
 
   client(userId: string): SupabaseClient {
-    return {
+    const cached = this.clients.get(userId);
+    if (cached) return cached;
+    const client = {
       from: (table: string) => new FixtureQuery(this, userId, table),
+      ...(this.options.realtime ? {
+        // Only payload-free hints are simulated. All message bytes and authorization
+        // still travel through the real encrypted mailbox and PostgreSQL policies.
+        channel: (name: string) => {
+          const state = { name, event: null as string | null, listener: null as (() => void) | null,
+            status: null as ((state: string) => void) | null, subscribed: false };
+          this.channels.add(state);
+          const channel = {
+            on: (_kind: string, filter: { event: string }, listener: () => void) => {
+              state.event = filter.event; state.listener = listener; return channel;
+            },
+            subscribe: (callback: (status: string) => void) => {
+              state.status = callback; state.subscribed = true;
+              queueMicrotask(() => { if (state.subscribed) callback('SUBSCRIBED'); });
+              return channel;
+            },
+            httpSend: async (event: string, payload: unknown) => {
+              if (JSON.stringify(payload) !== '{}') throw new Error('Fixture wakes must contain no message data');
+              const timing = { sentAt: performance.now(), deliveredAt: null as number | null };
+              this.wakeTimings.push(timing);
+              setTimeout(() => {
+                timing.deliveredAt = performance.now();
+                for (const receiver of this.channels) {
+                  if (receiver.name === name && receiver.subscribed && receiver.event === event) receiver.listener?.();
+                }
+              }, this.options.wakeDelayMs ?? 0);
+              return { success: true };
+            },
+            unsubscribe: async () => {
+              state.subscribed = false; this.channels.delete(state); state.status?.('CLOSED'); return 'ok';
+            },
+          };
+          return channel;
+        },
+        removeChannel: async (channel: { unsubscribe(): Promise<string> }) => channel.unsubscribe(),
+      } : {}),
       rpc: async (name: string, args: Row = {}) => {
         try {
           return await this.asUser(userId, async () => {
@@ -55,6 +101,8 @@ export class ProjectInvitationCloudFixture {
         } catch (error) { return { data: null, error: { code: Reflect.get(error as object, 'code'), message: 'Example cloud RPC rejected' } }; }
       },
     } as unknown as SupabaseClient;
+    this.clients.set(userId, client);
+    return client;
   }
 
   async close() { await this.queue; await this.pg.close(); }
