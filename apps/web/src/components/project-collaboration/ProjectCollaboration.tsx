@@ -193,19 +193,19 @@ export function ProjectTeammatesDialog({ project, onClose }: { project: Project;
         // Invitations can create the collaboration binding. Read it after the invite rather than
         // assuming the snapshot from opening Teammates already contained a shared project.
         const collaborationRequestId = ++requestId.current;
-        let latestCollaboration: ProjectCollaborationSnapshot;
-        try {
-          latestCollaboration = await projectCollaborationApi.snapshot(project.id);
-        } finally {
-          if (collaborationRequestId === requestId.current) setLoading(false);
-        }
+        const [latestCollaboration, structureResult] = await Promise.all([
+          projectCollaborationApi.snapshot(project.id),
+          teamOrchestrationApi.structure(project.id).then((value) => ({ value } as const), (cause: unknown) => ({ cause } as const)),
+        ]);
+        if (collaborationRequestId === requestId.current) setLoading(false);
         if (sequence !== invitationSequence.current || useMingle.getState().activeProjectId !== project.id) return;
         if (collaborationRequestId === requestId.current) setSnapshot(latestCollaboration);
         const binding = latestCollaboration.project;
         if (!binding || !binding.teamId || !binding.sharedProjectId) {
           teamSessionMessage = `${invitationOutcome}, but the shared project binding could not be confirmed. Refresh the team panel, then use Share current session if setup is still needed. You do not need to send the invitation again.`;
         } else {
-          const structure = await teamOrchestrationApi.structure(project.id);
+          if ('cause' in structureResult) throw structureResult.cause;
+          const structure = structureResult.value;
           if (sequence !== invitationSequence.current || useMingle.getState().activeProjectId !== project.id) return;
           if (structure.projectId !== project.id || structure.teamId !== binding.teamId || structure.sharedProjectId !== binding.sharedProjectId) {
             teamSessionMessage = `${invitationOutcome}, but the team binding changed before setup completed. Refresh the panel and use Share current session if needed. You do not need to send the invitation again.`;

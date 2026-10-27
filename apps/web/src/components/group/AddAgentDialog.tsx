@@ -110,11 +110,11 @@ export function AddAgentDialog({ sessionId }: { sessionId: string }) {
     setTeamAgentsLoading(true);
     setTeamAgentsError(null);
     try {
-      const collaboration = await api.projectCollaboration(projectId, signal);
+      const latest = await teamSessionsApi.availableAgents(projectId, signal);
       if (signal?.aborted) return;
-      if (!collaboration.project) { setSharedProject(false); setTeamAgents(null); return; }
-      setSharedProject(true);
-      setTeamAgents(await teamSessionsApi.availableAgents(projectId, signal));
+      const isShared = Boolean(latest.teamId && latest.sharedProjectId);
+      setSharedProject(isShared);
+      setTeamAgents(isShared ? latest : null);
     } catch (cause) {
       if (!signal?.aborted) setTeamAgentsError(errorMessage(cause));
     } finally {

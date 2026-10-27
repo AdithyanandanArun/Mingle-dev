@@ -334,7 +334,9 @@ export function TeamSessionView({ projectId, teamSession, structure }: {
     const requestId = ++refreshSequence.current;
     refreshInFlight.current = requestId;
     try {
-      const account = await api.account(signal);
+      const [account, latest] = await Promise.all([
+        api.account(signal), api.projectTeamChat(projectId, { limit: 100 }, signal),
+      ]);
       const accountId = account.status === 'signed-in' ? account.user?.id ?? null : null;
       if (signal?.aborted || useMingle.getState().activeProjectId !== projectId) return;
       const priorScope = accountScope.current;
@@ -343,7 +345,6 @@ export function TeamSessionView({ projectId, teamSession, structure }: {
       const requestScope = priorScope?.projectId === projectId && priorScope.accountId === accountId
         ? priorScope : { projectId, accountId };
       accountScope.current = requestScope;
-      const latest = await api.projectTeamChat(projectId, { limit: 100 }, signal);
       if (signal?.aborted) return;
       const confirmedAccount = await api.account(signal);
       if (signal?.aborted) return;
@@ -373,7 +374,7 @@ export function TeamSessionView({ projectId, teamSession, structure }: {
         }
       }
     }
-  }, [projectId]);
+  }, [projectId, teamSession.groupId]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -381,7 +382,7 @@ export function TeamSessionView({ projectId, teamSession, structure }: {
     void refresh(controller.signal).catch((cause) => { if (!controller.signal.aborted) setError(errorMessage(cause)); }).finally(() => { if (!controller.signal.aborted) setLoading(false); });
     const unsubscribe = subscribeToTeamUpdates(projectId, () => {
       void refresh(controller.signal).catch((cause) => { if (!controller.signal.aborted) setError(errorMessage(cause)); });
-    });
+    }, { kinds: ['chat'] });
     const timer = window.setInterval(() => { if (document.visibilityState === 'visible') void refresh(controller.signal).catch(() => undefined); }, 60_000);
     const visibility = () => { if (document.visibilityState === 'visible') void refresh(controller.signal).catch(() => undefined); };
     document.addEventListener('visibilitychange', visibility);
@@ -391,7 +392,7 @@ export function TeamSessionView({ projectId, teamSession, structure }: {
       refreshInFlight.current = null;
       unsubscribe(); window.clearInterval(timer); document.removeEventListener('visibilitychange', visibility);
     };
-  }, [refresh]);
+  }, [refresh, teamSession.groupId]);
 
   const structureSnapshot = structure ?? teamStructure.snapshot;
   const snapshotMatchesProject = Boolean(structureSnapshot?.projectId === projectId && snapshot?.project.sharedProjectId === structureSnapshot.sharedProjectId);

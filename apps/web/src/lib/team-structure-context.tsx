@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useState, type ReactNode } from 'react';
+import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type { TeamStructureSnapshot } from '@mingle/contracts';
 import { api, errorMessage } from './api';
 import { teamSessionsApi } from './team-sessions';
@@ -26,9 +26,11 @@ export function TeamStructureProvider({ projectId, children }: { projectId: stri
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [errorProjectId, setErrorProjectId] = useState<string | null>(null);
+  const bindingRef = useRef<{ projectId: string; teamId: string; sharedProjectId: string } | null>(null);
 
   const clearProjectTeam = (id: string) => {
     setSnapshot(null);
+    if (bindingRef.current?.projectId === id) bindingRef.current = null;
     useMingle.getState().setTeamSessionInfo(id, null, false);
   };
   const assertCurrentAccount = async (expectedAccountId: string | null, id: string, signal?: AbortSignal): Promise<boolean> => {
@@ -44,6 +46,7 @@ export function TeamStructureProvider({ projectId, children }: { projectId: stri
     if (latest.projectId !== id || latest.teamId !== binding.teamId || latest.sharedProjectId !== binding.sharedProjectId
       || useMingle.getState().activeProjectId !== id) return false;
     setSnapshot(latest);
+    bindingRef.current = { projectId: id, teamId: binding.teamId, sharedProjectId: binding.sharedProjectId };
     setError(null);
     setErrorProjectId(null);
     const store = useMingle.getState();
@@ -54,10 +57,43 @@ export function TeamStructureProvider({ projectId, children }: { projectId: stri
 
   const refresh = useCallback(async () => {
     if (!projectId || connection !== 'online' || useMingle.getState().activeProjectId !== projectId) return null;
-    const account = await api.account();
-    const accountId = account.status === 'signed-in' ? account.user?.id ?? null : null;
-    const collaboration = await api.projectCollaboration(projectId);
+    const knownBinding = bindingRef.current?.projectId === projectId ? bindingRef.current : null;
+    const structureResult = (signal?: AbortSignal) => teamSessionsApi.structure(projectId, signal)
+      .then((value) => ({ value } as const), (cause: unknown) => ({ cause } as const));
+    if (knownBinding) {
+      const [account, result] = await Promise.all([api.account(), structureResult()]);
+      if (useMingle.getState().activeProjectId !== projectId) return null;
+      const accountId = account.status === 'signed-in' ? account.user?.id ?? null : null;
+      if (!(await assertCurrentAccount(accountId, projectId))) return null;
+      if ('value' in result) {
+        if (result.value.teamId === knownBinding.teamId && result.value.sharedProjectId === knownBinding.sharedProjectId) {
+          return acceptStructure(projectId, result.value, accountId, knownBinding) ? result.value : null;
+        }
+        const collaboration = await api.projectCollaboration(projectId);
+        if (useMingle.getState().activeProjectId !== projectId) return null;
+        if (!(await assertCurrentAccount(accountId, projectId))) return null;
+        if (!collaboration.project) {
+          clearProjectTeam(projectId);
+          setError(null);
+          setErrorProjectId(null);
+          return null;
+        }
+        return acceptStructure(projectId, result.value, accountId, collaboration.project) ? result.value : null;
+      }
+      const collaboration = await api.projectCollaboration(projectId);
+      if (useMingle.getState().activeProjectId !== projectId) return null;
+      if (!(await assertCurrentAccount(accountId, projectId))) return null;
+      if (!collaboration.project) {
+        clearProjectTeam(projectId);
+        setError(null);
+        setErrorProjectId(null);
+        return null;
+      }
+      throw result.cause;
+    }
+    const [account, collaboration, result] = await Promise.all([api.account(), api.projectCollaboration(projectId), structureResult()]);
     if (useMingle.getState().activeProjectId !== projectId) return null;
+    const accountId = account.status === 'signed-in' ? account.user?.id ?? null : null;
     if (!(await assertCurrentAccount(accountId, projectId))) return null;
     if (!collaboration.project) {
       clearProjectTeam(projectId);
@@ -65,9 +101,8 @@ export function TeamStructureProvider({ projectId, children }: { projectId: stri
       setErrorProjectId(null);
       return null;
     }
-    const latest = await teamSessionsApi.structure(projectId);
-    if (!(await assertCurrentAccount(accountId, projectId))) return null;
-    return acceptStructure(projectId, latest, accountId, collaboration.project) ? latest : null;
+    if ('cause' in result) throw result.cause;
+    return acceptStructure(projectId, result.value, accountId, collaboration.project) ? result.value : null;
   }, [connection, projectId]);
 
   useEffect(() => {
@@ -81,22 +116,24 @@ export function TeamStructureProvider({ projectId, children }: { projectId: stri
     }
     const controller = new AbortController();
     setSnapshot(null); setError(null); setErrorProjectId(null); setLoading(true);
+    bindingRef.current = null;
     void (async () => {
-      const account = await api.account(controller.signal);
-      if (controller.signal.aborted) return null;
-      const accountId = account.status === 'signed-in' ? account.user?.id ?? null : null;
-      const collaboration = await api.projectCollaboration(projectId, controller.signal);
+      const structureResult = teamSessionsApi.structure(projectId, controller.signal)
+        .then((value) => ({ value } as const), (cause: unknown) => ({ cause } as const));
+      const [account, collaboration, result] = await Promise.all([
+        api.account(controller.signal), api.projectCollaboration(projectId, controller.signal), structureResult,
+      ]);
       if (controller.signal.aborted) return;
+      const accountId = account.status === 'signed-in' ? account.user?.id ?? null : null;
       if (!(await assertCurrentAccount(accountId, projectId, controller.signal))) return null;
       if (!collaboration.project) {
         clearProjectTeam(projectId);
         setError(null); setErrorProjectId(null);
         return null;
       }
-      const latest = await teamSessionsApi.structure(projectId, controller.signal);
-      if (controller.signal.aborted) return;
+      if ('cause' in result) throw result.cause;
       if (!(await assertCurrentAccount(accountId, projectId, controller.signal))) return null;
-      return acceptStructure(projectId, latest, accountId, collaboration.project) ? latest : null;
+      return acceptStructure(projectId, result.value, accountId, collaboration.project) ? result.value : null;
     })().catch((cause) => {
       if (!controller.signal.aborted) { setError(errorMessage(cause)); setErrorProjectId(projectId); }
     }).finally(() => {
