@@ -1,7 +1,7 @@
-.distributed { --dw-gap: 14px; padding-top: 8px; }
+.distributed { --dw-gap: 16px; padding-top: 8px; }
 .distributed__header { display: flex; align-items: center; justify-content: space-between; gap: 18px; margin: 0 0 14px; }
 .distributed__title { display: flex; align-items: center; gap: 12px; min-width: 0; }
-.distributed__mark { display: grid; place-items: center; width: 34px; height: 34px; flex: none; color: var(--fg-1); background: var(--bg-surface); border: 1px solid var(--line); border-radius: 10px; }
+.distributed__mark { display: grid; place-items: center; width: 40px; height: 40px; flex: none; color: var(--fg-1); background: var(--bg-surface); border: 1px solid var(--line); border-radius: 10px; }
 .distributed__title h2 { margin: 0; color: var(--fg-0); font-size: 16px; font-weight: 550; letter-spacing: -.02em; }
 .distributed__title p { margin: 4px 0 0; color: var(--fg-2); font-size: 12px; line-height: 1.55; }
 .distributed__header-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; flex: none; }
@@ -24,7 +24,7 @@
 .distributed__grid--people-onboarding { grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: stretch; }
 .distributed__grid--people-primary { grid-template-columns: minmax(0, 1fr); align-items: start; }
 .distributed__grid--people-onboarding .dw-card__heading { min-height: 48px; }
-.dw-card { display: grid; gap: 13px; min-width: 0; padding: 16px; border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--bg-panel); box-shadow: var(--shadow-card); }
+.dw-card { display: grid; gap: 13px; min-width: 0; padding: 18px; border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--bg-panel); box-shadow: var(--shadow-card); }
 .dw-card--wide { grid-column: 1 / -1; }
 .dw-people-action { align-content: start; gap: 11px; }
 .dw-people-roster, .dw-people-invitations { align-content: start; }
@@ -46,9 +46,9 @@
 .dw-card__heading { display: flex; align-items: flex-start; gap: 10px; margin-bottom: 1px; }
 .dw-card__heading > span { display: grid; place-items: center; width: 27px; height: 27px; flex: none; color: var(--fg-1); border: 1px solid var(--line); border-radius: 8px; background: var(--bg-surface); }
 .dw-card__heading h3 { margin: 1px 0 0; color: var(--fg-0); font-size: 13px; font-weight: 550; }
-.dw-card__heading p { margin: 4px 0 0; color: var(--fg-2); font-size: 11px; line-height: 1.55; }
+.dw-card__heading p { margin: 4px 0 0; color: var(--fg-2); font-size: 12px; line-height: 1.55; }
 .dw-field { display: grid; gap: 6px; min-width: 0; }
-.dw-field > span { color: var(--fg-1); font-size: 11px; font-weight: 500; }
+.dw-field > span { color: var(--fg-1); font-size: 12px; font-weight: 500; }
 .dw-field > small { color: var(--fg-2); font-size: 10px; line-height: 1.5; }
 .dw-field .input { width: 100%; min-width: 0; }
 .dw-field textarea.input { min-height: 70px; resize: vertical; padding-top: 9px; line-height: 1.5; }
@@ -64,12 +64,12 @@
 .dw-row__main { display: grid; gap: 4px; flex: 1; min-width: 0; }
 .dw-row__main strong, .dw-row__main > span { overflow-wrap: anywhere; }
 .dw-row__main strong { color: var(--fg-1); font-size: 12px; font-weight: 500; }
-.dw-row__main > span { color: var(--fg-2); font-size: 10px; line-height: 1.6; }
+.dw-row__main > span { color: var(--fg-2); font-size: 11px; line-height: 1.6; }
 .dw-row .btn { flex: none; }
 .dw-row > .badge { flex: none; }
 .dw-avatar { display: grid; place-items: center; width: 31px; height: 31px; flex: none; color: var(--fg-1); background: var(--bg-raised); border: 1px solid var(--line); border-radius: 50%; font-size: 12px; }
 .dw-icon { display: grid; place-items: center; width: 30px; height: 30px; flex: none; color: var(--fg-1); background: var(--bg-surface); border: 1px solid var(--line-soft); border-radius: 8px; }
-.dw-empty { margin: 0; padding: 15px 0; color: var(--fg-2); font-size: 11px; line-height: 1.6; }
+.dw-empty { margin: 0; padding: 20px 0; color: var(--fg-2); font-size: 12px; line-height: 1.6; }
 .dw-secret { display: grid; gap: 7px; padding: 11px; border: 1px solid var(--blue-line); border-radius: var(--radius-sm); background: var(--blue-soft); }
 .dw-secret strong { color: var(--fg-1); font-size: 11px; }
 .dw-secret code { padding: 8px; color: var(--fg-0); overflow-wrap: anywhere; border: 1px solid var(--line-soft); border-radius: 5px; background: var(--bg-inset); font-size: 11px; user-select: all; }
