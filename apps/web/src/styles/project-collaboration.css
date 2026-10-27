@@ -217,7 +217,7 @@
 .pc-empty, .pc-loading { margin: 0; padding: 15px; border-color: var(--line); background: var(--bg-panel); text-align: center; }
 .pc-owner-note { border-color: var(--accent-line); background: color-mix(in srgb, var(--accent-soft) 38%, var(--bg-panel)); }
 .pc-owner-note strong { font-weight: 600; }
-.pc-shared-actions { overflow: hidden; border: 1px solid var(--line-soft); border-radius: var(--radius-md); background: var(--bg-panel); }
+.pc-shared-actions { display: block; overflow: hidden; padding: 0; border: 1px solid var(--line-soft); border-radius: var(--radius-md); background: var(--bg-panel); }
 .pc-shared-actions > summary { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 48px; padding: 7px 11px; color: var(--fg-1); cursor: pointer; list-style: none; }
 .pc-shared-actions > summary::-webkit-details-marker { display: none; }
 .pc-shared-actions > summary::after { content: '⌄'; order: 2; color: var(--fg-3); font-size: 16px; transition: transform var(--motion-fast) var(--ease-standard); }
