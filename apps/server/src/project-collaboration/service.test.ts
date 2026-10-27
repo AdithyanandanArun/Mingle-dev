@@ -131,8 +131,8 @@ it('serializes matching joins, resumes after roster failure without duplicate se
   };
   const service = new ProjectCollaborationService({
     store, account: account as never, distributed: distributed as never, workspace, providers,
-    emailSender: { status: async () => ({ configured: false, message: 'Sender not configured in fixture.' }),
-      send: async () => ({ status: 'not_configured', message: 'test' }) },
+     emailSender: { status: async () => { throw new Error('Injected email-readiness failure'); },
+       send: async () => ({ status: 'not_configured', message: 'test' }) },
   });
   try {
     const firstInput = { token: TOKENS.first, localProjectId: project.id,
@@ -169,6 +169,7 @@ it('serializes matching joins, resumes after roster failure without duplicate se
     assert.equal(createCount, 2, 'the partial publication and its retry each wrote the preserved local roster');
     const snapshot = await service.snapshot(project.id);
     assert.equal(snapshot.project?.teamId, TEAM, 'a teammate resolves the invitation-bound local project snapshot');
+    assert.equal(snapshot.email.configured, false, 'email readiness failure is isolated from membership and roster reads');
     assert.deepEqual(snapshot.agents.map((agent) => agent.sessionId).sort(), [preexistingSession.id, ...recovered.sessionIds].sort());
     for (const agent of snapshot.agents.filter((candidate) => candidate.deviceId === DEVICE)) {
       assert.equal(agent.id, published.get(agent.sessionId!)?.id, 'published local agents use the execution roster ID while retaining their local session ID');

@@ -52,13 +52,14 @@ function makeAccount(ownerId: string): RemoteExecutionAccount {
 class FakeTransport implements RemoteExecutionTransport {
   sent: Array<{ teamId: string; toDeviceId: string; kind: string; payload: unknown; idempotencyKey: string }> = [];
   handler: ((envelope: AuthenticatedEnvelope) => Promise<void>) | null = null;
+  linked = true;
   constructor(readonly localDeviceId: string, private readonly remoteDeviceId: string) {}
   snapshot() {
     const localOwner = this.localDeviceId === DEVICE_A ? OWNER_A : OWNER_B;
     const remoteOwner = this.remoteDeviceId === DEVICE_A ? OWNER_A : OWNER_B;
     return { localDeviceId: this.localDeviceId, devices: [
       { id: this.localDeviceId, teamId: TEAM, ownerId: localOwner, linked: true, revokedAt: null, online: true },
-      { id: this.remoteDeviceId, teamId: TEAM, ownerId: remoteOwner, linked: true, revokedAt: null, online: true },
+      { id: this.remoteDeviceId, teamId: TEAM, ownerId: remoteOwner, linked: this.linked, revokedAt: null, online: true },
     ] };
   }
   async send(input: { teamId: string; toDeviceId: string; kind: string; payload: unknown; idempotencyKey: string }) {
@@ -277,6 +278,43 @@ describe('RemoteExecutionService', () => {
 
     expect(agent).toMatchObject({ sessionId: 'session_full_publish', policy: 'full-access' });
     expect(destination.db.prepare("SELECT policy FROM sessions WHERE id = 'session_full_publish'").get()).toEqual({ policy: 'full-access' });
+  });
+
+  it('backfills an explicitly published roster after a peer links, survives sender restart, and stops after peer acknowledgement', async () => {
+    const source = createFixture({ deviceId: DEVICE_A, peerId: DEVICE_B, ownerId: OWNER_A, projectId: 'roster_source', sessionId: 'roster_source', sessionName: 'Host', provider: 'codex' });
+    const owner = createFixture({ deviceId: DEVICE_B, peerId: DEVICE_A, ownerId: OWNER_B, projectId: 'roster_owner', sessionId: 'roster_owner', sessionName: 'Codex 1', provider: 'codex' });
+    await source.service.bindProject({ teamId: TEAM, sharedProjectId: SHARED_PROJECT, localProjectId: 'roster_source' });
+    await owner.service.bindProject({ teamId: TEAM, sharedProjectId: SHARED_PROJECT, localProjectId: 'roster_owner' });
+    owner.transport.linked = false;
+
+    await owner.service.publishAgents({ teamId: TEAM, sharedProjectId: SHARED_PROJECT, sessionIds: ['roster_owner'] });
+    expect(owner.transport.sent.filter((entry) => entry.kind === 'execution.agents')).toHaveLength(0);
+
+    const options = Reflect.get(owner.service, 'options');
+    await owner.service.close();
+    owner.service = new RemoteExecutionService(options);
+    services.push(owner.service);
+    owner.transport.linked = true;
+    await owner.service.refreshPublishedAgents({ teamId: TEAM, sharedProjectId: SHARED_PROJECT });
+    const publication = owner.transport.sent.find((entry) => entry.kind === 'execution.agents')!;
+    expect(publication.payload).toMatchObject({ sharedProjectId: SHARED_PROJECT, version: 1, agents: [expect.objectContaining({ name: 'Codex 1' })] });
+
+    await source.service.onEnvelope(envelope(DEVICE_B, DEVICE_A, publication.kind, publication.payload));
+    expect((await source.service.snapshot(TEAM)).agents).toMatchObject([{ id: expect.any(String), name: 'Codex 1', deviceId: DEVICE_B }]);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const acknowledgement = source.transport.sent.find((entry) => entry.kind === 'execution.agents.ack')!;
+    await owner.service.onEnvelope(envelope(DEVICE_A, DEVICE_B, acknowledgement.kind, acknowledgement.payload));
+    await owner.service.refreshPublishedAgents({ teamId: TEAM, sharedProjectId: SHARED_PROJECT });
+    expect(owner.transport.sent.filter((entry) => entry.kind === 'execution.agents')).toHaveLength(1);
+
+    owner.transport.linked = false;
+    await owner.service.publishAgents({ teamId: TEAM, sharedProjectId: SHARED_PROJECT, sessionIds: [] });
+    owner.transport.linked = true;
+    await owner.service.refreshPublishedAgents({ teamId: TEAM, sharedProjectId: SHARED_PROJECT });
+    const withdrawal = owner.transport.sent.filter((entry) => entry.kind === 'execution.agents').at(-1)!;
+    expect(withdrawal.payload).toMatchObject({ version: 2, agents: [] });
+    await source.service.onEnvelope(envelope(DEVICE_B, DEVICE_A, withdrawal.kind, withdrawal.payload));
+    expect((await source.service.snapshot(TEAM)).agents.filter((agent) => agent.deviceId === DEVICE_B)).toEqual([]);
   });
 
   it('withdraws the last shared agent on peers without clearing another owner or accepting an unscoped withdrawal', async () => {

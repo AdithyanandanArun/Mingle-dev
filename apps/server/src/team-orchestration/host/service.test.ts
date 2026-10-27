@@ -43,6 +43,9 @@ function fixture(options: { deviceId?: string; accountId?: string; role?: 'leade
     local_project_id TEXT,owner_id TEXT,team_id TEXT,shared_project_id TEXT,leader_device_id TEXT,leader_fingerprint TEXT
   ); CREATE TABLE mingle_project_collaboration_joins (
     local_project_id TEXT,account_id TEXT,team_id TEXT,shared_project_id TEXT,device_id TEXT
+  ); CREATE TABLE mingle_remote_roster_versions (
+    team_id TEXT,shared_project_id TEXT,owner_id TEXT,device_id TEXT,direction TEXT,version INTEGER,generated_at TEXT,
+    PRIMARY KEY(team_id,shared_project_id,owner_id,device_id,direction)
   );`);
   store.db.prepare('INSERT INTO mingle_project_collaboration_sources VALUES(?,?,?,?,?,?)').run(PROJECT, ACCOUNT, TEAM, SHARED, DEVICE, 'fingerprint');
 
@@ -226,6 +229,15 @@ function fixture(options: { deviceId?: string; accountId?: string; role?: 'leade
     afterRunFinished(callback: (sessionId: string, runId: string, outcome: string) => void) { afterRunFinished = callback; },
     async incoming(kind: string, payload: unknown, fromDeviceId = OWNER_DEVICE) {
       if (!receive) throw new Error('No team orchestration transport handler');
+      if (kind === 'execution.agents' && payload && typeof payload === 'object') {
+        const roster = payload as { sharedProjectId?: unknown; version?: unknown; generatedAt?: unknown };
+        const version = Number.isSafeInteger(roster.version) ? Number(roster.version) : null;
+        const generatedAt = typeof roster.generatedAt === 'string' ? roster.generatedAt : new Date().toISOString();
+        store.db.prepare(`INSERT INTO mingle_remote_roster_versions(team_id,shared_project_id,owner_id,device_id,direction,version,generated_at)
+          VALUES(?,?,?,?,'incoming',?,?) ON CONFLICT(team_id,shared_project_id,owner_id,device_id,direction)
+          DO UPDATE SET version=excluded.version,generated_at=excluded.generated_at`)
+          .run(TEAM, String(roster.sharedProjectId), fromDeviceId === OWNER_DEVICE ? OWNER : ACCOUNT, fromDeviceId, version, generatedAt);
+      }
       return receive({ id: randomUUID(), teamId: TEAM, fromDeviceId, toDeviceId: options.deviceId ?? DEVICE, kind, payload });
     },
     async close() { await Promise.all(hosts.map((instance) => instance.close())); store.db.close(); },
@@ -314,6 +326,64 @@ it('keeps a full-access consent granted when the team level is raised to full ac
   await fx.host.update(PROJECT, { expectedVersion: 1, permissionLevel: 'full-access' });
   expect((await fx.host.structure(PROJECT)).members.find((member) => member.agentId === REMOTE_AGENT)?.consent).toBe('granted');
   expect((await fx.host.availableAgents(PROJECT)).agents.find((agent) => agent.agentId === REMOTE_AGENT)).toMatchObject({ consent: 'granted' });
+});
+
+it('applies initial full-access consent that races ahead of roster publication without extending it to later agents', async () => {
+  const fx = fixture();
+  fx.agents.splice(1, 1);
+  await fx.incoming('teamgroup.consent', {
+    sharedProjectId: SHARED, agentIds: [REMOTE_AGENT], permissionLevel: 'full-access', settingsVersion: 7,
+    disclaimerVersion: TEAM_CONSENT_DISCLAIMER_VERSION, state: 'granted', at: new Date().toISOString(),
+  });
+  expect(fx.store.db.prepare('SELECT envelope_id FROM mingle_team_host_pending_consents WHERE shared_project_id=?').get(SHARED)).toBeDefined();
+
+  fx.addPublishedAgent({ id: REMOTE_AGENT, name: 'Codex 1', accountId: OWNER, deviceId: OWNER_DEVICE,
+    projectId: PROJECT, sessionId: 'owner-codex-1', provider: 'codex', model: 'gpt-6-codex', state: 'idle' });
+  const eventsBeforeRoster = fx.store.listEvents().filter((event) => event.type === 'team.structure.updated').length;
+  await fx.incoming('execution.agents', { sharedProjectId: SHARED, version: 1,
+    agents: [{ sharedProjectId: SHARED, deviceId: OWNER_DEVICE }] });
+  expect(fx.store.listEvents().filter((event) => event.type === 'team.structure.updated')).toHaveLength(eventsBeforeRoster + 1);
+  expect(fx.store.db.prepare(`SELECT state,permission_level,settings_version FROM mingle_team_host_consents
+    WHERE team_id=? AND shared_project_id=? AND agent_id=?`).get(TEAM, SHARED, REMOTE_AGENT))
+    .toEqual({ state: 'granted', permission_level: 'full-access', settings_version: 7 });
+  expect(fx.store.db.prepare('SELECT envelope_id FROM mingle_team_host_pending_consents WHERE shared_project_id=?').get(SHARED)).toBeUndefined();
+
+  await fx.host.enable(PROJECT, { ...enableInput(), permissionLevel: 'full-access' });
+  const changed = await fx.host.update(PROJECT, { expectedVersion: 7, leaderOrchestration: false });
+  expect(changed.settings).toMatchObject({ version: 8, permissionLevel: 'full-access' });
+  expect((await fx.host.structure(PROJECT)).members.find((member) => member.agentId === REMOTE_AGENT)?.consent).toBe('granted');
+
+  fx.addPublishedAgent({ id: 'remote-infernal-2', name: 'Infernal 2', accountId: OWNER, deviceId: OWNER_DEVICE,
+    projectId: PROJECT, sessionId: 'owner-infernal-2', provider: 'codex', model: 'gpt-6-codex', state: 'idle' });
+  const available = await fx.host.availableAgents(PROJECT);
+  expect(available.agents.find((agent) => agent.agentId === REMOTE_AGENT)).toMatchObject({ consent: 'granted', usable: true });
+  expect(available.agents.find((agent) => agent.agentId === 'remote-infernal-2')).toMatchObject({ consent: 'none', usable: false });
+  await expect(fx.host.addAgentToSession(LOCAL_AGENT, { agentId: 'remote-infernal-2' }))
+    .rejects.toMatchObject({ status: 409, message: expect.stringContaining('consent') });
+});
+
+it('does not replay an older queued consent grant over a newer owner revocation', async () => {
+  const fx = fixture();
+  fx.agents.splice(1, 1);
+  const firstAt = new Date(Date.now() - 2_000).toISOString();
+  const revokeAt = new Date(Date.now() - 1_000).toISOString();
+  await fx.incoming('teamgroup.consent', { sharedProjectId: SHARED, agentIds: [REMOTE_AGENT], permissionLevel: 'full-access',
+    settingsVersion: 1, disclaimerVersion: TEAM_CONSENT_DISCLAIMER_VERSION, state: 'granted', at: firstAt });
+  await fx.incoming('teamgroup.consent', { sharedProjectId: SHARED, agentIds: [REMOTE_AGENT], permissionLevel: 'full-access',
+    settingsVersion: 1, disclaimerVersion: TEAM_CONSENT_DISCLAIMER_VERSION, state: 'revoked', at: revokeAt });
+  expect(fx.store.db.prepare('SELECT COUNT(*) AS count FROM mingle_team_host_pending_consents WHERE shared_project_id=?').get(SHARED))
+    .toEqual({ count: 2 });
+
+  fx.addPublishedAgent({ id: REMOTE_AGENT, name: 'Remote Codex', accountId: OWNER, deviceId: OWNER_DEVICE,
+    projectId: PROJECT, sessionId: 'owner-session-remote', provider: 'codex', model: 'gpt-6-codex', state: 'idle' });
+  await fx.incoming('execution.agents', { sharedProjectId: SHARED, version: 1,
+    agents: [{ sharedProjectId: SHARED, deviceId: OWNER_DEVICE }] });
+
+  expect(fx.store.db.prepare(`SELECT state,updated_at FROM mingle_team_host_consents
+    WHERE team_id=? AND shared_project_id=? AND agent_id=?`).get(TEAM, SHARED, REMOTE_AGENT))
+    .toEqual({ state: 'revoked', updated_at: revokeAt });
+  expect(fx.store.db.prepare('SELECT COUNT(*) AS count FROM mingle_team_host_pending_consents WHERE shared_project_id=?').get(SHARED))
+    .toEqual({ count: 0 });
 });
 
 it('lazily migrates legacy local session IDs in host state while preserving assigned handles', async () => {
@@ -620,7 +690,8 @@ it('rebroadcasts structure after published agents, permission changes, and renew
 
   fx.addPublishedAgent({ id: 'newly-published-agent', name: 'New Codex', accountId: OWNER, deviceId: OWNER_DEVICE,
     projectId: PROJECT, sessionId: 'owner-session-new', provider: 'codex', model: 'gpt-6-codex', state: 'idle' });
-  await fx.incoming('execution.agents', { generatedAt: new Date().toISOString(), agents: [{ sharedProjectId: SHARED }] });
+  await fx.incoming('execution.agents', { sharedProjectId: SHARED, version: 1, generatedAt: new Date().toISOString(),
+    agents: [{ sharedProjectId: SHARED, deviceId: OWNER_DEVICE }, { sharedProjectId: SHARED, deviceId: OWNER_DEVICE }] });
   structures = fx.outgoing.filter((entry) => entry.kind === 'teamgroup.structure');
   expect(structures.length).toBeGreaterThanOrEqual(3);
   expect((await fx.host.availableAgents(PROJECT)).agents.map((agent) => agent.agentId)).toContain('newly-published-agent');
@@ -637,6 +708,13 @@ it('rebroadcasts structure after published agents, permission changes, and renew
   const updated = fx.outgoing.filter((entry) => entry.kind === 'teamgroup.structure').at(-1)?.payload as any;
   expect(updated.settings).toMatchObject({ permissionLevel: 'full-access', version: 2 });
   expect(updated.members.find((member: { agentId: string }) => member.agentId === REMOTE_AGENT)?.consent).toBe('granted');
+
+  const structuresBeforeWithdrawal = fx.outgoing.filter((entry) => entry.kind === 'teamgroup.structure').length;
+  const eventsBeforeWithdrawal = fx.store.listEvents().filter((event) => event.type === 'team.structure.updated').length;
+  fx.agents.splice(fx.agents.findIndex((agent) => agent.id === REMOTE_AGENT), 1);
+  await fx.incoming('execution.agents', { sharedProjectId: SHARED, version: 3, agents: [] });
+  expect(fx.outgoing.filter((entry) => entry.kind === 'teamgroup.structure')).toHaveLength(structuresBeforeWithdrawal + 1);
+  expect(fx.store.listEvents().filter((event) => event.type === 'team.structure.updated')).toHaveLength(eventsBeforeWithdrawal + 1);
 });
 
 it('converts one session into its team group, creates a remote proxy member, and routes it to the owner device', async () => {

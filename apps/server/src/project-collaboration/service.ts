@@ -182,6 +182,11 @@ export class ProjectCollaborationService {
   private readonly joinFlights = new Map<string, { intent: string; promise: Promise<ProjectInvitationJoinResult> }>();
   private joinQueue: Promise<void> = Promise.resolve();
   private readonly emailSender: ProjectInvitationEmailSender;
+  private emailReadinessCache: { configured: boolean; message?: string } | null = null;
+  private emailReadinessAt = 0;
+  private emailReadinessWork: Promise<void> | null = null;
+  private emailReadinessScope: string | null = null;
+  private emailReadinessGeneration = 0;
   private readonly joinBase = process.env.MINGLE_INVITE_JOIN_URL ?? '';
   private readonly now: () => Date;
 
@@ -253,6 +258,53 @@ export class ProjectCollaborationService {
       if (verified.id !== user.id) throw conflict('The signed-in account changed while the collaboration request was running. Retry.');
       return callback(client, user);
     });
+  }
+
+  /** Email sender readiness is ancillary UI metadata; never hold a roster or consent snapshot on it. */
+  private emailScope(accountId: string): string | null {
+    const account = this.options.account.snapshot?.();
+    if (!account) return `${accountId}\0unreported-connection`;
+    if (account.status !== 'signed-in' || account.user?.id !== accountId || !account.connection) return null;
+    const keyDigest = createHash('sha256').update(account.connection.publishableKey).digest('hex');
+    return `${accountId}\0${account.connection.url}\0${keyDigest}`;
+  }
+
+  private scheduleEmailReadiness(client: SupabaseClient, accountId: string): void {
+    const scope = this.emailScope(accountId);
+    if (scope !== this.emailReadinessScope) {
+      this.emailReadinessScope = scope;
+      this.emailReadinessGeneration += 1;
+      this.emailReadinessCache = null;
+      this.emailReadinessAt = 0;
+      this.emailReadinessWork = null;
+    }
+    if (!scope || this.emailReadinessWork || this.now().getTime() - this.emailReadinessAt < 60_000) return;
+    const generation = this.emailReadinessGeneration;
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<never>((_resolve, reject) => {
+      timeout = setTimeout(() => reject(new Error('Email readiness probe timed out.')), 5_000);
+    });
+    let tracked!: Promise<void>;
+    tracked = Promise.race([Promise.resolve().then(() => this.emailSender.status(client)), deadline]).then((sender) => {
+      if (this.emailReadinessGeneration !== generation || this.emailScope(accountId) !== scope) return;
+      const status = emailStatusFrom(sender);
+      this.emailReadinessCache = status.configured ? { configured: true }
+        : { configured: false, ...(status.message ? { message: status.message } : {}) };
+    }).catch(() => {
+      if (this.emailReadinessGeneration === generation && this.emailScope(accountId) === scope) {
+        this.emailReadinessCache = { configured: false, message: 'Email sender status is temporarily unavailable; invite links remain available.' };
+      }
+    }).finally(() => {
+      if (timeout) clearTimeout(timeout);
+      this.pending.delete(tracked);
+      if (this.emailReadinessGeneration === generation) {
+        this.emailReadinessAt = this.now().getTime();
+        if (this.emailReadinessWork === tracked) this.emailReadinessWork = null;
+        if (!this.closed) this.options.store.touch();
+      }
+    });
+    this.emailReadinessWork = tracked;
+    this.pending.add(tracked);
   }
 
   private localProject(projectId: string) {
@@ -398,6 +450,7 @@ export class ProjectCollaborationService {
       const local = this.localProject(projectId);
       const { project, repository } = await this.repository(projectId);
       const collab = await this.withClient(async (client, user) => {
+        this.scheduleEmailReadiness(client, user.id);
         let binding = this.mapping(projectId, user.id);
         if (!binding) {
           const joins = this.options.store.db.prepare(`SELECT account_id,device_id,local_project_id,team_id,shared_project_id
@@ -458,11 +511,7 @@ export class ProjectCollaborationService {
         };
         return { binding, members: memberViews, invitations: invitationViews, project: snapshotProject, userId: user.id };
       });
-      const email = await this.withClient(async (client) => {
-        const sender = await this.emailSender.status(client);
-        const status = emailStatusFrom(sender);
-        return status.configured ? { configured: true } : { configured: false, ...(status.message ? { message: status.message } : {}) };
-      });
+      const email = this.emailReadinessCache ?? { configured: false, message: 'Email sender status is being checked separately from team roster data.' };
       if (!collab.binding || !collab.project) return { project: null, members: [], agents: [], invitations: [], email };
       const device = this.options.distributed.transport.snapshot(collab.binding.teamId);
       const roster = await this.options.distributed.execution.snapshot(collab.binding.teamId);

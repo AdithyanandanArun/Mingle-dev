@@ -318,6 +318,11 @@ describe('owner-device team orchestration', () => {
     const accepted = await f.setConsent('full-access', 7);
     expect(accepted).toMatchObject({ state: 'granted', permissionLevel: 'full-access', settingsVersion: 7, hostSync: 'sent' });
     expect(f.side.latestStructure(SHARED)).toBeNull();
+
+    await sendStructure(f, structure(7, 'full-access'));
+    expect(f.side.localConsent(SHARED)).toMatchObject({ state: 'granted', permissionLevel: 'full-access', settingsVersion: 7 });
+    await sendStructure(f, { ...structure(8, 'full-access'), settings: { ...structure(8, 'full-access').settings, leaderOrchestration: false } });
+    expect(f.side.localConsent(SHARED)).toMatchObject({ state: 'granted', permissionLevel: 'full-access', settingsVersion: 7 });
   });
 
   it('rejects stale consent settings versions but lets owners choose a maximum permission level', async () => {
