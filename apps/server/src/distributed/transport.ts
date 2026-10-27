@@ -31,7 +31,7 @@ const MAX_MAILBOX_ROWS_PER_SYNC = 10_000;
 const ALLOWED_CLOCK_SKEW_MS = 2 * 60 * 1000;
 // Realtime broadcast requests have a tighter operational ceiling than encrypted mailbox payloads.
 const MAX_REALTIME_ENVELOPE_BYTES = 64 * 1024;
-const TEAM_CACHE_REFRESH_TTL_MS = 15_000;
+const TEAM_CACHE_REFRESH_TTL_MS = 5_000;
 const REALTIME_TOPIC_LABEL = 'mingle-team-device-envelope-v1';
 
 /** The account bridge is deliberately structural so transport can be built before AccountService is integrated. */
