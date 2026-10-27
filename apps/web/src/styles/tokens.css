@@ -3,34 +3,34 @@
 :root[data-theme='dark'] {
   color-scheme: dark;
 
-  --bg-app: #0a0a0a;
-  --bg-sidebar: #0b0b0b;
-  --bg-panel: #111111;
-  --bg-surface: #151515;
-  --bg-raised: #1b1b1b;
+  --bg-app: #0d0e11;
+  --bg-sidebar: #111216;
+  --bg-panel: #14161a;
+  --bg-surface: #191c21;
+  --bg-raised: #20242b;
   --bg-hover: rgba(255, 255, 255, 0.045);
   --bg-active: rgba(255, 255, 255, 0.075);
-  --bg-inset: #0a0a0a;
-  --bg-message: #151515;
+  --bg-inset: #0d0e11;
+  --bg-message: #191c21;
   --bg-overlay: rgba(0, 0, 0, 0.62);
 
   --line-soft: rgba(255, 255, 255, 0.055);
   --line: rgba(255, 255, 255, 0.10);
   --line-strong: rgba(255, 255, 255, 0.18);
 
-  --fg-0: #ededed;
-  --fg-1: #b9b9b9;
-  --fg-2: #858585;
-  --fg-3: #5e5e5e;
-  --fg-on-accent: #151515;
+  --fg-0: #eef0f5;
+  --fg-1: #c4c8d1;
+  --fg-2: #969ca9;
+  --fg-3: #79818f;
+  --fg-on-accent: #191c21;
 
-  --blue: #4d7fd9;
-  --blue-strong: #6595ed;
-  --blue-soft: rgba(77, 127, 217, 0.13);
+  --blue: #7d9fe8;
+  --blue-strong: #a0baff;
+  --blue-soft: rgba(125, 159, 232, 0.12);
   --blue-line: rgba(93, 148, 240, 0.65);
-  --fg-on-blue: #ffffff;
+  --fg-on-blue: #101b30;
 
-  --accent: #ededed;
+  --accent: #eef0f5;
   --accent-strong: #ffffff;
   --accent-dim: #c6c6c6;
   --accent-soft: rgba(255, 255, 255, 0.07);
@@ -46,7 +46,7 @@
   --info-soft: rgba(127, 195, 245, 0.12);
 
   --codex: #a3a3a3;
-  --claude: #a3a3a3;
+  --claude: #d7987e;
 
   --diff-add-bg: rgba(120, 214, 174, 0.1);
   --diff-del-bg: rgba(255, 130, 150, 0.1);
@@ -89,7 +89,7 @@
   --fg-on-blue: #ffffff;
 
   --accent: #242424;
-  --accent-strong: #111111;
+  --accent-strong: #14161a;
   --accent-dim: #424242;
   --accent-soft: rgba(0, 0, 0, 0.05);
   --accent-line: rgba(0, 0, 0, 0.24);
@@ -136,19 +136,19 @@
   --space-6: 24px;
   --space-8: 32px;
 
-  --radius-xs: 5px;
-  --radius-sm: 7px;
-  --radius-md: 10px;
-  --radius-lg: 14px;
+  --radius-xs: 6px;
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
 
   --sidebar-w: 250px;
   --context-w: 340px;
-  --header-h: 42px;
+  --header-h: 48px;
 
   --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
   --ease-standard: cubic-bezier(0.2, 0.7, 0.2, 1);
-  --motion-fast: 120ms;
-  --motion-ui: 180ms;
+  --motion-fast: 140ms;
+  --motion-ui: 200ms;
   --motion-overlay: 160ms;
   --motion-panel: 260ms;
   --ease: var(--ease-out);

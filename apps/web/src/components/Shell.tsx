@@ -62,18 +62,18 @@ export function StartupScreen() {
   return (
     <div className="startup" role={error ? 'alert' : 'status'}>
       <div className="startup__card">
-        <span className="brand-glyph brand-glyph--lg"><MingleGlyph size={26} /></span>
+        <span className="startup__identity" aria-hidden="true"><span className="brand-glyph brand-glyph--lg"><MingleGlyph size={30} /></span></span>
         {error ? (
           <>
             <h1>Can’t reach the Mingle server</h1>
             <p>{error}</p>
-            <p className="muted small">Start it with <code>pnpm dev</code> (API on 127.0.0.1:4310). Mingle keeps retrying{attempt > 0 ? ` — attempt ${attempt}` : ''}.</p>
+            <p className="muted small">Mingle keeps retrying{attempt > 0 ? ` — attempt ${attempt}` : ''}. If this continues, close and reopen the app. Your saved workspace stays on this device.</p>
             <Button variant="primary" onClick={() => useMingle.getState().reconnect()}><RefreshCw size={13} /> Retry now</Button>
           </>
         ) : (
           <>
             <h1>Starting Mingle</h1>
-            <Spinner label="Loading workspace" />
+            <div className="startup__progress"><Spinner label="Loading workspace" /><span>Opening your workspace</span></div>
           </>
         )}
       </div>

@@ -3,7 +3,7 @@ import { ArrowDown, FolderPlus } from 'lucide-react';
 import type { Session, SessionPlan, SessionRun, ToolCall, UserQuestion } from '@mingle/contracts';
 import { useMingle, useProject, useActiveSession, useActiveGroup } from '../store/store';
 import type { DisplayMessage } from '../lib/conversation';
-import { Button, EmptyState, PROVIDER_NAME } from './ui';
+import { Button, EmptyState, MingleGlyph, PROVIDER_NAME } from './ui';
 import { ApprovalCard, InternalDeliveryDisclosure, LegacyToolGroup, MessageRow, SessionPlanCard, UserQuestionCard } from './ConversationParts';
 import { GroupConversation } from './group/GroupConversation';
 import { Composer } from './Composer';
@@ -175,8 +175,11 @@ function SingleSessionPane() {
         <div className="chat__inner">
           {!messages.some(message => message.role === 'user' || message.role === 'assistant') ? (
             <div className="chat__empty">
-              <h3>Start a conversation</h3>
-              <p>Send a message to {PROVIDER_NAME[session.provider]} in this session.</p>
+              <span className="chat__welcome-mark" aria-hidden="true"><MingleGlyph size={28} /></span>
+              <span className="chat__eyebrow">YOUR WORKSPACE, READY</span>
+              <h3>What are we building?</h3>
+              <p>Work through an idea, explore your code, or make your next change with {PROVIDER_NAME[session.provider]}.</p>
+              <div className="chat__welcome-hints"><span><kbd>@</kbd> Add files and context</span><span><kbd>/</kbd> Explore commands</span></div>
             </div>
           ) : null}
           {messages.map((m, index) => {
