@@ -803,7 +803,7 @@ async function main() {
     await page.getByRole('status').filter({ hasText: /no email was sent to offline@example.invalid/ }).waitFor();
     assert.equal(await page.getByRole('button', { name: 'Copy join link', exact: true }).count(), 1, 'the backend-supplied unsent link is exposed as an explicit copy action');
     await page.getByRole('button', { name: 'Copy join link', exact: true }).click();
-    await page.locator('.toast').filter({ hasText: 'Join link copied.' }).waitFor();
+    await page.locator('.toast').filter({ hasText: 'Join link copied.' }).last().waitFor();
   });
 
   await test('onboarding shares the active session directly and the roster stays separate from session/orchestrator controls', async () => {
@@ -841,15 +841,16 @@ async function main() {
     const liveAgentName = 'Example live inbound agent';
     collaborationSnapshot.members = collaborationSnapshot.members.filter((member) => member.accountId !== liveOwnerId);
     collaborationSnapshot.agents = collaborationSnapshot.agents.filter((agent) => agent.id !== liveAgentId);
-    await dialog.getByRole('button', { name: 'Close dialog', exact: true }).click();
     const readsBeforeLiveStructure = collaborationReads;
     const heldInitialRead = { release: createDeferred(), started: false, completed: false };
     holdNextCollaborationRead = heldInitialRead;
     try {
-      await page.getByRole('button', { name: 'Add teammates', exact: true }).click();
+      // Use an explicit regular refresh: StrictMode can abort the first mount's
+      // GET, which cannot exercise a stale response that actually reaches React.
+      await dialog.getByRole('button', { name: 'Refresh project agents', exact: true }).click();
       const liveDialog = page.getByRole('dialog', { name: 'Teammates' });
       await liveDialog.waitFor();
-      await waitFor(() => heldInitialRead.started, 'initial collaboration read to capture the old roster and pause');
+      await waitFor(() => heldInitialRead.started, 'regular collaboration read to capture the old roster and pause');
       await liveDialog.getByLabel('Teammate email', { exact: true }).fill('live-update-preserves-form@example.invalid');
 
       collaborationSnapshot.members.push({ accountId: liveOwnerId, email: 'live-owner@example.invalid', displayName: 'Example live owner', role: 'member', status: 'active' });
