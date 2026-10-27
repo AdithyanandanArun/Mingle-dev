@@ -164,6 +164,7 @@ export default function TeamStructure() {
   const theme = useProject() ? document.documentElement.dataset.theme as 'dark' | 'light' | undefined : undefined;
   const [snapshot, setSnapshot] = useState<TeamStructureSnapshot | null>(null);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [loadError, setLoadError] = useState<unknown>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -186,6 +187,12 @@ export default function TeamStructure() {
       return null;
     }
   }, [project?.id]);
+
+  const refreshFromToolbar = async () => {
+    setRefreshing(true);
+    try { await refresh(); }
+    finally { setRefreshing(false); }
+  };
 
   useEffect(() => {
     const controller = new AbortController();
@@ -334,12 +341,15 @@ export default function TeamStructure() {
   if (!snapshot.enabled) return <div className="team-structure">
     <header className="team-structure__header">
       <div className="team-structure__title"><span className="team-structure__glyph"><Network size={16} /></span><div><h1>Team structure</h1><p>Shared orchestration is not enabled for this project.</p></div></div>
-      <div className="team-structure__settings" aria-label="Team orchestration settings">
-        <span className="team-setting"><i /> Leader orchestration <strong>Off</strong></span>
-        {snapshot.settings ? <span className="team-setting"><ShieldCheck size={13} /> Permission <strong>{snapshot.settings.permissionLevel === 'full-access' ? 'Full access' : 'Supervised'}</strong></span> : null}
-        <span className={cx('team-setting', snapshot.host.online ? 'is-online' : 'is-offline')}>
-          {snapshot.host.online ? <Wifi size={13} /> : <WifiOff size={13} />} Host device <strong>{snapshot.host.displayName} · {snapshot.host.online ? 'Online' : 'Offline'}</strong>
-        </span>
+      <div className="team-structure__toolbar">
+        <div className="team-structure__settings" aria-label="Team orchestration settings">
+          <span className="team-setting"><i /> Leader orchestration <strong>Off</strong></span>
+          {snapshot.settings ? <span className="team-setting"><ShieldCheck size={13} /> Permission <strong>{snapshot.settings.permissionLevel === 'full-access' ? 'Full access' : 'Supervised'}</strong></span> : null}
+          <span className={cx('team-setting', snapshot.host.online ? 'is-online' : 'is-offline')}>
+            {snapshot.host.online ? <Wifi size={13} /> : <WifiOff size={13} />} Host device <strong>{snapshot.host.displayName} · {snapshot.host.online ? 'Online' : 'Offline'}</strong>
+          </span>
+        </div>
+        <Button size="sm" variant="ghost" className="team-structure__refresh" disabled={refreshing || busy} busy={refreshing} onClick={() => void refreshFromToolbar()} aria-label="Refresh team structure"><RefreshCw size={13} />Refresh</Button>
       </div>
     </header>
     <div className="team-structure__empty"><EmptyState icon={<Network size={20} />} title="Make this a team project" action={<Button size="sm" variant="primary" onClick={() => useMingle.getState().openDialog({ kind: 'project-collaboration', projectId: project.id })}><Network size={13} /> Open Teammates</Button>}>
@@ -360,12 +370,15 @@ export default function TeamStructure() {
     <div className="team-structure">
       <header className="team-structure__header">
         <div className="team-structure__title"><span className="team-structure__glyph"><Network size={16} /></span><div><h1>Team structure</h1><p>{snapshot.members.length} contributed agent{snapshot.members.length === 1 ? '' : 's'} · updated {new Date(snapshot.observedAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</p></div></div>
-        <div className="team-structure__settings" aria-label="Team orchestration settings">
-          <span className={cx('team-setting', snapshot.settings?.leaderOrchestration && 'is-on')}><i /> Leader orchestration <strong>{snapshot.settings ? snapshot.settings.leaderOrchestration ? 'On' : 'Off' : 'Not configured'}</strong></span>
-          {snapshot.settings ? <span className="team-setting"><ShieldCheck size={13} /> Permission <strong>{snapshot.settings.permissionLevel === 'full-access' ? 'Full access' : 'Supervised'}</strong></span> : null}
-          <span className={cx('team-setting', snapshot.host.online ? 'is-online' : 'is-offline')}>
-            {snapshot.host.online ? <Wifi size={13} /> : <WifiOff size={13} />} Host device <strong>{snapshot.host.displayName} · {snapshot.host.online ? 'Online' : 'Offline'}</strong>
-          </span>
+        <div className="team-structure__toolbar">
+          <div className="team-structure__settings" aria-label="Team orchestration settings">
+            <span className={cx('team-setting', snapshot.settings?.leaderOrchestration && 'is-on')}><i /> Leader orchestration <strong>{snapshot.settings ? snapshot.settings.leaderOrchestration ? 'On' : 'Off' : 'Not configured'}</strong></span>
+            {snapshot.settings ? <span className="team-setting"><ShieldCheck size={13} /> Permission <strong>{snapshot.settings.permissionLevel === 'full-access' ? 'Full access' : 'Supervised'}</strong></span> : null}
+            <span className={cx('team-setting', snapshot.host.online ? 'is-online' : 'is-offline')}>
+              {snapshot.host.online ? <Wifi size={13} /> : <WifiOff size={13} />} Host device <strong>{snapshot.host.displayName} · {snapshot.host.online ? 'Online' : 'Offline'}</strong>
+            </span>
+          </div>
+          <Button size="sm" variant="ghost" className="team-structure__refresh" disabled={refreshing || busy} busy={refreshing} onClick={() => void refreshFromToolbar()} aria-label="Refresh team structure"><RefreshCw size={13} />Refresh</Button>
         </div>
       </header>
 

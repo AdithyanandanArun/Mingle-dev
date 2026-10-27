@@ -15,6 +15,7 @@ import { GitBar } from '../git/GitBar';
 import { subscribeToTeamUpdates } from '../../lib/team-live-updates';
 import { useTeamStructure } from '../../lib/team-structure-context';
 import './team-session.css';
+import './team-session-premium.css';
 
 const RUN_STATE_LABEL: Record<NonNullable<TeamChatMessage['runState']>, string> = {
   queued: 'Queued', running: 'Agent working', 'awaiting-approval': 'Waiting for approval',

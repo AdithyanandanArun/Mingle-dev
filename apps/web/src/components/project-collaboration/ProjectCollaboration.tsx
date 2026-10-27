@@ -48,6 +48,23 @@ function localSessionLabel(session: Session): string {
   return `${session.provider[0]!.toUpperCase()}${session.provider.slice(1)} · ${session.model}`;
 }
 
+function sessionPresenceLabel(session: Session): string {
+  switch (session.status) {
+    case 'running': return 'Running';
+    case 'waiting': return 'Waiting';
+    case 'interrupted': return 'Interrupted';
+    case 'error': return 'Error';
+    default: return 'Idle';
+  }
+}
+
+function sessionPresenceTone(session: Session): 'neutral' | 'info' | 'warn' | 'err' {
+  if (session.status === 'running') return 'info';
+  if (session.status === 'waiting') return 'warn';
+  if (session.status === 'error') return 'err';
+  return 'neutral';
+}
+
 function publishableSession(session: Session): boolean {
   return JOIN_PROVIDERS.includes(session.provider);
 }
@@ -272,35 +289,45 @@ export function ProjectTeammatesDialog({ project, onClose }: { project: Project;
 
   return <Modal title="Teammates" description={`Invite people to work on ${project.name}. Your local agents stay yours.`} onClose={onClose} width={640}>
     <div className="pc-dialog" aria-busy={loading || sending}>
-      <div className="pc-invite-intro"><span className="pc-icon"><Mail size={17} /></span><div><strong>Invite by email</strong><p>They’ll join this project from their own Mingle and choose their own checkout and provider.</p></div></div>
-      {emailStatus?.configured === false ? <p className="pc-inline-note" role="status"><CircleAlert size={14} /> Email delivery is not configured. {emailStatus.message || 'New invites may be created, but they cannot be delivered until email is configured.'}</p> : null}
+      <section className="pc-invite-card" aria-label="Invite a teammate">
+        <div className="pc-invite-intro"><span className="pc-icon"><Mail size={17} /></span><div><strong>Invite by email</strong><p>They’ll join from their own Mingle and choose their own checkout and provider.</p></div></div>
+        {emailStatus?.configured === false ? <p className="pc-inline-note" role="status"><CircleAlert size={14} /> Email delivery is not configured. {emailStatus.message || 'New invites may be created, but they cannot be delivered until email is configured.'}</p> : null}
+        <form className="pc-invite-form" onSubmit={(event) => void sendInvite(event)}>
+          <label className="pc-field pc-field--email"><span>Teammate email</span><input autoComplete="email" type="email" value={email} onChange={(event) => { setEmail(event.target.value); setDelivery(null); }} placeholder="name@example.com" required /></label>
+          <label className="pc-field pc-field--role"><span>Role</span><select value={role} onChange={(event) => setRole(event.target.value as 'member' | 'admin')}><option value="member">Member</option><option value="admin">Admin</option></select></label>
+          <Button type="submit" variant="primary" size="sm" disabled={!EMAIL_PATTERN.test(email.trim()) || sending} busy={sending}>Send invite</Button>
+        </form>
+        {delivery ? <div className={`pc-delivery pc-delivery--${delivery.status}`} role="status">
+          {delivery.status === 'sent' ? <Check size={14} /> : <CircleAlert size={14} />}
+          <span>{delivery.status === 'sent' ? `Invitation email sent to ${delivery.email}.` : delivery.status === 'failed' ? `Invitation created, but email delivery failed for ${delivery.email}.` : `Invitation created, but no email was sent to ${delivery.email}.`}{delivery.message ? ` ${delivery.message}` : ''}{delivery.teamSessionMessage ? ` ${delivery.teamSessionMessage}` : ''}</span>
+          {delivery.joinUrl ? <Button size="sm" onClick={() => void copyText(delivery.joinUrl!).then(() => useMingle.getState().toast('success', 'Join link copied.')).catch(() => setError('Could not copy the join link.'))}>Copy join link</Button> : null}
+        </div> : null}
+      </section>
       {error ? <InlineError onRetry={() => void refresh()}>{error}</InlineError> : null}
-      <form className="pc-invite-form" onSubmit={(event) => void sendInvite(event)}>
-        <label className="pc-field pc-field--email"><span>Teammate email</span><input autoComplete="email" type="email" value={email} onChange={(event) => { setEmail(event.target.value); setDelivery(null); }} placeholder="name@example.com" required /></label>
-        <label className="pc-field pc-field--role"><span>Role</span><select value={role} onChange={(event) => setRole(event.target.value as 'member' | 'admin')}><option value="member">Member</option><option value="admin">Admin</option></select></label>
-        <Button type="submit" variant="primary" size="sm" disabled={!EMAIL_PATTERN.test(email.trim()) || sending} busy={sending}>Send invite</Button>
-      </form>
-      {delivery ? <div className={`pc-delivery pc-delivery--${delivery.status}`} role="status">
-        {delivery.status === 'sent' ? <Check size={14} /> : <CircleAlert size={14} />}
-        <span>{delivery.status === 'sent' ? `Invitation email sent to ${delivery.email}.` : delivery.status === 'failed' ? `Invitation created, but email delivery failed for ${delivery.email}.` : `Invitation created, but no email was sent to ${delivery.email}.`}{delivery.message ? ` ${delivery.message}` : ''}{delivery.teamSessionMessage ? ` ${delivery.teamSessionMessage}` : ''}</span>
-        {delivery.joinUrl ? <Button size="sm" onClick={() => void copyText(delivery.joinUrl!).then(() => useMingle.getState().toast('success', 'Join link copied.')).catch(() => setError('Could not copy the join link.'))}>Copy join link</Button> : null}
-      </div> : null}
-      <div className="pc-roster-head"><div><h3>Project agents</h3><p>Inspect local and teammate agents together. Remote owners keep control of their model, permissions, stop and spend approvals.</p></div><Button size="sm" variant="ghost" disabled={loading} onClick={() => void refresh()} aria-label="Refresh project agents"><RefreshCw size={13} />Refresh</Button></div>
+      <div className="pc-roster-head"><div><h3>Project agents</h3><p>Review agents on this device and teammates’ devices. Each owner keeps control of their model, permissions, stop and spend approvals.</p></div><Button size="sm" variant="ghost" disabled={loading} onClick={() => void refresh()} aria-label="Refresh project agents"><RefreshCw size={13} />Refresh</Button></div>
       {loading && !snapshot ? <p className="pc-loading" role="status">Loading project roster…</p> : null}
       {snapshot?.project ? <p className="pc-project-ref"><Users size={13} /> {snapshot.project.name} <span>· shared project connected</span></p> : null}
       {!loading && snapshot && !snapshot.project ? <p className="pc-inline-note" role="status">This project’s collaboration workspace is being prepared. Refresh in a moment to see its roster.</p> : null}
       {snapshot?.project ? <TeamOrchestrationSettings key={`${project.id}:${teamSettingsRevision}`} projectId={project.id} currentSession={currentSession} onShared={() => void refresh()} onOpenProject={() => { useMingle.getState().selectProject(project.id); onClose(); }} /> : null}
-      <div className="pc-agent-list" role="list" aria-label="Local and teammate agents">
-        {localAgents.map((session) => <div className="pc-agent-row" role="listitem" key={`local-${session.id}`}>
-          <input type="checkbox" aria-label={`Share ${session.name} with this project`} checked={selectedLocalIds.includes(session.id)} disabled={!snapshot?.project || !canManageRoster || !publishableSession(session)} title={!publishableSession(session) ? 'This provider cannot be shared for remote execution.' : undefined} onChange={(event) => setLocalSelection((current) => {
-            const selected = current ?? sharedLocalIds;
-            return event.target.checked ? [...new Set([...selected, session.id])] : selected.filter((id) => id !== session.id);
-          })} />
-          <button type="button" className="pc-agent-select" onClick={() => { useMingle.getState().selectSession(session.id); onClose(); }} aria-label={`Inspect local agent ${session.name}`}>
-            <ProviderMark provider={session.provider} size={17} /><span className="pc-agent-copy"><strong>{session.name}</strong><small>{localSessionLabel(session)} · this device</small></span><StatusDot status={session.status} /><Badge>Local</Badge>
-          </button>
-        </div>)}
-        {remoteAgents.map((agent, index) => {
+      <div className="pc-agent-list" role="region" aria-label="Local and teammate agents">
+        {localAgents.length ? <section className="pc-agent-group" role="group" aria-label="Agents on this device">
+          <h4>On this device <span>{localAgents.length}</span></h4>
+          <div role="list">
+          {localAgents.map((session) => <div className="pc-agent-row" role="listitem" key={`local-${session.id}`}>
+            <input type="checkbox" aria-label={`Share ${session.name} with this project`} checked={selectedLocalIds.includes(session.id)} disabled={!snapshot?.project || !canManageRoster || !publishableSession(session)} title={!publishableSession(session) ? 'This provider cannot be shared for remote execution.' : undefined} onChange={(event) => setLocalSelection((current) => {
+              const selected = current ?? sharedLocalIds;
+              return event.target.checked ? [...new Set([...selected, session.id])] : selected.filter((id) => id !== session.id);
+            })} />
+            <button type="button" className="pc-agent-select" onClick={() => { useMingle.getState().selectSession(session.id); onClose(); }} aria-label={`Inspect local agent ${session.name}`}>
+              <ProviderMark provider={session.provider} size={17} /><span className="pc-agent-copy"><strong>{session.name}</strong><small>{localSessionLabel(session)}</small></span><StatusDot status={session.status} label={false} /><Badge tone={sessionPresenceTone(session)}>{sessionPresenceLabel(session)}</Badge><Badge>Local</Badge>
+            </button>
+          </div>)}
+          </div>
+        </section> : null}
+        {remoteAgents.length ? <section className="pc-agent-group" role="group" aria-label="Teammate agents">
+          <h4>Teammates <span>{remoteAgents.length}</span></h4>
+          <div role="list">
+          {remoteAgents.map((agent, index) => {
           const id = recordText(agent, ['id', 'agentId', 'sharedAgentId'], `team-agent-${index}`);
           const accountId = recordText(agent, ['accountId']);
           const member = memberMap.get(accountId);
@@ -314,19 +341,24 @@ export function ProjectTeammatesDialog({ project, onClose }: { project: Project;
           const selected = selectedAgentId === id;
           return <div className={`pc-agent-row pc-agent-row--remote${selected ? ' is-selected' : ''}`} role="listitem" key={`remote-${id}`}>
             <button type="button" className="pc-agent-select" aria-pressed={selected} onClick={() => setSelectedAgentId(selected ? null : id)}>
-              <span className="pc-team-avatar" aria-hidden="true">{name.charAt(0).toUpperCase()}</span><span className="pc-agent-copy"><strong>{name}</strong><small>{ownerName} · {PROVIDER_NAMES[provider as Provider] ?? provider} · {model} · {device}</small></span><Badge tone={/busy|running/i.test(state) ? 'info' : 'neutral'}>{state}</Badge><Badge>Team</Badge>
+              <span className="pc-team-avatar" aria-hidden="true">{name.charAt(0).toUpperCase()}</span><span className="pc-agent-copy"><strong>{name}</strong><small>{ownerName} · {PROVIDER_NAMES[provider as Provider] ?? provider} · {model} · {device}</small></span><Badge tone={/busy|running/i.test(state) ? 'info' : 'neutral'}>{state}</Badge><Badge>Remote</Badge>
             </button>
           </div>;
-        })}
+          })}
+          </div>
+        </section> : null}
         {!localAgents.length && !remoteAgents.length && snapshot?.project ? <p className="pc-empty">No agents have been shared for this project yet. Existing local sessions remain private until you explicitly publish them.</p> : null}
       </div>
       {snapshot?.project && localAgents.length ? <div className="pc-roster-actions"><span>{selectedLocalIds.filter((id) => localAgents.some((session) => session.id === id && publishableSession(session))).length} local agents selected · runs from teammates follow the team permission level</span><Button size="sm" disabled={!canManageRoster || sharing || selectedLocalIds.length === 0 && sharedLocalIds.length === 0} busy={sharing} onClick={() => void updatePublishedAgents()}>Update shared agents</Button></div> : null}
       {selectedRemote ? <div className="pc-owner-note"><strong>{selectedRemoteName} · {recordText(selectedRemote, ['state'], 'State not reported')}</strong><span>Owner {selectedRemoteOwner} · device {recordText(selectedRemote, ['deviceId'], 'not reported')} · {PROVIDER_NAMES[selectedRemoteProvider as Provider] ?? selectedRemoteProvider} · {recordText(selectedRemote, ['model'], 'Model not reported')} · owner retains model, permission, stop and spend control.</span><Button size="sm" onClick={openTeamWorkspace}>Open recovery controls <ArrowUpRight size={13} /></Button></div> : null}
-      {snapshot?.project ? <div className="pc-shared-actions">
-        <form className="pc-shared-note" onSubmit={(event) => void shareNote(event)}><label className="pc-field"><span>Share a project note</span><textarea value={note} onChange={(event) => { setNote(event.target.value); if (sharedAction && sharedAction !== 'sending-note') setSharedAction(null); }} placeholder="A decision, update or question for the team…" maxLength={5000} /></label><Button type="submit" size="sm" disabled={!note.trim() || sharedAction === 'sending-note'} busy={sharedAction === 'sending-note'}>Share note</Button></form>
-        <form className="pc-share-task" onSubmit={(event) => void shareTask(event)}><label className="pc-field"><span>Share a project task</span><select aria-label="Task to share" value={taskId} onChange={(event) => setTaskId(event.target.value)}><option value="">Choose a task…</option>{shareableTasks.map((task) => <option key={task.id} value={task.id}>{task.title}</option>)}</select></label><Button type="submit" size="sm" disabled={!taskId || sharedAction === 'sharing-task'} busy={sharedAction === 'sharing-task'}>Share task</Button></form>
-        {sharedAction && !['sending-note', 'sharing-task'].includes(sharedAction) ? <p className="pc-shared-feedback" role="status">{sharedAction}</p> : null}
-      </div> : null}
+      {snapshot?.project ? <details className="pc-shared-actions">
+        <summary><span><strong>Share a note or task</strong><small>Optional updates for everyone on this project</small></span><span className="pc-optional-label">Optional</span></summary>
+        <div className="pc-shared-actions__content">
+          <form className="pc-shared-note" onSubmit={(event) => void shareNote(event)}><label className="pc-field"><span>Share a project note</span><textarea value={note} onChange={(event) => { setNote(event.target.value); if (sharedAction && sharedAction !== 'sending-note') setSharedAction(null); }} placeholder="A decision, update or question for the team…" maxLength={5000} /></label><Button type="submit" size="sm" disabled={!note.trim() || sharedAction === 'sending-note'} busy={sharedAction === 'sending-note'}>Share note</Button></form>
+          <form className="pc-share-task" onSubmit={(event) => void shareTask(event)}><label className="pc-field"><span>Share a project task</span><select aria-label="Task to share" value={taskId} onChange={(event) => setTaskId(event.target.value)}><option value="">Choose a task…</option>{shareableTasks.map((task) => <option key={task.id} value={task.id}>{task.title}</option>)}</select></label><Button type="submit" size="sm" disabled={!taskId || sharedAction === 'sharing-task'} busy={sharedAction === 'sharing-task'}>Share task</Button></form>
+          {sharedAction && !['sending-note', 'sharing-task'].includes(sharedAction) ? <p className="pc-shared-feedback" role="status">{sharedAction}</p> : null}
+        </div>
+      </details> : null}
       {snapshot?.members?.length ? <details className="pc-members"><summary>Project members <span>{snapshot.members.length}</span></summary><div>{snapshot.members.map((member, index) => {
         const accountId = recordText(member, ['accountId']);
         const isSelf = Boolean(accountId && accountId === account?.user?.id);

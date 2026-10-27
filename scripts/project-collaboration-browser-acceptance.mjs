@@ -675,6 +675,7 @@ async function main() {
     await waitFor(async () => teamStructureReads > structureReadsBeforePublish
       && await dialog.locator('.team-orch-settings__session').filter({ hasText: 'Example local agent 2' }).count() > 0, 'team orchestration settings refresh after the roster changes');
     assert.ok(teamStructureReads > structureReadsBeforePublish, 'team orchestration settings refetch after the roster changes');
+    await dialog.locator('.pc-shared-actions').locator('summary').click();
     await dialog.getByLabel('Share a project note').fill('Example team note');
     await dialog.getByRole('button', { name: 'Share note', exact: true }).click();
     assert.ok(requests.some((item) => item.pathname === '/api/distributed/messages' && item.body.content === 'Example team note'));
