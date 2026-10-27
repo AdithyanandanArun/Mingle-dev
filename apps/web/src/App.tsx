@@ -115,7 +115,7 @@ export function App() {
   const invitationSequence = useRef(0);
   const onboardingReturnFocus = useRef<HTMLElement | null>(null);
   const browserPopoutId = new URLSearchParams(window.location.search).get('browserPopout');
-  const onboardingVisible = onboardingOpen && !browserPopoutId && !activeInvitation && !invitationHandledThisLaunch;
+  const onboardingVisible = onboardingOpen && !browserPopoutId && !activeInvitation && (!invitationHandledThisLaunch || onboardingReplayRequested);
   const onboardingVisibleRef = useRef(onboardingVisible);
   onboardingVisibleRef.current = onboardingVisible;
 
@@ -125,6 +125,8 @@ export function App() {
       if (!token) return;
       cleanJoinTokenFromLocation();
       setInvitationHandledThisLaunch(true);
+      setOnboardingOpen(false);
+      setOnboardingReplayRequested(false);
       useMingle.getState().closeDialog();
       setJoinSuspended(false);
       setActiveInvitation({ token, sequence: ++invitationSequence.current });

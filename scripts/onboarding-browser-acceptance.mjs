@@ -298,6 +298,41 @@ try {
   assert.equal(await page.locator('.onboarding__dialog').count(), 0, 'The provider guide opens full provider settings and persists completion.');
   const settingsAfterProviderGuide = await page.evaluate(async () => (await (await fetch('/api/bootstrap')).json()).settings);
   assert.deepEqual(settingsAfterProviderGuide, savedSettings, 'Opening provider settings through onboarding leaves preferences unchanged.');
+
+  await page.getByRole('navigation', { name: 'Settings sections' }).getByRole('button', { name: 'General', exact: true }).click();
+  await page.getByRole('button', { name: 'Replay welcome' }).click();
+  await page.getByRole('button', { name: 'Continue without an account' }).click();
+  let releaseSave;
+  let markSaveStarted;
+  const saving = new Promise((resolve) => { markSaveStarted = resolve; });
+  const saveGate = new Promise((resolve) => { releaseSave = resolve; });
+  let holdSave = true;
+  await page.route('**/api/settings', async (route) => {
+    if (!holdSave || route.request().method() !== 'PATCH') return route.fallback();
+    holdSave = false;
+    const response = await route.fetch({ url: `${apiBase}/api/settings` });
+    markSaveStarted();
+    await saveGate;
+    await route.fulfill({ response });
+  });
+  await page.getByRole('button', { name: /Manage providers in Settings/ }).click();
+  await saving;
+  await page.evaluate((url) => window.dispatchEvent(new CustomEvent('mingle:deep-link', { detail: url })), `${webBase}/?join=not-a-real-token`);
+  await page.getByText(/invitation link is incomplete or invalid/i).waitFor();
+  assert.equal(await page.locator('.onboarding__dialog').count(), 0, 'A warm invitation interrupts onboarding even while completion is saving.');
+  const refreshedAfterSave = page.waitForResponse((response) => new URL(response.url()).pathname === '/api/bootstrap');
+  releaseSave();
+  await refreshedAfterSave;
+  await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  assert.equal(await page.getByRole('navigation', { name: 'Settings sections' }).getByRole('button', { name: 'General', exact: true }).getAttribute('aria-current'), 'page', 'Late onboarding completion cannot navigate away to provider settings.');
+  await page.getByRole('button', { name: 'Close dialog', exact: true }).click();
+  await page.getByRole('dialog').waitFor({ state: 'detached' });
+  assert.equal(await page.locator('.onboarding__dialog').count(), 0, 'Dismissed invitations do not automatically reopen welcome.');
+  await page.getByRole('button', { name: 'Replay welcome' }).click();
+  await page.getByRole('heading', { name: /Make room for good work/i }).waitFor();
+  await page.keyboard.press('Escape');
+  await page.getByRole('dialog').waitFor({ state: 'detached' });
+  console.log('PASS warm invitation interruption: late setup completion stays inert; explicit replay still works afterward.');
   assert.deepEqual(pageErrors, [], `Browser page errors: ${pageErrors.join('; ')}`);
   console.log(`PASS replay/accessibility/reduced motion/mobile: settings preserved; 900px and 360px have no overflow.\nScreenshots: ${outputDir}`);
 } finally {

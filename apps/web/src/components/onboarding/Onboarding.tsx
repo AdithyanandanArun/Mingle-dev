@@ -100,11 +100,12 @@ export function Onboarding({ providers, isExampleWorkspace = false, returnFocus,
     try {
       await api.updateSettings({ onboardingCompletedVersion: 1 });
       await useMingle.getState().refreshNow();
+      if (!mounted.current) return;
       restoreFocusOnExit.current = !after;
       onComplete();
       after?.();
     } catch (cause) {
-      setCompletionError(errorMessage(cause));
+      if (mounted.current) setCompletionError(errorMessage(cause));
     } finally {
       completionLock.current = false;
       if (mounted.current) setCompletionBusy(false);
