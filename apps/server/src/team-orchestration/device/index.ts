@@ -94,6 +94,14 @@ const ACTIVITY_BATCH_SIZE = 20;
 const MAX_ACTIVITY_TEXT = 8_000;
 const DELIVERY_TIMEOUT_MS = 24 * 60 * 60_000;
 const ISO = () => new Date().toISOString();
+function nextConsentAt(previous?: Pick<TeamConsent, 'updatedAt'>): string {
+  const now = Date.now();
+  const previousAt = previous ? Date.parse(previous.updatedAt) : Number.NaN;
+  const nextAt = Number.isFinite(previousAt) ? Math.max(now, previousAt + 1) : now;
+  const date = new Date(nextAt);
+  if (!Number.isFinite(date.getTime())) throw new HttpError(409, 'The saved team consent timestamp cannot be advanced.');
+  return date.toISOString();
+}
 const permissionRank = (value: TeamPermissionLevel) => value === 'supervised' ? 0 : 1;
 const policyRank: Record<Policy, number> = { supervised: 0, balanced: 1, auto: 2, 'full-access': 3 };
 function mostRestrictivePolicy(...policies: Policy[]): Policy {
@@ -305,7 +313,10 @@ export function createDeviceSide(deps: DeviceSideDeps): {
     const bySession = new Map(published.map((agent) => [agent.sessionId, agent.id]));
     const agentIds = input.sessionIds.map((sessionId) => bySession.get(sessionId)).filter((id): id is string => Boolean(id));
     if (agentIds.length !== input.sessionIds.length) throw new HttpError(409, 'The selected agents could not be verified in the shared roster.');
-    const at = ISO();
+    const previousRow = db.prepare(`SELECT consent_json FROM mingle_team_device_consents
+      WHERE shared_project_id=? AND account_id=? AND device_id=?`).get(shared.sharedProjectId, accountId, deviceId) as { consent_json: string } | undefined;
+    const previous = previousRow ? parseConsent(JSON.parse(previousRow.consent_json)) : undefined;
+    const at = nextConsentAt(previous);
     const consent: TeamConsent = {
       teamId: shared.teamId, sharedProjectId: shared.sharedProjectId, accountId, deviceId, agentIds,
       permissionLevel: input.permissionLevel, settingsVersion: input.settingsVersion,
@@ -342,7 +353,7 @@ export function createDeviceSide(deps: DeviceSideDeps): {
     });
     if (!selected) throw new HttpError(404, 'This device has not accepted team consent for the project.');
     const previous = parseConsent(JSON.parse(selected.consent_json));
-    const consent: TeamConsent = { ...previous, state: parsed.state as TeamConsentState, updatedAt: ISO() };
+    const consent: TeamConsent = { ...previous, state: parsed.state as TeamConsentState, updatedAt: nextConsentAt(previous) };
     saveConsent(consent);
     recordStructureUpdated(consent.sharedProjectId, 'Team consent updated');
     if (consent.state === 'paused' || consent.state === 'revoked') {
@@ -410,7 +421,7 @@ export function createDeviceSide(deps: DeviceSideDeps): {
         const disclaimerVersion = parsed.data.disclaimerVersion ?? TEAM_CONSENT_DISCLAIMER_VERSION;
         if (permissionRank(parsed.data.settings.permissionLevel) > permissionRank(consent.permissionLevel)
           || disclaimerVersion !== consent.disclaimerVersion) {
-          saveConsent({ ...consent, state: 'needs-reconsent', updatedAt: ISO() });
+          saveConsent({ ...consent, state: 'needs-reconsent', updatedAt: nextConsentAt(consent) });
         }
       }
     });

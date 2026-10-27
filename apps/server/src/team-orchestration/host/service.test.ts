@@ -328,6 +328,42 @@ it('keeps a full-access consent granted when the team level is raised to full ac
   expect((await fx.host.availableAgents(PROJECT)).agents.find((agent) => agent.agentId === REMOTE_AGENT)).toMatchObject({ consent: 'granted' });
 });
 
+it('orders owner consent by its durable timestamp across clock correction, replay, and host restart', async () => {
+  const fx = fixture();
+  const grantAt = '2099-01-01T00:00:00.000Z';
+  const pauseAt = '2099-01-01T00:00:00.001Z';
+  const revokeAt = '2099-01-01T00:00:00.002Z';
+  const resumeAt = '2099-01-01T00:00:00.003Z';
+  const consent = (state: 'granted' | 'paused' | 'revoked', at: string) => ({ sharedProjectId: SHARED,
+    agentIds: [REMOTE_AGENT], permissionLevel: 'supervised', settingsVersion: 1,
+    disclaimerVersion: TEAM_CONSENT_DISCLAIMER_VERSION, state, at });
+
+  await fx.incoming('teamgroup.consent', consent('granted', grantAt));
+  expect(fx.store.db.prepare(`SELECT state,updated_at FROM mingle_team_host_consents
+    WHERE team_id=? AND shared_project_id=? AND agent_id=?`).get(TEAM, SHARED, REMOTE_AGENT))
+    .toEqual({ state: 'granted', updated_at: grantAt });
+
+  // Owner timestamps advance logically from saved state, so a corrected wall clock still
+  // produces a later pause/revoke timestamp. Host ordering remains durable and wire-compatible.
+  fx.restartHost();
+  await fx.incoming('teamgroup.consent', consent('paused', pauseAt));
+  await fx.incoming('teamgroup.consent', consent('granted', grantAt));
+  expect(fx.store.db.prepare(`SELECT state,updated_at FROM mingle_team_host_consents
+    WHERE team_id=? AND shared_project_id=? AND agent_id=?`).get(TEAM, SHARED, REMOTE_AGENT))
+    .toEqual({ state: 'paused', updated_at: pauseAt });
+
+  await fx.incoming('teamgroup.consent', consent('revoked', revokeAt));
+  await fx.incoming('teamgroup.consent', consent('granted', pauseAt));
+  expect(fx.store.db.prepare(`SELECT state,updated_at FROM mingle_team_host_consents
+    WHERE team_id=? AND shared_project_id=? AND agent_id=?`).get(TEAM, SHARED, REMOTE_AGENT))
+    .toEqual({ state: 'revoked', updated_at: revokeAt });
+
+  await fx.incoming('teamgroup.consent', consent('granted', resumeAt));
+  expect(fx.store.db.prepare(`SELECT state,updated_at FROM mingle_team_host_consents
+    WHERE team_id=? AND shared_project_id=? AND agent_id=?`).get(TEAM, SHARED, REMOTE_AGENT))
+    .toEqual({ state: 'granted', updated_at: resumeAt });
+});
+
 it('applies initial full-access consent that races ahead of roster publication without extending it to later agents', async () => {
   const fx = fixture();
   fx.agents.splice(1, 1);
@@ -365,8 +401,8 @@ it('applies initial full-access consent that races ahead of roster publication w
 it('does not replay an older queued consent grant over a newer owner revocation', async () => {
   const fx = fixture();
   fx.agents.splice(1, 1);
-  const firstAt = new Date(Date.now() - 2_000).toISOString();
-  const revokeAt = new Date(Date.now() - 1_000).toISOString();
+  const firstAt = '2099-01-01T00:00:00.000Z';
+  const revokeAt = '2099-01-01T00:00:00.001Z';
   await fx.incoming('teamgroup.consent', { sharedProjectId: SHARED, agentIds: [REMOTE_AGENT], permissionLevel: 'full-access',
     settingsVersion: 1, disclaimerVersion: TEAM_CONSENT_DISCLAIMER_VERSION, state: 'granted', at: firstAt });
   await fx.incoming('teamgroup.consent', { sharedProjectId: SHARED, agentIds: [REMOTE_AGENT], permissionLevel: 'full-access',

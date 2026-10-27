@@ -325,6 +325,34 @@ describe('owner-device team orchestration', () => {
     expect(f.side.localConsent(SHARED)).toMatchObject({ state: 'granted', permissionLevel: 'full-access', settingsVersion: 7 });
   });
 
+  it('advances consent timestamps from persisted owner state after a wall-clock correction and restart', async () => {
+    const f = await fixture();
+    await sendStructure(f);
+    await f.setConsent();
+    const saved = f.side.localConsent(SHARED)!;
+    const futureAt = '2099-01-01T00:00:00.000Z';
+    f.store.db.prepare(`UPDATE mingle_team_device_consents SET consent_json=?,updated_at=?
+      WHERE shared_project_id=? AND account_id=? AND device_id=?`)
+      .run(JSON.stringify({ ...saved, updatedAt: futureAt }), futureAt, SHARED, ACCOUNT, OWN_DEVICE);
+
+    await f.restartSide();
+    const paused = await callRoute(f, 'PATCH', '/api/projects/:projectId/team-consent', { projectId: f.projectId }, { state: 'paused' });
+    expect(paused.updatedAt).toBe('2099-01-01T00:00:00.001Z');
+    expect(f.side.localConsent(SHARED)?.state).toBe('paused');
+    const pauseMessage = f.sent.filter((message) => message.kind === 'teamgroup.consent').at(-1);
+    expect(pauseMessage?.payload).toMatchObject({ state: 'paused', at: paused.updatedAt });
+
+    const revoked = await callRoute(f, 'PATCH', '/api/projects/:projectId/team-consent', { projectId: f.projectId }, { state: 'revoked' });
+    expect(revoked.updatedAt).toBe('2099-01-01T00:00:00.002Z');
+    expect(f.sent.filter((message) => message.kind === 'teamgroup.consent').at(-1)?.payload)
+      .toMatchObject({ state: 'revoked', at: revoked.updatedAt });
+
+    const resumed = await f.setConsent();
+    expect(resumed).toMatchObject({ state: 'granted', updatedAt: '2099-01-01T00:00:00.003Z' });
+    expect(f.sent.filter((message) => message.kind === 'teamgroup.consent').at(-1)?.payload)
+      .toMatchObject({ state: 'granted', at: resumed.updatedAt });
+  });
+
   it('rejects stale consent settings versions but lets owners choose a maximum permission level', async () => {
     const f = await fixture();
     await sendStructure(f, structure(2, 'full-access'));
