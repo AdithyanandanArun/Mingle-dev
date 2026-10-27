@@ -213,6 +213,8 @@ if (process.argv.includes('--serve')) {
       exampleWorkspace: true,
       detectOnStart: false,
     });
+    // These existing-flow suites start after welcome; its own fixture tests first launch.
+    app.store.updateSettings({ onboardingCompletedVersion: 1 });
     const address = await app.listen();
     process.stdout.write(`READY ${JSON.stringify({ url: address.url, exampleWorkspace: true, dataDir })}\n`);
     process.once('SIGINT', () => { void shutdown().finally(() => process.exit(0)); });

@@ -132,6 +132,12 @@ try {
   apiProcess.stdout.on('data', (chunk) => { apiLogs = (apiLogs + chunk).slice(-12_000); });
   apiProcess.stderr.on('data', (chunk) => { apiLogs = (apiLogs + chunk).slice(-12_000); });
   await waitFor(`${apiBase}/api/health`, apiProcess, 'Disposable local service', () => apiLogs);
+  const welcomeSetup = await fetch(`${apiBase}/api/settings`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', Origin: webBase },
+    body: JSON.stringify({ onboardingCompletedVersion: 1 }),
+  });
+  assert.equal(welcomeSetup.status, 200, 'Account settings acceptance starts after first-launch welcome.');
 
   webProcess = spawn(process.execPath, [
     join(root, 'apps/web/node_modules/vite/bin/vite.js'),

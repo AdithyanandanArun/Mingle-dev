@@ -27,6 +27,7 @@ describe('bootstrap and example workspace', () => {
     expect(JSON.parse(readFileSync(path.join(project.path, EXAMPLE_ARTIFACT_PATH), 'utf8')).info.version).toBe('1.0.0');
     expect(state.messages.every((m: any) => m.role === 'system')).toBe(true); // no invented runs
     expect(state.settings.defaultPolicy).toBe('supervised');
+    expect(state.settings.onboardingCompletedVersion).toBeUndefined();
     expect(state.events.map((e: any) => e.type)).toContain('workspace.example.created');
     expect(t.fake.runs).toHaveLength(0);
   });
@@ -52,7 +53,7 @@ describe('bootstrap and example workspace', () => {
     first.fake.script = async (o, emit) => { emit({ type: 'session', providerSessionId: 'prov-1' }); emit({ type: 'text', text: 'Hello ' }); emit({ type: 'tool', name: 'Bash', content: 'ls' }); emit({ type: 'text', text: 'world' }); emit({ type: 'usage', inputTokens: 10, outputTokens: 5, costUsd: 0.01 }); };
     expect((await first.api('POST', `/api/sessions/${session.id}/messages`, { content: 'hi' })).status).toBe(202);
     await waitFor(async () => (await first.api('GET', '/api/bootstrap')).json.sessions.find((s: any) => s.id === session.id).status === 'idle');
-    await first.api('PATCH', '/api/settings', { theme: 'light' });
+    await first.api('PATCH', '/api/settings', { theme: 'light', onboardingCompletedVersion: 1 });
     const before = (await first.api('GET', '/api/bootstrap')).json;
     const mine = before.messages.filter((m: any) => m.sessionId === session.id);
     expect(mine.map((m: any) => [m.role, m.content, m.kind ?? null])).toEqual([['user', 'hi', null], ['assistant', 'Hello ', null], ['tool', 'Bash\nls', 'tool'], ['assistant', 'world', null]]);
@@ -68,6 +69,7 @@ describe('bootstrap and example workspace', () => {
     const restored = after.sessions.find((s: any) => s.id === session.id);
     expect(restored).toMatchObject({ providerSessionId: 'prov-1', inputTokens: 10, outputTokens: 5, costUsd: 0.01, status: 'idle', branch: session.branch });
     expect(after.settings.theme).toBe('light');
+    expect(after.settings.onboardingCompletedVersion).toBe(1);
     expect(after.events.filter((e: any) => e.type === 'workspace.example.created')).toHaveLength(1);
     const ids = after.events.map((e: any) => e.id);
     expect(ids).toEqual([...ids].sort((a: number, b: number) => a - b));
@@ -175,6 +177,9 @@ describe('settings and providers', () => {
   it('validates executable settings, refreshes diagnostics and exposes provider info', async () => {
     const t = await boot();
     expect((await t.api('PATCH', '/api/settings', { claudeExecutable: 'a\nb' })).status).toBe(400);
+    for (const onboardingCompletedVersion of [0, 2, -1, 1.5, '1', null]) {
+      expect((await t.api('PATCH', '/api/settings', { onboardingCompletedVersion })).status).toBe(400);
+    }
     const updated = await t.api('PATCH', '/api/settings', { codexExecutable: '/opt/codex', defaultPolicy: 'balanced' });
     expect(updated.json).toMatchObject({ codexExecutable: '/opt/codex', defaultPolicy: 'balanced' });
     const providers = (await t.api('GET', '/api/providers')).json;
