@@ -35,7 +35,10 @@ export class DistributedWorkspaceService {
   readonly git: GitSyncService;
   readonly commands: RemoteCommandService;
   private readonly unsubscribe: () => void;
+  private readonly unsubscribeMetadata: () => void;
   private metadataTimer: NodeJS.Timeout | null = null;
+  private metadataDebounce: NodeJS.Timeout | null = null;
+  private metadataAgain = false;
   private metadataWork: Promise<void> | null = null;
   private closed = false;
 
@@ -136,6 +139,12 @@ export class DistributedWorkspaceService {
         await mutate(binding.localProjectId, () => this.git.onEnvelope(envelope));
       }
       else if (envelope.kind.startsWith('command.')) await this.commands.onEnvelope(envelope);
+    });
+    this.unsubscribeMetadata = store.subscribe((event) => {
+      // Streaming text and transport touches must not cause cloud reads per token.
+      // These durable changes affect already-shared agent/task metadata only.
+      if (!event || !/^(session\.(renamed|updated|archived|run\.(started|completed|failed|interrupted))|task\.(updated|running|unblocked|blocked|run\.[\w.-]+)|group\.member\.[\w.-]+|approval\.(requested|resolved|denied))$/.test(event.type)) return;
+      this.scheduleMetadataRefresh();
     });
   }
 
@@ -428,8 +437,21 @@ export class DistributedWorkspaceService {
     return { requests, messages, tasks, agents: execution.agents.filter((agent) => agentIds.has(agent.id) && permitted(agent)) };
   }
 
+  private scheduleMetadataRefresh(): void {
+    if (this.closed) return;
+    if (this.metadataWork) { this.metadataAgain = true; return; }
+    // Bound burst delay: later events do not keep pushing the refresh back.
+    if (this.metadataDebounce) return;
+    this.metadataDebounce = setTimeout(() => {
+      this.metadataDebounce = null;
+      void this.refreshMetadata();
+    }, 40);
+    this.metadataDebounce.unref();
+  }
+
   private refreshMetadata(): Promise<void> {
-    if (this.metadataWork || this.closed || !this.transport.snapshot().deviceId) return this.metadataWork ?? Promise.resolve();
+    if (this.closed || !this.transport.snapshot().deviceId) return Promise.resolve();
+    if (this.metadataWork) { this.metadataAgain = true; return this.metadataWork; }
     this.metadataWork = (async () => {
       const snapshot = await this.execution.snapshot();
       for (const binding of snapshot.bindings) {
@@ -449,11 +471,18 @@ export class DistributedWorkspaceService {
             ...(shared.agentId ? { agentId: shared.agentId } : {}), ...(shared.groupId ? { groupId: shared.groupId } : {}) });
         }
       }
-    })().catch(() => { /* Offline/expired identity remains visible through transport and account state. */ }).finally(() => { this.metadataWork = null; });
+    })().catch(() => { /* Offline/expired identity remains visible through transport and account state. */ }).finally(() => {
+      this.metadataWork = null;
+      if (this.metadataAgain) {
+        this.metadataAgain = false;
+        this.scheduleMetadataRefresh();
+      }
+    });
     return this.metadataWork;
   }
   start(): void {
     this.transport.start();
+    this.scheduleMetadataRefresh();
     this.metadataTimer ??= setInterval(() => { void this.refreshMetadata(); }, 30_000);
     this.metadataTimer.unref();
   }
@@ -461,6 +490,9 @@ export class DistributedWorkspaceService {
     if (this.closed) return;
     this.closed = true;
     if (this.metadataTimer) clearInterval(this.metadataTimer);
+    if (this.metadataDebounce) clearTimeout(this.metadataDebounce);
+    this.metadataDebounce = null;
+    this.unsubscribeMetadata();
     await this.metadataWork;
     this.unsubscribe();
     await this.execution.close();

@@ -12,6 +12,39 @@ afterEach(async () => {
   while (apps.length) await apps.pop()!.cleanup();
 });
 
+it('refreshes only already-published metadata promptly and retains edits arriving during a refresh', async () => {
+  const t = await startTestApp({ env: {} });
+  apps.push(t);
+  const session = t.app.store.getSession(EXAMPLE_CLIENT_SESSION_ID)!;
+  const distributed = t.app.distributed;
+  const nativeTransportSnapshot = distributed.transport.snapshot.bind(distributed.transport);
+  vi.spyOn(distributed.transport, 'snapshot').mockImplementation(() => ({ ...nativeTransportSnapshot(), deviceId: 'fixture-device' }));
+  vi.spyOn(distributed.execution, 'snapshot').mockResolvedValue({
+    bindings: [{ teamId: 'fixture-team', sharedProjectId: 'fixture-shared', localProjectId: session.projectId }],
+    agents: [{ deviceId: 'fixture-device', teamId: 'fixture-team', sharedProjectId: 'fixture-shared' }], tasks: [],
+  } as any);
+  const publish = vi.spyOn(distributed.execution, 'publishAgents');
+  let release: (() => void) | undefined;
+  const refresh = vi.spyOn(distributed.execution, 'refreshPublishedAgents').mockImplementationOnce(async () => {
+    await new Promise<void>((resolve) => { release = resolve; });
+    return [];
+  }).mockResolvedValue([]);
+  const changedAt = performance.now();
+  t.app.store.recordEvent({ projectId: session.projectId, sessionId: session.id, type: 'session.renamed', summary: 'Example shared agent renamed' });
+  await waitFor(() => Boolean(release));
+  expect(performance.now() - changedAt).toBeLessThan(800);
+  t.app.store.recordEvent({ projectId: session.projectId, sessionId: session.id, type: 'session.updated', summary: 'Example model changed during publication' });
+  release!();
+  await waitFor(() => refresh.mock.calls.length === 2);
+  expect(refresh).toHaveBeenLastCalledWith({ teamId: 'fixture-team', sharedProjectId: 'fixture-shared' });
+  expect(publish).not.toHaveBeenCalled();
+  // Text deltas and unrelated durable events must not turn into repeated cloud reads.
+  t.app.store.touch();
+  t.app.store.recordEvent({ projectId: session.projectId, type: 'team.structure.updated', summary: 'Example unrelated snapshot' });
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  expect(refresh).toHaveBeenCalledTimes(2);
+});
+
 it('preserves a completed recovery run when a later local run starts before the progress flush', async () => {
   const t = await startTestApp({ env: {} });
   apps.push(t);
