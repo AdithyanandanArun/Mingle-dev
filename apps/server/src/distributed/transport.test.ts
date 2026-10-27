@@ -529,6 +529,7 @@ it('handles a small realtime envelope in about two simulated 90ms network turns'
     cloud.postgrestRequests = 0;
     cloud.postgrestRequestsByUser.clear();
     cloud.realtimeRequests = 0;
+    cloud.inboxPullsByUserTeam.set(`${userB}:${teamId}`, 0);
     cloud.authRttMs = 90;
     cloud.postgrestRttMs = 90;
     cloud.realtimeRttMs = 90;
@@ -541,6 +542,7 @@ it('handles a small realtime envelope in about two simulated 90ms network turns'
     expect(wakeToHandlerMs).toBeLessThan(90 * 1.5);
     expect(sendToHandlerMs).toBeLessThan(90 * 2.5);
     expect(cloud.authRequestsByUser.get(userB) ?? 0).toBe(0);
+    expect(cloud.inboxPullsByUserTeam.get(`${userB}:${teamId}`) ?? 0).toBe(0);
     expect(cloud.wakes.at(-1)?.event).toBe('envelope');
     console.info(`Realtime transport latency: ${sendToHandlerMs.toFixed(1)} ms at 90 ms simulated per-request RTT`);
     // This is a local deterministic mock with per-request delay, not an Internet/Supabase measurement.
