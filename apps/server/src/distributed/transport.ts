@@ -550,9 +550,13 @@ export class TransportService {
   }
 
   private async refreshTeam(client: SupabaseClient, accountId: string, teamId: string, deviceId: string): Promise<void> {
-    const heartbeat = await this.query<CloudDeviceRow | null>(client.from('mingle_devices')
-      .update({ last_seen_at: this.isoNow() }).eq('team_id', teamId).eq('id', deviceId).eq('owner_id', accountId)
-      .is('revoked_at', null).select(DEVICE_COLUMNS).maybeSingle(), 'The local device is no longer active in this team.');
+    const [heartbeat, devices, links] = await Promise.all([
+      this.query<CloudDeviceRow | null>(client.from('mingle_devices')
+        .update({ last_seen_at: this.isoNow() }).eq('team_id', teamId).eq('id', deviceId).eq('owner_id', accountId)
+        .is('revoked_at', null).select(DEVICE_COLUMNS).maybeSingle(), 'The local device is no longer active in this team.'),
+      this.query<CloudDeviceRow[]>(client.from('mingle_devices').select(DEVICE_COLUMNS).eq('team_id', teamId).order('created_at', { ascending: true }), 'The team device roster could not be loaded.'),
+      this.query<CloudLinkRow[]>(client.from('mingle_device_links').select(LINK_COLUMNS).eq('team_id', teamId).order('created_at', { ascending: true }), 'The team trust links could not be loaded.'),
+    ]);
     if (!heartbeat) {
       this.db.prepare('UPDATE mingle_transport_local_devices SET registered = 0 WHERE account_id = ? AND team_id = ? AND device_id = ?')
         .run(accountId, teamId, deviceId);
@@ -561,10 +565,6 @@ export class TransportService {
         .run(accountId, teamId, deviceId);
       throw new HttpError(403, 'The local device is no longer active.');
     }
-    const [devices, links] = await Promise.all([
-      this.query<CloudDeviceRow[]>(client.from('mingle_devices').select(DEVICE_COLUMNS).eq('team_id', teamId).order('created_at', { ascending: true }), 'The team device roster could not be loaded.'),
-      this.query<CloudLinkRow[]>(client.from('mingle_device_links').select(LINK_COLUMNS).eq('team_id', teamId).order('created_at', { ascending: true }), 'The team trust links could not be loaded.'),
-    ]);
     const rows = (devices ?? []).map((row) => ({ ...row }));
     // The heartbeat response is authoritative for this device even if a policy omits it from the roster query.
     if (!rows.some((row) => row.id === deviceId)) rows.push(heartbeat);

@@ -417,11 +417,14 @@ it('delivers after a payload-free wake within a subsecond 90ms/PostgREST-request
     cloud.postgrestRequestsByUser.clear();
     cloud.authRttMs = 90;
     cloud.postgrestRttMs = 90;
+    const sendStartedAt = performance.now();
     await first.send({ teamId, toDeviceId: b.id, kind: 'collaboration.message', payload: { content: 'simulated WAN' }, idempotencyKey: 'wake-90ms-rtt' });
     const publishedAt = cloud.lastWakePublishedAt;
     await vi.waitFor(() => expect(received).toEqual(['collaboration.message']), { timeout: 1_000 });
-    const recipientLatencyMs = performance.now() - publishedAt;
-    expect(recipientLatencyMs).toBeLessThan(1_000);
+    const wakeToHandlerMs = performance.now() - publishedAt;
+    const sendToHandlerMs = performance.now() - sendStartedAt;
+    expect(wakeToHandlerMs).toBeLessThan(1_000);
+    expect(sendToHandlerMs).toBeLessThan(1_000);
     expect(cloud.authRequestsByUser.get(userB)).toBe(2);
     expect(cloud.postgrestRequestsByUser.get(userB)).toBe(9);
     expect(cloud.wakes.at(-1)).toEqual({ channel: `mingle-device-wake:${b.id}`, event: 'wake', payload: {} });
