@@ -17,7 +17,7 @@ export class ProjectInvitationCloudFixture {
   private queue: Promise<unknown> = Promise.resolve();
   private readonly clients = new Map<string, SupabaseClient>();
   private readonly channels = new Set<{
-    name: string; event: string | null; listener: (() => void) | null;
+    name: string; listeners: Map<string, (message: { payload: unknown }) => void>;
     status: ((state: string) => void) | null; subscribed: boolean;
   }>();
   readonly wakeTimings: Array<{ sentAt: number; deliveredAt: number | null }> = [];
@@ -58,15 +58,15 @@ export class ProjectInvitationCloudFixture {
     const client = {
       from: (table: string) => { this.calls++; return new FixtureQuery(this, userId, table); },
       ...(this.options.realtime ? {
-        // Only payload-free hints are simulated. All message bytes and authorization
-        // still travel through the real encrypted mailbox and PostgreSQL policies.
+        // Simulates payload-free wakes and sealed live envelopes. Authorization and the durable
+        // copy still go through the real encrypted mailbox and PostgreSQL policies.
         channel: (name: string) => {
-          const state = { name, event: null as string | null, listener: null as (() => void) | null,
+          const state = { name, listeners: new Map<string, (message: { payload: unknown }) => void>(),
             status: null as ((state: string) => void) | null, subscribed: false };
           this.channels.add(state);
           const channel = {
-            on: (_kind: string, filter: { event: string }, listener: () => void) => {
-              state.event = filter.event; state.listener = listener; return channel;
+            on: (_kind: string, filter: { event: string }, listener: (message: { payload: unknown }) => void) => {
+              state.listeners.set(filter.event, listener); return channel;
             },
             subscribe: (callback: (status: string) => void) => {
               state.status = callback; state.subscribed = true;
@@ -74,13 +74,20 @@ export class ProjectInvitationCloudFixture {
               return channel;
             },
             httpSend: async (event: string, payload: unknown) => {
-              if (JSON.stringify(payload) !== '{}') throw new Error('Fixture wakes must contain no message data');
+              // Wakes carry nothing; live envelopes must already be sealed (ciphertext, nonce, signature), never plaintext.
+              if (event === 'wake' && JSON.stringify(payload) !== '{}') throw new Error('Fixture wakes must contain no message data');
+              if (event === 'envelope') {
+                const sealed = payload as Record<string, unknown> | null;
+                if (!sealed || typeof sealed.ciphertext !== 'string' || typeof sealed.nonce !== 'string' || typeof sealed.signature !== 'string' || 'payload' in sealed) {
+                  throw new Error('Fixture envelopes must be sealed');
+                }
+              }
               const timing = { sentAt: performance.now(), deliveredAt: null as number | null };
               this.wakeTimings.push(timing);
               setTimeout(() => {
                 timing.deliveredAt = performance.now();
                 for (const receiver of this.channels) {
-                  if (receiver.name === name && receiver.subscribed && receiver.event === event) receiver.listener?.();
+                  if (receiver.name === name && receiver.subscribed) receiver.listeners.get(event)?.({ payload: structuredClone(payload) });
                 }
               }, this.options.wakeDelayMs ?? 0);
               return { success: true };
