@@ -134,6 +134,7 @@ export interface AppSettings {
   antigravityExecutable?: string; opencodeExecutable?: string;
   groupDefaults?: import('./groups').GroupDefaults;
   autoCompactPercent?: number | null;
+  onboardingCompletedVersion?: number;
   browserAgentEnabled?: boolean; browserExecutable?: string;
   browserDefaultMode?: 'managed' | 'existing'; browserExistingSourceId?: string; browserCdpEndpoint?: string;
 }
@@ -197,6 +198,7 @@ export const UpdateSettingsSchema = z.object({
   antigravityExecutable: z.string().max(4096).optional(), opencodeExecutable: z.string().max(4096).optional(),
   groupDefaults: z.lazy(() => GroupDefaultsSchema).optional(),
   autoCompactPercent: z.number().int().min(1).max(95).nullable().optional(),
+  onboardingCompletedVersion: z.number().int().min(1).max(1).optional(),
   browserAgentEnabled: z.boolean().optional(), browserExecutable: z.string().max(4096).optional(),
   browserDefaultMode: z.enum(['managed', 'existing']).optional(), browserExistingSourceId: z.string().max(200).optional(),
   browserCdpEndpoint: z.string().max(2048).optional(),

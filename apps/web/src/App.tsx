@@ -19,6 +19,7 @@ import { BrowserPopout } from './components/browser/BrowserPopout';
 import { ProjectInviteJoinDialog, ProjectTeammatesDialog } from './components/project-collaboration/ProjectCollaboration';
 import { TeamStructureProvider } from './lib/team-structure-context';
 import { teamSessionsApi } from './lib/team-sessions';
+import { Onboarding } from './components/onboarding/Onboarding';
 
 declare global {
   interface Window {
@@ -107,13 +108,23 @@ export function App() {
   const previousView = useRef(view);
   const [activeInvitation, setActiveInvitation] = useState<ActiveInvitation | null>(null);
   const [joinSuspended, setJoinSuspended] = useState(false);
+  const [invitationHandledThisLaunch, setInvitationHandledThisLaunch] = useState(false);
+  const [onboardingOpen, setOnboardingOpen] = useState(false);
+  const [onboardingReplayRequested, setOnboardingReplayRequested] = useState(false);
+  const [onboardingCompletedThisLaunch, setOnboardingCompletedThisLaunch] = useState(false);
   const invitationSequence = useRef(0);
+  const onboardingReturnFocus = useRef<HTMLElement | null>(null);
+  const browserPopoutId = new URLSearchParams(window.location.search).get('browserPopout');
+  const onboardingVisible = onboardingOpen && !browserPopoutId && !activeInvitation && !invitationHandledThisLaunch;
+  const onboardingVisibleRef = useRef(onboardingVisible);
+  onboardingVisibleRef.current = onboardingVisible;
 
   useEffect(() => { useMingle.getState().init(); }, []);
   useEffect(() => {
     const openInvitation = (token: string | null) => {
       if (!token) return;
       cleanJoinTokenFromLocation();
+      setInvitationHandledThisLaunch(true);
       useMingle.getState().closeDialog();
       setJoinSuspended(false);
       setActiveInvitation({ token, sequence: ++invitationSequence.current });
@@ -144,6 +155,14 @@ export function App() {
     };
   }, []);
   useEffect(() => {
+    if (!boot || browserPopoutId || invitationHandledThisLaunch || activeInvitation) return;
+    if (onboardingReplayRequested) {
+      setOnboardingOpen(true);
+      return;
+    }
+    if (!onboardingCompletedThisLaunch && boot.settings.onboardingCompletedVersion !== 1) setOnboardingOpen(true);
+  }, [boot, browserPopoutId, invitationHandledThisLaunch, activeInvitation, onboardingReplayRequested, onboardingCompletedThisLaunch]);
+  useEffect(() => {
     if (joinSuspended && view !== 'settings') setJoinSuspended(false);
   }, [joinSuspended, view]);
   useEffect(() => { document.documentElement.dataset.theme = theme; }, [theme]);
@@ -160,6 +179,7 @@ export function App() {
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if (onboardingVisibleRef.current) return;
       const mod = e.metaKey || e.ctrlKey;
       const s = useMingle.getState();
       if (mod && e.key.toLowerCase() === 'k') {
@@ -182,8 +202,18 @@ export function App() {
 
   if (!boot) return <StartupScreen />;
 
-  const browserPopoutId = new URLSearchParams(window.location.search).get('browserPopout');
   if (browserPopoutId) return <BrowserPopout sessionId={browserPopoutId} />;
+
+  const finishOnboarding = () => {
+    setOnboardingOpen(false);
+    setOnboardingReplayRequested(false);
+    setOnboardingCompletedThisLaunch(true);
+  };
+  const replayOnboarding = () => {
+    onboardingReturnFocus.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    setOnboardingReplayRequested(true);
+    setOnboardingOpen(true);
+  };
 
   const openJoinedProject = async (projectId: string) => {
     const store = useMingle.getState();
@@ -204,6 +234,7 @@ export function App() {
   return (
     <TeamStructureProvider projectId={activeProjectId}>
     <div className={cx('app', `view-${view}`)}>
+      <div className="onboarding-background" inert={onboardingVisible} aria-hidden={onboardingVisible || undefined}>
       <a className="skip" href="#main">Skip to content</a>
       <Sidebar />
       <button type="button" className={cx('sidebar-scrim', sidebarOpen && 'is-open')} aria-label="Close sidebar" aria-hidden={!sidebarOpen} inert={!sidebarOpen} tabIndex={-1} onClick={() => useMingle.getState().setSidebarOpen(false)} />
@@ -217,7 +248,7 @@ export function App() {
             {view === 'activity' ? <ActivityView /> : null}
             {view === 'map' ? <Suspense fallback={<div className="editor__state"><Spinner label="Loading map" /></div>}><AgentMap /></Suspense> : null}
             {view === 'team-structure' ? <Suspense fallback={<div className="editor__state"><Spinner label="Loading team structure" /></div>}><TeamStructure /></Suspense> : null}
-            {view === 'settings' ? <SettingsPage /> : null}
+            {view === 'settings' ? <SettingsPage onReplayOnboarding={replayOnboarding} /> : null}
           </Boundary>
         </div>
       </main>
@@ -232,6 +263,14 @@ export function App() {
         onJoined={(result) => { void openJoinedProject(result.projectId); }}
       /> : null}
       <Toasts />
+      </div>
+      {onboardingVisible ? <Onboarding
+        providers={boot.providers}
+        isExampleWorkspace={boot.projects.find((project) => project.id === activeProjectId)?.isExample ?? false}
+        returnFocus={onboardingReturnFocus.current}
+        onComplete={finishOnboarding}
+        onManageProviders={() => useMingle.getState().openSettings({ section: 'providers' })}
+      /> : null}
     </div>
     </TeamStructureProvider>
   );

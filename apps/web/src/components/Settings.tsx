@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { RefreshCw } from 'lucide-react';
+import { RefreshCw, RotateCcw } from 'lucide-react';
 import type { AppSettings, Project, ProviderInfo, ProviderModel } from '@mingle/contracts';
 import { useMingle, type SettingsSection } from '../store/store';
 import { api, errorMessage } from '../lib/api';
@@ -34,7 +34,7 @@ function ProviderStatus({ provider, settings, disabled, onSavePath }: { provider
   </section>;
 }
 
-export function SettingsPage() {
+export function SettingsPage({ onReplayOnboarding }: { onReplayOnboarding: () => void }) {
   const boot = useMingle((s) => s.boot);
   const settings = boot?.settings;
   const category = useMingle((s) => s.settingsSection);
@@ -146,6 +146,10 @@ export function SettingsPage() {
         <SettingRow title="Approval policy" description="Supervised asks before changes. Balanced allows edits with fewer prompts." htmlFor="st-policy">
           <SelectMenu id="st-policy" label="Default approval policy" value={settings.defaultPolicy} displayValue={policies.length ? policies.includes(settings.defaultPolicy) ? undefined : 'Not available' : 'Native/default'} disabled={disabled || policies.length === 0} options={policies.map((value) => ({ value, label: value === 'balanced' ? 'Auto-accept edits' : value === 'full-access' ? 'Full access' : value[0]!.toUpperCase() + value.slice(1), description: value === 'supervised' ? 'Ask before taking actions that change files or run commands.' : value === 'balanced' ? 'Allow file edits while keeping command approvals.' : value === 'auto' ? 'Allow common actions automatically with safety checks.' : 'Allow all actions without approval prompts.' }))} onChange={(value) => void update({ defaultPolicy: value as AppSettings['defaultPolicy'] }, 'policy')} />
         </SettingRow>
+        <div className="settings-onboarding-replay">
+          <div><h3>Welcome tour</h3><p>Revisit the introduction, account options and provider availability. Your settings stay as they are.</p></div>
+          <button type="button" onClick={onReplayOnboarding}><RotateCcw size={13} /> Replay welcome</button>
+        </div>
       </div> : null}
       {category === 'agents' ? <AgentsSettings settings={settings} providers={boot.providers} disabled={disabled} update={update} /> : null}
       {category === 'browser' ? <BrowserSettings settings={settings} disabled={disabled} update={update} /> : null}

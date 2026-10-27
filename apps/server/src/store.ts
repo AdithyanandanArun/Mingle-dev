@@ -13,7 +13,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   defaultProvider: 'codex', defaultCodexModel: 'gpt-6.1-sol', defaultClaudeModel: 'claude-sonnet-5-5', defaultAntigravityModel: 'default', defaultOpencodeModel: 'default', defaultEffort: 'high', defaultIsolated: true,
   defaultPolicy: 'supervised', defaultServiceTier: 'standard', theme: 'dark', claudeExecutable: '', codexExecutable: '', antigravityExecutable: '', opencodeExecutable: '',
   groupDefaults: { maxParallel: 2, maxTurns: 80, maxHops: 6, autonomy: { mode: 'balanced' } },
-  autoCompactPercent: null, browserAgentEnabled: true, browserExecutable: '', browserDefaultMode: 'managed', browserExistingSourceId: '', browserCdpEndpoint: '',
+  autoCompactPercent: null, onboardingCompletedVersion: undefined, browserAgentEnabled: true, browserExecutable: '', browserDefaultMode: 'managed', browserExistingSourceId: '', browserCdpEndpoint: '',
 };
 
 export interface NewSession {
