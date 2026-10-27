@@ -31,7 +31,9 @@ export function subscribeToTeamUpdates(
   const listener = (event: Event) => {
     const detail = (event as CustomEvent<{ projectId?: string | null }>).detail;
     if (detail?.projectId !== projectId) return;
-    if (timer) clearTimeout(timer);
+    // A continuous stream must not postpone refresh forever. Coalesce within
+    // a bounded window starting with the first relevant event.
+    if (timer) return;
     timer = setTimeout(() => {
       timer = null;
       onUpdate();

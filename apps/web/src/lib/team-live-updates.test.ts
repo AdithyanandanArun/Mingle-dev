@@ -36,3 +36,18 @@ it('debounces same-project updates and ignores unrelated projects', async () => 
     unsubscribe();
   }
 });
+
+it('refreshes during continuous updates and cancels a pending refresh on unsubscribe', async () => {
+  vi.useFakeTimers();
+  const target = new EventTarget();
+  const refresh = vi.fn();
+  const unsubscribe = subscribeToTeamUpdates('project-a', refresh, { target, kinds: ['structure'], debounceMs: 80 });
+  for (let index = 0; index < 10; index++) {
+    dispatchTeamUpdate({ type: 'team.structure.updated', projectId: 'project-a' }, target);
+    await vi.advanceTimersByTimeAsync(20);
+  }
+  expect(refresh).toHaveBeenCalledTimes(2);
+  unsubscribe();
+  await vi.advanceTimersByTimeAsync(100);
+  expect(refresh).toHaveBeenCalledTimes(2);
+});
