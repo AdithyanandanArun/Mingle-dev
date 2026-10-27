@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { AlertTriangle, CircleAlert, Crown, RefreshCw, Users } from 'lucide-react';
+import { CircleAlert, Crown, RefreshCw, Users } from 'lucide-react';
 import type { Session, TeamPermissionLevel, TeamStructureSnapshot, UpdateTeamOrchestration } from '@mingle/contracts';
 import { useMingle } from '../../../store/store';
 import { Button, Segmented } from '../../ui';
@@ -162,7 +162,7 @@ export function TeamOrchestrationSettings({ projectId, currentSession, onShared,
   return <section className="team-orch-settings" aria-labelledby="team-orch-settings-title" aria-busy={loading || saving}>
     <header className="team-orch-settings__heading">
       <span className="team-orch-settings__icon"><Crown size={16} /></span>
-      <div><h3 id="team-orch-settings-title">Share a session with the team</h3><p>Your current conversation is shared automatically when you invite a teammate.</p></div>
+      <div><h3 id="team-orch-settings-title">Share a session with the team</h3><p>Share this conversation and set its maximum permission.</p></div>
       <Button size="sm" variant="ghost" disabled={loading || saving} onClick={() => void load()} aria-label="Refresh team orchestration settings"><RefreshCw size={13} /></Button>
     </header>
     {loading && !snapshot ? <p className="team-orch-settings__status" role="status">Loading team settings…</p> : null}
@@ -174,25 +174,26 @@ export function TeamOrchestrationSettings({ projectId, currentSession, onShared,
         : !snapshot.host.isThisDevice ? <p className="team-orch-settings__notice" role="status">This device is not the project host. Only the lead’s device can share a session or change its permission level.</p>
           : !snapshot.canEdit ? <p className="team-orch-settings__notice" role="status">Only the team lead or an admin on the lead’s device can share a session or change its permission level.</p> : null}
       {!projectIsActive ? <p className="team-orch-settings__notice" role="status">The active project changed. Close Teammates and reopen it before sharing or changing permissions.</p> : null}
-      {sharedSession ? <div className="team-orch-settings__session" aria-label="Current shared session">
-        <Users size={14} /><span><strong>{sharedSession.name}</strong><small>{sharedSession.detail}{hasCanonicalSession ? ' · already shared' : ' · selected session on this device'}</small></span>
-      </div> : <div className="team-orch-settings__no-session" role="status">
-        <p>No local session is open for this project. Open the project and create or select a session, then reopen Teammates to share it.</p>
-        <Button size="sm" variant="ghost" disabled={saving} onClick={openProject}>Open this project</Button>
-      </div>}
       {!hasCanonicalSession && sharedSession && !shareEligibility.allowed ? <p className="team-orch-settings__notice" role="status">{shareEligibility.message}</p> : null}
-      {snapshot.enabled && snapshot.settings && !snapshot.teamSession ? <p className="team-orch-settings__notice" role="status">Share this session to finish team setup.</p> : null}
-      {!canEdit && snapshot.settings ? <p className="team-orch-settings__summary"><Users size={14} /> Team permission: {snapshot.settings.permissionLevel === 'supervised' ? 'Supervised' : 'Full access'}</p> : null}
-      {canEdit && hasSessionForProject ? <fieldset className="team-orch-settings__controls" aria-label="Team permission level" disabled={saving}>
-        <div className="team-orch-settings__field">
-          <strong>Maximum permission for teammate runs</strong>
-          <Segmented value={permissionLevel} onChange={(value) => { setPermissionLevel(value); setSaved(null); }} label="Team permission level" options={[
-            { value: 'supervised', label: 'Supervised' }, { value: 'full-access', label: 'Full access' },
-          ]} />
-          <p>Supervised asks owners to approve file or command actions. Full access permits those actions after owner consent. Owners can pause or revoke sharing.</p>
-          {choosingFullAccess ? <p className="team-orch-settings__warning" role="alert"><AlertTriangle size={14} />Full access requires every teammate to consent at this level. Raising a project from Supervised to Full access requires teammates to re-consent before new work is delivered.</p> : null}
-        </div>
-      </fieldset> : null}
+      <div className="team-orch-settings__layout">
+        {sharedSession ? <div className="team-orch-settings__session" aria-label="Current shared session">
+          <Users size={14} /><span><strong>{sharedSession.name}</strong><small>{sharedSession.detail}{hasCanonicalSession ? ' · already shared' : ' · selected session on this device'}</small></span>
+        </div> : <div className="team-orch-settings__no-session" role="status">
+          <p>No local session is open for this project. Open the project and create or select a session, then reopen Teammates to share it.</p>
+          <Button size="sm" variant="ghost" disabled={saving} onClick={openProject}>Open this project</Button>
+        </div>}
+        {canEdit && hasSessionForProject ? <fieldset className="team-orch-settings__controls" aria-label="Team permission level" disabled={saving}>
+          <div className="team-orch-settings__field">
+            <strong>Maximum permission for teammate runs</strong>
+            <Segmented value={permissionLevel} onChange={(value) => { setPermissionLevel(value); setSaved(null); }} label="Team permission level" options={[
+              { value: 'supervised', label: 'Supervised' }, { value: 'full-access', label: 'Full access' },
+            ]} />
+            <p>{choosingFullAccess
+              ? 'Full access allows file and command actions after owner consent. Raising to Full access requires every teammate to consent again before new work is delivered.'
+              : 'Supervised asks owners to approve file or command actions. Sharing can be paused or revoked at any time.'}</p>
+          </div>
+        </fieldset> : snapshot.settings ? <p className="team-orch-settings__summary"><Users size={14} /> Team permission: {snapshot.settings.permissionLevel === 'supervised' ? 'Supervised' : 'Full access'}</p> : null}
+      </div>
       {canEdit ? <div className="team-orch-settings__actions"><Button variant="primary" size="sm" disabled={saving || loading || !projectIsActive || !hasSessionForProject || (!hasCanonicalSession && (!shareEligibility.allowed || currentSession?.projectId !== projectId))} busy={saving} onClick={() => void save()}>{hasCanonicalSession ? 'Save permission level' : 'Share current session'}</Button></div> : null}
     </> : null}
   </section>;

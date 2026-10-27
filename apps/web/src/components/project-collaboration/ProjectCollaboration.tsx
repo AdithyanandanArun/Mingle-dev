@@ -5,6 +5,7 @@ import { api, errorMessage } from '../../lib/api';
 import { useMingle } from '../../store/store';
 import { copyText } from '../../lib/clipboard';
 import { teamAgentDisplayName } from '../../lib/team-agent-display';
+import { subscribeToTeamUpdates } from '../../lib/team-live-updates';
 import { PROVIDER_NAMES } from '../../lib/providers';
 import { POLICY_DESCRIPTION, POLICY_LABEL } from '../../lib/groups';
 import { createIdempotencyKey, distributedApi } from '../distributed/api';
@@ -99,20 +100,38 @@ export function ProjectTeammatesDialog({ project, onClose }: { project: Project;
   const [sharedAction, setSharedAction] = useState<string | null>(null);
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
   const requestId = useRef(0);
+  const liveRefreshId = useRef(0);
   const invitationSequence = useRef(0);
 
-  const refresh = async (signal?: AbortSignal) => {
-    const id = ++requestId.current;
-    setLoading(true);
-    setError(null);
+  const refresh = async (signal?: AbortSignal, { quiet = false }: { quiet?: boolean } = {}) => {
+    const id = quiet ? ++liveRefreshId.current : ++requestId.current;
+    const requestSequence = requestId.current;
+    if (!quiet) {
+      liveRefreshId.current++;
+      setLoading(true);
+      setError(null);
+    }
+    const isCurrent = () => (quiet
+      ? id === liveRefreshId.current && requestSequence === requestId.current
+      : id === requestId.current)
+      && useMingle.getState().activeProjectId === project.id
+      && !signal?.aborted;
     try {
       const result = await projectCollaborationApi.snapshot(project.id, signal);
-      if (id === requestId.current && useMingle.getState().activeProjectId === project.id && !signal?.aborted) setSnapshot(result);
+      if (isCurrent()) {
+        setSnapshot(result);
+        setError(null);
+      }
     } catch (cause) {
-      if (id === requestId.current && useMingle.getState().activeProjectId === project.id && !signal?.aborted) setError(errorMessage(cause));
+      if (isCurrent()) setError(errorMessage(cause));
     } finally {
-      if (id === requestId.current && !signal?.aborted) setLoading(false);
+      if (!quiet && id === requestId.current && !signal?.aborted) setLoading(false);
     }
+  };
+
+  const liveRefresh = useRef<() => void>(() => {});
+  liveRefresh.current = () => {
+    if (useMingle.getState().activeProjectId === project.id) void refresh(undefined, { quiet: true });
   };
 
   useEffect(() => {
@@ -122,6 +141,8 @@ export function ProjectTeammatesDialog({ project, onClose }: { project: Project;
     // `project.id` keys the dialog; use one bounded initial read per dialog.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [project.id]);
+
+  useEffect(() => subscribeToTeamUpdates(project.id, () => liveRefresh.current(), { kinds: ['structure'] }), [project.id]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -176,6 +197,7 @@ export function ProjectTeammatesDialog({ project, onClose }: { project: Project;
       try {
         // Invitations can create the collaboration binding. Read it after the invite rather than
         // assuming the snapshot from opening Teammates already contained a shared project.
+        liveRefreshId.current++;
         const collaborationRequestId = ++requestId.current;
         const latestCollaboration = await projectCollaborationApi.snapshot(project.id);
         if (sequence !== invitationSequence.current || collaborationRequestId !== requestId.current || useMingle.getState().activeProjectId !== project.id) return;
@@ -682,7 +704,8 @@ export function ProjectInviteJoinDialog({ token, onClose, onOpenAccountSettings,
     { id: 'invite', label: 'Invitation' }, { id: 'workspace', label: 'Code location' },
     { id: 'agents', label: 'Your agents' }, { id: 'consent', label: 'Team consent' }, { id: 'success', label: 'Ready' },
   ];
-  const activeStepIndex = Math.max(0, steps.findIndex((item) => item.id === step));
+  const joinStages = steps.slice(0, 4);
+  const activeStepIndex = Math.max(0, joinStages.findIndex((item) => item.id === step));
   const canContinueInvite = inviteState === 'ready' && Boolean(preview && signedIn && emailMatches);
   const canContinueWorkspace = Boolean(selectedProject && inviteState === 'ready' && emailMatches && !workspaceBusy);
   const title = step === 'invite' && preview && inviteState === 'ready' ? `Join ${preview.projectName}?`
@@ -691,11 +714,9 @@ export function ProjectInviteJoinDialog({ token, onClose, onOpenAccountSettings,
 
   return <Modal title={title} description={step === 'success' ? 'Your agents are ready in this project.' : step === 'consent' ? 'Choose which agents teammates may send work to, and review the consent terms.' : 'Review the invitation, choose a checkout, then configure your local agents.'} onClose={onClose} width={700}>
     <div className="pc-join" aria-busy={inviteState === 'loading' || joining || workspaceBusy}>
-      <ol className="pc-join-steps" aria-label="Join project steps">
-        {steps.slice(0, step === 'consent' ? 4 : 3).map((item, index) => <li key={item.id} className={`${index === activeStepIndex ? 'is-current' : ''}${index < activeStepIndex ? ' is-complete' : ''}`} aria-current={index === activeStepIndex ? 'step' : undefined}>
-          <span>{index < activeStepIndex ? <Check size={13} /> : index + 1}</span>{item.label}
-        </li>)}
-      </ol>
+      {step !== 'success' ? <p className="pc-join-progress" aria-label={`Step ${activeStepIndex + 1} of ${joinStages.length}`}>
+        <span>Step {activeStepIndex + 1} of {joinStages.length}</span><strong aria-current="step">{joinStages[activeStepIndex]?.label}</strong>
+      </p> : null}
       {inviteState === 'loading' ? <p className="pc-loading" role="status">Checking invitation and Mingle account…</p> : null}
       {inviteState === 'unavailable' ? <div className="pc-state-card pc-state-card--error"><CircleAlert size={19} /><div><h3>Invitation unavailable</h3><p>This link can’t be verified for the current account. Check which Google account received it, switch accounts, or ask the project owner to send a new invitation.</p>{accountEmail ? <small>Signed in as {accountEmail}</small> : null}<Button size="sm" onClick={() => void switchAccount()}>Switch account</Button><Button size="sm" variant="ghost" onClick={() => setPreviewRetry((value) => value + 1)}>Try again</Button></div></div> : null}
       {inviteState === 'expired' || inviteState === 'revoked' ? <div className="pc-state-card pc-state-card--error"><CircleAlert size={19} /><div><h3>{inviteState === 'revoked' ? 'This invitation was revoked' : 'This invitation has expired'}</h3><p>{previewError || 'Ask the project owner to send a new invitation.'}</p></div></div> : null}
@@ -782,7 +803,7 @@ export function ProjectInviteJoinDialog({ token, onClose, onOpenAccountSettings,
             const status = !info ? 'Not reported by this device' : !info.available ? `Unavailable${info.reason ? ` · ${info.reason}` : ''}`
               : !choices.length ? `Available, but no compatible model is reported${info.reason ? ` · ${info.reason}` : ''}`
                 : `${choices.length} model${choices.length === 1 ? '' : 's'} available${info.reason ? ` · ${info.reason}` : ''}`;
-            return <p key={id} className={info?.available && choices.length ? 'is-available' : ''}><ProviderMark provider={id} size={15} /><strong>{info?.name ?? id}</strong><span>{status}</span></p>;
+            return <p key={id} className={info?.available && choices.length ? 'is-available' : ''}><ProviderMark provider={id} size={15} /><strong>{info?.name ?? id}</strong><span className="pc-provider-availability__status">{status}</span></p>;
           })}
           <Button size="sm" variant="ghost" onClick={onOpenProviderSettings}>Provider settings</Button>
         </div>

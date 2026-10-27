@@ -205,8 +205,8 @@ if (process.argv.includes('--serve')) {
     ]);
     app = createApplication({
       dataDir,
-      port: 4310,
-      webDevPort: 4451,
+      port: Number(process.env.MINGLE_BROWSER_API_PORT) || 4310,
+      webDevPort: Number(process.env.MINGLE_BROWSER_UI_PORT) || 4451,
       webDistDir: null,
       providers: new FakeProviders(),
       log: () => {},

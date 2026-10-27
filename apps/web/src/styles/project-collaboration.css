@@ -101,12 +101,9 @@
 .pc-state-card--success > svg { color: var(--ok); }
 .pc-help { color: var(--warn) !important; }
 
-.pc-join-steps { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 7px; margin: 0 0 2px; padding: 0; list-style: none; }
-.pc-join-steps li { display: flex; align-items: center; gap: 7px; min-width: 0; color: var(--fg-3); font-size: var(--text-xs); }
-.pc-join-steps li > span { display: grid; place-items: center; flex: none; width: 22px; height: 22px; border: 1px solid var(--line); border-radius: 50%; color: var(--fg-3); font-size: var(--text-2xs); font-weight: 600; }
-.pc-join-steps li.is-current { color: var(--fg-0); font-weight: 600; }
-.pc-join-steps li.is-current > span { border-color: var(--accent-line); background: var(--accent-soft); color: var(--accent); }
-.pc-join-steps li.is-complete > span { border-color: color-mix(in srgb, var(--ok) 40%, var(--line)); color: var(--ok); }
+.pc-join-progress { display: flex; align-items: baseline; gap: 8px; min-width: 0; margin: 0; color: var(--fg-2); font-size: var(--text-xs); }
+.pc-join-progress > span { flex: none; color: var(--fg-3); font-size: var(--text-2xs); font-variant-numeric: tabular-nums; text-transform: uppercase; letter-spacing: .04em; }
+.pc-join-progress > strong { min-width: 0; color: var(--fg-1); font-weight: 550; }
 .pc-join-confirm, .pc-workspace-step, .pc-agent-step { display: grid; gap: 13px; min-width: 0; }
 .pc-invitation-details { display: grid; gap: 1px; margin: 0; padding: 5px 11px; border: 1px solid var(--line-soft); border-radius: var(--radius-md); background: var(--bg-panel); }
 .pc-invitation-details > div { display: grid; grid-template-columns: minmax(100px, .34fr) minmax(0, 1fr); gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--line-soft); }
@@ -139,8 +136,8 @@
 .pc-provider-availability > p { display: grid; grid-template-columns: 18px minmax(72px, 110px) minmax(0, 1fr); align-items: center; gap: 7px; min-width: 0; margin: 0; color: var(--fg-3); font-size: var(--text-2xs); }
 .pc-provider-availability > p > svg { color: var(--fg-3); }
 .pc-provider-availability > p > strong { color: var(--fg-2); font-size: var(--text-xs); font-weight: 550; }
-.pc-provider-availability > p > span { min-width: 0; overflow-wrap: anywhere; }
-.pc-provider-availability > p.is-available > span { color: var(--ok); }
+.pc-provider-availability__status { min-width: 0; overflow-wrap: anywhere; }
+.pc-provider-availability > p.is-available > .pc-provider-availability__status { color: var(--ok); }
 .pc-provider-availability > .btn { justify-self: start; margin-top: 3px; }
 .pc-agent-card { display: grid; gap: 8px; min-width: 0; margin: 0; padding: 10px 11px; border: 1px solid var(--line-soft); border-radius: var(--radius-md); background: var(--bg-panel); }
 .pc-agent-card > legend { padding: 0 4px; color: var(--fg-0); font-size: var(--text-xs); font-weight: 600; }
@@ -165,12 +162,11 @@
   .pc-agent-row .badge { margin-left: 3px; }
   .pc-join-actions { align-items: flex-start; flex-direction: column; }
   .pc-join-actions .btn { align-self: flex-end; }
-  .pc-join-steps li { align-items: flex-start; flex-direction: column; gap: 4px; font-size: var(--text-2xs); }
   .pc-invitation-details > div { grid-template-columns: minmax(0, 1fr); gap: 4px; }
   .pc-directory-path, .pc-local-folder-form { grid-template-columns: minmax(0, 1fr); }
   .pc-directory-path > .btn, .pc-local-folder-form > .btn { justify-self: start; }
   .pc-provider-availability > p { grid-template-columns: 18px minmax(0, 1fr); }
-  .pc-provider-availability > p > span { grid-column: 2; }
+  .pc-provider-availability > p > .pc-provider-availability__status { grid-column: 2; }
   .pc-delivery { align-items: flex-start; flex-wrap: wrap; }
   .pc-delivery > span { flex-basis: calc(100% - 28px); }
   .pc-delivery > .btn { margin-left: 22px; }
@@ -233,13 +229,7 @@
 .pc-members, .pc-invitations { padding-top: 9px; }
 .pc-no-run-note { padding-top: 3px; border-top: 1px solid var(--line-soft); }
 
-.pc-join { gap: 16px; padding: 2px 5px 2px 0; }
-.pc-join-steps { position: sticky; z-index: 2; top: 0; gap: 0; margin: -2px 0 0; padding: 9px 2px; border-bottom: 1px solid var(--line-soft); background: var(--bg-raised); }
-.pc-join-steps li { position: relative; gap: 8px; padding-right: 8px; }
-.pc-join-steps li:not(:last-child)::after { content: ''; position: absolute; top: 10px; left: 31px; right: 8px; height: 1px; background: var(--line-soft); transform: translateX(16px); }
-.pc-join-steps li > span { width: 23px; height: 23px; background: var(--bg-panel); }
-.pc-join-steps li.is-current > span { box-shadow: 0 0 0 3px var(--accent-soft); }
-.pc-join-steps li.is-complete > span { background: var(--ok-soft); }
+.pc-join { gap: 14px; padding: 2px 5px 2px 0; }
 .pc-join-summary { padding: 14px; border-color: var(--line); background: linear-gradient(135deg, var(--bg-surface), var(--bg-panel)); }
 .pc-join-mark { width: 40px; height: 40px; }
 .pc-join-form { gap: 14px; }
@@ -258,7 +248,7 @@
 .pc-provider-availability { gap: 5px; padding: 10px; background: var(--bg-panel); }
 .pc-provider-availability > p { min-height: 31px; padding: 4px 6px; border-radius: var(--radius-xs); }
 .pc-provider-availability > p.is-available { background: var(--ok-soft); }
-.pc-provider-availability > p.is-available > span { color: var(--fg-2); }
+.pc-provider-availability > p.is-available > .pc-provider-availability__status { color: var(--fg-2); }
 .pc-agent-card { padding: 12px; border-color: var(--line); background: var(--bg-panel); }
 .pc-agent-card > legend { font-size: var(--text-sm); }
 .pc-agent-config { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -266,7 +256,7 @@
 .pc-policy-note svg { flex: none; }
 .pc-state-card { padding: 16px; box-shadow: var(--shadow-card); }
 .pc-state-card--success { background: color-mix(in srgb, var(--ok-soft) 34%, var(--bg-surface)); }
-.pc-join .pc-join-actions { position: sticky; bottom: -2px; z-index: 1; padding: 9px 0 3px; border-top: 1px solid var(--line-soft); background: var(--bg-raised); }
+.pc-join .pc-join-actions { position: static; padding: 8px 0 0; border-top: 1px solid var(--line-soft); background: transparent; }
 
 @keyframes pc-enter { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: translateY(0); } }
 .pc-delivery, .pc-join-confirm, .pc-workspace-step, .pc-agent-step, .pc-state-card { animation: pc-enter var(--motion-ui) var(--ease-out) both; }
@@ -278,12 +268,8 @@
   .pc-agent-list { max-height: 260px; }
   .pc-agent-config { grid-template-columns: minmax(0, 1fr); }
   .pc-join { padding-right: 0; }
-  .pc-join-steps li { flex-direction: row; align-items: center; gap: 5px; }
-  .pc-join-steps li:not(:last-child)::after { left: 24px; right: 0; transform: translateX(8px); }
-  .pc-join-steps li > span { width: 21px; height: 21px; }
   .pc-source-tabs { width: 100%; }
   .pc-source-tabs button { flex: 1; }
-  .pc-join .pc-join-actions { position: static; }
 }
 @media (prefers-reduced-motion: reduce) {
   .pc-delivery, .pc-join-confirm, .pc-workspace-step, .pc-agent-step, .pc-state-card,

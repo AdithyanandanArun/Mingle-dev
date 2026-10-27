@@ -7,11 +7,12 @@
  */
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
+import { createServer } from 'node:net';
 import { spawn } from 'node:child_process';
-import { createWriteStream, existsSync, mkdirSync } from 'node:fs';
+import { createWriteStream, existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
@@ -25,7 +26,16 @@ const outputDir = path.join(os.tmpdir(), `mingle-project-collaboration-acceptanc
 const log = createWriteStream(path.join(outputDir, 'browser-acceptance.log'), { flags: 'w' });
 const screenshots = {
   invite: path.join(outputDir, 'teammates-invite.png'),
+  shareNeeded: path.join(outputDir, 'share-needed-desktop.png'),
+  shareNeededCard: path.join(outputDir, 'share-needed-card.png'),
+  shareNeededNarrow: path.join(outputDir, 'share-needed-570px.png'),
+  shareConflict: path.join(outputDir, 'share-permission-conflict.png'),
+  joinInvitation: path.join(outputDir, 'join-invitation.png'),
+  joinWorkspace: path.join(outputDir, 'join-workspace.png'),
   join: path.join(outputDir, 'join-project-desktop.png'),
+  joinConsent: path.join(outputDir, 'join-consent.png'),
+  joinConsentNarrow: path.join(outputDir, 'join-consent-390px.png'),
+  joinSuccess: path.join(outputDir, 'join-success.png'),
   narrow: path.join(outputDir, 'join-project-narrow.png'),
   memberDesktop: path.join(outputDir, 'member-shared-group.png'),
   member900: path.join(outputDir, 'member-shared-group-900.png'),
@@ -51,6 +61,11 @@ let projectId = '';
 let joinedProjectId = '';
 let memberTeamSessionCreated = false;
 let memberGroupResultState = 'in-progress';
+let memberConsentPermission = 'supervised';
+let memberConsentSettingsVersion = 1;
+let memberConsentDisclaimerVersion = '2026-10-24.1';
+let memberTeamSettingsVersion = 1;
+let changeAccountDuringTargetStructureOnce = false;
 let localSessions = [];
 let sourceBootstrap;
 let latestBootstrapFixture;
@@ -86,8 +101,8 @@ function note(text) {
   log.write(`${text}\n`);
 }
 
-function start(command, args, { cwd = root, name } = {}) {
-  const child = spawn(command, args, { cwd, stdio: ['ignore', 'pipe', 'pipe'], env: process.env });
+function start(command, args, { cwd = root, name, env = {} } = {}) {
+  const child = spawn(command, args, { cwd, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, ...env } });
   children.push({ child, name });
   for (const [streamName, stream] of [['stdout', child.stdout], ['stderr', child.stderr]]) {
     stream.setEncoding('utf8');
@@ -116,12 +131,112 @@ async function waitFor(predicate, label, timeoutMs = 15_000) {
   throw new Error(`Timed out waiting for ${label}${lastError ? `: ${lastError.message}` : ''}`);
 }
 
+async function ephemeralPort() {
+  const probe = createServer();
+  probe.listen(0, '127.0.0.1');
+  await new Promise((resolve, reject) => { probe.once('listening', resolve); probe.once('error', reject); });
+  const port = probe.address().port;
+  await new Promise((resolve, reject) => probe.close((error) => error ? reject(error) : resolve()));
+  return port;
+}
+
+async function assertTeamSettingsGeometry(dialog, { setupNeeded = false } = {}) {
+  const settings = dialog.locator('.team-orch-settings');
+  const geometry = await settings.evaluate((element) => {
+    const rect = (selector) => {
+      const node = element.querySelector(selector);
+      if (!node) return null;
+      const { x, y, width, height, right, bottom } = node.getBoundingClientRect();
+      return { x, y, width, height, right, bottom };
+    };
+    const body = rect('.team-orch-settings__layout');
+    const session = rect('.team-orch-settings__session');
+    const controls = rect('.team-orch-settings__controls');
+    const label = rect('.team-orch-settings__field > strong');
+    const segmented = rect('.team-orch-settings__field .seg');
+    const parent = element.getBoundingClientRect();
+    const style = getComputedStyle(element);
+    const containerContentWidth = element.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
+    return { viewport: innerWidth, settingsWidth: parent.width, containerContentWidth, body, session, controls, label, segmented,
+      sessionText: element.querySelector('.team-orch-settings__session')?.textContent?.trim() ?? '' };
+  });
+  assert.ok(geometry.session && geometry.controls, `session and permission controls are both visible: ${JSON.stringify(geometry)}`);
+  assert.ok(geometry.body && geometry.body.width <= geometry.settingsWidth + 1, `settings content fits its panel: ${JSON.stringify(geometry)}`);
+  assert.ok(geometry.controls.y >= geometry.session.bottom, `permissions follow the full-width session row: ${JSON.stringify(geometry)}`);
+  assert.ok(Math.abs(geometry.session.x - geometry.controls.x) <= 2, `session and permissions share one vertical alignment: ${JSON.stringify(geometry)}`);
+  assert.ok(Math.abs(geometry.session.width - geometry.controls.width) <= 2, `permission controls use the full available width: ${JSON.stringify(geometry)}`);
+  assert.ok(geometry.label && geometry.segmented, `permission title and choices are visible: ${JSON.stringify(geometry)}`);
+  if (geometry.containerContentWidth > 420) {
+    assert.ok(Math.abs((geometry.label.y + geometry.label.height / 2) - (geometry.segmented.y + geometry.segmented.height / 2)) <= 2, `permission title and segmented control share a row: ${JSON.stringify(geometry)}`);
+  } else {
+    assert.ok(geometry.segmented.y >= geometry.label.bottom, `the permission choice stacks only when the panel itself is narrow: ${JSON.stringify(geometry)}`);
+  }
+  if (setupNeeded) {
+    assert.match(geometry.sessionText, /selected session on this device/);
+    assert.equal(await dialog.getByRole('button', { name: 'Share current session', exact: true }).isEnabled(), true, 'the share-needed action is visible and enabled');
+  }
+  return geometry;
+}
+
+async function assertAgentRowGeometry(container, rowSelector, copySelector) {
+  const rows = container.locator(rowSelector);
+  const geometry = await rows.evaluateAll((elements, textSelector) => elements.map((element) => {
+    const rect = (selector) => {
+      const node = element.querySelector(selector);
+      if (!node) return null;
+      const { x, y, width, height, right, bottom } = node.getBoundingClientRect();
+      return { x, y, width, height, right, bottom };
+    };
+    return { mark: rect('.pmark'), copy: rect(textSelector), status: rect('.sdot') };
+  }), copySelector);
+  assert.ok(geometry.length, `agent rows exist for geometry check: ${rowSelector}`);
+  for (const row of geometry) {
+    assert.ok(row.mark && row.copy && row.status, `provider mark, copy and status dot render: ${JSON.stringify(row)}`);
+    assert.ok(row.mark.width <= 24 && row.mark.height <= 24, `provider mark remains compact: ${JSON.stringify(row)}`);
+    assert.ok(row.status.width <= 24 && row.status.height <= 24, `status dot remains compact: ${JSON.stringify(row)}`);
+    const gap = row.copy.x - row.mark.right;
+    assert.ok(gap >= 0 && gap <= 14, `agent text starts immediately after the provider mark: ${JSON.stringify({ ...row, gap })}`);
+  }
+  return geometry;
+}
+
+async function assertProviderAvailabilityGeometry(dialog) {
+  const geometry = await dialog.locator('.pc-provider-availability > p').evaluateAll((rows) => rows.map((row) => {
+    const rect = (selector) => {
+      const node = row.querySelector(selector);
+      if (!node) return null;
+      const { x, y, width, height, right, bottom } = node.getBoundingClientRect();
+      return { x, y, width, height, right, bottom };
+    };
+    return { mark: rect('.pmark'), name: rect('strong'), status: rect('.pc-provider-availability__status') };
+  }));
+  assert.ok(geometry.length, 'provider availability rows render');
+  for (const row of geometry) {
+    assert.ok(row.mark && row.name && row.status, `provider mark, name and availability are present: ${JSON.stringify(row)}`);
+    assert.ok(row.mark.width <= 24 && row.mark.height <= 24, `provider availability mark remains compact: ${JSON.stringify(row)}`);
+    assert.ok(row.name.x >= row.mark.right && row.name.x - row.mark.right <= 14, `provider name starts after its icon: ${JSON.stringify(row)}`);
+    assert.ok(row.status.x >= row.mark.right, `availability text does not overlap its icon: ${JSON.stringify(row)}`);
+  }
+  return geometry;
+}
+
+async function assertSuccessIconGeometry(dialog) {
+  const geometry = await dialog.locator('.pc-state-card--success').evaluate((element) => {
+    const icon = element.querySelector('svg')?.getBoundingClientRect();
+    const copy = element.querySelector('div')?.getBoundingClientRect();
+    return icon && copy ? { icon: { x: icon.x, y: icon.y, width: icon.width, height: icon.height, right: icon.right }, copy: { x: copy.x, y: copy.y } } : null;
+  });
+  assert.ok(geometry && geometry.icon.width <= 24 && geometry.icon.height <= 24, `success icon remains compact: ${JSON.stringify(geometry)}`);
+  assert.ok(geometry.copy.x >= geometry.icon.right && geometry.copy.x - geometry.icon.right <= 18, `success copy follows its icon cleanly: ${JSON.stringify(geometry)}`);
+}
+
 async function test(label, run) {
   try {
     await run();
     passed++;
     note(`PASS ${label}`);
   } catch (cause) {
+    await page?.setViewportSize({ width: 1280, height: 900 }).catch(() => {});
     const message = cause instanceof Error ? cause.stack ?? cause.message : String(cause);
     failures.push({ label, message });
     note(`FAIL ${label}: ${message}`);
@@ -201,10 +316,10 @@ function teamStructureSnapshot(id = projectId) {
     const now = new Date().toISOString();
     return {
       projectId: id, teamId: TEAM_ID, sharedProjectId: SHARED_PROJECT_ID, enabled: true,
-      settings: { leaderOrchestration: true, permissionLevel: 'supervised', orchestratorAgentId: 'example-host-agent', fallbackAgentIds: [], version: 1, updatedAt: now, updatedByAccountId: LEADER_ID },
+      settings: { leaderOrchestration: true, permissionLevel: 'supervised', orchestratorAgentId: 'example-host-agent', fallbackAgentIds: [], version: memberTeamSettingsVersion, updatedAt: now, updatedByAccountId: LEADER_ID },
       host: { deviceId: 'example-leader-device', accountId: LEADER_ID, displayName: 'Example leader device', online: true, isThisDevice: false },
       canEdit: false,
-      myConsent: { teamId: TEAM_ID, sharedProjectId: SHARED_PROJECT_ID, accountId: 'example-invitee-account', deviceId: 'example-invitee-device', agentIds: ['example-invited-agent-1'], permissionLevel: 'supervised', settingsVersion: 1, disclaimerVersion: '1', state: 'granted', acceptedAt: now, updatedAt: now },
+      myConsent: { teamId: TEAM_ID, sharedProjectId: SHARED_PROJECT_ID, accountId: 'example-invitee-account', deviceId: 'example-invitee-device', agentIds: ['example-invited-agent-1'], permissionLevel: memberConsentPermission, settingsVersion: memberConsentSettingsVersion, disclaimerVersion: memberConsentDisclaimerVersion, state: 'granted', acceptedAt: now, updatedAt: now },
       members: [
         { agentId: 'example-host-agent', name: 'Example host lead', handle: 'example-host-lead', ownerAccountId: LEADER_ID, ownerDisplayName: 'Example leader', deviceId: 'example-leader-device', deviceName: 'Example leader device', local: false, sessionId: null, provider: 'claude', model: 'example-claude-model', effort: 'high', role: 'orchestrator', fallbackRank: null, state: 'working', consent: 'granted', currentTask: 'Review the shared order total assignment', lastActivityAt: now, failure: null },
         ...joinedSessions.map((session, index) => ({ agentId: `example-invited-agent-${index + 1}`, name: session.name, handle: `example-invited-${index + 1}`, ownerAccountId: 'example-invitee-account', ownerDisplayName: 'Example invitee', deviceId: 'example-invitee-device', deviceName: 'Example member device', local: true, sessionId: session.id, provider: session.provider, model: session.model, effort: session.effort, role: 'worker', fallbackRank: null, state: 'idle', consent: 'granted', currentTask: null, lastActivityAt: null, failure: null })),
@@ -355,11 +470,21 @@ async function main() {
   const { chromium } = serverRequire('playwright');
   const executablePath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH || chromium.executablePath();
   if (!existsSync(executablePath)) throw new Error(`Chromium executable not found at ${executablePath}. Set PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH to an existing browser; this script never installs one.`);
-  const uiUrl = 'http://127.0.0.1:4451/';
-  const serverUrl = 'http://127.0.0.1:4310';
+  const [apiPort, uiPort] = await Promise.all([ephemeralPort(), ephemeralPort()]);
+  const uiUrl = `http://127.0.0.1:${uiPort}/`;
+  const serverUrl = `http://127.0.0.1:${apiPort}`;
+  const viteConfig = path.join(outputDir, 'vite.config.mjs');
+  writeFileSync(viteConfig, `
+    import { mergeConfig } from ${JSON.stringify(pathToFileURL(viteModule).href)};
+    import base from ${JSON.stringify(pathToFileURL(path.join(root, 'apps/web/vite.config.ts')).href)};
+    export default mergeConfig(base, { server: { port: ${uiPort}, strictPort: true, proxy: {
+      '/api': { target: ${JSON.stringify(serverUrl)}, changeOrigin: false },
+      '/ws': { target: ${JSON.stringify(serverUrl.replace('http', 'ws'))}, ws: true, changeOrigin: false },
+    } } });
+  `);
 
-  start(process.execPath, [tsxCli, serverScript, '--serve'], { name: 'local-fixture-runtime' });
-  start(process.execPath, [viteCli, '--host', '127.0.0.1', '--port', '4451', '--strictPort'], { cwd: path.join(root, 'apps/web'), name: 'vite' });
+  start(process.execPath, [tsxCli, serverScript, '--serve'], { name: 'local-fixture-runtime', env: { MINGLE_BROWSER_API_PORT: String(apiPort), MINGLE_BROWSER_UI_PORT: String(uiPort) } });
+  start(process.execPath, [viteCli, '--host', '127.0.0.1', '--port', String(uiPort), '--strictPort', '--config', viteConfig], { cwd: path.join(root, 'apps/web'), name: 'vite' });
   await waitFor(() => serverReady, 'disposable FakeProviders Mingle runtime');
   await waitFor(async () => (await fetch(uiUrl, { signal: AbortSignal.timeout(500) })).ok, 'Vite UI server');
 
@@ -456,7 +581,21 @@ async function main() {
     }
     if (/^\/api\/projects\/[^/]+\/team-structure$/.test(url.pathname) && method === 'GET') {
       teamStructureReads++;
-      await jsonResponse(route, 200, teamStructureSnapshot(decodeURIComponent(url.pathname.split('/')[3])));
+      const requestedProjectId = decodeURIComponent(url.pathname.split('/')[3]);
+      const structure = teamStructureSnapshot(requestedProjectId);
+      if (changeAccountDuringTargetStructureOnce && requestedProjectId === joinedProjectId) {
+        changeAccountDuringTargetStructureOnce = false;
+        accountMode = 'wrong-account';
+      }
+      await jsonResponse(route, 200, structure);
+      return;
+    }
+    if (/^\/api\/projects\/[^/]+\/team-consent$/.test(url.pathname) && method === 'POST') {
+      memberConsentPermission = body.permissionLevel;
+      memberConsentSettingsVersion = body.settingsVersion;
+      memberTeamSettingsVersion = body.settingsVersion;
+      memberConsentDisclaimerVersion = body.disclaimerVersion;
+      await jsonResponse(route, 200, { ok: true, exampleFixture: true });
       return;
     }
     if (/^\/api\/projects\/[^/]+\/team-orchestration\/share-session$/.test(url.pathname) && method === 'POST') {
@@ -654,6 +793,28 @@ async function main() {
     await dialog.locator('.pc-agent-row').filter({ hasText: 'Example local Codex' }).waitFor();
     await waitFor(async () => await dialog.locator('.pc-agent-row').filter({ hasText: 'Example local Codex' }).count() === 1, 'leader-owned session de-duplication');
     assert.equal(await dialog.locator('.pc-agent-row').filter({ hasText: 'Example local Codex' }).count(), 1, 'the leader-owned published session appears once in the local section, not again as a remote agent');
+    try {
+      await assertAgentRowGeometry(dialog, '.pc-agent-row:not(.pc-agent-row--remote)', '.pc-agent-copy');
+      await page.setViewportSize({ width: 570, height: 860 });
+      await assertAgentRowGeometry(dialog, '.pc-agent-row:not(.pc-agent-row--remote)', '.pc-agent-copy');
+    } finally { await page.setViewportSize({ width: 1280, height: 900 }); }
+
+    const liveOwnerId = 'example-live-roster-owner';
+    collaborationSnapshot.members.push({ accountId: liveOwnerId, email: 'live-owner@example.invalid', displayName: 'Example live owner', role: 'member', status: 'active' });
+    collaborationSnapshot.agents.push({ id: 'example-live-roster-agent', name: 'Example live inbound agent', accountId: liveOwnerId, deviceId: 'example-live-roster-device', deviceName: 'Example live device', projectId, sessionId: null, provider: 'claude', model: 'example-claude-model', state: 'idle' });
+    const readsBeforeLiveStructure = collaborationReads;
+    await dialog.getByLabel('Teammate email', { exact: true }).fill('live-update-preserves-form@example.invalid');
+    await page.evaluate(async (id) => {
+      const { dispatchTeamUpdate } = await import('/src/lib/team-live-updates.ts');
+      dispatchTeamUpdate({ type: 'team.structure.updated', projectId: id });
+    }, projectId);
+    await waitFor(() => collaborationReads > readsBeforeLiveStructure, 'project collaboration snapshot refresh after the normal structure event');
+    await dialog.locator('.pc-agent-row--remote').filter({ hasText: 'Example live inbound agent' }).waitFor();
+    assert.equal(await dialog.getByLabel('Teammate email', { exact: true }).inputValue(), 'live-update-preserves-form@example.invalid', 'quiet live refresh preserves invitation form state');
+    assert.equal(await dialog.locator('.pc-dialog').getAttribute('aria-busy'), 'false', 'live refresh does not replace the dialog with its loading state');
+    collaborationSnapshot.members = collaborationSnapshot.members.filter((member) => member.accountId !== liveOwnerId);
+    collaborationSnapshot.agents = collaborationSnapshot.agents.filter((agent) => agent.id !== 'example-live-roster-agent');
+    await dialog.getByLabel('Teammate email', { exact: true }).fill('');
     const teammate = dialog.locator('.pc-agent-row--remote').filter({ hasText: 'Example teammate' });
     await teammate.getByRole('button').click();
     await dialog.getByRole('button', { name: 'Open recovery controls' }).waitFor();
@@ -713,7 +874,7 @@ async function main() {
     await page.locator('.sitem').filter({ hasText: 'Example local agent 2' }).click();
     const dialog = await ensureTeammatesDialog();
     const onboarding = dialog.locator('.team-orch-settings');
-    await onboarding.getByRole('alert').filter({ hasText: /Full access requires every teammate/ }).waitFor();
+    await onboarding.locator('.team-orch-settings__field > p').filter({ hasText: /Raising to Full access requires every teammate/ }).waitFor();
     const selectedSessionId = await page.evaluate((id) => JSON.parse(localStorage.getItem('relay.ui.v2') ?? '{}').sessionByProject?.[id], projectId);
     const invitationsBefore = requests.filter((item) => item.method === 'POST' && item.pathname === `/api/projects/${projectId}/collaboration/invitations`).length;
     const shareCallsBefore = requests.filter((item) => item.method === 'POST' && item.pathname === `/api/projects/${projectId}/team-orchestration/share-session`).length;
@@ -734,6 +895,35 @@ async function main() {
     sharedTeamSession = null;
   });
 
+  await test('share-needed settings align the active session and permission card at desktop and narrow widths', async () => {
+    orchestrationEnabled = true;
+    orchestrationPermission = 'full-access';
+    orchestrationVersion = 34;
+    sharedTeamSession = null;
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    await page.getByRole('button', { name: 'Add teammates', exact: true }).waitFor();
+    await page.locator('.sitem').filter({ hasText: 'Example local agent 2' }).click();
+    const dialog = await ensureTeammatesDialog();
+    const onboarding = dialog.locator('.team-orch-settings');
+    assert.equal(await onboarding.getByRole('button', { name: 'Share current session', exact: true }).isEnabled(), true);
+    const desktop = await assertTeamSettingsGeometry(dialog, { setupNeeded: true });
+    await page.screenshot({ path: screenshots.shareNeeded, fullPage: false });
+    await onboarding.screenshot({ path: screenshots.shareNeededCard });
+    assert.ok(desktop.controls.y >= desktop.session.bottom, 'permission controls follow the selected session in the same compact flow');
+
+    try {
+      await page.setViewportSize({ width: 570, height: 860 });
+      const narrow = await assertTeamSettingsGeometry(dialog, { setupNeeded: true });
+      assert.ok(narrow.settingsWidth <= 530, `settings panel remains within the narrow viewport: ${JSON.stringify(narrow)}`);
+      await page.screenshot({ path: screenshots.shareNeededNarrow, fullPage: false });
+    } finally { await page.setViewportSize({ width: 1280, height: 900 }); }
+
+    orchestrationEnabled = false;
+    orchestrationPermission = 'supervised';
+    orchestrationVersion = 3;
+    sharedTeamSession = null;
+  });
+
   await test('an established shared session takes precedence and is never rebound by an invitation', async () => {
     orchestrationEnabled = true;
     orchestrationPermission = 'supervised';
@@ -746,6 +936,12 @@ async function main() {
     const summary = dialog.locator('.team-orch-settings__session');
     await summary.getByText('Example local Codex', { exact: true }).waitFor();
     await summary.getByText('already shared', { exact: false }).waitFor();
+    await assertTeamSettingsGeometry(dialog);
+    try {
+      await page.setViewportSize({ width: 570, height: 860 });
+      await assertTeamSettingsGeometry(dialog);
+    } finally { await page.setViewportSize({ width: 1280, height: 900 }); }
+    await page.screenshot({ path: path.join(outputDir, 'canonical-shared-settings.png'), fullPage: false });
     assert.equal(await dialog.getByRole('button', { name: 'Share current session', exact: true }).count(), 0, 'a bound canonical session has no rebind action');
     const shareCount = requests.filter((item) => item.method === 'POST' && item.pathname === `/api/projects/${projectId}/team-orchestration/share-session`).length;
     await dialog.getByLabel('Teammate email', { exact: true }).fill('existing-session@example.invalid');
@@ -793,6 +989,8 @@ async function main() {
     await error.waitFor();
     assert.match(await error.innerText(), /Refresh team settings and try again after resolving the issue/);
     assert.doesNotMatch(await error.innerText(), /permissions changed elsewhere/i, 'a non-version conflict is not mislabeled as a permission edit');
+    await assertTeamSettingsGeometry(dialog);
+    await page.screenshot({ path: screenshots.shareConflict, fullPage: false });
     sharedTeamSession = null;
     orchestrationEnabled = false;
     orchestrationPermission = 'supervised';
@@ -903,13 +1101,28 @@ async function main() {
     await page.getByRole('button', { name: 'Continue with Google' }).click();
     await page.getByText('Example Mingle project', { exact: true }).waitFor();
     const invitation = page.getByRole('dialog', { name: 'Join Example Mingle project?' });
+    await invitation.locator('.pc-join-progress').filter({ hasText: 'Step 1 of 4' }).waitFor();
+    await page.screenshot({ path: screenshots.joinInvitation, fullPage: false });
     await invitation.getByRole('button', { name: 'Join project', exact: true }).click();
     const workspace = page.getByRole('dialog', { name: 'Where should we put the code?' });
+    await workspace.locator('.pc-join-progress').filter({ hasText: 'Step 2 of 4' }).waitFor();
     await workspace.getByRole('button', { name: 'I already have a checkout', exact: true }).click();
     await workspace.getByRole('radio', { name: /Example local checkout/ }).click();
+    await page.screenshot({ path: screenshots.joinWorkspace, fullPage: false });
     await workspace.getByRole('button', { name: 'Use this checkout', exact: true }).click();
     const agents = page.getByRole('dialog', { name: 'Add your agents' });
     await agents.getByRole('heading', { name: 'Choose one or more local agents' }).waitFor();
+    await agents.locator('.pc-join-progress').filter({ hasText: 'Step 3 of 4' }).waitFor();
+    const actionStyle = await agents.locator('.pc-join-actions').evaluate((element) => ({
+      position: getComputedStyle(element).position, background: getComputedStyle(element).backgroundColor,
+    }));
+    assert.equal(actionStyle.position, 'static', 'wizard actions remain in document flow instead of sticking over content');
+    assert.equal(actionStyle.background, 'rgba(0, 0, 0, 0)', 'wizard actions have no opaque gray strip');
+    await assertProviderAvailabilityGeometry(agents);
+    try {
+      await page.setViewportSize({ width: 390, height: 844 });
+      await assertProviderAvailabilityGeometry(agents);
+    } finally { await page.setViewportSize({ width: 1280, height: 900 }); }
     const providerForm = agents.locator('.pc-agent-config select');
     assert.equal(await providerForm.nth(0).inputValue(), 'codex');
     assert.equal(await providerForm.nth(1).inputValue(), 'example-codex-model');
@@ -920,10 +1133,22 @@ async function main() {
     await page.screenshot({ path: screenshots.join, fullPage: true });
     await agents.getByRole('button', { name: 'Join project', exact: true }).click();
     const joinFlow = page.locator('.pc-join');
+    await joinFlow.locator('.pc-join-progress').filter({ hasText: 'Step 4 of 4' }).waitFor();
     await joinFlow.getByText('Please review before agreeing').waitFor();
+    await page.screenshot({ path: screenshots.joinConsent, fullPage: false });
+    await assertAgentRowGeometry(joinFlow, '.team-consent__agent', '.team-consent__copy');
     assert.equal(await joinFlow.locator('.team-consent__agent').filter({ hasText: 'Example invited agent 1' }).locator('input[type=checkbox]').isChecked(), true, 'the newly configured local agent is selected for explicit review before sharing');
+    assert.equal(await joinFlow.locator('.team-consent__level select').inputValue(), 'supervised', 'a new owner starts with the supervised default and chooses any elevation intentionally');
+    try {
+      await page.setViewportSize({ width: 390, height: 844 });
+      await assertAgentRowGeometry(joinFlow, '.team-consent__agent', '.team-consent__copy');
+      await page.screenshot({ path: screenshots.joinConsentNarrow, fullPage: false });
+    } finally { await page.setViewportSize({ width: 1280, height: 900 }); }
     await joinFlow.getByRole('button', { name: 'Skip for now', exact: true }).click();
     await page.getByRole('heading', { name: 'You’re in' }).waitFor();
+    const successDialog = page.getByRole('dialog', { name: 'Project joined' });
+    await assertSuccessIconGeometry(successDialog);
+    await page.screenshot({ path: screenshots.joinSuccess, fullPage: false });
     const joins = requests.filter((item) => item.method === 'POST' && item.pathname === '/api/project-invitations/join');
     assert.equal(joins.length, beforeJoin + 1, 'only the explicit Join project action accepts the invite');
     assert.deepEqual(joins.at(-1)?.body, { token: TOKEN, localProjectId: projectId, agents: [{ provider: 'codex', model: 'example-codex-model', effort: 'medium', policy: 'supervised' }] });
@@ -957,7 +1182,11 @@ async function main() {
   await test('warm desktop invitation opens as an overlay and requires an explicit clone destination', async () => {
     accountMode = 'signed-in';
     previewMode = 'valid';
-    await page.getByRole('button', { name: 'Close dialog', exact: true }).click();
+    memberConsentPermission = 'full-access';
+    memberConsentSettingsVersion = 11;
+    memberTeamSettingsVersion = 19;
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    await page.getByRole('button', { name: 'Add teammates', exact: true }).waitFor();
     await page.getByRole('button', { name: 'Workspace', exact: true }).click();
     const sessionRow = page.locator('.sitem').first();
     if (await sessionRow.count()) await sessionRow.click();
@@ -971,6 +1200,7 @@ async function main() {
     await dialog.getByRole('button', { name: 'Clone repository', exact: true }).click();
     await dialog.getByLabel('Repository destination parent folder').fill('/example/checkouts');
     await page.setViewportSize({ width: 390, height: 844 });
+    await dialog.locator('.pc-join-progress').filter({ hasText: 'Step 2 of 4' }).waitFor();
     await page.screenshot({ path: screenshots.narrow, fullPage: true });
     const geometry = await dialog.evaluate((element) => ({
       viewport: window.innerWidth, documentWidth: document.documentElement.scrollWidth,
@@ -978,17 +1208,44 @@ async function main() {
     }));
     assert.ok(geometry.documentWidth <= geometry.viewport, `narrow invite layout does not overflow: ${JSON.stringify(geometry)}`);
     assert.ok(geometry.modalRight <= geometry.viewport + 1, `dialog remains in the narrow viewport: ${JSON.stringify(geometry)}`);
+    const narrowActions = await dialog.locator('.pc-join-actions').evaluate((element) => getComputedStyle(element).position);
+    assert.equal(narrowActions, 'static', 'narrow wizard actions do not overlap the acceptance content');
     assert.equal(requests.some((item) => item.method === 'POST' && item.pathname === '/api/projects/clone'), false, 'opening an invitation never clones by itself');
     await dialog.getByRole('button', { name: 'Clone and continue', exact: true }).click();
     await waitFor(() => requests.some((item) => item.method === 'POST' && item.pathname === '/api/projects/clone'), 'explicit clone request');
     assert.deepEqual(requests.findLast((item) => item.method === 'POST' && item.pathname === '/api/projects/clone')?.body, { url: 'https://example.invalid/acme/mingle-demo.git', name: 'mingle-demo', parentPath: '/example/checkouts' });
     const agents = page.getByRole('dialog', { name: 'Add your agents' });
+    changeAccountDuringTargetStructureOnce = true;
     await agents.getByRole('button', { name: 'Join project', exact: true }).click();
     const joinFlow = page.locator('.pc-join');
     await joinFlow.getByText('Please review before agreeing').waitFor();
-    await joinFlow.getByRole('button', { name: 'Skip for now', exact: true }).click();
+    await joinFlow.getByRole('alert').filter({ hasText: /account changed while loading consent/ }).waitFor();
+    assert.equal(await joinFlow.getByRole('button', { name: /I agree — share selected agents/ }).isDisabled(), true, 'a response fetched across an account switch cannot enable consent');
+    assert.equal(requests.some((item) => item.method === 'POST' && item.pathname === `/api/projects/${joinedProjectId}/team-consent`), false, 'the account-fenced snapshot cannot submit consent');
+    accountMode = 'signed-in';
+    await joinFlow.getByRole('button', { name: 'Refresh team settings', exact: true }).click();
+    await waitFor(async () => await joinFlow.locator('.team-consent__level select').inputValue() === 'full-access', 'load the valid existing full-access consent');
+    assert.equal(await joinFlow.locator('.team-consent__level select').inputValue(), 'full-access', 'a valid existing full-access consent is retained while adding agents');
+    await assertAgentRowGeometry(joinFlow, '.team-consent__agent', '.team-consent__copy');
+    const activeProjectId = await page.evaluate(() => JSON.parse(localStorage.getItem('relay.ui.v2') ?? '{}').activeProjectId);
+    assert.notEqual(activeProjectId, joinedProjectId, 'consent is loaded for the joined project without switching away from the current workspace');
+    const exactProjectStructureIndex = requests.findLastIndex((item) => item.method === 'GET' && item.pathname === `/api/projects/${joinedProjectId}/team-structure`);
+    assert.ok(exactProjectStructureIndex >= 0, 'consent reads the exact joined project structure while its dialog is open');
+    const consentStartIndex = requests.length;
+    await joinFlow.getByRole('button', { name: /I agree — share selected agents/ }).click();
     await page.getByRole('heading', { name: 'You’re in' }).waitFor();
+    await assertSuccessIconGeometry(page.getByRole('dialog', { name: 'Project joined' }));
+    const consentRequestIndex = requests.findLastIndex((item) => item.method === 'POST' && item.pathname === `/api/projects/${joinedProjectId}/team-consent`);
+    const consentRefreshIndex = requests.findLastIndex((item, index) => index > consentRequestIndex && item.method === 'GET' && item.pathname === `/api/projects/${joinedProjectId}/team-structure`);
+    assert.ok(consentRequestIndex >= consentStartIndex, 'the explicit consent action is recorded');
+    assert.ok(consentRefreshIndex > consentRequestIndex, 'the latest team structure is loaded before the join UI advances');
+    assert.deepEqual(requests[consentRequestIndex]?.body, {
+      sessionIds: [joinedSessions[0]?.id], permissionLevel: 'full-access', settingsVersion: 19, disclaimerVersion: '2026-10-24.1',
+    }, 'existing permission is preserved while the consent request carries the new project’s exact current settings version');
     await page.getByRole('dialog', { name: 'Project joined' }).getByRole('button', { name: 'Open project', exact: true }).click();
+    memberConsentPermission = 'supervised';
+    memberConsentSettingsVersion = 1;
+    memberTeamSettingsVersion = 1;
     await page.setViewportSize({ width: 1280, height: 900 });
     assert.equal(pageErrors.length, 0, `no uncaught browser errors: ${pageErrors.join('; ')}`);
     assert.equal(consoleErrors.length, 0, `no browser console errors: ${consoleErrors.join('; ')}`);
