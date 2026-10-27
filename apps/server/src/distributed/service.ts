@@ -446,7 +446,7 @@ export class DistributedWorkspaceService {
     const snapshot = this.transport.snapshot();
     // Ignore heartbeats, message counters and outbox acknowledgements. A new or
     // restored trusted peer needs our existing roster without waiting 30 seconds.
-    const topology = JSON.stringify({ deviceId: snapshot.deviceId,
+    const topology = JSON.stringify({ deviceId: snapshot.deviceId, status: snapshot.status,
       devices: snapshot.devices.map(({ id, teamId, ownerId, fingerprint, revokedAt, status }) => ({ id, teamId, ownerId, fingerprint, revokedAt, status })),
       links: snapshot.links,
     });

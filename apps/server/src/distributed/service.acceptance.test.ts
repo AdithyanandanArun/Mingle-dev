@@ -69,6 +69,12 @@ it('replays a saved empty roster when trust links change without republishing on
   transportChanged();
   await new Promise((resolve) => setTimeout(resolve, 100));
   expect(refresh).toHaveBeenCalledTimes(2);
+  snapshot.status = 'offline';
+  transportChanged();
+  await waitFor(() => refresh.mock.calls.length === 3);
+  snapshot.status = 'ready';
+  transportChanged();
+  await waitFor(() => refresh.mock.calls.length === 4);
   expect(publish).not.toHaveBeenCalled();
 });
 
