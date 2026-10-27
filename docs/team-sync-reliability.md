@@ -29,6 +29,9 @@ changes until rebuilt and installed.
 - Mailbox partitions were processed sequentially, and handler dispatch waited
   behind unrelated team work and outbound retries.
 - Roster snapshots synchronously queried ancillary email-sender readiness.
+- A slow initial roster request could overwrite a newer event-triggered response.
+- Sender wall-clock timestamps could order a later pause behind an earlier grant
+  if the owner's clock was corrected backwards.
 
 ## Local metadata propagation
 
@@ -58,8 +61,19 @@ The host retains authenticated consent that arrives before its selected agents.
 It applies the grant only after the owner/device roster proves those identities.
 Queued consent is bounded and expires; an older grant cannot replace a newer
 pause or revocation. An existing Full access grant remains valid through unrelated
-settings edits, while a permission increase, changed disclaimer, or newly selected
-agent still requires the relevant owner's consent.
+settings edits. A permission increase beyond the owner's existing grant, a changed
+disclaimer, or a newly selected agent still requires the relevant owner's consent.
+
+Owner consent changes persist a strictly increasing timestamp before sending,
+using the later of the current clock or the saved timestamp plus one millisecond.
+Correcting a device clock backwards therefore cannot place a new pause or revoke
+behind its earlier grant. The saved value survives restarts and keeps the wire
+format compatible with existing clients.
+
+The Teammates dialog uses one latest-request fence for initial, manual, and quiet
+roster reads. A late response cannot replace a newer view or its form drafts.
+Invitation setup has a separate operation fence, so a newer roster read does not
+cancel the automatic sharing of the selected session.
 
 ## Verification boundary
 
@@ -70,7 +84,7 @@ empty wake hints, with a simulated 25 ms delay. The rename regression requires t
 host's saved remote roster to update within one second without a manual sync.
 The polling-only case retains lost-acknowledgement replay coverage.
 
-The integrated server suite passed 54 test files: 417 tests passed and one was
+The final integrated server suite passed 54 test files: 419 tests passed and one was
 skipped. It includes the two-app project join and team-chat/task/artifact workflows.
 
 The integrated web TypeScript check, six web unit tests, four consent-flow tests,
@@ -81,11 +95,17 @@ preservation, and desktop/narrow layout geometry. The browser harness uses
 explicit Example cloud/auth/email responses with a local FakeProviders runtime.
 It does not send real invitations or run provider inference.
 
-Acceptance logs for this run are `/tmp/mingle-team-sync-full-server.log`,
-`/tmp/mingle-integrated-ui-acceptance.log`, and
+Acceptance logs for this run are `/tmp/mingle-team-sync-final-server-serial.log`,
+`/tmp/mingle-team-sync-final-ui-verified.log`, and
 `/tmp/mingle-integrated-team-workspace-acceptance.log`. Final UI captures are under
-`/tmp/mingle-project-collaboration-acceptance-122093/`, including the full
+`/tmp/mingle-project-collaboration-acceptance-140961/`, including the full
 `share-needed-card.png` and `join-consent-390px.png`.
+
+An overlapping final test/build/browser run hit host memory pressure and was
+stopped. Heavy checks were repeated separately. The browser regression harness
+also needed to avoid waiting for a StrictMode-cancelled mount request and to select
+the latest of multiple valid copy-link toasts; the verified log above is the
+subsequent passing run.
 
 The transport's RTT regression also delays each authentication bridge and
 PostgREST request by 90 ms. One measured sample after parallelizing independent
