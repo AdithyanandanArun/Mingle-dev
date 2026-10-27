@@ -29,6 +29,10 @@ const MAX_RETRY_MS = 60 * 60 * 1000;
 const PAGE_SIZE = 100;
 const MAX_MAILBOX_ROWS_PER_SYNC = 10_000;
 const ALLOWED_CLOCK_SKEW_MS = 2 * 60 * 1000;
+// Realtime broadcast requests have a tighter operational ceiling than encrypted mailbox payloads.
+const MAX_REALTIME_ENVELOPE_BYTES = 64 * 1024;
+const TEAM_CACHE_REFRESH_TTL_MS = 15_000;
+const REALTIME_TOPIC_LABEL = 'mingle-team-device-envelope-v1';
 
 /** The account bridge is deliberately structural so transport can be built before AccountService is integrated. */
 export interface AuthenticatedTransportAccount {
@@ -58,6 +62,7 @@ interface CloudDeviceRow {
   id: string; team_id: string; owner_id: string; name: string; signing_public_key: string; encryption_public_key: string;
   fingerprint: string; last_seen_at: string | null; revoked_at: string | null; created_at: string;
 }
+interface CloudMemberRow { user_id: string }
 interface CloudLinkRow { team_id: string; device_id: string; peer_device_id: string; peer_fingerprint: string; created_at: string }
 interface CloudEnvelopeRow {
   id: string; team_id: string; from_device_id: string; to_device_id: string; idempotency_key: string; kind: string;
@@ -106,7 +111,11 @@ export class TransportService {
   private syncAgain = false;
   private deliveryPromise: Promise<void> = Promise.resolve();
   private readonly teamSyncs = new Map<string, TeamSyncState>();
+  private readonly teamRefreshes = new Map<string, Promise<void>>();
+  private readonly teamCacheRefreshedAt = new Map<string, number>();
+  private readonly teamActiveMembers = new Map<string, Set<string>>();
   private readonly outboxSyncs = new Map<string, Promise<void>>();
+  private readonly fastDeliveryPromises = new Set<Promise<void>>();
   private timer: NodeJS.Timeout | null = null;
   private readonly wakeSubscriptions = new Map<string, WakeSubscription>();
   private readonly wakeRetryTimers = new Map<string, NodeJS.Timeout>();
@@ -228,7 +237,7 @@ export class TransportService {
         }).select(LINK_COLUMNS).maybeSingle(), 'Device linking failed. Confirm team membership and active device status.');
         if (!inserted) throw new HttpError(502, 'The cloud did not confirm the device link.');
       }
-      await this.refreshTeam(client, user.id, request.teamId, own.device_id);
+      await this.refreshTeamCoalesced(client, user.id, request.teamId, own.device_id);
       const link = this.linkCacheRow(user.id, request.teamId, own.device_id, peer.id);
       if (!link) throw new HttpError(502, 'The cloud did not return the device link.');
       this.markHealthy();
@@ -279,9 +288,17 @@ export class TransportService {
     return this.withAccount(async (client, user, keys) => {
       const own = this.requireLocalDevice(user.id, request.teamId);
       if (own.registered !== 1) throw new HttpError(409, 'Register this device in the team before sending.');
-      await this.refreshTeam(client, user.id, request.teamId, own.device_id);
+      if (!this.hasTrustedPeerCache(user.id, request.teamId, own.device_id, request.toDeviceId)) {
+        await this.refreshTeamCoalesced(client, user.id, request.teamId, own.device_id);
+      } else {
+        this.refreshTeamInBackground(client, user.id, request.teamId, own.device_id);
+      }
       const peer = this.deviceCacheRow(user.id, request.teamId, request.toDeviceId);
       if (!peer || peer.revoked_at) throw new HttpError(409, 'The destination device is not currently active in the cached team roster. Sync and verify it before sending.');
+      const activeMembers = this.teamActiveMembers.get(`${user.id}:${request.teamId}`);
+      if (!activeMembers?.has(user.id) || !activeMembers.has(peer.owner_id)) {
+        throw new HttpError(403, 'Both devices must belong to active team members before sending.');
+      }
       const peerFingerprint = fingerprintForPublicKeys(peer.signing_public_key, peer.encryption_public_key);
       if (peerFingerprint !== peer.fingerprint) throw new HttpError(409, 'The destination device key fingerprint is invalid.');
       const ownPin = this.linkCacheRow(user.id, request.teamId, own.device_id, request.toDeviceId);
@@ -415,12 +432,17 @@ export class TransportService {
     await this.syncPromise;
     await Promise.all([
       ...[...this.teamSyncs.values()].map((state) => state.promise),
+      ...this.teamRefreshes.values(),
       ...this.outboxSyncs.values(),
+      ...this.fastDeliveryPromises,
       this.deliveryPromise,
     ]);
     await Promise.allSettled([...this.wakeSubscriptions.values()].map(({ client, channel }) => client.removeChannel(channel)));
     this.wakeSubscriptions.clear();
     this.teamSyncs.clear();
+    this.teamRefreshes.clear();
+    this.teamCacheRefreshedAt.clear();
+    this.teamActiveMembers.clear();
     this.outboxSyncs.clear();
     this.wakeRetryAttempts.clear();
     this.pendingWakeDeviceIds.clear();
@@ -467,7 +489,11 @@ export class TransportService {
   }
 
   private teamSyncKey(accountId: string, local: LocalDeviceRow): string {
-    return `${accountId}:${local.team_id}:${local.device_id}`;
+    return this.teamCacheKey(accountId, local.team_id, local.device_id);
+  }
+
+  private teamCacheKey(accountId: string, teamId: string, deviceId: string): string {
+    return `${accountId}:${teamId}:${deviceId}`;
   }
 
   private requestTeamSync(accountId: string, local: LocalDeviceRow): Promise<boolean> {
@@ -512,8 +538,8 @@ export class TransportService {
       if (user.id !== accountId) throw new HttpError(401, 'The signed-in account changed during mailbox synchronization.');
       const own = this.requireLocalDevice(user.id, local.team_id);
       if (own.device_id !== local.device_id) throw new HttpError(409, 'The registered team device changed during mailbox synchronization.');
-      this.ensureWakeSubscription(client, user.id, local.device_id);
-      await this.refreshTeam(client, user.id, local.team_id, local.device_id);
+      await this.refreshTeamCoalesced(client, user.id, local.team_id, local.device_id);
+      this.ensureWakeSubscription(client, user.id, local.team_id, local.device_id);
       await this.pullInbox(client, user.id, local.team_id, local.device_id);
     }, false);
 
@@ -550,12 +576,13 @@ export class TransportService {
   }
 
   private async refreshTeam(client: SupabaseClient, accountId: string, teamId: string, deviceId: string): Promise<void> {
-    const [heartbeat, devices, links] = await Promise.all([
+    const [heartbeat, devices, links, members] = await Promise.all([
       this.query<CloudDeviceRow | null>(client.from('mingle_devices')
         .update({ last_seen_at: this.isoNow() }).eq('team_id', teamId).eq('id', deviceId).eq('owner_id', accountId)
         .is('revoked_at', null).select(DEVICE_COLUMNS).maybeSingle(), 'The local device is no longer active in this team.'),
       this.query<CloudDeviceRow[]>(client.from('mingle_devices').select(DEVICE_COLUMNS).eq('team_id', teamId).order('created_at', { ascending: true }), 'The team device roster could not be loaded.'),
       this.query<CloudLinkRow[]>(client.from('mingle_device_links').select(LINK_COLUMNS).eq('team_id', teamId).order('created_at', { ascending: true }), 'The team trust links could not be loaded.'),
+      this.query<CloudMemberRow[]>(client.from('mingle_members').select('user_id').eq('team_id', teamId).is('revoked_at', null), 'The active team member roster could not be loaded.'),
     ]);
     if (!heartbeat) {
       this.db.prepare('UPDATE mingle_transport_local_devices SET registered = 0 WHERE account_id = ? AND team_id = ? AND device_id = ?')
@@ -578,6 +605,43 @@ export class TransportService {
       this.db.exec('COMMIT');
     } catch (error) { this.db.exec('ROLLBACK'); throw error; }
     this.cacheDevice(accountId, heartbeat);
+    this.teamActiveMembers.set(`${accountId}:${teamId}`, new Set((members ?? []).map((member) => member.user_id)));
+    this.teamCacheRefreshedAt.set(this.teamCacheKey(accountId, teamId, deviceId), this.now());
+  }
+
+  private refreshTeamCoalesced(client: SupabaseClient, accountId: string, teamId: string, deviceId: string): Promise<void> {
+    const key = this.teamCacheKey(accountId, teamId, deviceId);
+    const current = this.teamRefreshes.get(key);
+    if (current) return current;
+    const refresh = this.refreshTeam(client, accountId, teamId, deviceId).finally(() => {
+      if (this.teamRefreshes.get(key) === refresh) this.teamRefreshes.delete(key);
+    });
+    this.teamRefreshes.set(key, refresh);
+    return refresh;
+  }
+
+  private refreshTeamInBackground(client: SupabaseClient, accountId: string, teamId: string, deviceId: string): void {
+    const key = this.teamCacheKey(accountId, teamId, deviceId);
+    const refreshedAt = this.teamCacheRefreshedAt.get(key);
+    if (refreshedAt !== undefined && this.now() >= refreshedAt && this.now() - refreshedAt < TEAM_CACHE_REFRESH_TTL_MS) return;
+    void this.refreshTeamCoalesced(client, accountId, teamId, deviceId).catch(() => undefined);
+  }
+
+  private hasTrustedPeerCache(accountId: string, teamId: string, deviceId: string, peerDeviceId: string): boolean {
+    const own = this.deviceCacheRow(accountId, teamId, deviceId);
+    const peer = this.deviceCacheRow(accountId, teamId, peerDeviceId);
+    if (!own || !peer || own.revoked_at || peer.revoked_at) return false;
+    try {
+      const ownFingerprint = fingerprintForPublicKeys(own.signing_public_key, own.encryption_public_key);
+      const peerFingerprint = fingerprintForPublicKeys(peer.signing_public_key, peer.encryption_public_key);
+      const ownPin = this.linkCacheRow(accountId, teamId, deviceId, peerDeviceId);
+      const peerPin = this.linkCacheRow(accountId, teamId, peerDeviceId, deviceId);
+      const members = this.teamActiveMembers.get(`${accountId}:${teamId}`);
+      if (!ownPin || !peerPin) return false;
+      return own.fingerprint === ownFingerprint && peer.fingerprint === peerFingerprint && ownPin.mutual === 1 &&
+        ownPin.peer_fingerprint === peer.fingerprint && peerPin.mutual === 1 && peerPin.peer_fingerprint === own.fingerprint &&
+        members !== undefined && members.has(own.owner_id) && members.has(peer.owner_id);
+    } catch { return false; }
   }
 
   private async flushOutbox(client: SupabaseClient, accountId: string, teamId: string, deviceId: string): Promise<void> {
@@ -591,19 +655,19 @@ export class TransportService {
       const envelope = JSON.parse(entry.envelope_json) as SignedEnvelope;
       const record = this.toCloudEnvelope(envelope);
       try {
-        // Senders cannot SELECT their outbound envelopes. PostgreSQL's conflict
-        // path also applies SELECT RLS, so use an INSERT without RETURNING.
-        // A unique conflict confirms this durable envelope's identity was already
-        // submitted, including a retry after an uncertain network response.
-        const { error } = await client.from('mingle_envelopes').insert(record);
-        const duplicateIdentity = error?.code === '23505' && [
-          'mingle_envelopes_pkey',
-          'mingle_envelopes_team_id_from_device_id_to_device_id_idempo_key',
-        ].some((constraint) => error.message === `duplicate key value violates unique constraint "${constraint}"`);
-        if (error && !duplicateIdentity) throw new Error('cloud-insert');
+        // The durable mailbox write and direct encrypted delivery are independent requests.
+        // Keeping them parallel lets an online peer handle one small envelope in one RTT.
+        const serializedSize = Buffer.byteLength(JSON.stringify(envelope), 'utf8');
+        const canBroadcastEnvelope = serializedSize <= MAX_REALTIME_ENVELOPE_BYTES;
+        const [mailboxSaved, realtimeSent] = await Promise.all([
+          this.insertMailboxEnvelope(client, record),
+          canBroadcastEnvelope ? this.broadcastEnvelope(client, accountId, teamId, envelope) : Promise.resolve(false),
+        ]);
+        if (!mailboxSaved) throw new Error('cloud-insert');
         this.db.prepare(`UPDATE mingle_transport_outbox SET status = 'delivered', attempts = attempts + 1, next_attempt_at = 0, error = NULL WHERE id = ? AND account_id = ?`)
           .run(entry.id, accountId);
-        this.broadcastWake(client, entry.to_device_id);
+        // Large envelopes and unavailable Realtime retain the old payload-free mailbox wake.
+        if (!realtimeSent) this.broadcastWake(client, accountId, teamId, entry.to_device_id);
       } catch (error) {
         const attempts = entry.attempts + 1;
         const retry = Math.min(MAX_RETRY_MS, this.retryBaseMs * (2 ** Math.min(20, attempts - 1)));
@@ -615,6 +679,18 @@ export class TransportService {
         this.scheduleRetrySync(this.now() + retry);
       }
     }
+  }
+
+  private async insertMailboxEnvelope(client: SupabaseClient, record: Omit<CloudEnvelopeRow, 'received_at'>): Promise<boolean> {
+    // Senders cannot SELECT their outbound envelopes. PostgreSQL's conflict path also applies
+    // SELECT RLS, so use an INSERT without RETURNING. A known unique conflict confirms a retry.
+    const { error } = await client.from('mingle_envelopes').insert(record);
+    const duplicateIdentity = error?.code === '23505' && [
+      'mingle_envelopes_pkey',
+      'mingle_envelopes_team_id_from_device_id_to_device_id_idempo_key',
+    ].some((constraint) => error.message === `duplicate key value violates unique constraint "${constraint}"`);
+    if (error && !duplicateIdentity) throw new Error('cloud-insert');
+    return true;
   }
 
   private scheduleRetrySync(at: number): void {
@@ -629,26 +705,33 @@ export class TransportService {
     this.retryTimer.unref();
   }
 
-  private wakeChannelName(deviceId: string): string {
-    return `mingle-device-wake:${deviceId}`;
+  private realtimeChannelName(fingerprint: string): string {
+    const topic = createHash('sha256').update(`${REALTIME_TOPIC_LABEL}\0${fingerprint}`).digest('hex');
+    return `${REALTIME_TOPIC_LABEL}:${topic}`;
   }
 
-  /** Empty public Realtime broadcasts carry only a wake hint; the authenticated mailbox remains authoritative. */
-  private ensureWakeSubscription(client: SupabaseClient, accountId: string, deviceId: string): void {
+  /** A public Realtime topic is derived from recipient key material visible only to team members. */
+  private ensureWakeSubscription(client: SupabaseClient, accountId: string, teamId: string, deviceId: string): void {
     if (typeof client.channel !== 'function') return;
     const key = `${accountId}:${deviceId}`;
     const current = this.wakeSubscriptions.get(key);
     if (current?.client === client || this.wakeRetryTimers.has(key)) return;
     if (current) this.removeWakeSubscription(key, current);
+    const own = this.deviceCacheRow(accountId, teamId, deviceId);
+    if (!own || own.revoked_at || typeof own.fingerprint !== 'string') {
+      this.scheduleWakeRetry(key, accountId, deviceId);
+      return;
+    }
     let channel: ReturnType<SupabaseClient['channel']> | null = null;
     try {
-      channel = client.channel(this.wakeChannelName(deviceId), { config: { broadcast: { ack: false } } });
+      channel = client.channel(this.realtimeChannelName(own.fingerprint), { config: { broadcast: { ack: false } } });
       const subscription = { client, channel };
       this.wakeSubscriptions.set(key, subscription);
       channel.on('broadcast', { event: 'wake' }, () => {
-        // The channel contains no mailbox contents. Its only job is to nudge a read
-        // from the recipient-owned RLS-protected table and re-run cryptographic checks.
         this.wakeSync(deviceId);
+      });
+      channel.on('broadcast', { event: 'envelope' }, (message) => {
+        this.receiveRealtimeEnvelope(client, accountId, teamId, deviceId, message?.payload);
       });
       channel.subscribe((status) => {
         if (this.wakeSubscriptions.get(key)?.channel !== channel || this.closed) return;
@@ -706,16 +789,31 @@ export class TransportService {
     }
   }
 
-  private broadcastWake(client: SupabaseClient, deviceId: string): void {
+  private broadcastWake(client: SupabaseClient, accountId: string, teamId: string, deviceId: string): void {
     // One REST request, without joining the channel: subscribing and removing a channel per message
     // re-entered removeChannel through the CLOSED status callback and overflowed the stack.
+    const recipient = this.deviceCacheRow(accountId, teamId, deviceId);
+    if (!recipient || recipient.revoked_at || typeof recipient.fingerprint !== 'string') return;
+    void this.sendRealtime(client, recipient.fingerprint, 'wake', {}).catch(() => undefined);
+  }
+
+  private broadcastEnvelope(client: SupabaseClient, accountId: string, teamId: string, envelope: SignedEnvelope): Promise<boolean> {
+    const recipient = this.deviceCacheRow(accountId, teamId, envelope.toDeviceId);
+    if (!recipient || recipient.revoked_at || typeof recipient.fingerprint !== 'string') return Promise.resolve(false);
+    return this.sendRealtime(client, recipient.fingerprint, 'envelope', envelope);
+  }
+
+  private async sendRealtime(client: SupabaseClient, fingerprint: string, event: string, payload: unknown): Promise<boolean> {
+    if (typeof client.channel !== 'function') return false;
     let channel: ReturnType<SupabaseClient['channel']> | null = null;
     try {
-      channel = client.channel(this.wakeChannelName(deviceId), { config: { broadcast: { ack: false } } });
-      const sent = channel;
-      void sent.httpSend('wake', {}).catch(() => undefined).finally(() => { void client.removeChannel(sent).catch(() => undefined); });
+      channel = client.channel(this.realtimeChannelName(fingerprint), { config: { broadcast: { ack: false } } });
+      // httpSend uses the Realtime REST endpoint without a per-message join/subscription.
+      return (await channel.httpSend(event, payload)).success;
     } catch {
       // A missing or unavailable Realtime transport silently falls back to mailbox polling.
+      return false;
+    } finally {
       if (channel) void client.removeChannel(channel).catch(() => undefined);
     }
   }
@@ -761,21 +859,132 @@ export class TransportService {
     if (this.currentAccountId() !== accountId) return;
     const pending = this.db.prepare(`SELECT * FROM mingle_transport_inbox WHERE account_id = ? AND team_id = ? AND status = 'pending' AND next_attempt_at <= ? ORDER BY received_at,id LIMIT 100`)
       .all(accountId, teamId, this.now()) as unknown as LocalEnvelopeRow[];
-    for (const row of pending) {
-      if (Date.parse(row.expires_at) <= this.now()) {
-        this.db.prepare(`UPDATE mingle_transport_inbox SET status = 'rejected', error = 'Message expired before delivery.' WHERE account_id = ? AND team_id = ? AND id = ?`)
-          .run(accountId, row.team_id, row.id);
-        continue;
+    for (const row of pending) await this.deliverInboxRow(accountId, row, false);
+  }
+
+  private receiveRealtimeEnvelope(
+    client: SupabaseClient, accountId: string, teamId: string, deviceId: string, candidate: unknown,
+  ): void {
+    if (this.closed || this.currentAccountId() !== accountId) return;
+    const envelope = parseRealtimeEnvelope(candidate);
+    if (!envelope) return;
+    try { this.validateEnvelope(envelope, teamId, envelope.fromDeviceId, deviceId); }
+    catch { return; }
+
+    if (!this.teamCacheIsFresh(accountId, teamId, deviceId)) {
+      this.wakeSync(deviceId);
+      return;
+    }
+    let trusted: { own: LocalDeviceRow; senderRow: Record<string, any> } | null;
+    try { trusted = this.cachedEnvelopeTrust(accountId, teamId, deviceId, envelope.fromDeviceId); }
+    catch { return; }
+    if (!trusted) {
+      // Unknown senders are not authority. Refresh through the normal authenticated mailbox path.
+      this.wakeSync(deviceId);
+      return;
+    }
+    try {
+      openEnvelope({ envelope, recipient: this.loadKeys(accountId), senderSigningPublicKey: trusted.senderRow.signing_public_key,
+        senderEncryptionPublicKey: trusted.senderRow.encryption_public_key });
+    } catch { return; }
+
+    const cloudRow = { ...this.toCloudEnvelope(envelope), received_at: this.isoNow() } as CloudEnvelopeRow;
+    const before = this.changeSignature();
+    if (!this.persistIncoming(accountId, teamId, deviceId, cloudRow)) return;
+    this.acknowledgeRealtimeEnvelope(client, accountId, teamId, deviceId, envelope.id);
+    if (this.handlers.size === 0) {
+      this.notifyIfChanged(before);
+      return;
+    }
+    const row = this.db.prepare('SELECT * FROM mingle_transport_inbox WHERE account_id = ? AND team_id = ? AND id = ?')
+      .get(accountId, teamId, envelope.id) as LocalEnvelopeRow | undefined;
+    if (!row) return;
+    const delivery = this.deliverInboxRow(accountId, row, true).finally(() => {
+      this.notifyIfChanged(before);
+      this.fastDeliveryPromises.delete(delivery);
+    });
+    this.fastDeliveryPromises.add(delivery);
+    void delivery;
+  }
+
+  private teamCacheIsFresh(accountId: string, teamId: string, deviceId: string): boolean {
+    const refreshedAt = this.teamCacheRefreshedAt.get(this.teamCacheKey(accountId, teamId, deviceId));
+    if (refreshedAt === undefined) return false;
+    const age = this.now() - refreshedAt;
+    return age >= 0 && age <= TEAM_CACHE_REFRESH_TTL_MS;
+  }
+
+  private cachedEnvelopeTrust(
+    accountId: string, teamId: string, deviceId: string, senderDeviceId: string,
+  ): { own: LocalDeviceRow; senderRow: Record<string, any> } | null {
+    const own = this.requireLocalDevice(accountId, teamId);
+    if (own.device_id !== deviceId) throw new Error('device-revoked');
+    const ownRow = this.deviceCacheRow(accountId, teamId, deviceId);
+    const senderRow = this.deviceCacheRow(accountId, teamId, senderDeviceId);
+    if (!ownRow || !senderRow) return null;
+    if (ownRow.revoked_at || senderRow.revoked_at) throw new Error('device-revoked');
+    const members = this.teamActiveMembers.get(`${accountId}:${teamId}`);
+    if (!members) return null;
+    if (!members.has(ownRow.owner_id) || !members.has(senderRow.owner_id)) throw new Error('device-revoked');
+    let ownFingerprint: string;
+    let senderFingerprint: string;
+    try {
+      ownFingerprint = fingerprintForPublicKeys(ownRow.signing_public_key, ownRow.encryption_public_key);
+      senderFingerprint = fingerprintForPublicKeys(senderRow.signing_public_key, senderRow.encryption_public_key);
+    } catch { throw new Error('device-revoked'); }
+    if (ownFingerprint !== ownRow.fingerprint || senderFingerprint !== senderRow.fingerprint) throw new Error('device-revoked');
+    const ownPin = this.linkCacheRow(accountId, teamId, deviceId, senderDeviceId);
+    const peerPin = this.linkCacheRow(accountId, teamId, senderDeviceId, deviceId);
+    if (!ownPin || !peerPin || !ownPin.mutual || !peerPin.mutual ||
+      ownPin.peer_fingerprint !== senderRow.fingerprint || peerPin.peer_fingerprint !== ownRow.fingerprint) throw new Error('link-revoked');
+    return { own, senderRow };
+  }
+
+  private acknowledgeRealtimeEnvelope(client: SupabaseClient, accountId: string, teamId: string, deviceId: string, envelopeId: string): void {
+    void (async () => {
+      for (const delayMs of [0, 75, 250]) {
+        if (delayMs) await new Promise((resolve) => setTimeout(resolve, delayMs));
+        if (this.closed || this.currentAccountId() !== accountId) return;
+        try {
+          const result = await client.from('mingle_envelopes').delete().eq('team_id', teamId)
+            .eq('to_device_id', deviceId).eq('id', envelopeId).select('id');
+          if (result.error) continue;
+          // A zero-row delete can race the parallel mailbox insert; retry briefly for that copy.
+          if (Array.isArray(result.data) && result.data.length > 0) return;
+        } catch { /* Mailbox polling remains authoritative if the background acknowledgement fails. */ }
       }
-      const envelope = JSON.parse(row.envelope_json) as SignedEnvelope;
-      try {
-        // Refresh authenticated membership, device revocation and both fingerprint pins for every
-        // dispatch. RLS supplies the current account identity; cached presence is never authority.
-        const { own, senderRow } = await this.withAccount(async (client, user) => {
+    })();
+  }
+
+  private async deliverInboxRow(accountId: string, row: LocalEnvelopeRow, cacheOnly: boolean): Promise<void> {
+    if (Date.parse(row.expires_at) <= this.now()) {
+      this.db.prepare(`UPDATE mingle_transport_inbox SET status = 'rejected', error = 'Message expired before delivery.' WHERE account_id = ? AND team_id = ? AND id = ?`)
+        .run(accountId, row.team_id, row.id);
+      return;
+    }
+    const envelope = JSON.parse(row.envelope_json) as SignedEnvelope;
+    try {
+      let own: LocalDeviceRow;
+      let senderRow: Record<string, any> | undefined;
+      if (cacheOnly) {
+        if (!this.teamCacheIsFresh(accountId, row.team_id, row.to_device_id)) {
+          this.wakeSync(row.to_device_id);
+          return;
+        }
+        const trusted = this.cachedEnvelopeTrust(accountId, row.team_id, row.to_device_id, row.from_device_id);
+        if (!trusted) {
+          this.wakeSync(row.to_device_id);
+          return;
+        }
+        own = trusted.own;
+        senderRow = trusted.senderRow;
+      } else {
+        // Mailbox recovery rechecks current account membership and trust using authenticated cloud reads.
+        const verified = await this.withAccount(async (client, user) => {
           if (user.id !== accountId) throw new HttpError(401, 'The signed-in account changed during mailbox delivery.');
           const own = this.requireLocalDevice(user.id, row.team_id);
           if (own.device_id !== row.to_device_id) throw new Error('device-revoked');
-          await this.refreshTeam(client, user.id, row.team_id, own.device_id);
+          await this.refreshTeamCoalesced(client, user.id, row.team_id, own.device_id);
           const senderRow = this.deviceCacheRow(user.id, row.team_id, row.from_device_id);
           if (senderRow) {
             const member = await this.query<{ user_id: string } | null>(client.from('mingle_members').select('user_id')
@@ -784,39 +993,42 @@ export class TransportService {
           }
           return { own, senderRow };
         }, false);
-        if (own.device_id !== row.to_device_id || !senderRow || senderRow.revoked_at ||
-          fingerprintForPublicKeys(senderRow.signing_public_key, senderRow.encryption_public_key) !== senderRow.fingerprint) {
-          throw new Error('device-revoked');
-        }
-        const ownFingerprint = this.ownFingerprint(accountId, row.team_id);
-        const ownPin = this.linkCacheRow(accountId, row.team_id, own.device_id, row.from_device_id);
-        const peerPin = this.linkCacheRow(accountId, row.team_id, row.from_device_id, own.device_id);
-        if (!ownPin || ownPin.peer_fingerprint !== senderRow.fingerprint || !peerPin || peerPin.peer_fingerprint !== ownFingerprint) throw new Error('link-revoked');
-        this.validateEnvelope(envelope, row.team_id, row.from_device_id, row.to_device_id);
-        const keys = this.loadKeys(accountId);
-        const payload = openEnvelope({ envelope, recipient: keys, senderSigningPublicKey: senderRow.signing_public_key, senderEncryptionPublicKey: senderRow.encryption_public_key });
-        const message: AuthenticatedTransportMessage = {
-          id: envelope.id, teamId: envelope.teamId, fromDeviceId: envelope.fromDeviceId,
-          toDeviceId: envelope.toDeviceId, kind: DistributedMessageKindSchema.parse(envelope.kind) as DistributedMessageKind,
-          payload,
-        };
-        const claim = this.db.prepare(`UPDATE mingle_transport_inbox SET status = 'dispatching' WHERE account_id = ? AND team_id = ? AND id = ? AND status = 'pending'`)
-          .run(accountId, row.team_id, row.id);
-        if (claim.changes !== 1) continue;
-        for (const handler of this.handlers) await this.handlerScope.run(true, () => handler(message));
-        this.db.prepare(`UPDATE mingle_transport_inbox SET status = 'handled', attempts = attempts + 1, next_attempt_at = 0, error = NULL WHERE account_id = ? AND team_id = ? AND id = ? AND status = 'dispatching'`)
-          .run(accountId, row.team_id, row.id);
-      } catch (error) {
-        const rejected = (error instanceof Error && ['device-revoked', 'link-revoked'].includes(error.message)) ||
-          (error instanceof HttpError && [401, 403, 404, 409].includes(error.status));
-        const attempts = row.attempts + 1;
-        const retry = Math.min(MAX_RETRY_MS, this.retryBaseMs * (2 ** Math.min(20, attempts - 1)));
-        const reason = rejected ? 'Current account membership, sender device, or mutual trust is no longer active.' : 'Message authentication or handler delivery failed.';
-        this.db.prepare(`UPDATE mingle_transport_inbox SET status = ?, attempts = ?, next_attempt_at = ?, error = ? WHERE account_id = ? AND team_id = ? AND id = ? AND status IN ('pending','dispatching')`)
-          .run(rejected ? 'rejected' : 'pending', attempts, rejected ? 0 : this.now() + retry, reason, accountId, row.team_id, row.id);
-        if (!rejected) this.lastError = reason;
-        if (!rejected) this.scheduleRetrySync(this.now() + retry);
+        own = verified.own;
+        senderRow = verified.senderRow;
       }
+      if (own.device_id !== row.to_device_id || !senderRow || senderRow.revoked_at ||
+        fingerprintForPublicKeys(senderRow.signing_public_key, senderRow.encryption_public_key) !== senderRow.fingerprint) {
+        throw new Error('device-revoked');
+      }
+      const ownFingerprint = this.ownFingerprint(accountId, row.team_id);
+      const ownPin = this.linkCacheRow(accountId, row.team_id, own.device_id, row.from_device_id);
+      const peerPin = this.linkCacheRow(accountId, row.team_id, row.from_device_id, own.device_id);
+      if (!ownPin || ownPin.peer_fingerprint !== senderRow.fingerprint || !peerPin || peerPin.peer_fingerprint !== ownFingerprint) throw new Error('link-revoked');
+      this.validateEnvelope(envelope, row.team_id, row.from_device_id, row.to_device_id);
+      const keys = this.loadKeys(accountId);
+      const payload = openEnvelope({ envelope, recipient: keys, senderSigningPublicKey: senderRow.signing_public_key, senderEncryptionPublicKey: senderRow.encryption_public_key });
+      const message: AuthenticatedTransportMessage = {
+        id: envelope.id, teamId: envelope.teamId, fromDeviceId: envelope.fromDeviceId,
+        toDeviceId: envelope.toDeviceId, kind: DistributedMessageKindSchema.parse(envelope.kind) as DistributedMessageKind,
+        payload,
+      };
+      const claim = this.db.prepare(`UPDATE mingle_transport_inbox SET status = 'dispatching'
+        WHERE account_id = ? AND team_id = ? AND id = ? AND status = 'pending' AND next_attempt_at <= ?`)
+        .run(accountId, row.team_id, row.id, this.now());
+      if (claim.changes !== 1) return;
+      for (const handler of this.handlers) await this.handlerScope.run(true, () => handler(message));
+      this.db.prepare(`UPDATE mingle_transport_inbox SET status = 'handled', attempts = attempts + 1, next_attempt_at = 0, error = NULL WHERE account_id = ? AND team_id = ? AND id = ? AND status = 'dispatching'`)
+        .run(accountId, row.team_id, row.id);
+    } catch (error) {
+      const rejected = (error instanceof Error && ['device-revoked', 'link-revoked'].includes(error.message)) ||
+        (error instanceof HttpError && [401, 403, 404, 409].includes(error.status));
+      const attempts = row.attempts + 1;
+      const retry = Math.min(MAX_RETRY_MS, this.retryBaseMs * (2 ** Math.min(20, attempts - 1)));
+      const reason = rejected ? 'Current account membership, sender device, or mutual trust is no longer active.' : 'Message authentication or handler delivery failed.';
+      this.db.prepare(`UPDATE mingle_transport_inbox SET status = ?, attempts = ?, next_attempt_at = ?, error = ? WHERE account_id = ? AND team_id = ? AND id = ? AND status IN ('pending','dispatching')`)
+        .run(rejected ? 'rejected' : 'pending', attempts, rejected ? 0 : this.now() + retry, reason, accountId, row.team_id, row.id);
+      if (!rejected) this.lastError = reason;
+      if (!rejected) this.scheduleRetrySync(this.now() + retry);
     }
   }
 
@@ -1139,6 +1351,20 @@ export class TransportService {
 
 function isUuid(value: string): boolean {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+}
+
+function parseRealtimeEnvelope(value: unknown): SignedEnvelope | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const candidate = value as Record<string, unknown>;
+  if (Object.getPrototypeOf(candidate) !== Object.prototype && Object.getPrototypeOf(candidate) !== null) return null;
+  const fields = ['id', 'teamId', 'fromDeviceId', 'toDeviceId', 'idempotencyKey', 'kind', 'createdAt', 'expiresAt', 'ciphertext', 'nonce', 'signature'];
+  const keys = Object.keys(candidate);
+  if (keys.length !== fields.length || keys.some((key) => !fields.includes(key))) return null;
+  if (fields.some((field) => typeof candidate[field] !== 'string' || Buffer.byteLength(candidate[field] as string, 'utf8') > MAX_REALTIME_ENVELOPE_BYTES)) return null;
+  try {
+    if (Buffer.byteLength(JSON.stringify(candidate), 'utf8') > MAX_REALTIME_ENVELOPE_BYTES) return null;
+  } catch { return null; }
+  return candidate as unknown as SignedEnvelope;
 }
 
 /** PostgREST returns timestamptz with offsets and variable precision; signatures use canonical JS UTC milliseconds. */

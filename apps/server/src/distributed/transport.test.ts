@@ -46,6 +46,9 @@ class MailboxCloud {
   postgrestRttMs = 0;
   postgrestRequests = 0;
   readonly postgrestRequestsByUser = new Map<string, number>();
+  realtimeRttMs = 0;
+  realtimeRequests = 0;
+  failRealtimeSends = 0;
   readonly inboxPullsByUserTeam = new Map<string, number>();
   lastWakePublishedAt = 0;
   failEnvelopeWrites = 0;
@@ -87,11 +90,10 @@ class MailboxCloud {
       from: (table: string) => new MailboxQuery(this, user, table),
       channel: (name: string) => {
         const cloud = this;
-        let listener: ((payload: unknown) => void) | undefined;
+        const listeners = new Map<string, (payload: unknown) => void>();
         const channel: any = {
           on(_type: string, filter: { event: string }, callback: (payload: unknown) => void) {
-            listener = (payload) => callback({ payload });
-            channel.event = filter.event;
+            listeners.set(filter.event, (payload) => callback({ payload }));
             return channel;
           },
           subscribe(callback?: (status: string) => void) {
@@ -103,20 +105,41 @@ class MailboxCloud {
               callback?.('TIMED_OUT');
               return channel;
             }
-            let listeners = cloud.wakeListeners.get(name);
-            if (!listeners) { listeners = new Set(); cloud.wakeListeners.set(name, listeners); }
-            if (listener) listeners.add(listener);
+            const subscribedListeners = new Map<string, Set<(payload: unknown) => void>>();
+            for (const [event, listener] of listeners) {
+              const key = `${name}:${event}`;
+              let eventListeners = cloud.wakeListeners.get(key);
+              if (!eventListeners) { eventListeners = new Set(); cloud.wakeListeners.set(key, eventListeners); }
+              eventListeners.add(listener);
+              subscribedListeners.set(key, eventListeners);
+            }
             // Like realtime-js, unsubscribing reports CLOSED back through the subscribe callback.
-            channel.unsubscribe = async () => { listeners?.delete(listener!); callback?.('CLOSED'); return 'ok'; };
+            channel.unsubscribe = async () => {
+              for (const [key, eventListeners] of subscribedListeners) {
+                for (const listener of listeners.values()) eventListeners.delete(listener);
+                if (!eventListeners.size) cloud.wakeListeners.delete(key);
+              }
+              callback?.('CLOSED');
+              return 'ok';
+            };
             callback?.('SUBSCRIBED');
             return channel;
           },
-          async httpSend(event: string, payload: unknown) { return channel.send({ event, payload }); },
+          async httpSend(event: string, payload: unknown) {
+            cloud.realtimeRequests++;
+            if (cloud.realtimeRttMs > 0) await new Promise((resolve) => setTimeout(resolve, cloud.realtimeRttMs));
+            if (cloud.failRealtimeSends > 0) {
+              cloud.failRealtimeSends--;
+              return { success: false, status: 503, error: 'simulated Realtime failure' };
+            }
+            await channel.send({ event, payload });
+            return { success: true };
+          },
           async send(message: { event: string; payload: unknown }) {
             cloud.wakes.push({ channel: name, event: message.event, payload: structuredClone(message.payload) });
             cloud.lastWakePublishedAt = performance.now();
             queueMicrotask(() => {
-              for (const deliver of [...(cloud.wakeListeners.get(name) ?? [])]) deliver(message.payload);
+              for (const deliver of [...(cloud.wakeListeners.get(`${name}:${message.event}`) ?? [])]) deliver(message.payload);
             });
             return 'ok';
           },
@@ -364,19 +387,109 @@ it('lets a message handler request a sync without deadlocking the sync that deli
   }
 });
 
-it('uses a payload-free Realtime wake to pull a newly delivered mailbox message immediately', async () => {
+it('delivers a small encrypted envelope on a fingerprint-derived Realtime topic', async () => {
   const cloud = new MailboxCloud(true);
   const { first, second, b } = await pairedServices(cloud);
   const received: string[] = [];
   const unsubscribe = second.onMessage((message) => { received.push(message.kind); });
   try {
+    await second.sync();
     const startedAt = performance.now();
     await first.send({ teamId, toDeviceId: b.id, kind: 'collaboration.message', payload: { content: 'private mailbox content' }, idempotencyKey: 'wake-now' });
     await vi.waitFor(() => expect(received).toEqual(['collaboration.message']), { timeout: 1_000 });
     const elapsedMs = performance.now() - startedAt;
     expect(elapsedMs).toBeLessThan(1_000); // No transport.start()/poll timer is running in this fixture.
-    expect(cloud.wakes).toContainEqual({ channel: `mingle-device-wake:${b.id}`, event: 'wake', payload: {} });
+    expect(cloud.wakes).toHaveLength(1);
+    expect(cloud.wakes[0]!.channel).toMatch(/^mingle-team-device-envelope-v1:[a-f0-9]{64}$/);
+    expect(cloud.wakes[0]!.channel).not.toContain(b.id);
+    expect(cloud.wakes[0]!.event).toBe('envelope');
     expect(JSON.stringify(cloud.wakes)).not.toContain('private mailbox content');
+  } finally {
+    unsubscribe();
+    await first.close();
+    await second.close();
+  }
+});
+
+it('does not dispatch twice when the mailbox copy arrives after the live envelope', async () => {
+  const cloud = new MailboxCloud(true);
+  const { first, second, b } = await pairedServices(cloud);
+  const received: string[] = [];
+  const unsubscribe = second.onMessage((message) => { received.push(message.id); });
+  try {
+    await second.sync();
+    const id = await first.send({ teamId, toDeviceId: b.id, kind: 'collaboration.message', payload: { content: 'dedupe race' }, idempotencyKey: 'realtime-mailbox-race' });
+    await vi.waitFor(() => expect(received).toEqual([id]), { timeout: 1_000 });
+
+    // Reintroduce the parallel mailbox copy after the recipient has handled Realtime.
+    const wire = cloud.wakes.find((wake) => wake.event === 'envelope')!.payload as Record<string, string>;
+    cloud.envelopes.push({
+      id: wire.id!, team_id: wire.teamId!, from_device_id: wire.fromDeviceId!, to_device_id: wire.toDeviceId!,
+      idempotency_key: wire.idempotencyKey!, kind: wire.kind!, ciphertext: wire.ciphertext!, nonce: wire.nonce!,
+      signature: wire.signature!, created_at: wire.createdAt!, expires_at: wire.expiresAt!, received_at: new Date().toISOString(),
+    });
+    await second.sync();
+    expect(received).toEqual([id]);
+    expect((second as unknown as { db: DatabaseSync }).db.prepare('SELECT status FROM mingle_transport_inbox WHERE id = ?').get(id))
+      .toMatchObject({ status: 'handled' });
+  } finally {
+    unsubscribe();
+    await first.close();
+    await second.close();
+  }
+});
+
+it('falls back to a payload-free mailbox wake when the envelope broadcast fails', async () => {
+  const cloud = new MailboxCloud(true);
+  const { first, second, b } = await pairedServices(cloud);
+  const received: string[] = [];
+  const unsubscribe = second.onMessage((message) => { received.push(message.kind); });
+  try {
+    await second.sync();
+    cloud.failRealtimeSends = 1;
+    await first.send({ teamId, toDeviceId: b.id, kind: 'collaboration.message', payload: { text: 'mailbox fallback' }, idempotencyKey: 'realtime-send-failure' });
+    await vi.waitFor(() => expect(received).toEqual(['collaboration.message']), { timeout: 1_000 });
+    expect(cloud.wakes).toHaveLength(1);
+    expect(cloud.wakes[0]).toMatchObject({ event: 'wake', payload: {} });
+  } finally {
+    unsubscribe();
+    await first.close();
+    await second.close();
+  }
+});
+
+it('rejects a signed live envelope when the refreshed team member cache excludes its sender', async () => {
+  const cloud = new MailboxCloud(true);
+  const { first, second, b } = await pairedServices(cloud);
+  const received: string[] = [];
+  const unsubscribe = second.onMessage((message) => { received.push(message.id); });
+  try {
+    await second.sync();
+    cloud.members.get(teamId)!.delete(userA);
+    await second.sync();
+    const id = await first.send({ teamId, toDeviceId: b.id, kind: 'collaboration.message', payload: { text: 'revoked sender' }, idempotencyKey: 'revoked-member-live' });
+    await Promise.resolve();
+    expect(received).toEqual([]);
+    expect(cloud.envelopes).toHaveLength(0);
+    expect(first.snapshot(teamId).outbox.find((entry) => entry.id === id)).toMatchObject({ status: 'queued' });
+  } finally {
+    unsubscribe();
+    await first.close();
+    await second.close();
+  }
+});
+
+it('uses a payload-free wake for envelopes above the 64 KiB Realtime budget', async () => {
+  const cloud = new MailboxCloud(true);
+  const { first, second, b } = await pairedServices(cloud);
+  const received: string[] = [];
+  const unsubscribe = second.onMessage((message) => { received.push(message.kind); });
+  try {
+    await second.sync();
+    await first.send({ teamId, toDeviceId: b.id, kind: 'collaboration.message', payload: { text: 'x'.repeat(60_000) }, idempotencyKey: 'realtime-large-fallback' });
+    await vi.waitFor(() => expect(received).toEqual(['collaboration.message']), { timeout: 1_000 });
+    expect(cloud.wakes.map(({ event, payload }) => ({ event, payload }))).toEqual([{ event: 'wake', payload: {} }]);
+    expect(cloud.envelopes).toHaveLength(0);
   } finally {
     unsubscribe();
     await first.close();
@@ -396,7 +509,7 @@ it('catches up after a transient Realtime join timeout and retries without waiti
     await first.send({ teamId, toDeviceId: b.id, kind: 'collaboration.message', payload: { content: 'retry path' }, idempotencyKey: 'wake-retry' });
     await vi.waitFor(() => expect(received).toEqual(['collaboration.message']), { timeout: 1_000 });
     expect(performance.now() - startedAt).toBeLessThan(1_000);
-    expect(cloud.wakes.some((wake) => wake.channel === `mingle-device-wake:${b.id}` && JSON.stringify(wake.payload) === '{}')).toBe(true);
+    expect(cloud.wakes.some((wake) => wake.event === 'envelope')).toBe(true);
   } finally {
     unsubscribe();
     await first.close();
@@ -404,7 +517,7 @@ it('catches up after a transient Realtime join timeout and retries without waiti
   }
 });
 
-it('delivers after a payload-free wake within a subsecond 90ms/PostgREST-request fixture budget', async () => {
+it('handles a small realtime envelope in about two simulated 90ms network turns', async () => {
   const cloud = new MailboxCloud(true);
   const { first, second, b } = await pairedServices(cloud);
   const received: string[] = [];
@@ -415,21 +528,24 @@ it('delivers after a payload-free wake within a subsecond 90ms/PostgREST-request
     cloud.authRequestsByUser.clear();
     cloud.postgrestRequests = 0;
     cloud.postgrestRequestsByUser.clear();
+    cloud.realtimeRequests = 0;
     cloud.authRttMs = 90;
     cloud.postgrestRttMs = 90;
+    cloud.realtimeRttMs = 90;
     const sendStartedAt = performance.now();
     await first.send({ teamId, toDeviceId: b.id, kind: 'collaboration.message', payload: { content: 'simulated WAN' }, idempotencyKey: 'wake-90ms-rtt' });
     const publishedAt = cloud.lastWakePublishedAt;
     await vi.waitFor(() => expect(received).toEqual(['collaboration.message']), { timeout: 1_000 });
     const wakeToHandlerMs = performance.now() - publishedAt;
     const sendToHandlerMs = performance.now() - sendStartedAt;
-    expect(wakeToHandlerMs).toBeLessThan(1_000);
-    expect(sendToHandlerMs).toBeLessThan(1_000);
-    expect(cloud.authRequestsByUser.get(userB)).toBe(2);
-    expect(cloud.postgrestRequestsByUser.get(userB)).toBe(9);
-    expect(cloud.wakes.at(-1)).toEqual({ channel: `mingle-device-wake:${b.id}`, event: 'wake', payload: {} });
+    expect(wakeToHandlerMs).toBeLessThan(90 * 1.5);
+    expect(sendToHandlerMs).toBeLessThan(90 * 2.5);
+    expect(cloud.authRequestsByUser.get(userB) ?? 0).toBe(0);
+    expect(cloud.wakes.at(-1)?.event).toBe('envelope');
+    console.info(`Realtime transport latency: ${sendToHandlerMs.toFixed(1)} ms at 90 ms simulated per-request RTT`);
     // This is a local deterministic mock with per-request delay, not an Internet/Supabase measurement.
   } finally {
+    cloud.realtimeRttMs = 0;
     cloud.postgrestRttMs = 0;
     cloud.authRttMs = 0;
     unsubscribe();
