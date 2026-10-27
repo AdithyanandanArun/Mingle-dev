@@ -12,6 +12,8 @@ Download a package from [GitHub releases](https://github.com/AdithyanandanArun/M
 
 Launch **Mingle** from the application menu. Desktop packages include Electron, Node, the local server and the UI. Coding-provider tools and accounts are configured separately. Signing in to a Mingle account is optional for local development sessions.
 
+Source version **0.0.5** adds a welcome tour with optional Mingle sign-in and local provider guidance. It remembers completion on the device; replay it in **Settings → General → Replay welcome**. Invitation links take priority over the tour.
+
 ## Set up a source checkout
 
 Requirements: Git, Node **24.13 or later**, and pnpm **11.26.0**, as declared in [package.json](package.json). Native `node-pty` compilation may require Python and a C++ build toolchain if no compatible prebuilt binary is available. Windows installer builds additionally need NSIS 3.11; Debian package builds run on Debian/Ubuntu.
