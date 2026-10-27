@@ -39,6 +39,7 @@ export class DistributedWorkspaceService {
   private metadataTimer: NodeJS.Timeout | null = null;
   private metadataDebounce: NodeJS.Timeout | null = null;
   private metadataAgain = false;
+  private metadataTopology = '';
   private metadataWork: Promise<void> | null = null;
   private closed = false;
 
@@ -46,7 +47,10 @@ export class DistributedWorkspaceService {
     const { store, account, runtime, providers, recovery, dataDir } = options;
     const changed = () => store.touch();
     this.teams = new TeamService({ account, changed });
-    this.transport = new TransportService({ account, store, dataDir, changed });
+    this.transport = new TransportService({ account, store, dataDir, changed: () => {
+      changed();
+      this.onTransportTopologyChanged();
+    } });
     const transport = {
       snapshot: (teamId?: string) => {
         const snapshot = this.transport.snapshot(teamId);
@@ -437,6 +441,20 @@ export class DistributedWorkspaceService {
     return { requests, messages, tasks, agents: execution.agents.filter((agent) => agentIds.has(agent.id) && permitted(agent)) };
   }
 
+  private onTransportTopologyChanged(): void {
+    if (this.closed) return;
+    const snapshot = this.transport.snapshot();
+    // Ignore heartbeats, message counters and outbox acknowledgements. A new or
+    // restored trusted peer needs our existing roster without waiting 30 seconds.
+    const topology = JSON.stringify({ deviceId: snapshot.deviceId,
+      devices: snapshot.devices.map(({ id, teamId, ownerId, fingerprint, revokedAt, status }) => ({ id, teamId, ownerId, fingerprint, revokedAt, status })),
+      links: snapshot.links,
+    });
+    if (topology === this.metadataTopology) return;
+    this.metadataTopology = topology;
+    this.scheduleMetadataRefresh();
+  }
+
   private scheduleMetadataRefresh(): void {
     if (this.closed) return;
     if (this.metadataWork) { this.metadataAgain = true; return; }
@@ -457,7 +475,10 @@ export class DistributedWorkspaceService {
       for (const binding of snapshot.bindings) {
         if (this.closed) return;
         const deviceId = this.transport.snapshot(binding.teamId).deviceId;
-        if (snapshot.agents.some((agent) => agent.deviceId === deviceId && agent.sharedProjectId === binding.sharedProjectId && agent.teamId === binding.teamId)) {
+        const hasPublishedVersion = this.options.store.db.prepare(`SELECT 1 FROM mingle_remote_roster_versions
+          WHERE team_id=? AND shared_project_id=? AND owner_id=? AND device_id=? AND direction='outgoing'`)
+          .get(binding.teamId, binding.sharedProjectId, binding.ownerId, deviceId);
+        if (hasPublishedVersion || snapshot.agents.some((agent) => agent.deviceId === deviceId && agent.sharedProjectId === binding.sharedProjectId && agent.teamId === binding.teamId)) {
           await this.execution.refreshPublishedAgents({ teamId: binding.teamId, sharedProjectId: binding.sharedProjectId });
         }
         // Only tasks already explicitly shared by this owner follow subsequent local edits.

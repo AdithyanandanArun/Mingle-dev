@@ -20,7 +20,7 @@ it('refreshes only already-published metadata promptly and retains edits arrivin
   const nativeTransportSnapshot = distributed.transport.snapshot.bind(distributed.transport);
   vi.spyOn(distributed.transport, 'snapshot').mockImplementation(() => ({ ...nativeTransportSnapshot(), deviceId: 'fixture-device' }));
   vi.spyOn(distributed.execution, 'snapshot').mockResolvedValue({
-    bindings: [{ teamId: 'fixture-team', sharedProjectId: 'fixture-shared', localProjectId: session.projectId }],
+    bindings: [{ teamId: 'fixture-team', sharedProjectId: 'fixture-shared', localProjectId: session.projectId, ownerId: 'fixture-owner' }],
     agents: [{ deviceId: 'fixture-device', teamId: 'fixture-team', sharedProjectId: 'fixture-shared' }], tasks: [],
   } as any);
   const publish = vi.spyOn(distributed.execution, 'publishAgents');
@@ -43,6 +43,33 @@ it('refreshes only already-published metadata promptly and retains edits arrivin
   t.app.store.recordEvent({ projectId: session.projectId, type: 'team.structure.updated', summary: 'Example unrelated snapshot' });
   await new Promise((resolve) => setTimeout(resolve, 100));
   expect(refresh).toHaveBeenCalledTimes(2);
+});
+
+it('replays a saved empty roster when trust links change without republishing on every outbox update', async () => {
+  const t = await startTestApp({ env: {}, exampleWorkspace: false });
+  apps.push(t);
+  const distributed = t.app.distributed;
+  const snapshot = { ...distributed.transport.snapshot(), deviceId: 'fixture-device', links: [] as any[], devices: [] as any[] };
+  vi.spyOn(distributed.transport, 'snapshot').mockImplementation(() => snapshot);
+  vi.spyOn(distributed.execution, 'snapshot').mockResolvedValue({
+    bindings: [{ teamId: 'fixture-team', sharedProjectId: 'fixture-shared', localProjectId: 'fixture-project', ownerId: 'fixture-owner' }],
+    agents: [], tasks: [],
+  } as any);
+  t.app.store.db.prepare(`INSERT INTO mingle_remote_roster_versions
+    (team_id,shared_project_id,owner_id,device_id,direction,version,generated_at) VALUES(?,?,?,?,'outgoing',1,?)`)
+    .run('fixture-team', 'fixture-shared', 'fixture-owner', 'fixture-device', new Date().toISOString());
+  const refresh = vi.spyOn(distributed.execution, 'refreshPublishedAgents').mockResolvedValue([]);
+  const publish = vi.spyOn(distributed.execution, 'publishAgents');
+  const transportChanged = Reflect.get(distributed.transport, 'options').changed as () => void;
+  transportChanged();
+  await waitFor(() => refresh.mock.calls.length === 1);
+  snapshot.links.push({ teamId: 'fixture-team', deviceId: 'fixture-device', peerDeviceId: 'new-peer', peerFingerprint: 'fixture-pin', mutual: true });
+  transportChanged();
+  await waitFor(() => refresh.mock.calls.length === 2);
+  transportChanged();
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  expect(refresh).toHaveBeenCalledTimes(2);
+  expect(publish).not.toHaveBeenCalled();
 });
 
 it('preserves a completed recovery run when a later local run starts before the progress flush', async () => {
