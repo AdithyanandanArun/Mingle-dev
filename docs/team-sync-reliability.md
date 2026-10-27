@@ -119,3 +119,59 @@ These are local fixtures using example accounts and fake providers. They do not
 measure the public Supabase service, a physical Windows recipient, provider
 inference, or routes between continents. A local sub-second assertion is not a
 guarantee for arbitrary internet connections.
+
+## Live encrypted-envelope delivery
+
+For an online recipient with a fresh local trust cache, `TransportService` persists
+the sealed envelope to the sender's SQLite outbox, then starts the cloud mailbox
+insert and a Supabase Realtime `httpSend` concurrently. The Realtime payload is the
+same signed `SignedEnvelope` object used to form the mailbox row; its payload remains
+end-to-end encrypted. A recipient accepts this fast path only when the envelope
+route and expiry are valid, the sender is in the local device roster, both device
+owners remain in the cached active-member roster, both devices are unrevoked, their
+current public-key fingerprints match, and both cached pins are mutual. It verifies
+the signature and decrypts locally, stores the inbox row with the mailbox path's ID
+and idempotency uniqueness, then runs handlers under the same `handlerScope`. An
+atomic inbox claim prevents a concurrent or late mailbox pull from running the same
+envelope twice. Mailbox acknowledgement happens in the background. If it races the
+insert or fails, subsequent pulls see the already
+saved inbox row and safely retry acknowledgement.
+
+The local trust cache has a 5-second refresh TTL. Senders with a complete valid
+cached peer link do not wait for a roster refresh; an expired cache refreshes in the
+background. A missing or invalid cached peer uses the existing refresh-before-send
+path. Receivers with a stale cache, or without the sender in their roster, use the
+normal authenticated mailbox sync instead of trusting the broadcast. That sync
+refreshes roster and links before delivery. A revocation, unlink or membership change
+can remain in a still-fresh live cache until its next refresh (at most five seconds);
+the durable mailbox continues to enforce current cloud RLS.
+
+Public Realtime broadcast topics are a SHA-256 derivation of a fixed protocol label
+and the recipient's registered device fingerprint. Team members can read that
+fingerprint from the team device roster; the topic is not derived from a device ID
+or other data exposed outside the team. A public topic is not an access-control
+boundary: anyone who learns it can subscribe and observe broadcast timing, envelope
+size, and the envelope's clear routing/header metadata (including device IDs, kind,
+timestamps and idempotency key). They cannot decrypt the payload, create an accepted
+message without the pinned device signing key, modify an envelope without breaking
+its signature, or make a replayed/expired envelope run a handler again. Forged
+broadcasts are rejected locally; an unknown sender can prompt the ordinary mailbox
+catch-up (which retains the existing 10,000-row per-sync scan cap). This design uses
+existing public Realtime broadcast and does not require or apply a migration to the
+hosted Supabase project.
+
+The serialized-envelope broadcast limit is 64 KiB, conservatively below the normal
+distributed payload limit. Larger envelopes skip the payload broadcast and retain
+the mailbox plus empty wake behavior. Failed Realtime sends also trigger the empty
+wake; if Realtime is absent, mailbox polling remains the recovery path. An online
+device with a successful fast path persists locally before acknowledging cloud
+storage, preserving durability across a mailbox/publish race.
+
+`scripts/measure-team-latency.mjs --from-url URL --from-project ID --to-url URL
+--to-project ID` sends ten unique team-chat probes and reports p50/p90 time until
+each appears in the destination transcript. Its output contains aggregate timings
+only, not the probe text or server response bodies. The transport acceptance test
+uses a deterministic 90 ms per-request fake-cloud delay; it verifies that handler
+delivery stays near two simulated network turns rather than the prior sequence of
+roster, mailbox, and per-row authorization reads. This local measurement is not a
+public-network performance guarantee.

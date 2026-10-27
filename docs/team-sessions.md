@@ -48,6 +48,15 @@ Group-composer user messages are mirrored after local acceptance, using `(source
 
 ## Live updates
 
-Mailbox delivery remains durable and authoritative in the encrypted envelope tables. When Supabase Realtime is available, senders also broadcast an empty wake hint on the recipient's per-device channel; the recipient immediately pulls its authenticated mailbox. The hint contains no message, token or account data and uses public Realtime broadcast, so it requires no table publication or database migration. Realtime failures are silent and the 3-second mailbox polling loop remains the fallback.
+Mailbox delivery remains durable and authoritative in the encrypted envelope tables.
+For a small envelope (at most 64 KiB serialized), the sender concurrently inserts
+the sealed envelope into the mailbox and publishes that same signed,
+end-to-end-encrypted envelope through Supabase Realtime. A recipient with a fresh
+local roster validates and handles the live envelope without cloud reads, saves it
+to the inbox first, and acknowledges the mailbox copy asynchronously. Larger
+envelopes and Realtime failures use the existing payload-free wake plus mailbox
+pull; the 3-second polling loop remains the fallback. Public Realtime topics are
+derived from the recipient's registered fingerprint, which is available to team
+members, not from a device ID. This needs no hosted Supabase migration.
 
 Host roster/agent, settings, consent and session-structure mutations, plus member-device structure/consent updates, emit project-scoped workspace events. The web client refreshes the team structure and teammate-agent choices only for those events. Team-chat persistence and run-state changes emit a separate project-scoped event that refreshes the shared transcript and agent bubble; the transcript keeps a slow polling fallback for missed events.
