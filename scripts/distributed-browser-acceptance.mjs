@@ -210,6 +210,13 @@ async function main() {
   assert.ok(localProjectId, 'local runtime supplies its labelled example project');
   assert.ok(localSessionIds.length >= 2, 'local runtime supplies idle example sessions');
 
+  // This suite exercises the Settings workspace, not project-first cloud binding.
+  // The labelled example folder is deliberately not a shareable Git checkout.
+  await page.route(`**/api/projects/${localProjectId}/collaboration`, async (route) => {
+    assert.equal(route.request().method(), 'GET');
+    await json(route, 200, { exampleData: true, project: null, members: [], agents: [], invitations: [], email: { configured: false } });
+  });
+
   // The bootstrap is from the local app; only this explicitly named local-group
   // fixture is added so GroupRemoteActivity can be tested without real group work.
   await page.route('**/api/bootstrap', async (route) => {
