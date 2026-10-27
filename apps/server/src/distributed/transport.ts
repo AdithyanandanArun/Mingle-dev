@@ -44,6 +44,7 @@ export interface TransportServiceOptions {
   changed?: () => void;
   now?: () => number;
   retryBaseMs?: number;
+  wakeRetryBaseMs?: number;
   onlineWindowMs?: number;
   messageTtlMs?: number;
   syncIntervalMs?: number;
@@ -77,6 +78,16 @@ interface StoredKeyFile {
   encryptionPublicKeyDer: string;
 }
 
+interface WakeSubscription {
+  client: SupabaseClient;
+  channel: ReturnType<SupabaseClient['channel']>;
+}
+
+interface TeamSyncState {
+  promise: Promise<boolean>;
+  again: boolean;
+}
+
 /**
  * Outbound-only, authenticated cloud mailbox. SQLite rows contain ciphertext and public metadata only;
  * private X25519/Ed25519 key material is kept in an account-scoped 0600 file under the runtime data dir.
@@ -93,19 +104,28 @@ export class TransportService {
   /** Marks work started by an inbound message handler, which runs inside the current sync. */
   private readonly handlerScope = new AsyncLocalStorage<true>();
   private syncAgain = false;
+  private deliveryPromise: Promise<void> = Promise.resolve();
+  private readonly teamSyncs = new Map<string, TeamSyncState>();
+  private readonly outboxSyncs = new Map<string, Promise<void>>();
   private timer: NodeJS.Timeout | null = null;
-  private readonly wakeSubscriptions = new Map<string, { client: SupabaseClient; channel: ReturnType<SupabaseClient['channel']> }>();
-  private readonly wakeUnavailable = new Set<string>();
+  private readonly wakeSubscriptions = new Map<string, WakeSubscription>();
+  private readonly wakeRetryTimers = new Map<string, NodeJS.Timeout>();
+  private readonly wakeRetryAttempts = new Map<string, number>();
+  private readonly pendingWakeDeviceIds = new Set<string>();
   private closed = false;
   private readonly now: () => number;
   private readonly retryBaseMs: number;
+  private readonly wakeRetryBaseMs: number;
   private readonly onlineWindowMs: number;
   private readonly messageTtlMs: number;
+  private retryTimer: NodeJS.Timeout | null = null;
+  private retryTimerAt = Number.POSITIVE_INFINITY;
 
   constructor(private readonly options: TransportServiceOptions) {
     this.db = options.store.db;
     this.now = options.now ?? Date.now;
     this.retryBaseMs = Math.max(0, options.retryBaseMs ?? 1_000);
+    this.wakeRetryBaseMs = Math.max(1, options.wakeRetryBaseMs ?? 1_000);
     this.onlineWindowMs = options.onlineWindowMs ?? ONLINE_WINDOW_MS;
     this.messageTtlMs = Math.min(DEFAULT_MESSAGE_TTL_MS, Math.max(1, options.messageTtlMs ?? DEFAULT_MESSAGE_TTL_MS));
     this.ensureTables();
@@ -338,7 +358,12 @@ export class TransportService {
       this.syncAgain = true;
       return Promise.resolve();
     }
-    if (this.syncPromise) return this.syncPromise;
+    if (this.syncPromise) {
+      // A caller requesting catch-up while a prior sync is in flight may have observed
+      // a mailbox snapshot from just before a new INSERT. Coalesce one follow-up pass.
+      this.syncAgain = true;
+      return this.awaitSyncAndFollowUps(this.syncPromise);
+    }
     const before = this.changeSignature();
     this.syncPromise = this.runSync().catch((error: unknown) => {
       this.recordFailure(this.isSignedIn() ? 'The distributed mailbox is temporarily unavailable.' : 'Sign in to the Mingle account to sync devices.');
@@ -354,9 +379,26 @@ export class TransportService {
     return this.syncPromise;
   }
 
-  private wakeSync(): void {
+  private async awaitSyncAndFollowUps(first: Promise<void>): Promise<void> {
+    await first;
+    // A single coalesced follow-up satisfies this caller's request. Later wakes may
+    // already have started another pass; do not make route callers wait for global idle.
+    const followUp = this.syncPromise;
+    if (followUp && followUp !== first) await followUp;
+  }
+
+  private wakeSync(deviceId?: string): void {
     if (this.closed) return;
-    if (this.syncPromise) { this.syncAgain = true; return; }
+    if (deviceId) this.pendingWakeDeviceIds.add(deviceId);
+    if (this.syncPromise) {
+      this.syncAgain = true;
+      if (deviceId) {
+        const accountId = this.currentAccountId();
+        const local = accountId && this.localDevices(accountId).find((row) => row.registered === 1 && row.device_id === deviceId);
+        if (accountId && local) void this.requestTeamSync(accountId, local);
+      }
+      return;
+    }
     void this.sync();
   }
 
@@ -365,40 +407,146 @@ export class TransportService {
     this.closed = true;
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
+    if (this.retryTimer) clearTimeout(this.retryTimer);
+    this.retryTimer = null;
+    this.retryTimerAt = Number.POSITIVE_INFINITY;
+    for (const timer of this.wakeRetryTimers.values()) clearTimeout(timer);
+    this.wakeRetryTimers.clear();
     await this.syncPromise;
+    await Promise.all([
+      ...[...this.teamSyncs.values()].map((state) => state.promise),
+      ...this.outboxSyncs.values(),
+      this.deliveryPromise,
+    ]);
     await Promise.allSettled([...this.wakeSubscriptions.values()].map(({ client, channel }) => client.removeChannel(channel)));
     this.wakeSubscriptions.clear();
+    this.teamSyncs.clear();
+    this.outboxSyncs.clear();
+    this.wakeRetryAttempts.clear();
+    this.pendingWakeDeviceIds.clear();
     this.handlers.clear();
     this.keyCache.clear();
   }
 
   private async runSync(): Promise<void> {
-    await this.withAccount(async (client, user) => {
-      this.lastError = null;
-      const localDevices = this.localDevices(user.id).filter((row) => row.registered === 1);
-      if (localDevices.length === 0) {
+    const accountId = this.currentAccountId();
+    if (!accountId) {
+      // Preserve the authenticated error/status path while signed out or during account changes.
+      await this.withAccount(async () => undefined, false);
+      return;
+    }
+    this.lastError = null;
+    const localDevices = this.localDevices(accountId).filter((row) => row.registered === 1);
+    this.removeStaleWakeSubscriptions(accountId, localDevices);
+    if (localDevices.length === 0) {
+      // No device-specific callback below would otherwise verify this account snapshot.
+      await this.withAccount(async (_client, user) => {
+        if (user.id !== accountId) throw new HttpError(401, 'The signed-in account changed during mailbox synchronization.');
         this.activeAccountId = user.id;
         this.status = 'unregistered';
         this.lastError = null;
-        return;
-      }
-      for (const local of localDevices) {
-        try {
-          this.ensureWakeSubscription(client, user.id, local.device_id);
-          await this.refreshTeam(client, user.id, local.team_id, local.device_id);
-          await this.flushOutbox(client, user.id, local.team_id, local.device_id);
-          await this.pullInbox(client, user.id, local.team_id, local.device_id);
-        } catch {
-          this.recordFailure('A team mailbox could not be synchronized.');
-        }
-      }
+      }, false);
+      return;
+    }
+    const urgentDevices = new Set(this.pendingWakeDeviceIds);
+    this.pendingWakeDeviceIds.clear();
+    localDevices.sort((left, right) => Number(urgentDevices.has(right.device_id)) - Number(urgentDevices.has(left.device_id)));
+
+    // Inbox catch-up/dispatch and outbound retry draining are distinct work. A wake for
+    // one team can start its bounded team task even while this pass is flushing another.
+    await Promise.all(localDevices.map(async (local) => {
+      if (!await this.requestTeamSync(accountId, local)) return;
+      await this.flushLocalOutbox(accountId, local);
+    }));
+
+    if (this.currentAccountId() === accountId) {
       this.lastSyncAt = this.now();
       if (this.lastError) this.status = 'offline';
       else this.markHealthy();
-      // Do not invoke external handlers while the account bridge holds its authenticated-client callback.
-      await Promise.resolve();
+    }
+  }
+
+  private teamSyncKey(accountId: string, local: LocalDeviceRow): string {
+    return `${accountId}:${local.team_id}:${local.device_id}`;
+  }
+
+  private requestTeamSync(accountId: string, local: LocalDeviceRow): Promise<boolean> {
+    if (this.closed) return Promise.resolve(false);
+    const key = this.teamSyncKey(accountId, local);
+    const current = this.teamSyncs.get(key);
+    if (current) {
+      current.again = true;
+      return this.awaitTeamSyncAndFollowUps(key, current, current.promise);
+    }
+    const state: TeamSyncState = { promise: Promise.resolve(false), again: false };
+    this.teamSyncs.set(key, state);
+    this.startTeamSyncPass(key, state, accountId, local);
+    return state.promise;
+  }
+
+  private startTeamSyncPass(key: string, state: TeamSyncState, accountId: string, local: LocalDeviceRow): void {
+    const pass = this.syncTeamInbox(accountId, local).then(() => true).catch(() => {
+      this.recordFailure('A team mailbox could not be synchronized.');
+      return false;
+    });
+    state.promise = pass;
+    void pass.then(() => {
+      if (this.teamSyncs.get(key) !== state) return;
+      if (state.again && !this.closed) {
+        state.again = false;
+        this.startTeamSyncPass(key, state, accountId, local);
+      } else {
+        this.teamSyncs.delete(key);
+      }
+    });
+  }
+
+  private async awaitTeamSyncAndFollowUps(key: string, state: TeamSyncState, first: Promise<boolean>): Promise<boolean> {
+    const firstResult = await first;
+    const followUp = this.teamSyncs.get(key) === state ? state.promise : null;
+    return followUp && followUp !== first ? followUp : firstResult;
+  }
+
+  private async syncTeamInbox(accountId: string, local: LocalDeviceRow): Promise<void> {
+    await this.withAccount(async (client, user) => {
+      if (user.id !== accountId) throw new HttpError(401, 'The signed-in account changed during mailbox synchronization.');
+      const own = this.requireLocalDevice(user.id, local.team_id);
+      if (own.device_id !== local.device_id) throw new HttpError(409, 'The registered team device changed during mailbox synchronization.');
+      this.ensureWakeSubscription(client, user.id, local.device_id);
+      await this.refreshTeam(client, user.id, local.team_id, local.device_id);
+      await this.pullInbox(client, user.id, local.team_id, local.device_id);
     }, false);
-    if (this.handlers.size > 0) await this.deliverPending();
+
+    // The authenticated-client callback has released before invoking application handlers.
+    if (this.handlers.size > 0) await this.enqueuePendingDelivery(accountId, local.team_id);
+  }
+
+  private async flushLocalOutbox(accountId: string, local: LocalDeviceRow): Promise<void> {
+    const hasDueOutbox = Boolean(this.db.prepare(`SELECT 1 FROM mingle_transport_outbox
+      WHERE account_id = ? AND team_id = ? AND from_device_id = ? AND status = 'queued' AND next_attempt_at <= ? LIMIT 1`)
+      .get(accountId, local.team_id, local.device_id, this.now()));
+    if (!hasDueOutbox) return;
+    const key = this.teamSyncKey(accountId, local);
+    const current = this.outboxSyncs.get(key);
+    if (current) return current;
+    const operation = this.withAccount(async (client, user) => {
+      if (user.id !== accountId) throw new HttpError(401, 'The signed-in account changed during mailbox synchronization.');
+      const own = this.requireLocalDevice(user.id, local.team_id);
+      if (own.device_id !== local.device_id) throw new HttpError(409, 'The registered team device changed during mailbox synchronization.');
+      await this.flushOutbox(client, user.id, local.team_id, local.device_id);
+    }, false).catch(() => {
+      this.recordFailure('A team mailbox could not be synchronized.');
+    }).finally(() => {
+      if (this.outboxSyncs.get(key) === operation) this.outboxSyncs.delete(key);
+    });
+    this.outboxSyncs.set(key, operation);
+    return operation;
+  }
+
+  private enqueuePendingDelivery(accountId: string, teamId: string): Promise<void> {
+    const delivery = this.deliveryPromise.then(() => this.deliverPending(accountId, teamId));
+    this.deliveryPromise = delivery.catch(() => undefined);
+    return delivery;
   }
 
   private async refreshTeam(client: SupabaseClient, accountId: string, teamId: string, deviceId: string): Promise<void> {
@@ -464,39 +612,97 @@ export class TransportService {
           .run(attempts, this.now() + retry, message, entry.id, accountId);
         this.lastError = message;
         this.status = 'offline';
+        this.scheduleRetrySync(this.now() + retry);
       }
     }
+  }
+
+  private scheduleRetrySync(at: number): void {
+    if (this.closed || (this.retryTimer && this.retryTimerAt <= at)) return;
+    if (this.retryTimer) clearTimeout(this.retryTimer);
+    this.retryTimerAt = at;
+    this.retryTimer = setTimeout(() => {
+      this.retryTimer = null;
+      this.retryTimerAt = Number.POSITIVE_INFINITY;
+      void this.sync();
+    }, Math.max(1, at - this.now()));
+    this.retryTimer.unref();
   }
 
   private wakeChannelName(deviceId: string): string {
     return `mingle-device-wake:${deviceId}`;
   }
 
-  /** Public Realtime broadcasts carry only a wake hint; the authenticated mailbox remains authoritative. */
+  /** Empty public Realtime broadcasts carry only a wake hint; the authenticated mailbox remains authoritative. */
   private ensureWakeSubscription(client: SupabaseClient, accountId: string, deviceId: string): void {
+    if (typeof client.channel !== 'function') return;
     const key = `${accountId}:${deviceId}`;
     const current = this.wakeSubscriptions.get(key);
-    if (current?.client === client || this.wakeUnavailable.has(key)) return;
-    if (current) void current.client.removeChannel(current.channel).catch(() => undefined);
+    if (current?.client === client || this.wakeRetryTimers.has(key)) return;
+    if (current) this.removeWakeSubscription(key, current);
+    let channel: ReturnType<SupabaseClient['channel']> | null = null;
     try {
-      const channel = client.channel(this.wakeChannelName(deviceId), { config: { broadcast: { ack: false } } });
+      channel = client.channel(this.wakeChannelName(deviceId), { config: { broadcast: { ack: false } } });
+      const subscription = { client, channel };
+      this.wakeSubscriptions.set(key, subscription);
       channel.on('broadcast', { event: 'wake' }, () => {
-        this.wakeSync();
+        // The channel contains no mailbox contents. Its only job is to nudge a read
+        // from the recipient-owned RLS-protected table and re-run cryptographic checks.
+        this.wakeSync(deviceId);
       });
-      this.wakeSubscriptions.set(key, { client, channel });
-      let failed = false;
       channel.subscribe((status) => {
-        // removeChannel reports CLOSED back through this callback; clean up only once.
-        if ((status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') && !failed) {
-          failed = true;
-          this.wakeUnavailable.add(key);
-          if (this.wakeSubscriptions.get(key)?.channel === channel) this.wakeSubscriptions.delete(key);
-          void client.removeChannel(channel).catch(() => undefined);
+        if (this.wakeSubscriptions.get(key)?.channel !== channel || this.closed) return;
+        if (status === 'SUBSCRIBED') {
+          this.wakeRetryAttempts.delete(key);
+          // Catch up after initial join/rejoin so a send during connection setup is not
+          // delayed until the periodic poll. Durable mailbox reads recover missed hints.
+          this.wakeSync(deviceId);
+        } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED') {
+          this.removeWakeSubscription(key, subscription);
+          this.scheduleWakeRetry(key, accountId, deviceId);
         }
       });
     } catch {
-      // Realtime is an optional accelerator. The mailbox polling loop remains authoritative.
-      this.wakeUnavailable.add(key);
+      if (channel && this.wakeSubscriptions.get(key)?.channel === channel) {
+        this.removeWakeSubscription(key, { client, channel });
+      }
+      // Realtime is an optional accelerator. Continue polling while retrying the join.
+      this.scheduleWakeRetry(key, accountId, deviceId);
+    }
+  }
+
+  private removeWakeSubscription(key: string, subscription: WakeSubscription): void {
+    if (this.wakeSubscriptions.get(key)?.channel === subscription.channel) this.wakeSubscriptions.delete(key);
+    void subscription.client.removeChannel(subscription.channel).catch(() => undefined);
+  }
+
+  private scheduleWakeRetry(key: string, accountId: string, deviceId: string): void {
+    if (this.closed || this.wakeRetryTimers.has(key)) return;
+    const attempts = (this.wakeRetryAttempts.get(key) ?? 0) + 1;
+    this.wakeRetryAttempts.set(key, attempts);
+    const delay = Math.min(MAX_RETRY_MS, this.wakeRetryBaseMs * (2 ** Math.min(20, attempts - 1)));
+    const timer = setTimeout(() => {
+      this.wakeRetryTimers.delete(key);
+      if (this.closed || this.currentAccountId() !== accountId) return;
+      this.wakeSync(deviceId);
+    }, delay);
+    timer.unref();
+    this.wakeRetryTimers.set(key, timer);
+  }
+
+  private removeStaleWakeSubscriptions(accountId: string, devices: LocalDeviceRow[]): void {
+    const desired = new Set(devices.map((device) => `${accountId}:${device.device_id}`));
+    for (const [key, subscription] of this.wakeSubscriptions) {
+      if (!desired.has(key)) this.removeWakeSubscription(key, subscription);
+    }
+    for (const [key, timer] of this.wakeRetryTimers) {
+      if (desired.has(key)) continue;
+      clearTimeout(timer);
+      this.wakeRetryTimers.delete(key);
+      this.wakeRetryAttempts.delete(key);
+    }
+    for (const key of this.wakeRetryAttempts.keys()) {
+      if (!desired.has(key)) this.wakeRetryAttempts.delete(key);
     }
   }
 
@@ -551,11 +757,10 @@ export class TransportService {
     if (remaining?.length) this.lastError = 'The mailbox exceeds the per-sync scan limit; remaining messages will continue on the next sync.';
   }
 
-  private async deliverPending(): Promise<void> {
-    const accountId = this.currentAccountId();
-    if (!accountId) return;
-    const pending = this.db.prepare(`SELECT * FROM mingle_transport_inbox WHERE account_id = ? AND status = 'pending' AND next_attempt_at <= ? ORDER BY received_at,id LIMIT 100`)
-      .all(accountId, this.now()) as unknown as LocalEnvelopeRow[];
+  private async deliverPending(accountId: string, teamId: string): Promise<void> {
+    if (this.currentAccountId() !== accountId) return;
+    const pending = this.db.prepare(`SELECT * FROM mingle_transport_inbox WHERE account_id = ? AND team_id = ? AND status = 'pending' AND next_attempt_at <= ? ORDER BY received_at,id LIMIT 100`)
+      .all(accountId, teamId, this.now()) as unknown as LocalEnvelopeRow[];
     for (const row of pending) {
       if (Date.parse(row.expires_at) <= this.now()) {
         this.db.prepare(`UPDATE mingle_transport_inbox SET status = 'rejected', error = 'Message expired before delivery.' WHERE account_id = ? AND team_id = ? AND id = ?`)
@@ -610,6 +815,7 @@ export class TransportService {
         this.db.prepare(`UPDATE mingle_transport_inbox SET status = ?, attempts = ?, next_attempt_at = ?, error = ? WHERE account_id = ? AND team_id = ? AND id = ? AND status IN ('pending','dispatching')`)
           .run(rejected ? 'rejected' : 'pending', attempts, rejected ? 0 : this.now() + retry, reason, accountId, row.team_id, row.id);
         if (!rejected) this.lastError = reason;
+        if (!rejected) this.scheduleRetrySync(this.now() + retry);
       }
     }
   }

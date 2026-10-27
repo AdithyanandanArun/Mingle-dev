@@ -9,6 +9,7 @@ import { fingerprintForPublicKeys, generateDeviceKeyMaterial, openEnvelope, seal
 import { TransportService } from './transport.ts';
 
 const teamId = '737a46b3-42ac-4f5e-9f69-5bf451e4c1a2';
+const secondTeamId = '837a46b3-42ac-4f5e-9f69-5bf451e4c1a2';
 const userA = '220f8441-9dbe-49b2-928d-5f2f9db2eab6';
 const userB = '6d34d2e2-4fed-4ed6-bc1f-32f22dbe6bf2';
 const userOutside = 'ab12f39d-1d36-4937-8d20-f87f3e7a59f4';
@@ -39,10 +40,31 @@ class MailboxCloud {
   envelopeWriteError: Result['error'] = null;
   readonly members = new Map<string, Set<string>>([[teamId, new Set([userA, userB])]]);
   now: () => number = Date.now;
+  authRttMs = 0;
+  authRequests = 0;
+  readonly authRequestsByUser = new Map<string, number>();
+  postgrestRttMs = 0;
+  postgrestRequests = 0;
+  readonly postgrestRequestsByUser = new Map<string, number>();
+  readonly inboxPullsByUserTeam = new Map<string, number>();
+  lastWakePublishedAt = 0;
   failEnvelopeWrites = 0;
   readonly wakes: Array<{ channel: string; event: string; payload: unknown }> = [];
+  readonly wakeSubscribeAttempts = new Map<string, number>();
+  private readonly failedWakeSubscriptions = new Map<string, number>();
   private readonly wakeListeners = new Map<string, Set<(payload: unknown) => void>>();
+  private readonly clients = new Map<string, SupabaseClient>();
+  private heartbeatBlock: { teamId: string; entered: () => void; enteredPromise: Promise<void>; releasePromise: Promise<void>; release: () => void } | null = null;
   constructor(private readonly realtime = false) {}
+  failWakeSubscriptions(user: string, count: number): void { this.failedWakeSubscriptions.set(user, count); }
+  blockNextHeartbeat(teamId: string): { entered: Promise<void>; release: () => void } {
+    let entered!: () => void;
+    let release!: () => void;
+    const enteredPromise = new Promise<void>((resolve) => { entered = resolve; });
+    const releasePromise = new Promise<void>((resolve) => { release = resolve; });
+    this.heartbeatBlock = { teamId, entered, enteredPromise, releasePromise, release };
+    return { entered: enteredPromise, release };
+  }
   private active(user: string, team: string): boolean { return this.members.get(team)?.has(user) ?? false; }
   private device(id: string, team: string): CloudDevice | undefined { return this.devices.find((row) => row.id === id && row.team_id === team); }
   private owns(user: string, id: string, team: string): boolean { return this.device(id, team)?.owner_id === user; }
@@ -54,8 +76,14 @@ class MailboxCloud {
       this.links.some((link) => link.team_id === team && link.device_id === b && link.peer_device_id === a && link.peer_fingerprint === left.fingerprint));
   }
   client(user: string): SupabaseClient {
-    if (!this.realtime) return { from: (table: string) => new MailboxQuery(this, user, table) } as unknown as SupabaseClient;
-    return {
+    const existing = this.clients.get(user);
+    if (existing) return existing;
+    if (!this.realtime) {
+      const client = { from: (table: string) => new MailboxQuery(this, user, table) } as unknown as SupabaseClient;
+      this.clients.set(user, client);
+      return client;
+    }
+    const client = {
       from: (table: string) => new MailboxQuery(this, user, table),
       channel: (name: string) => {
         const cloud = this;
@@ -67,6 +95,14 @@ class MailboxCloud {
             return channel;
           },
           subscribe(callback?: (status: string) => void) {
+            cloud.wakeSubscribeAttempts.set(user, (cloud.wakeSubscribeAttempts.get(user) ?? 0) + 1);
+            const failures = cloud.failedWakeSubscriptions.get(user) ?? 0;
+            if (failures > 0) {
+              cloud.failedWakeSubscriptions.set(user, failures - 1);
+              channel.unsubscribe = async () => { callback?.('CLOSED'); return 'ok'; };
+              callback?.('TIMED_OUT');
+              return channel;
+            }
             let listeners = cloud.wakeListeners.get(name);
             if (!listeners) { listeners = new Set(); cloud.wakeListeners.set(name, listeners); }
             if (listener) listeners.add(listener);
@@ -78,7 +114,10 @@ class MailboxCloud {
           async httpSend(event: string, payload: unknown) { return channel.send({ event, payload }); },
           async send(message: { event: string; payload: unknown }) {
             cloud.wakes.push({ channel: name, event: message.event, payload: structuredClone(message.payload) });
-            for (const deliver of [...(cloud.wakeListeners.get(name) ?? [])]) deliver(message.payload);
+            cloud.lastWakePublishedAt = performance.now();
+            queueMicrotask(() => {
+              for (const deliver of [...(cloud.wakeListeners.get(name) ?? [])]) deliver(message.payload);
+            });
             return 'ok';
           },
         };
@@ -86,10 +125,27 @@ class MailboxCloud {
       },
       removeChannel: async (channel: any) => channel.unsubscribe?.() ?? 'ok',
     } as unknown as SupabaseClient;
+    this.clients.set(user, client);
+    return client;
   }
   private isoNow(): string { return new Date(this.now()).toISOString(); }
   async execute(user: string, table: string, action: string, values: any, filters: Array<[string, string, unknown]>, range: [number, number] | null, order: Array<[string, boolean]>, returning: boolean): Promise<Result> {
+    this.postgrestRequests++;
+    this.postgrestRequestsByUser.set(user, (this.postgrestRequestsByUser.get(user) ?? 0) + 1);
+    if (this.postgrestRttMs > 0) await new Promise((resolve) => setTimeout(resolve, this.postgrestRttMs));
+    const teamFilter = filters.find(([, column]) => column === 'team_id')?.[2];
+    const blocked = this.heartbeatBlock;
+    if (blocked && table === 'mingle_devices' && action === 'update' && blocked.teamId === teamFilter) {
+      this.heartbeatBlock = null;
+      blocked.entered();
+      await blocked.releasePromise;
+    }
     const rows = this.table(table);
+    const inboxTeamId = filters.find(([, column]) => column === 'team_id')?.[2];
+    if (table === 'mingle_envelopes' && action === 'select' && filters.some(([, column]) => column === 'to_device_id')) {
+      const key = `${user}:${String(inboxTeamId)}`;
+      this.inboxPullsByUserTeam.set(key, (this.inboxPullsByUserTeam.get(key) ?? 0) + 1);
+    }
     if (action === 'insert' && table === 'mingle_envelopes' && this.envelopeWriteError) return { data: null, error: this.envelopeWriteError };
     if ((action === 'insert' || action === 'upsert') && table === 'mingle_envelopes' && this.failEnvelopeWrites > 0) {
       this.failEnvelopeWrites -= 1;
@@ -220,18 +276,23 @@ function account(cloud: MailboxCloud, id: string) {
   const user = { id, app_metadata: { provider: 'google' }, user_metadata: {}, aud: 'authenticated', created_at: new Date().toISOString() } as User;
   return {
     snapshot: () => ({ status: 'signed-in', user: { id } }),
-    withAuthenticatedClient: async <T>(callback: (client: SupabaseClient, verifiedUser: User) => Promise<T>): Promise<T> => callback(cloud.client(id), user),
+    withAuthenticatedClient: async <T>(callback: (client: SupabaseClient, verifiedUser: User) => Promise<T>): Promise<T> => {
+      cloud.authRequests++;
+      cloud.authRequestsByUser.set(id, (cloud.authRequestsByUser.get(id) ?? 0) + 1);
+      if (cloud.authRttMs > 0) await new Promise((resolve) => setTimeout(resolve, cloud.authRttMs));
+      return callback(cloud.client(id), user);
+    },
   };
 }
 
-function service(cloud: MailboxCloud, user: string, now: () => number = () => cloud.now(), changed?: () => void, syncIntervalMs = 60_000) {
+function service(cloud: MailboxCloud, user: string, now: () => number = () => cloud.now(), changed?: () => void, syncIntervalMs = 60_000, wakeRetryBaseMs = 1_000) {
   const dataDir = mkdtempSync(path.join(tmpdir(), 'mingle-transport-'));
   const db = new DatabaseSync(':memory:');
   temporaryDirectories.push(dataDir);
   databases.push(db);
   return new TransportService({
     account: account(cloud, user), store: { db }, dataDir,
-    now, retryBaseMs: 100, syncIntervalMs, changed,
+    now, retryBaseMs: 100, syncIntervalMs, wakeRetryBaseMs, changed,
   });
 }
 
@@ -239,9 +300,9 @@ function postgresTimestamp(iso: string, subMillisecondMicros = '000'): string {
   return iso.replace(/\.(\d{3})Z$/, (_match, milliseconds: string) => `.${milliseconds}${subMillisecondMicros}+00:00`);
 }
 
-async function pairedServices(cloud = new MailboxCloud(), now: () => number = Date.now) {
-  const first = service(cloud, userA, now);
-  const second = service(cloud, userB, now);
+async function pairedServices(cloud = new MailboxCloud(), now: () => number = Date.now, wakeRetryBaseMs = 1_000) {
+  const first = service(cloud, userA, now, undefined, 60_000, wakeRetryBaseMs);
+  const second = service(cloud, userB, now, undefined, 60_000, wakeRetryBaseMs);
   const a = await first.register({ teamId, name: 'Laptop' });
   const b = await second.register({ teamId, name: 'Desktop' });
   await first.link({ teamId, deviceId: b.id, fingerprint: b.fingerprint });
@@ -309,13 +370,151 @@ it('uses a payload-free Realtime wake to pull a newly delivered mailbox message 
   const received: string[] = [];
   const unsubscribe = second.onMessage((message) => { received.push(message.kind); });
   try {
+    const startedAt = performance.now();
     await first.send({ teamId, toDeviceId: b.id, kind: 'collaboration.message', payload: { content: 'private mailbox content' }, idempotencyKey: 'wake-now' });
     await vi.waitFor(() => expect(received).toEqual(['collaboration.message']), { timeout: 1_000 });
+    const elapsedMs = performance.now() - startedAt;
+    expect(elapsedMs).toBeLessThan(1_000); // No transport.start()/poll timer is running in this fixture.
     expect(cloud.wakes).toContainEqual({ channel: `mingle-device-wake:${b.id}`, event: 'wake', payload: {} });
     expect(JSON.stringify(cloud.wakes)).not.toContain('private mailbox content');
   } finally {
     unsubscribe();
     await first.close();
+    await second.close();
+  }
+});
+
+it('catches up after a transient Realtime join timeout and retries without waiting for mailbox polling', async () => {
+  const cloud = new MailboxCloud(true);
+  cloud.failWakeSubscriptions(userB, 1);
+  const { first, second, b } = await pairedServices(cloud, Date.now, 20);
+  const received: string[] = [];
+  const unsubscribe = second.onMessage((message) => { received.push(message.kind); });
+  try {
+    await vi.waitFor(() => expect(cloud.wakeSubscribeAttempts.get(userB)).toBeGreaterThanOrEqual(2), { timeout: 1_000 });
+    const startedAt = performance.now();
+    await first.send({ teamId, toDeviceId: b.id, kind: 'collaboration.message', payload: { content: 'retry path' }, idempotencyKey: 'wake-retry' });
+    await vi.waitFor(() => expect(received).toEqual(['collaboration.message']), { timeout: 1_000 });
+    expect(performance.now() - startedAt).toBeLessThan(1_000);
+    expect(cloud.wakes.some((wake) => wake.channel === `mingle-device-wake:${b.id}` && JSON.stringify(wake.payload) === '{}')).toBe(true);
+  } finally {
+    unsubscribe();
+    await first.close();
+    await second.close();
+  }
+});
+
+it('delivers after a payload-free wake within a subsecond 90ms/PostgREST-request fixture budget', async () => {
+  const cloud = new MailboxCloud(true);
+  const { first, second, b } = await pairedServices(cloud);
+  const received: string[] = [];
+  const unsubscribe = second.onMessage((message) => { received.push(message.kind); });
+  try {
+    await second.sync(); // Finish subscription and initial catch-up before enabling artificial network RTT.
+    cloud.authRequests = 0;
+    cloud.authRequestsByUser.clear();
+    cloud.postgrestRequests = 0;
+    cloud.postgrestRequestsByUser.clear();
+    cloud.authRttMs = 90;
+    cloud.postgrestRttMs = 90;
+    await first.send({ teamId, toDeviceId: b.id, kind: 'collaboration.message', payload: { content: 'simulated WAN' }, idempotencyKey: 'wake-90ms-rtt' });
+    const publishedAt = cloud.lastWakePublishedAt;
+    await vi.waitFor(() => expect(received).toEqual(['collaboration.message']), { timeout: 1_000 });
+    const recipientLatencyMs = performance.now() - publishedAt;
+    expect(recipientLatencyMs).toBeLessThan(1_000);
+    expect(cloud.authRequestsByUser.get(userB)).toBe(2);
+    expect(cloud.postgrestRequestsByUser.get(userB)).toBe(9);
+    expect(cloud.wakes.at(-1)).toEqual({ channel: `mingle-device-wake:${b.id}`, event: 'wake', payload: {} });
+    // This is a local deterministic mock with per-request delay, not an Internet/Supabase measurement.
+  } finally {
+    cloud.postgrestRttMs = 0;
+    cloud.authRttMs = 0;
+    unsubscribe();
+    await first.close();
+    await second.close();
+  }
+});
+
+it('dispatches a ready team inbox while another team heartbeat is still blocked', async () => {
+  const cloud = new MailboxCloud(true);
+  cloud.members.set(secondTeamId, new Set([userA, userB]));
+  const { first, second, b } = await pairedServices(cloud);
+  let releaseBlockedHeartbeat: (() => void) | null = null;
+  try {
+    const a2 = await first.register({ teamId: secondTeamId, name: 'Laptop second team' });
+    const b2 = await second.register({ teamId: secondTeamId, name: 'Desktop second team' });
+    await first.link({ teamId: secondTeamId, deviceId: b2.id, fingerprint: b2.fingerprint });
+    await second.link({ teamId: secondTeamId, deviceId: a2.id, fingerprint: a2.fingerprint });
+    await second.sync();
+
+    const handled = new Promise<string>((resolve) => {
+      const unsubscribe = second.onMessage((message) => {
+        if (message.teamId === teamId) {
+          unsubscribe();
+          resolve(message.kind);
+        }
+      });
+    });
+    await second.sync();
+    cloud.inboxPullsByUserTeam.set(`${userB}:${teamId}`, 0);
+    const blocked = cloud.blockNextHeartbeat(secondTeamId);
+    releaseBlockedHeartbeat = blocked.release;
+    const syncBeforeWake = second.sync();
+    await Promise.all([
+      blocked.entered,
+      vi.waitFor(() => expect(cloud.inboxPullsByUserTeam.get(`${userB}:${teamId}`)).toBeGreaterThanOrEqual(1), { timeout: 1_000 }),
+    ]);
+    await first.send({ teamId, toDeviceId: b.id, kind: 'collaboration.message', payload: { content: 'ready team' }, idempotencyKey: 'ready-team-first' });
+    expect(await Promise.race([
+      handled,
+      new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error('new message waited for another team heartbeat')), 1_000)),
+    ])).toBe('collaboration.message');
+    expect((second as unknown as { syncPromise: Promise<void> | null }).syncPromise).not.toBeNull();
+    releaseBlockedHeartbeat?.();
+    releaseBlockedHeartbeat = null;
+    await syncBeforeWake;
+  } finally {
+    releaseBlockedHeartbeat?.();
+    await first.close();
+    await second.close();
+  }
+});
+
+it('resolves an explicit sync after one catch-up pass even when later wakes queue another pass', async () => {
+  const cloud = new MailboxCloud();
+  const { second } = await pairedServices(cloud);
+  let releaseFirst: (() => void) | null = null;
+  let releaseSecond: (() => void) | null = null;
+  let releaseThird: (() => void) | null = null;
+  try {
+    const firstBlock = cloud.blockNextHeartbeat(teamId);
+    releaseFirst = firstBlock.release;
+    const initialSync = second.sync();
+    await firstBlock.entered;
+
+    const requestedCatchup = second.sync();
+    const secondBlock = cloud.blockNextHeartbeat(teamId);
+    releaseFirst();
+    await secondBlock.entered;
+
+    const thirdBlock = cloud.blockNextHeartbeat(teamId);
+    releaseSecond = secondBlock.release;
+    releaseThird = thirdBlock.release;
+    const laterWake = second.sync();
+    releaseSecond();
+    await thirdBlock.entered;
+
+    await Promise.race([
+      requestedCatchup,
+      new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error('sync waited for global idle after repeated wakes')), 1_000)),
+    ]);
+    expect((second as unknown as { syncPromise: Promise<void> | null }).syncPromise).not.toBeNull();
+    releaseThird();
+    await Promise.all([initialSync, laterWake]);
+  } finally {
+    releaseFirst?.();
+    releaseSecond?.();
+    releaseThird?.();
     await second.close();
   }
 });
