@@ -32,6 +32,16 @@ it('keeps clarification message deliveries reply-only without granting task stat
   expect(instructions).not.toContain('Assignment assignment-1 (task task-1)');
 });
 
+it('tells cross-device workers that Mingle publishes only their scoped completion branch', () => {
+  const instructions = buildInstructions({ ...worker, crossDeviceWorker: true });
+  expect(instructions).toContain('Mingle commits your remaining in-scope changes');
+  expect(instructions).toContain('dedicated `mingle/<your-handle>/<task-or-delivery>` branch on origin');
+  expect(instructions).toContain('resulting branch, full commit SHA');
+  expect(instructions).toContain('never report absolute paths from your device');
+  expect(instructions).toContain('Do not push manually, push to a default/protected branch, force-push');
+  expect(instructions).not.toContain('never push or publish without explicit human authorization');
+});
+
 it('yields for pending worker integration and waits for the durable result-review wake', () => {
   const instructions = buildInstructions({ ...worker, self: { ...worker.self, role: 'orchestrator' }, canAssign: true,
     deliveryKind: 'request', assignment: null });
@@ -39,4 +49,7 @@ it('yields for pending worker integration and waits for the durable result-revie
   expect(instructions).toContain('yield with Pending and end the turn');
   expect(instructions).toContain('Mingle will wake a result-review turn after durable completion');
   expect(instructions).toContain('Do not give a partial final-looking result while waiting for that work to return');
+  expect(instructions).toContain('inspect the exact host-fetched review ref');
+  expect(instructions).toContain('never answer Pending or wait for a human prompt after completion has arrived');
+  expect(instructions).toContain('call team_accept');
 });

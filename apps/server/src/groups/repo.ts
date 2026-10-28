@@ -95,7 +95,12 @@ const placeholders = (n: number) => Array.from({ length: n }, () => '?').join(',
 
 /** Thin SQL layer over the group tables. Callers own transactions through Store.tx. */
 export class GroupRepo {
-  constructor(private readonly db: DatabaseSync) {}
+  constructor(private readonly db: DatabaseSync) {
+    db.exec(`CREATE TABLE IF NOT EXISTS group_assignment_acceptances (
+      assignment_id TEXT PRIMARY KEY, accepted_by TEXT NOT NULL CHECK(accepted_by='orchestrator'),
+      verification_summary TEXT NOT NULL, accepted_at TEXT NOT NULL
+    )`);
+  }
 
   private all(sql: string, ...params: SQLInputValue[]): Row[] { return this.db.prepare(sql).all(...params) as Row[]; }
   private get(sql: string, ...params: SQLInputValue[]): Row | undefined { return this.db.prepare(sql).get(...params) as Row | undefined; }
@@ -387,7 +392,15 @@ export class GroupRepo {
       .map((row) => ({ id: row.id as string, label: row.label as string, status: row.state as GroupMilestone['status'],
         ...(row.evidence_ref ? { evidence: row.evidence_ref as string } : {}), acceptanceProvenance: row.acceptance_source as GroupMilestone['acceptanceProvenance'] }));
     const acceptanceProvenance = milestones[0]?.acceptanceProvenance;
-    return { ...assignment, ...(acceptanceProvenance ? { acceptanceProvenance } : {}), ...(milestones.length ? { milestones } : {}) };
+    const acceptance = this.get('SELECT accepted_by,verification_summary FROM group_assignment_acceptances WHERE assignment_id=?', assignment.id);
+    return { ...assignment, ...(acceptanceProvenance ? { acceptanceProvenance } : {}), ...(milestones.length ? { milestones } : {}),
+      ...(acceptance ? { acceptedBy: acceptance.accepted_by as 'orchestrator', verificationSummary: acceptance.verification_summary as string } : {}) };
+  }
+  acceptAssignment(assignmentId: string, verificationSummary: string): void {
+    this.run(`INSERT INTO group_assignment_acceptances(assignment_id,accepted_by,verification_summary,accepted_at)
+      VALUES(?,'orchestrator',?,?) ON CONFLICT(assignment_id) DO UPDATE SET
+      accepted_by='orchestrator',verification_summary=excluded.verification_summary,accepted_at=excluded.accepted_at`,
+    assignmentId, verificationSummary.slice(0, 4_000), nowIso());
   }
   setTaskMilestones(taskId: string, status: 'completed' | 'blocked', evidence: string): void {
     this.run(`UPDATE group_assignment_milestones SET state = ?, evidence_ref = ?, updated_at = ? WHERE task_id = ? AND state <> 'completed'`,

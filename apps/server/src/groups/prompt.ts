@@ -15,6 +15,7 @@ export interface RosterEntry { handle: string; role: GroupMember['role']; provid
 export interface InstructionData {
   title: string; mode: GroupMode; self: RosterEntry; roster: RosterEntry[]; canAssign: boolean; leaseHolder: string | null;
   requestExcerpt: string; deliveryKind: DeliveryKind; hop: number; maxHops: number; turnsUsed: number; maxTurns: number | null; unread: number;
+  crossDeviceWorker?: boolean;
   assignment: { id: string; taskId: string; scope: string[] } | null;
 }
 
@@ -25,7 +26,8 @@ const ROLE_RULE: Record<GroupMember['role'], string> = {
 };
 
 const WORKER_COMPLETION = 'Completion: send one concise completion, not repeats. Publish the committed files needed for handoff once through team_artifact (one file revision per call; never invent an artifact when nothing is committed). When the assigned work is ready, record team_status review, then your final summary of changes, checks you ran and caveats; unresolved work stays blocked, not review. Do not send unsolicited completion acknowledgments or wake peers solely to repeat completion. Answer concrete teammate questions concisely with replyToId when needed.';
-const COORDINATOR_COMPLETION = 'Final answer to the human: begin with the outcome, Implemented, Partially complete or Blocked, plus material caveats. Then state each @agent\'s contribution; where the work is actually integrated (worktree, branch or commit; the selected checkout only if that was authorized and done); which checks you ran yourself versus which a peer reported; and what still needs review or user action. If any worker is still running or terminal transfer is pending, say Pending instead of claiming it is done. Do not give a partial final-looking result while waiting for that work to return. Review tasks are not Done until a human accepts them.';
+const TEAM_WORKER_COMPLETION = 'Cross-device assignment completion: Mingle commits your remaining in-scope changes and pushes the completed worktree HEAD to a dedicated `mingle/<your-handle>/<task-or-delivery>` branch on origin. Keep every commit in the assigned scope; Mingle refuses to publish protected or out-of-scope changes. Do not push manually, push to a default/protected branch, force-push, or publish a release. Mingle reports the resulting branch, full commit SHA and any publication failure in the host completion record; report those values only if Mingle has exposed them to you and never guess. Use repository-relative paths, and never report absolute paths from your device.';
+const COORDINATOR_COMPLETION = 'Final answer to the human: begin with the outcome, Implemented, Partially complete or Blocked, plus material caveats. Then state each @agent\'s contribution; where the work is actually integrated (worktree, branch or commit; the selected checkout only if that was authorized and done); which checks you ran yourself versus which a peer reported; and what still needs review or user action. On each durable worker completion, act immediately: inspect the exact host-fetched review ref and worktree Mingle supplies, inspect the diff, run the project checks and start the site when applicable, and open it in the shared browser if that tool is available. Decide whether the result meets its criteria; never answer Pending or wait for a human prompt after completion has arrived. In full-access team mode, provide a concise verification summary and call team_accept for work you accept. In supervised mode, report that it needs the human\'s acceptance. If a worker is genuinely still running or terminal transfer is pending, you may yield Pending for that work only. Do not give a partial final-looking result while waiting for that work to return.';
 
 /** Bounded per-run guidance. Native history, roster and request excerpt only; never other members' transcripts. */
 export function buildInstructions(d: InstructionData): string {
@@ -40,7 +42,7 @@ export function buildInstructions(d: InstructionData): string {
       : 'Cowork request receipt is not execution. Edit only after you receive an assignment with a concrete scope, or when the human addresses you directly.');
   }
   if (d.self.role === 'orchestrator') {
-    lines.push('When an assigned worker is still running or its terminal transfer is pending, do not poll its repository or wait inside this provider turn. If no concrete question needs your answer to unblock the worker, yield with Pending and end the turn; Mingle will wake a result-review turn after durable completion. On that wake, inspect the actual integrated files and artifacts before reporting.');
+    lines.push('When an assigned worker is still running or its terminal transfer is pending, do not poll its repository or wait inside this provider turn. If no concrete question needs your answer to unblock the worker, yield with Pending and end the turn; Mingle will wake a result-review turn after durable completion. When that completion arrives, immediately inspect the actual fetched branch/ref or integrated artifacts, run the appropriate checks and start the site when applicable, then make an acceptance decision. Do not say Pending or wait for another human prompt after completion has arrived. In full-access team mode, use team_accept with a verification summary when the task passes; in supervised mode, leave acceptance to the human.');
   }
   if (replyOnlyWorker) {
     lines.push('This is a reply-only message delivery, not a task assignment. Answer the sender through team_message. It grants no team_status or team_artifact authority; ask the coordinator for a new scoped assignment if more work or task reporting is needed.');
@@ -63,8 +65,10 @@ export function buildInstructions(d: InstructionData): string {
       ? 'Do not edit files or report task status during this clarification turn. Resume implementation and task_status/team_artifact only in the active scoped assignment delivery.'
       : d.canAssign
         ? 'You may prepare integration in your own scoped worktree under the selected permission policy. Never push or publish, or modify the human-selected checkout, without explicit human authorization.'
-        : 'Keep edits inside your assignment and own worktree. Ask the coordinator or human before integration; never push or publish without explicit human authorization.',
-    replyOnlyWorker ? '' : d.canAssign ? COORDINATOR_COMPLETION : WORKER_COMPLETION,
+        : d.crossDeviceWorker
+          ? `Keep edits inside your assignment and owner-device worktree. ${TEAM_WORKER_COMPLETION}`
+          : 'Keep edits inside your assignment and own worktree. Ask the coordinator or human before integration; never push or publish without explicit human authorization.',
+    replyOnlyWorker ? '' : d.canAssign ? COORDINATOR_COMPLETION : d.crossDeviceWorker ? '' : WORKER_COMPLETION,
   ];
   // Completion guidance is kept whole: only the roster and request context yield when the bound is reached.
   const fixed = [...lines, ...rules].join('\n');
@@ -88,6 +92,7 @@ export function requestDeliveryText(d: { content: string; handle: string; planne
 export function assignmentText(d: {
   id: string; taskId: string; from: string; to: string; title: string; objective: string; acceptance: string; scope: string[];
   request: string; dependsOn: Array<{ taskId: string; title: string; status: string }>; inputs: Array<{ taskId: string; path: string; reference: string | null }>;
+  crossDeviceWorker?: boolean;
 }): string {
   const lines = [
     `Assignment ${d.id} from @${d.from} to @${d.to} (task ${d.taskId}): ${clean(d.title, 200)}`,
@@ -100,7 +105,9 @@ export function assignmentText(d: {
   if (d.inputs.length) {
     lines.push('', 'Expected input artifacts (verified handoff messages appear in your session when published):', ...d.inputs.map((input) => `- task ${input.taskId}: ${input.path}${input.reference ? ` · ${input.reference}` : ''}`));
   }
-  lines.push('', 'Report progress with team_status; when ready, finish with one completion (publish required committed handoff files with team_artifact, record team_status review, then summarize changes and actual verification). Unresolved work stays blocked. Review is not Done.');
+  lines.push('', d.crossDeviceWorker
+    ? 'Report progress with team_status; when ready, record team_status review and summarize changes, checks and repository-relative paths. Mingle will publish the scoped completion branch and include its exact branch and SHA in the host completion record; do not guess these values. Never report absolute paths from your device. Unresolved work stays blocked.'
+    : 'Report progress with team_status; when ready, finish with one completion (publish required committed handoff files with team_artifact, record team_status review, then summarize changes and actual verification). Unresolved work stays blocked. Review is not Done.');
   return truncate(lines.join('\n'), LIMITS.message);
 }
 
@@ -126,7 +133,7 @@ export function resultText(lines: ResultLine[]): string {
   const rows = lines.flatMap((row) => [`- @${row.handle} · ${clean(row.title, 120)} · ${row.outcome}`, row.summary ? `  ${clean(row.summary, LIMITS.summary).replaceAll('\n', '\n  ')}` : '']).filter(Boolean);
   return truncate([
     'Your latest delegation batch has returned. The statuses below describe native turns; they do not certify implementation, integration or human acceptance. Excerpts are bounded; inspect actual worktrees and artifacts.',
-    'Check team_members and team_inbox, review the actual artifacts and worktrees, integrate authorized work within your own scope or location, then send ONE self-contained final summary for the human (outcome first, each agent\'s contribution, where it landed, checks run versus peer-reported, remaining review or action). Say Pending if workers are still running. Do not claim Done for tasks in Review. Use team_assign only if specific work remains.',
+    'Check team_members and team_inbox, then immediately review every returned worker result and its exact fetched branch/ref or integrated artifacts. Inspect diffs, run applicable project checks, start the site when useful and open it in the shared browser when available. Decide whether each result passes; do not answer Pending or wait for a human prompt after a completion is delivered. In full-access mode use team_accept with a verification summary for accepted tasks; in supervised mode leave them for human review. Send ONE self-contained final summary for the human (outcome first, each agent\'s contribution, where it landed, checks run versus peer-reported, remaining review or action). Say Pending only while workers are genuinely still running. Use team_assign only if specific work remains.',
     '', ...rows,
   ].join('\n'), LIMITS.message);
 }

@@ -5,7 +5,7 @@ import {
 import type {
   AddGroupAgent, AgentConfiguration, AutonomyConfig, ConversationGroup, CreateGroup, GroupAssignment, GroupDelivery, GroupMember, GroupMessage, GroupMode, MessageContextRef, SessionPlan,
   GroupMilestone, GroupRecoveryPolicy, GroupRecoveryState, ProviderFailure, RecoveryActionRequest, RecoveryActionResult, RecoveryCheckpoint,
-  GroupRunContext, GroupSnapshot, ProviderInfo, ProviderSkill, Session, Task, TeamArtifactSchema, TeamAssignSchema, TeamMessageSchema, TeamStatusSchema, UpdateGroupSchema,
+  GroupRunContext, GroupSnapshot, ProviderInfo, ProviderSkill, Session, Task, TeamAcceptTask, TeamArtifactSchema, TeamAssignSchema, TeamMessageSchema, TeamStatusSchema, UpdateGroupSchema,
 } from '@mingle/contracts';
 import type { z } from 'zod';
 import { unfinishedDeps } from '../dag.ts';
@@ -408,6 +408,7 @@ export class GroupService {
     const messages = [...new Map([...this.repo.recentMessages(group.id, SNAPSHOT_MESSAGES), ...[...rows.map((d) => d.messageId), ...requests.map((r) => r.messageId)].map((id) => this.repo.getMessage(id)).filter((m): m is GroupMessage => Boolean(m))].map((m) => [m.id, m])).values()].sort((a, b) => a.seq - b.seq);
     const assignments: GroupAssignment[] = this.repo.assignments(group.id).map((a) => ({
       id: a.id, groupId: a.groupId, requestId: a.requestId, fromMemberId: a.fromMemberId, toMemberId: a.toMemberId, taskId: a.taskId, deliveryId: a.deliveryId, scope: a.scope, createdAt: a.createdAt,
+      ...(a.acceptedBy ? { acceptedBy: a.acceptedBy } : {}), ...(a.verificationSummary ? { verificationSummary: a.verificationSummary } : {}),
     }));
     return { group, members, messages, requests, deliveries, assignments };
   }
@@ -1955,6 +1956,7 @@ export class GroupService {
       title: group.title, mode: group.mode, self: roster.find((r) => r.you)!, roster, canAssign: this.mayAssign(group, member, request.plannerMemberId), leaseHolder: lease,
       requestExcerpt: this.repo.getMessage(request.messageId)?.content ?? '', deliveryKind: delivery.kind, hop: delivery.hop, maxHops: group.maxHops,
       turnsUsed: request.turnsUsed, maxTurns: effectiveTurnLimit(group), unread: this.repo.countAddressedAfter(group.id, member.id, member.lastReadSeq),
+      crossDeviceWorker: member.role === 'worker' && Boolean(this.store.db.prepare('SELECT 1 AS found FROM mingle_team_proxy_sessions WHERE session_id=?').get(member.sessionId)),
       assignment: assignment ? { id: assignment.id, taskId: assignment.taskId, scope: assignment.scope } : null,
     });
     return { groupId: group.id, memberId: member.id, requestId: request.id, deliveryId: delivery.id, hop: delivery.hop, instructions };
@@ -2762,6 +2764,7 @@ export class GroupService {
         content: assignmentText({
           id, taskId: task.id, from: member.handle, to: recipient.handle, title, objective: input.objective, acceptance: acceptanceCriteria, scope,
           request: this.repo.getMessage(request.messageId)?.content ?? '', dependsOn: dependencies, inputs: inputs.map((i) => ({ ...i, reference: null })),
+          crossDeviceWorker: Boolean(this.store.db.prepare('SELECT 1 AS found FROM mingle_team_proxy_sessions WHERE session_id=?').get(recipientSession.id)),
         }),
       });
       this.repo.insertDelivery({ id: deliveryIdValue, groupId: group.id, requestId: request.id, messageId: message.id, memberId: recipient.id, kind: 'assignment', hop, assignmentId: id });
@@ -2865,6 +2868,46 @@ export class GroupService {
     // A producer reaching Review can unblock consumers that opted into its published artifacts.
     this.schedule(group.id);
     return { taskId: result.id, status: result.status };
+  }
+
+  /** Host-authorized full-access acceptance after the team orchestrator has inspected the result. */
+  acceptTask(ctx: GroupRunContext, input: TeamAcceptTask): unknown {
+    const { group, member, session, delivery } = this.live(ctx);
+    const request = this.repo.getRequest(delivery.requestId);
+    if (!request || !this.mayAssign(group, member, request.plannerMemberId)) throw forbidden('Only this request’s current orchestrator may accept a worker task.');
+    const assignment = this.repo.assignmentByTask(group.id, input.taskId);
+    if (!assignment || assignment.fromMemberId !== member.id || assignment.requestId !== delivery.requestId) {
+      throw forbidden('You may accept only a worker assignment from this request that you issued.');
+    }
+    const task = this.store.getTask(input.taskId);
+    const workerDelivery = this.repo.getDelivery(assignment.deliveryId);
+    if (!task || task.projectId !== group.projectId || task.sessionId !== this.repo.getMember(assignment.toMemberId)?.sessionId) {
+      throw notFound('The assigned task is no longer available to accept.');
+    }
+    if (task.status !== 'review' || workerDelivery?.status !== 'completed') {
+      throw conflict('The worker task must be in Review with a completed delivery before it can be accepted.');
+    }
+    const verificationSummary = clean(input.verificationSummary, 4_000).trim();
+    if (verificationSummary.length < 8) throw unprocessable('Provide a meaningful verification summary before accepting this task.');
+    const accepted = this.store.tx(() => {
+      this.live(ctx);
+      const current = this.store.getTask(task.id);
+      if (!current || current.status !== 'review') throw conflict('The task changed before it could be accepted.');
+      const next = this.store.updateTask(current.id, { status: 'done' });
+      this.repo.acceptAssignment(assignment.id, verificationSummary);
+      this.repo.updateMilestonesForAssignment(assignment.id, 'completed', verificationSummary);
+      this.repo.insertMessage({ groupId: group.id, senderMemberId: member.id, recipients: [assignment.toMemberId], kind: 'status',
+        requestId: delivery.requestId, content: clean(`Accepted by orchestrator: ${verificationSummary}`, 4_000), sourceRunId: delivery.runId });
+      this.store.recordEvent({ projectId: next.projectId, sessionId: next.sessionId, type: 'task.done',
+        summary: `Task accepted by orchestrator: ${next.title}`, payload: { taskId: next.id, from: 'review', to: 'done',
+          acceptedBy: 'orchestrator', verificationSummary, groupId: group.id, assignmentId: assignment.id } });
+      this.repo.touchGroup(group.id);
+      this.event(group, 'group.status', `@${member.handle} accepted @${this.repo.getMember(assignment.toMemberId)?.handle ?? 'worker'}’s task`,
+        { taskId: next.id, status: 'done', acceptedBy: 'orchestrator', verificationSummary }, session.id);
+      return next;
+    });
+    this.schedule(group.id);
+    return { taskId: accepted.id, status: accepted.status, acceptedBy: 'orchestrator', verificationSummary };
   }
 
   async artifact(ctx: GroupRunContext, input: TeamArtifact): Promise<unknown> {

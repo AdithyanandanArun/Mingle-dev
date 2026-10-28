@@ -10,8 +10,9 @@ import {
 } from '@mingle/contracts';
 import { openDatabase } from '../../db.ts';
 import { Store } from '../../store.ts';
-import { makeRepo, runGit, waitFor } from '../../test-utils.ts';
+import { makeRepo, runGit, tmpDir, waitFor } from '../../test-utils.ts';
 import { HttpError } from '../../util.ts';
+import { teamCompletionBranch } from '../../repository/team-branch.ts';
 import { TeamOrchestrationHost } from './service.ts';
 
 const ACCOUNT = '10000000-0000-4000-8000-000000000001';
@@ -220,6 +221,14 @@ function fixture(options: { deviceId?: string; accountId?: string; role?: 'leade
       const hook = afterRunFinished;
       afterRunFinished = null;
       hook?.(sessionId, runId, outcome);
+    },
+    acceptTask(_context: any, input: { taskId: string; verificationSummary: string }) {
+      const task = store.getTask(input.taskId);
+      if (!task || task.status !== 'review') throw new HttpError(409, 'Task is not ready for acceptance.');
+      store.updateTask(task.id, { status: 'done' });
+      const assignment = group?.assignments.find((item) => item.taskId === task.id);
+      if (assignment) Object.assign(assignment, { acceptedBy: 'orchestrator', verificationSummary: input.verificationSummary });
+      return { taskId: task.id, status: 'done', acceptedBy: 'orchestrator', verificationSummary: input.verificationSummary };
     },
     setTeamDispatchGuard() {}, setTeamRunFinishedHook() {}, holdTeamMember() {},
     contextForRun() { return undefined; },
@@ -1325,6 +1334,73 @@ it('imports remote artifacts into isolated refs and includes those ref names in 
   const assistant = fx.store.listMessages(sessionId, { limit: 20 }).find((message) => message.role === 'assistant');
   expect(assistant?.content).toContain(`Git ref: refs/mingle/team/${SHARED}/${deliveryId}/${revision}`);
   expect(assistant?.content).toContain('Artifact import/integration failures');
+});
+
+it('fetches a pushed worker branch for review and lets only a full-access orchestrator accept and merge it locally', async () => {
+  const fx = fixture();
+  const originRoot = tmpDir('mingle-team-host-origin-'); paths.push(originRoot);
+  const origin = path.join(originRoot, 'origin.git');
+  mkdirSync(origin);
+  execFileSync('git', ['init', '-q', '--bare', '--initial-branch=main', origin]);
+  runGit(fx.project.path, 'remote', 'add', 'origin', origin);
+  runGit(fx.project.path, 'push', '-u', 'origin', 'main');
+  const baseRevision = runGit(fx.project.path, 'rev-parse', 'HEAD').trim();
+
+  const group = await addRemoteToSession(fx);
+  const worker = group.members.find((member) => member.sessionId.startsWith('proxy_'))!;
+  const orchestrator = group.members.find((member) => member.role === 'orchestrator')!;
+  const deliveryId = 'team-branch-review-delivery';
+  const requestId = 'team-branch-review-request';
+  const taskId = 'team-branch-review-task';
+  const proxySession = fx.store.getSession(worker.sessionId)!;
+  fx.store.insertTask({ id: taskId, projectId: PROJECT, title: 'Add scoped output', description: '', acceptanceCriteria: 'The output file exists.',
+    sessionId: proxySession.id, dependsOn: [], status: 'review' });
+  group.deliveries.push({ id: deliveryId, groupId: group.group.id, requestId, messageId: 'review-message', memberId: worker.id,
+    status: 'running', runId: 'host-branch-run', hop: 0, error: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), kind: 'assignment' });
+  group.assignments.push({ id: 'team-branch-review-assignment', groupId: group.group.id, requestId, fromMemberId: orchestrator.id,
+    toMemberId: worker.id, taskId, deliveryId, scope: ['src/features/landing.ts'], createdAt: new Date().toISOString() });
+  const userMessage = fx.store.insertMessage({ sessionId: worker.sessionId, role: 'user', content: 'Add the scoped output', runId: 'host-branch-run', kind: 'group-delivery' });
+  fx.store.insertRun({ id: 'host-branch-run', sessionId: worker.sessionId, userMessageId: userMessage.id, provider: 'codex', model: 'gpt-6-codex', startedAt: new Date().toISOString() });
+  fx.host.start({ session: proxySession, runId: 'host-branch-run', content: 'Add the scoped output', options: { groupDeliveryId: deliveryId },
+    context: { groupId: group.group.id, memberId: worker.id, requestId, deliveryId, hop: 0, instructions: 'Team instructions' } });
+  await waitFor(() => fx.outgoing.find((entry) => entry.kind === 'teamgroup.delivery' && (entry.payload as { deliveryId?: string }).deliveryId === deliveryId));
+
+  const ownerRoot = tmpDir('mingle-team-owner-'); paths.push(ownerRoot);
+  const ownerClone = path.join(ownerRoot, 'repo');
+  execFileSync('git', ['clone', '-q', origin, ownerClone]);
+  const branch = teamCompletionBranch(worker.handle, taskId, deliveryId);
+  runGit(ownerClone, 'switch', '-c', branch);
+  mkdirSync(path.join(ownerClone, 'src/features'), { recursive: true });
+  writeFileSync(path.join(ownerClone, 'src/features/landing.ts'), 'export const landing = true;\n');
+  runGit(ownerClone, 'add', '--', 'src/features/landing.ts');
+  runGit(ownerClone, '-c', 'user.name=Owner test', '-c', 'user.email=owner-test@example.invalid', 'commit', '-m', 'Scoped worker result');
+  const commitSha = runGit(ownerClone, 'rev-parse', 'HEAD').trim();
+  runGit(ownerClone, 'push', 'origin', `${branch}:${branch}`);
+
+  await fx.incoming('teamgroup.delivery.status', { sharedProjectId: SHARED, deliveryId, agentId: REMOTE_AGENT, status: 'completed',
+    runId: 'owner-branch-run', finalText: 'Added the landing module.', artifacts: [], pushedBranch: { name: branch, commitSha }, at: new Date().toISOString() });
+  const completion = fx.store.listMessages(worker.sessionId, { limit: 20 }).find((message) => message.role === 'assistant');
+  expect(completion?.content).toContain(`origin/${branch} @ ${commitSha}`);
+  expect(completion?.content).toContain('Local review ref: refs/mingle/team/review/');
+  expect(completion?.content).toContain(`Integration worktree: ${fx.project.path}`);
+  const review = fx.store.db.prepare(`SELECT branch,commit_sha,review_ref FROM mingle_team_host_review_branches WHERE delivery_id=?`).get(deliveryId) as {
+    branch: string; commit_sha: string; review_ref: string;
+  };
+  expect(runGit(fx.project.path, 'rev-parse', review.review_ref).trim()).toBe(commitSha);
+  expect(runGit(fx.project.path, 'rev-parse', 'HEAD').trim()).toBe(baseRevision);
+
+  const context = { groupId: group.group.id, memberId: orchestrator.id, requestId, deliveryId, hop: 1, instructions: 'Review result' };
+  await expect(fx.host.acceptTask(context, fx.local.id, { taskId, verificationSummary: 'Tests pass and I inspected the diff.' }))
+    .rejects.toMatchObject({ status: 403 });
+  await fx.host.update(PROJECT, { expectedVersion: 1, permissionLevel: 'full-access' });
+  await grantRemote(fx, 2, { permissionLevel: 'full-access' });
+
+  const accepted = await fx.host.acceptTask(context, fx.local.id, { taskId, verificationSummary: 'Tests pass and I inspected the diff.' });
+  expect(accepted).toMatchObject({ acceptedBy: 'orchestrator', taskId, status: 'done', branch, commitSha, localRef: review.review_ref, merged: true });
+  expect(fx.store.getTask(taskId)?.status).toBe('done');
+  expect(group.assignments[0]).toMatchObject({ acceptedBy: 'orchestrator', verificationSummary: 'Tests pass and I inspected the diff.' });
+  expect(runGit(fx.project.path, 'rev-parse', 'HEAD').trim()).toBe(commitSha);
+  expect(runGit(origin, 'rev-parse', 'refs/heads/main').trim()).toBe(baseRevision);
 });
 
 it('does not import or integrate a completed artifact after the owner revokes team consent', async () => {

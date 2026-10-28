@@ -3,7 +3,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { z } from 'zod';
-import { TeamArtifactSchema, TeamAssignSchema, TeamMessageSchema, TeamStatusSchema } from '@mingle/contracts';
+import { TeamAcceptTaskSchema, TeamArtifactSchema, TeamAssignSchema, TeamMessageSchema, TeamStatusSchema } from '@mingle/contracts';
 import type { GroupRunContext, Session, TeamMcpConnection } from '@mingle/contracts';
 import type { Store } from './store.ts';
 import { errorMessage, truncate } from './util.ts';
@@ -24,6 +24,7 @@ export interface TeamGroupService {
   message(ctx: GroupRunContext, input: Input<typeof TeamMessageSchema>): unknown;
   artifact(ctx: GroupRunContext, input: Input<typeof TeamArtifactSchema>): Promise<unknown>;
   status(ctx: GroupRunContext, input: Input<typeof TeamStatusSchema>): unknown;
+  acceptTask(ctx: GroupRunContext, input: Input<typeof TeamAcceptTaskSchema>): unknown;
 }
 
 /** Optional distributed recovery tools retain the existing run-scoped group authority. */
@@ -32,6 +33,8 @@ export interface DistributedTeamTools {
   members(context: GroupRunContext, sessionId: string): Promise<unknown>;
   recover(context: GroupRunContext, sessionId: string, input: Record<string, unknown>): Promise<unknown>;
 }
+
+export type TeamAcceptanceHandler = (context: GroupRunContext, sessionId: string, input: Input<typeof TeamAcceptTaskSchema>) => Promise<unknown>;
 
 interface Binding {
   runId: string; sessionId: string; signal: AbortSignal; context: Readonly<GroupRunContext>;
@@ -50,7 +53,7 @@ const INSTRUCTIONS = [
   'Call team_members first to see each member’s handle, role and actual status, including your own. Call team_inbox to read what Mingle has queued for you.',
   'Who may assign work is enforced by the host on every call. In Orchestrated and Current agent leads groups only the designated orchestrator assigns work. In Cowork only the peer holding this request’s temporary planning lease may assign, and only within that lease; any member may message or report on its own work. A refusal is final: do not try to work around it.',
   'team_assign, team_message and team_artifact confirm acceptance or queueing, never completion. Every assignment needs a meaningful scoped objective and finish condition; if acceptance criteria are omitted, Mingle derives and labels one from the objective and edit scope. A derived criterion is not evidence of completion or acceptance. team_status reports progress on a task you own. Recipients are handles such as claude1; Mingle never dispatches work by scanning your prose for @mentions, so use these tools to reach someone.',
-  'For completion, publish required committed handoff files once with team_artifact (one file revision per call, only when a real commit exists), record team_status review when ready, then give a concise final summary. Unresolved work stays blocked. Do not send unsolicited completion acknowledgments or wake peers solely to repeat completion. Answer concrete teammate questions concisely with replyToId when needed. A coordinator answers the human once, with the outcome first, each member’s contribution, where work was integrated, which checks it ran versus peers reported, and what still needs review. Review is not Done.',
+  'For completion, publish required committed handoff files once with team_artifact (one file revision per call, only when a real commit exists), record team_status review when ready, then give a concise final summary. For cross-device work Mingle commits and pushes only the scoped completion branch; workers must not report absolute device paths. On a returned completion, the coordinator immediately inspects the fetched branch/ref, runs checks and decides whether it passes; do not answer Pending or wait for another human prompt. In full-access team mode, a coordinator may call team_accept with a verification summary; supervised mode always leaves acceptance to the human. Unresolved work stays blocked. Do not send unsolicited completion acknowledgments or wake peers solely to repeat completion. Answer concrete teammate questions concisely with replyToId when needed. A coordinator answers the human once, with the outcome first, each member’s contribution, where work was integrated, which checks it ran versus peers reported, and what still needs review.',
   'Keep payloads compact: scoped objectives, exact paths and revisions, and concise questions. Limits, edit-scope ownership and delegation budgets are enforced by the host.',
   'When available, team_remote_agents lists explicitly shared agents on linked team devices. Local execution remains the default. Use team_remote_recover only for a stopped task with verified quota/provider exhaustion after eligible local alternatives are exhausted; it queues destination-owner review and grants no execution, quota-spend, push or command permission.',
   'Group autonomy is reported by team_members. In supervised mode, or when balanced mode expands beyond the accepted edit scope, team_assign may return awaiting-human-ack with a durable checkpoint ID; stop creating assignments and tell the coordinator that human acknowledgment is required. Repeating the same tool call does not acknowledge a checkpoint.',
@@ -60,9 +63,11 @@ const INSTRUCTIONS = [
 export class TeamMcpBridge {
   private bindings = new Map<string, Binding>();
   private distributed: DistributedTeamTools | null = null;
+  private acceptanceHandler: TeamAcceptanceHandler | null = null;
   constructor(private groups: TeamGroupService, private store: Store, private getPort: () => number, private getHost: () => string = () => '127.0.0.1') {}
 
   setDistributedTools(tools: DistributedTeamTools): void { this.distributed = tools; }
+  setAcceptanceHandler(handler: TeamAcceptanceHandler): void { this.acceptanceHandler = handler; }
 
   create(runId: string, session: Session, signal: AbortSignal, context: GroupRunContext): TeamMcpConnection {
     if (this.bindings.size >= MAX_BINDINGS) throw new Error('Too many active team tool connections');
@@ -91,6 +96,7 @@ export class TeamMcpBridge {
       case 'team_message': this.ensure(binding, binding.signal); return this.groups.message(ctx, TeamMessageSchema.parse(args));
       case 'team_artifact': this.ensure(binding, binding.signal); return this.groups.artifact(ctx, TeamArtifactSchema.parse(args));
       case 'team_status': this.ensure(binding, binding.signal); return this.groups.status(ctx, TeamStatusSchema.parse(args));
+      case 'team_accept': this.ensure(binding, binding.signal); return this.acceptanceHandler?.(ctx, binding.sessionId, TeamAcceptTaskSchema.parse(args)) ?? Promise.reject(new Error('Task acceptance is unavailable.'));
       default: throw new Error('Unsupported team tool.');
     }
   }
@@ -149,6 +155,8 @@ export class TeamMcpBridge {
       register('team_remote_recover', 'Propose exceptional recovery of a stopped task on a linked device after verified local provider exhaustion. The host checks the current group planning authority and source failure. Acceptance only queues a request for the destination device owner; it never grants execution, quota, Git push or command permissions.',
         distributed.recoveryShape, { readOnly: false, idempotent: true }, (args) => distributed.recover(ctx, binding.sessionId, args));
     }
+    if (this.acceptanceHandler) register('team_accept', 'Accept a completed worker task after reviewing its changes and running applicable verification. Requires the current full-access team permission, a task in Review, and a concise verificationSummary; Mingle merges an available fetched worker branch locally but never pushes the host branch. Supervised teams must leave tasks for human acceptance.',
+      TeamAcceptTaskSchema.shape, { readOnly: false, idempotent: true }, (args) => this.acceptanceHandler!(ctx, binding.sessionId, TeamAcceptTaskSchema.parse(args)));
     return server;
   }
 

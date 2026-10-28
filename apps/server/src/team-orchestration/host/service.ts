@@ -1,14 +1,14 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import {
-  AddTeamAgentSchema, EnableTeamOrchestrationSchema, ShareTeamSessionSchema, TeamApprovalDecisionPayloadSchema,
+  AddTeamAgentSchema, EnableTeamOrchestrationSchema, ShareTeamSessionSchema, TeamAcceptTaskSchema, TeamApprovalDecisionPayloadSchema,
   TeamApprovalRequestPayloadSchema, TeamConsentPayloadSchema, TeamDeliveryPayloadSchema,
   TeamActivityPayloadSchema, TeamDeliveryHeartbeatPayloadSchema, TeamDeliveryStatusPayloadSchema, TeamInterruptPayloadSchema, TeamOrchestrationSettingsSchema,
   TEAM_CONSENT_DISCLAIMER_VERSION, TeamArtifactSchema, TeamPermissionLevelSchema, TeamStructureChangeSchema, TeamStructurePayloadSchema, TeamToolCallPayloadSchema,
   TeamToolResultPayloadSchema, TeamArtifactRefSchema,
   type ProviderFailure, type TeamAgentRole, type TeamAgentState, type TeamConsentState,
   type TeamAvailableAgentsSnapshot, type TeamLeaderChange, type TeamPermissionLevel, type TeamStructureMember, type TeamSessionRef,
-  type TeamArtifactRef, type TeamOrchestrationSettings, type TeamStructureSnapshot, type Session,
+  type TeamAcceptTask, type TeamArtifactRef, type TeamOrchestrationSettings, type TeamStructureSnapshot, type Session,
 } from '@mingle/contracts';
 import { ProviderFailureSchema, ProviderSchema, TeamStructurePayloadSchema as StructureSchema } from '@mingle/contracts';
 import type { DatabaseSync } from 'node:sqlite';
@@ -28,6 +28,7 @@ import type { ProjectCollaborationSnapshot } from '../../../../../packages/contr
 import { KeyedLock } from '../../repository/lock.ts';
 import { normalizeScopes, safeArtifactPath } from '../../groups/routing.ts';
 import { isDeniedName } from '../../paths.ts';
+import { fetchTeamCompletionBranch } from '../../repository/team-branch.ts';
 
 type Row = Record<string, unknown>;
 type HostRow = {
@@ -63,6 +64,8 @@ const CompletionArtifactSchema = z.object({
 const CompletionIntentSchema = z.object({
   kind: z.literal('team-completion'), version: z.literal(1), phase: z.enum(['artifacts', 'finalizing', 'notifying']),
   remoteRunId: z.string().nullable(), at: z.string(), finalText: z.string().max(50_000),
+  pushedBranch: z.object({ name: z.string().min(1).max(240).regex(/^mingle\/[a-z][a-z0-9_-]{1,31}\/[a-z0-9][a-z0-9-]{0,79}$/), commitSha: z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i) }).strict().optional(),
+  branchPushFailure: z.string().max(2_000).optional(), reviewRef: z.string().max(255).optional(), branchFetchFailure: z.string().max(2_000).optional(),
   workspaceBefore: z.unknown().nullable(), artifacts: z.array(CompletionArtifactSchema).max(30),
   artifactFailures: z.array(z.string().max(500)).max(30), importedArtifacts: z.array(TeamArtifactRefSchema).max(30),
   integratedArtifacts: z.array(TeamArtifactRefSchema).max(30), finalContent: z.string().max(50_000).optional(),
@@ -146,6 +149,10 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
         team_id TEXT NOT NULL, shared_project_id TEXT NOT NULL, agent_id TEXT NOT NULL,
         consent_at TEXT NOT NULL, removed_at TEXT NOT NULL,
         PRIMARY KEY(team_id,shared_project_id,agent_id)
+      );
+      CREATE TABLE IF NOT EXISTS mingle_team_host_review_branches (
+        delivery_id TEXT PRIMARY KEY, branch TEXT, commit_sha TEXT, review_ref TEXT, fetch_failure TEXT,
+        push_failure TEXT, accepted_at TEXT, verification_summary TEXT, merged_at TEXT
       );`);
     this.unsubscribe = options.transport.onMessage((message) => this.onEnvelope(message));
     this.unsubscribeStore = options.store.subscribe((event) => {
@@ -179,6 +186,76 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
   }
 
   setTeamChat(chat: TeamOrchestrationChat): void { this.chat = chat; }
+
+  /** Full-access orchestrator acceptance; branch merges stay local and require the supplied verification evidence. */
+  async acceptTask(context: import('@mingle/contracts').GroupRunContext, sessionId: string, rawInput: TeamAcceptTask): Promise<unknown> {
+    const input = TeamAcceptTaskSchema.parse(rawInput);
+    const group = this.options.groups.get(context.groupId);
+    const host = this.hostRows.prepare(`SELECT * FROM mingle_team_host_projects WHERE group_id=? AND group_id!=''`).get(context.groupId) as HostRow | undefined;
+    if (!host) throw new HttpError(403, 'This task is not part of a host-authorized cross-device team session.');
+    if (this.settings(host).permissionLevel !== 'full-access') throw new HttpError(403, 'Orchestrator acceptance is available only while the team permission level is full-access.');
+    const caller = group.members.find((member) => member.id === context.memberId && !member.removedAt);
+    const assignment = group.assignments.find((row) => row.taskId === input.taskId);
+    if (!caller || caller.sessionId !== sessionId || !assignment || assignment.fromMemberId !== caller.id || assignment.requestId !== context.requestId) {
+      throw new HttpError(403, 'Only the active request orchestrator may accept a worker assignment.');
+    }
+    const task = this.options.store.getTask(input.taskId);
+    const delivery = this.delivery(assignment.deliveryId);
+    if (!task || task.status !== 'review' || !delivery || delivery.status !== 'completed') {
+      throw new HttpError(409, 'The worker assignment must have a completed delivery and be in Review before acceptance.');
+    }
+    const verificationSummary = redactSecrets(input.verificationSummary).replace(/[\u0000-\u001f\u007f]/g, ' ').trim().slice(0, 4_000);
+    if (verificationSummary.length < 8) throw new HttpError(400, 'Provide a meaningful verification summary before accepting this task.');
+
+    return this.mutations.run(`${host.team_id}\0${host.shared_project_id}`, async () => this.deliveryMutations.run(delivery.delivery_id, async () => {
+      const latestHost = this.readHost(host.team_id, host.shared_project_id);
+      if (!latestHost || latestHost.group_id !== group.group.id || this.settings(latestHost).permissionLevel !== 'full-access') {
+        throw new HttpError(403, 'Team permission changed; only full-access orchestrators may accept tasks.');
+      }
+      const currentTask = this.options.store.getTask(input.taskId);
+      const currentDelivery = this.delivery(delivery.delivery_id);
+      if (!currentTask || currentTask.status !== 'review' || !currentDelivery || currentDelivery.status !== 'completed') {
+        throw new HttpError(409, 'The task or worker delivery changed before acceptance.');
+      }
+      await this.assertCompletionAuthority(currentDelivery);
+      const review = this.hostRows.prepare(`SELECT branch,commit_sha,review_ref,fetch_failure FROM mingle_team_host_review_branches WHERE delivery_id=?`)
+        .get(delivery.delivery_id) as { branch: string | null; commit_sha: string | null; review_ref: string | null; fetch_failure: string | null } | undefined;
+      let merged = false;
+      let mergedRef: string | undefined;
+      if (review?.review_ref && review.branch && review.commit_sha) {
+        const workspace = this.groupWorkspace(group.group.id);
+        if (!workspace) throw new HttpError(409, 'The team integration worktree is unavailable for the accepted worker branch.');
+        if (!/^refs\/mingle\/team\/review\/[0-9a-f]{24}$/.test(review.review_ref)
+          || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(review.commit_sha)) {
+          throw new HttpError(409, 'The saved worker review ref is invalid.');
+        }
+        const currentAuthority = this.artifactAuthority(currentDelivery);
+        const imported = TeamArtifactRefSchema.parse({ revision: review.commit_sha, ref: review.review_ref,
+          ...(currentAuthority.task_id ? { taskId: currentAuthority.task_id } : {}) });
+        await this.options.authorizeTeam({ teamId: delivery.team_id, peerDeviceId: delivery.owner_device_id });
+        await this.validateArtifactHistory(currentDelivery, currentAuthority, imported, workspace.worktreePath, false);
+        const dirty = await git(workspace.worktreePath, ['status', '--porcelain=v1', '--untracked-files=all'], { maxBuffer: 8 * 1024 * 1024 });
+        if (dirty.stdout.trim()) throw new HttpError(409, 'The team integration worktree has uncommitted changes. Commit or move them before accepting this branch.');
+        const head = (await git(workspace.worktreePath, ['rev-parse', '--verify', 'HEAD'])).stdout.trim();
+        const integrationBranch = await git(workspace.worktreePath, ['symbolic-ref', '--quiet', '--short', 'HEAD'], { allowFailure: true });
+        if (integrationBranch.code !== 0 || !integrationBranch.stdout.trim()) throw new HttpError(409, 'The team integration worktree is detached and cannot accept a worker branch.');
+        const alreadyIntegrated = await git(workspace.worktreePath, ['merge-base', '--is-ancestor', review.review_ref, head], { allowFailure: true });
+        if (alreadyIntegrated.code !== 0) {
+          await git(workspace.worktreePath, ['merge', '--ff-only', '--no-edit', review.review_ref], { timeoutMs: 120_000 });
+          merged = true;
+        }
+        mergedRef = review.review_ref;
+        this.hostRows.prepare(`UPDATE mingle_team_host_review_branches SET merged_at=COALESCE(merged_at,?) WHERE delivery_id=?`)
+          .run(new Date(this.now()).toISOString(), delivery.delivery_id);
+      }
+      const result = this.options.groups.acceptTask(context, { taskId: input.taskId, verificationSummary });
+      this.hostRows.prepare(`UPDATE mingle_team_host_review_branches SET accepted_at=?,verification_summary=? WHERE delivery_id=?`)
+        .run(new Date(this.now()).toISOString(), verificationSummary, delivery.delivery_id);
+      return { ...(result && typeof result === 'object' ? result as Record<string, unknown> : {}), acceptedBy: 'orchestrator',
+        verificationSummary, ...(review?.branch ? { branch: review.branch } : {}), ...(review?.commit_sha ? { commitSha: review.commit_sha } : {}),
+        ...(mergedRef ? { localRef: mergedRef, integrationWorktree: this.groupWorkspace(group.group.id)?.worktreePath ?? null, merged } : {}) };
+    }));
+  }
 
   private track(work: Promise<unknown>): void {
     this.pending.add(work);
@@ -1599,7 +1676,7 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
     const enabledRole = member.role === 'orchestrator' ? 'orchestrator' : 'worker';
     const basePayload = DeliverySchema.parse({
       sharedProjectId: proxy.shared_project_id, deliveryId: context.deliveryId, groupId: context.groupId,
-      requestId: context.requestId, agentId: proxy.agent_id, role: enabledRole,
+      requestId: context.requestId, agentId: proxy.agent_id, workerHandle: proxy.handle, role: enabledRole,
       kind: delivery.kind ?? 'request', content: input.content.slice(0, 100_000), hop: context.hop,
       permissionLevel: settings.permissionLevel, settingsVersion: settings.version,
       ...((assignment?.taskId ?? input.options.taskId) ? { taskId: assignment?.taskId ?? input.options.taskId } : {}),
@@ -2156,7 +2233,9 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
         if (existing) {
           if (existing.remoteRunId !== parsed.data.runId
             || existing.finalText !== (parsed.data.finalText ?? '')
-            || JSON.stringify(existing.artifacts.map((entry) => entry.source)) !== JSON.stringify(parsed.data.artifacts)) {
+            || JSON.stringify(existing.artifacts.map((entry) => entry.source)) !== JSON.stringify(parsed.data.artifacts)
+            || JSON.stringify(existing.pushedBranch ?? null) !== JSON.stringify(parsed.data.pushedBranch ?? null)
+            || (existing.branchPushFailure ?? '') !== (parsed.data.branchPushFailure ?? '')) {
             throw new HttpError(409, 'A different completion result is already recorded for this team delivery.');
           }
           return existing;
@@ -2166,6 +2245,8 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
         const nextIntent: CompletionIntent = {
           kind: 'team-completion', version: 1, phase: 'artifacts', remoteRunId: parsed.data.runId,
           at: parsed.data.at, finalText: parsed.data.finalText ?? '', workspaceBefore: null,
+          ...(parsed.data.pushedBranch ? { pushedBranch: parsed.data.pushedBranch } : {}),
+          ...(parsed.data.branchPushFailure ? { branchPushFailure: parsed.data.branchPushFailure } : {}),
           artifacts: parsed.data.artifacts.map((artifact) => ({ source: TeamArtifactRefSchema.parse(artifact), state: 'pending' as const })),
           artifactFailures: [], importedArtifacts: [], integratedArtifacts: [],
         };
@@ -2258,7 +2339,45 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
         // cancellation handle for host-side artifact processing until terminal notification.
         this.beginCompletion(delivery);
 
+        const pushedBranch = intent.pushedBranch;
+        if (pushedBranch && !intent.reviewRef && !intent.branchFetchFailure) {
+          try {
+            this.assertCompletionStillLive(deliveryId);
+            if (!workspace) throw new Error('The host team integration worktree is unavailable.');
+            await this.options.authorizeTeam({ teamId: delivery.team_id, peerDeviceId: delivery.owner_device_id });
+            this.assertCompletionStillLive(deliveryId);
+            const fetched = await fetchTeamCompletionBranch({ worktreePath: workspace.worktreePath,
+              branch: pushedBranch.name, commitSha: pushedBranch.commitSha, deliveryId });
+            const authority = this.artifactAuthority(delivery);
+            const reviewArtifact = TeamArtifactRefSchema.parse({ revision: fetched.commitSha, ref: fetched.ref,
+              ...(authority.task_id ? { taskId: authority.task_id } : {}) });
+            await this.validateArtifactHistory(delivery, authority, reviewArtifact, workspace.worktreePath, false);
+            this.assertCompletionStillLive(deliveryId);
+            intent = { ...intent, reviewRef: fetched.ref };
+            this.hostRows.prepare(`INSERT INTO mingle_team_host_review_branches(delivery_id,branch,commit_sha,review_ref,fetch_failure,push_failure)
+              VALUES(?,?,?,?,NULL,?) ON CONFLICT(delivery_id) DO UPDATE SET branch=excluded.branch,commit_sha=excluded.commit_sha,
+              review_ref=excluded.review_ref,fetch_failure=NULL,push_failure=excluded.push_failure`)
+              .run(deliveryId, pushedBranch.name, fetched.commitSha, fetched.ref, intent.branchPushFailure ?? null);
+            this.persistCompletionIntent(deliveryId, intent);
+          } catch (error) {
+            if (error instanceof CompletionAuthorityError) throw error;
+            this.assertCompletionStillLive(deliveryId);
+            const failure = redactSecrets(error instanceof Error ? error.message : 'The worker branch could not be fetched and verified.').slice(0, 2_000);
+            intent = { ...intent, branchFetchFailure: failure };
+            this.hostRows.prepare(`INSERT INTO mingle_team_host_review_branches(delivery_id,branch,commit_sha,fetch_failure,push_failure)
+              VALUES(?,?,?,?,?) ON CONFLICT(delivery_id) DO UPDATE SET branch=excluded.branch,commit_sha=excluded.commit_sha,
+              fetch_failure=excluded.fetch_failure,push_failure=excluded.push_failure`)
+              .run(deliveryId, pushedBranch.name, pushedBranch.commitSha, failure, intent.branchPushFailure ?? null);
+            this.persistCompletionIntent(deliveryId, intent);
+          }
+        } else if (intent.branchPushFailure) {
+          this.hostRows.prepare(`INSERT INTO mingle_team_host_review_branches(delivery_id,push_failure)
+            VALUES(?,?) ON CONFLICT(delivery_id) DO UPDATE SET push_failure=excluded.push_failure`)
+            .run(deliveryId, intent.branchPushFailure);
+        }
+
         for (let index = 0; index < intent.artifacts.length; index++) {
+          if (intent.reviewRef) break;
           const progress = intent.artifacts[index]!;
           if (progress.state !== 'pending') continue;
           try {
@@ -2318,6 +2437,12 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
           ? `\n\nImported committed artifacts:\n${intent.importedArtifacts.map((artifact) =>
             `- ${safeArtifactText(artifact.path ?? 'committed artifact', 120)} @ ${artifact.revision}${artifact.taskId ? ` (task ${safeArtifactText(artifact.taskId, 80)})` : ''}\n  Git ref: ${safeArtifactText(artifact.ref ?? '', 255)}`,
           ).join('\n')}` : '';
+        const branchSummary = intent.pushedBranch
+          ? intent.reviewRef && workspace
+            ? `\n\nWorker branch pushed and fetched for review: origin/${safeArtifactText(intent.pushedBranch.name, 240)} @ ${intent.pushedBranch.commitSha}.\nLocal review ref: ${safeArtifactText(intent.reviewRef, 255)}\nIntegration worktree: ${safeArtifactText(workspace.worktreePath, 4_096)}\nInspect with git show / git diff from that ref, run the project checks, and inspect the running site before accepting.`
+            : `\n\nWorker pushed origin/${safeArtifactText(intent.pushedBranch.name, 240)} @ ${intent.pushedBranch.commitSha}, but the host could not fetch and verify it: ${safeArtifactText(intent.branchFetchFailure ?? 'The host review ref is unavailable.', 2_000)}. The existing committed-artifact handoff was used if available.`
+          : intent.branchPushFailure
+            ? `\n\nWorker branch push failed: ${safeArtifactText(intent.branchPushFailure, 2_000)}. The existing committed-artifact handoff was used if available.` : '';
         const workspaceSummary = intent.integratedArtifacts.length
           ? workspaceChanges?.summary.status === 'available'
             ? workspaceChanges.summary.files.length
@@ -2327,8 +2452,8 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
           : '';
         const failureSummary = intent.artifactFailures.length
           ? `\n\nArtifact import/integration failures:\n${intent.artifactFailures.map((failure) => `- ${failure}`).join('\n')}`.slice(0, 15_000) : '';
-        const finalBudget = Math.max(0, 50_000 - artifactSummary.length - workspaceSummary.length - failureSummary.length);
-        const finalContent = `${intent.finalText ? redactSecrets(intent.finalText).slice(0, finalBudget) : ''}${artifactSummary}${workspaceSummary}${failureSummary}`.slice(0, 50_000);
+        const finalBudget = Math.max(0, 50_000 - artifactSummary.length - branchSummary.length - workspaceSummary.length - failureSummary.length);
+        const finalContent = `${intent.finalText ? redactSecrets(intent.finalText).slice(0, finalBudget) : ''}${artifactSummary}${branchSummary}${workspaceSummary}${failureSummary}`.slice(0, 50_000);
         intent = { ...intent, phase: 'finalizing', finalContent };
         this.persistCompletionIntent(deliveryId, intent);
         await this.finalizeCompletion(currentDelivery, intent);
