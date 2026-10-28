@@ -55,13 +55,15 @@ function fixture(options: { deviceId?: string; accountId?: string; role?: 'leade
   ];
   let role = options.role ?? 'leader';
   let collaborationRefreshes = 0;
+  let ownerDeviceRevoked = false;
+  let ownerMemberActive = true;
   const collaboration = {
     async snapshot(_projectId?: string) {
       return {
         project: { teamId: TEAM, sharedProjectId: SHARED, name: 'Shared host fixture', repositoryUrl: 'https://example.test/shared.git' },
         members: [
           { accountId: ACCOUNT, displayName: 'Lead Ada', email: null, role, status: 'active' },
-          { accountId: OWNER, displayName: 'Owner Sam', email: null, role: 'member', status: 'active' },
+          ...(ownerMemberActive ? [{ accountId: OWNER, displayName: 'Owner Sam', email: null, role: 'member' as const, status: 'active' as const }] : []),
         ],
         agents, invitations: [], email: { configured: false },
       };
@@ -85,12 +87,17 @@ function fixture(options: { deviceId?: string; accountId?: string; role?: 'leade
   let localDeviceId = options.deviceId ?? DEVICE;
   let extraLinkedPeer: string | null = null;
   let ownerOnline = true;
+  let authorizeCalls = 0;
+  let activeCloudQueries = 0;
+  let maxConcurrentCloudQueries = 0;
+  const cloudQueryTables: string[] = [];
   let delayedAuthorization: Promise<void> | null = null;
+  let delayedCloudVerification: Promise<void> | null = null;
   const transport = {
     snapshot: () => {
       const devices = [
         { id: DEVICE, teamId: TEAM, ownerId: ACCOUNT, name: 'Host device', fingerprint: 'host-fingerprint', signingPublicKey: '', encryptionPublicKey: '', lastSeenAt: new Date().toISOString(), revokedAt: null, createdAt: new Date().toISOString(), status: 'online' },
-        { id: OWNER_DEVICE, teamId: TEAM, ownerId: OWNER, name: 'Owner device', fingerprint: 'owner-fingerprint', signingPublicKey: '', encryptionPublicKey: '', lastSeenAt: new Date().toISOString(), revokedAt: null, createdAt: new Date().toISOString(), status: ownerOnline ? 'online' : 'offline' },
+        { id: OWNER_DEVICE, teamId: TEAM, ownerId: OWNER, name: 'Owner device', fingerprint: 'owner-fingerprint', signingPublicKey: '', encryptionPublicKey: '', lastSeenAt: new Date().toISOString(), revokedAt: ownerDeviceRevoked ? new Date().toISOString() : null, createdAt: new Date().toISOString(), status: ownerDeviceRevoked ? 'revoked' : ownerOnline ? 'online' : 'offline' },
       ];
       if (extraLinkedPeer) devices.push({ id: extraLinkedPeer, teamId: TEAM, ownerId: OWNER, name: 'Second owner device', fingerprint: 'owner-fingerprint-2', signingPublicKey: '', encryptionPublicKey: '', lastSeenAt: new Date().toISOString(), revokedAt: null, createdAt: new Date().toISOString(), status: 'online' });
       const links = [
@@ -112,17 +119,31 @@ function fixture(options: { deviceId?: string; accountId?: string; role?: 'leade
           const filters = new Map<string, unknown>();
           const builder: any = {
             select() { return builder; }, eq(key: string, value: unknown) { filters.set(key, value); return builder; },
-            is() { return builder; },
-            maybeSingle() { return Promise.resolve({ data: rows()[0] ?? null, error: null }); },
+            is(key: string, value: unknown) { filters.set(key, value); return builder; },
+            maybeSingle() {
+              cloudQueryTables.push(table);
+              activeCloudQueries++;
+              maxConcurrentCloudQueries = Math.max(maxConcurrentCloudQueries, activeCloudQueries);
+              const gate = delayedCloudVerification;
+              delayedCloudVerification = null;
+              return (async () => {
+                await gate;
+                await Promise.resolve();
+                activeCloudQueries--;
+                return { data: rows()[0] ?? null, error: null };
+              })();
+            },
             then(resolve: (value: unknown) => unknown, reject: (error: unknown) => unknown) {
               return Promise.resolve({ data: rows(), error: null }).then(resolve, reject);
             },
           };
           const rows = () => {
             if (table === 'mingle_devices') return [
-              { id: DEVICE, owner_id: ACCOUNT, revoked_at: null }, { id: OWNER_DEVICE, owner_id: OWNER, revoked_at: null },
-            ].filter((row) => (!filters.has('id') || filters.get('id') === row.id) && (!filters.has('team_id') || filters.get('team_id') === TEAM));
-            if (table === 'mingle_members') return [ACCOUNT, OWNER].filter((id) => id === filters.get('user_id')).map((user_id) => ({ user_id }));
+              { id: DEVICE, owner_id: ACCOUNT, revoked_at: null }, { id: OWNER_DEVICE, owner_id: OWNER, revoked_at: ownerDeviceRevoked ? new Date().toISOString() : null },
+            ].filter((row) => (!filters.has('id') || filters.get('id') === row.id) && (!filters.has('team_id') || filters.get('team_id') === TEAM)
+              && (!filters.has('revoked_at') || filters.get('revoked_at') === row.revoked_at));
+            if (table === 'mingle_members') return [ACCOUNT, ...(ownerMemberActive ? [OWNER] : [])]
+              .filter((id) => id === filters.get('user_id')).map((user_id) => ({ user_id, revoked_at: null }));
             return [];
           };
           return builder;
@@ -215,7 +236,7 @@ function fixture(options: { deviceId?: string; accountId?: string; role?: 'leade
   const hosts: TeamOrchestrationHost[] = [];
   const makeHost = () => {
     const host = new TeamOrchestrationHost({ store, git: teamGit as any, account: account as any, transport: transport as any,
-      authorizeTeam: async () => { const gate = delayedAuthorization; delayedAuthorization = null; await gate; },
+      authorizeTeam: async () => { authorizeCalls++; const gate = delayedAuthorization; delayedAuthorization = null; await gate; },
       collaboration: collaboration as any, groups: groupService as any, teamMcp: teamMcp as any, recovery: recovery as any,
       integrateTeamArtifact: options.integrateTeamArtifact ? async (input) => {
         artifactIntegrations.push(input);
@@ -233,6 +254,15 @@ function fixture(options: { deviceId?: string; accountId?: string; role?: 'leade
   const fx = {
     store, project, local, get host() { return host; }, outgoing, finished, enqueued, artifactImports, artifactDiscards, artifactIntegrations, remoteToolCalls, agents, group: () => group,
     authenticatedCalls: () => authenticatedCalls, collaborationRefreshCalls: () => collaborationRefreshes,
+    authorizeCalls: () => authorizeCalls, maxConcurrentCloudQueries: () => maxConcurrentCloudQueries,
+    cloudQueryTables: () => [...cloudQueryTables],
+    setOwnerDeviceRevoked(value: boolean) { ownerDeviceRevoked = value; },
+    setOwnerMemberActive(value: boolean) { ownerMemberActive = value; },
+    async verifyOwnerDevice(deviceId: string, accountId: string, includeReadModel = true) {
+      const readModel = includeReadModel ? await collaboration.snapshot(PROJECT) : undefined;
+      return (host as unknown as { verifyOwnerDevice(teamId: string, deviceId: string, accountId: string, readModel?: unknown): Promise<void> })
+        .verifyOwnerDevice(TEAM, deviceId, accountId, readModel);
+    },
     setRole(value: typeof role) { role = value; },
     setPublisher(callback: typeof publishLocalAgents) { publishLocalAgents = callback; },
     setDevice(deviceId: string) { localDeviceId = deviceId; },
@@ -242,6 +272,7 @@ function fixture(options: { deviceId?: string; accountId?: string; role?: 'leade
     failNextSync() { failNextSync = true; },
     pumpCount() { return pumpCount; },
     delayAuthorization(gate: Promise<void>) { delayedAuthorization = gate; },
+    delayCloudVerification(gate: Promise<void>) { delayedCloudVerification = gate; },
     restartHost() { host = makeHost(); return host; },
     afterRunFinished(callback: (sessionId: string, runId: string, outcome: string) => void) { afterRunFinished = callback; },
     async incoming(kind: string, payload: unknown, fromDeviceId = OWNER_DEVICE) {
@@ -337,6 +368,34 @@ it('authorizes host changes, enforces optimistic versions, validates broadcasts,
   });
   expect(fx.enqueued).toHaveLength(0);
   expect(fx.outgoing.every((entry) => entry.kind !== 'teamgroup.delivery')).toBe(true);
+});
+
+it('fast-verifies a known active sender locally and authoritatively checks missing, revoked, or removed senders', async () => {
+  const trusted = fixture();
+  await expect(trusted.verifyOwnerDevice(OWNER_DEVICE, OWNER)).resolves.toBeUndefined();
+  expect(trusted.authenticatedCalls()).toBe(0);
+  expect(trusted.authorizeCalls()).toBe(0);
+  expect(trusted.cloudQueryTables()).toHaveLength(0);
+
+  const unknown = fixture();
+  await expect(unknown.verifyOwnerDevice('40000000-0000-4000-8000-000000000099', OWNER))
+    .rejects.toMatchObject({ status: 403 });
+  expect(unknown.authenticatedCalls()).toBe(1);
+  expect(unknown.authorizeCalls()).toBe(0);
+  expect(unknown.maxConcurrentCloudQueries()).toBe(2);
+  expect(unknown.cloudQueryTables().sort()).toEqual(['mingle_devices', 'mingle_members']);
+
+  const revoked = fixture();
+  revoked.setOwnerDeviceRevoked(true);
+  await expect(revoked.verifyOwnerDevice(OWNER_DEVICE, OWNER)).rejects.toMatchObject({ status: 403 });
+  expect(revoked.authenticatedCalls()).toBe(1);
+  expect(revoked.maxConcurrentCloudQueries()).toBe(2);
+
+  const removed = fixture();
+  removed.setOwnerMemberActive(false);
+  await expect(removed.verifyOwnerDevice(OWNER_DEVICE, OWNER)).rejects.toMatchObject({ status: 403 });
+  expect(removed.authenticatedCalls()).toBe(1);
+  expect(removed.maxConcurrentCloudQueries()).toBe(2);
 });
 
 it('keeps a full-access consent granted when the team level is raised to full access', async () => {
@@ -1070,7 +1129,7 @@ it('dispatches remote proxy deliveries, proxies team MCP calls, rejects mismatch
   expect(fx.outgoing.find((entry) => entry.kind === 'teamgroup.approval.decision')?.payload).toMatchObject({ approvalId: 'owner-approval-1', decision: 'approved' });
 
   let releaseDelayedStatus!: () => void;
-  fx.delayAuthorization(new Promise<void>((resolve) => { releaseDelayedStatus = resolve; }));
+  fx.delayCloudVerification(new Promise<void>((resolve) => { releaseDelayedStatus = resolve; }));
   const delayedRunningStatus = fx.incoming('teamgroup.delivery.status', { sharedProjectId: SHARED, deliveryId, agentId: REMOTE_AGENT,
     status: 'running', runId: 'owner-run-1', at: new Date().toISOString() });
   const completedStatus = { sharedProjectId: SHARED, deliveryId, agentId: REMOTE_AGENT, status: 'completed', runId: 'owner-run-1' as const,

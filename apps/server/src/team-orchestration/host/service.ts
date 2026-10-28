@@ -1356,15 +1356,17 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
     const transport = this.options.transport.snapshot(context.project.teamId);
     const structureDigest = createHash('sha256').update(JSON.stringify(payload)).digest('hex').slice(0, 24);
     const linked = transport.links.filter((link) => link.deviceId === transport.deviceId && link.mutual).map((link) => link.peerDeviceId);
-    for (const deviceId of [...new Set(linked)]) {
-      if (transport.devices.find((device) => device.id === deviceId)?.status === 'revoked') continue;
+    // Each send performs a cloud mailbox flush. Fan out concurrently so a settings
+    // PATCH waits for one network round rather than one round per linked device.
+    await Promise.all([...new Set(linked)].map(async (deviceId) => {
+      if (transport.devices.find((device) => device.id === deviceId)?.status === 'revoked') return;
       try {
         // transport.send performs the authenticated cloud write; cloud RLS remains authoritative
         // for active membership/device links without a separate auth.getUser() round trip here.
         await this.options.transport.send({ teamId: context.project.teamId, toDeviceId: deviceId, kind: 'teamgroup.structure', payload,
           idempotencyKey: `teamgroup-structure:${context.project.sharedProjectId}:${payload.settings.version}:${structureDigest}:${deviceId}`.slice(0, 200) });
       } catch { /* structure remains saved locally and will be broadcast on the next change */ }
-    }
+    }));
     this.options.store.recordEvent({ projectId: context.localProjectId, type: 'team.structure.updated', summary: 'Shared team structure updated',
       payload: { teamSession: payload.teamSession, settingsVersion: payload.settings.version } });
     void this.options.transport.sync().catch(() => undefined);
@@ -1661,12 +1663,23 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
     });
   }
 
-  private async verifyOwnerDevice(teamId: string, deviceId: string, accountId: string): Promise<void> {
-    // Consent and activity envelopes claim an owner identity; verify it against current cloud membership/device state.
-    await this.options.authorizeTeam({ teamId, peerDeviceId: deviceId });
+  private async verifyOwnerDevice(teamId: string, deviceId: string, accountId: string,
+    readModel?: ProjectCollaborationSnapshot, requireFresh = false): Promise<void> {
+    // The transport has already verified the envelope signature and mutual device pin. Its
+    // snapshot is refreshed on roster, structure and revocation changes; pair it with the
+    // collaboration read model's active membership before taking the local fast path.
+    const sender = this.options.transport.snapshot(teamId).devices.find((device) => device.id === deviceId
+      && device.ownerId === accountId && device.revokedAt === null);
+    const activeMember = readModel?.members.some((member) => member.accountId === accountId && member.status === 'active');
+    if (!requireFresh && sender && activeMember) return;
+
+    // Repository-mutating inbound work retains the additional fresh team/link check.
+    if (requireFresh) await this.options.authorizeTeam({ teamId, peerDeviceId: deviceId });
     await this.options.account.withAuthenticatedClient(async (client, _user) => {
-      const device = await client.from('mingle_devices').select('id,owner_id,revoked_at').eq('team_id', teamId).eq('id', deviceId).maybeSingle();
-      const owner = await client.from('mingle_members').select('user_id').eq('team_id', teamId).eq('user_id', accountId).is('revoked_at', null).maybeSingle();
+      const [device, owner] = await Promise.all([
+        client.from('mingle_devices').select('id,owner_id,revoked_at').eq('team_id', teamId).eq('id', deviceId).maybeSingle(),
+        client.from('mingle_members').select('user_id').eq('team_id', teamId).eq('user_id', accountId).is('revoked_at', null).maybeSingle(),
+      ]);
       if (device.error || owner.error || !device.data || device.data.revoked_at || String(device.data.owner_id) !== accountId || !owner.data) {
         throw new HttpError(403, 'The team message sender is not the active device for the claimed account.');
       }
@@ -1702,7 +1715,7 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
     const senderDevice = this.options.transport.snapshot(envelope.teamId).devices.find((device) => device.id === envelope.fromDeviceId);
     const owner = senderDevice?.ownerId;
     if (!owner) throw new HttpError(403, 'The consent sender device is not registered.');
-    await this.verifyOwnerDevice(envelope.teamId, envelope.fromDeviceId, owner);
+    await this.verifyOwnerDevice(envelope.teamId, envelope.fromDeviceId, owner, collaboration);
     for (const agentId of parsed.data.agentIds) {
       const agent = collaboration.agents.find((candidate) => candidate.id === agentId);
       if (agent && (agent.accountId !== owner || agent.deviceId !== envelope.fromDeviceId)) {
@@ -2184,7 +2197,7 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
       || !member || this.consentFor(context, delivery.agent_id) !== 'granted') {
       throw new CompletionAuthorityError('Team consent or roster authority ended before artifact integration.');
     }
-    try { await this.verifyOwnerDevice(delivery.team_id, delivery.owner_device_id, delivery.owner_account_id); }
+    try { await this.verifyOwnerDevice(delivery.team_id, delivery.owner_device_id, delivery.owner_account_id, context, true); }
     catch (error) {
       if (error instanceof HttpError && error.status === 403) throw new CompletionAuthorityError('The team owner device lost authority before artifact integration.');
       throw error;
@@ -2642,8 +2655,6 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
   async receiveActivity(payload: unknown, envelope: import('@mingle/contracts').AuthenticatedTransportMessage): Promise<void> {
     const parsed = TeamActivityPayloadSchema.safeParse(payload);
     if (!parsed.success) throw new HttpError(400, 'Team activity payload is invalid.');
-    // Inbound activity is accepted only from a currently authorized, mutually pinned device.
-    await this.options.authorizeTeam({ teamId: envelope.teamId, peerDeviceId: envelope.fromDeviceId });
     if (!parsed.data.runId) return;
     const candidates = this.hostRows.prepare(`SELECT * FROM mingle_team_host_deliveries
       WHERE team_id=? AND shared_project_id=? AND agent_id=? AND owner_device_id=?

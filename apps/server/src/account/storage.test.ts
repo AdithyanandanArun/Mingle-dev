@@ -102,24 +102,41 @@ it('reports a disk write failure and keeps the login usable in memory', () => {
 
 async function identityFixture() {
   let rejectNextUser = false;
+  let userRequests = 0;
+  let userDelayMs = 0;
   const user = { id: '72000000-0000-4000-8000-000000000001', email: 'example-storage@example.test', email_confirmed_at: '2026-01-01T00:00:00Z', aud: 'authenticated', created_at: '2026-01-01T00:00:00Z', identities: [{ provider: 'google', id: 'example-google' }], app_metadata: { provider: 'google' }, user_metadata: { full_name: 'Example storage test' } };
+  let currentUser = user;
   const b64 = (value: unknown) => Buffer.from(JSON.stringify(value)).toString('base64url');
-  const token = `${b64({ alg: 'HS256', typ: 'JWT' })}.${b64({ sub: user.id, exp: Math.floor(Date.now() / 1000) + 3600, aud: 'authenticated' })}.${Buffer.alloc(32).toString('base64url')}`;
+  const tokenFor = (userId: string) => `${b64({ alg: 'HS256', typ: 'JWT' })}.${b64({ sub: userId, exp: Math.floor(Date.now() / 1000) + 3600, aud: 'authenticated' })}.${Buffer.alloc(32).toString('base64url')}`;
+  let token = tokenFor(user.id);
   const server = createServer((req, res) => {
     res.setHeader('content-type', 'application/json');
     const url = new URL(req.url!, 'http://127.0.0.1');
     if (url.pathname === '/auth/v1/settings') res.end(JSON.stringify({ external: { google: true } }));
     else if (url.pathname === '/auth/v1/user') {
-      if (rejectNextUser) { rejectNextUser = false; res.statusCode = 401; res.end(JSON.stringify({ message: 'Example rejected account', code: 'bad_jwt' })); }
-      else res.end(JSON.stringify(user));
+      userRequests++;
+      const respond = () => {
+        if (rejectNextUser) { rejectNextUser = false; res.statusCode = 401; res.end(JSON.stringify({ message: 'Example rejected account', code: 'bad_jwt' })); }
+        else res.end(JSON.stringify(currentUser));
+      };
+      if (userDelayMs) setTimeout(respond, userDelayMs);
+      else respond();
     }
-    else if (url.pathname === '/auth/v1/token') res.end(JSON.stringify({ access_token: token, refresh_token: 'example-refresh-token', token_type: 'bearer', expires_in: 3600, user }));
+    else if (url.pathname === '/auth/v1/token') res.end(JSON.stringify({ access_token: token, refresh_token: 'example-refresh-token', token_type: 'bearer', expires_in: 3600, user: currentUser }));
     else { res.statusCode = 404; res.end('{}'); }
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   cleanup.push(() => new Promise<void>((resolve) => { server.close(() => resolve()); server.closeAllConnections(); }));
   const address = server.address() as { port: number };
-  return { env: { MINGLE_SUPABASE_URL: `http://127.0.0.1:${address.port}`, MINGLE_SUPABASE_PUBLISHABLE_KEY: 'sb_publishable_example_storage_only' }, user, rejectNextUser: () => { rejectNextUser = true; } };
+  return {
+    env: { MINGLE_SUPABASE_URL: `http://127.0.0.1:${address.port}`, MINGLE_SUPABASE_PUBLISHABLE_KEY: 'sb_publishable_example_storage_only' },
+    user, rejectNextUser: () => { rejectNextUser = true; }, setUserDelay: (value: number) => { userDelayMs = value; }, userRequests: () => userRequests,
+    changeAccount: (id: string) => {
+      currentUser = { ...user, id, email: 'changed-account@example.test' };
+      token = tokenFor(id);
+      return token;
+    },
+  };
 }
 
 async function makeService(dir: string, env: NodeJS.ProcessEnv) {
@@ -173,6 +190,75 @@ it('keeps a signed-in memory session usable when retry still cannot unlock secur
   expect((await service.retryStorage()).sessionStorage).toBe('memory');
   expect(service.snapshot().user).toEqual(before.user);
   expect(await service.withAuthenticatedClient(async (_client, user) => user.id)).toBe(fixture.user.id);
+});
+
+it('caches verified users for 60 seconds but leaves sign-in completion freshly verified', async () => {
+  const fixture = await identityFixture(), service = await makeService(directory(), fixture.env);
+  await service.startSignIn();
+  await finishSignIn(service);
+  expect(fixture.userRequests()).toBe(1);
+
+  expect(await service.withAuthenticatedClient(async (_client, user) => user.id)).toBe(fixture.user.id);
+  expect(fixture.userRequests()).toBe(2);
+  await service.withAuthenticatedClient(async (_client, user) => user.id);
+  expect(fixture.userRequests()).toBe(2);
+});
+
+it('shares a single in-flight user verification between concurrent operations', async () => {
+  const fixture = await identityFixture(), service = await makeService(directory(), fixture.env);
+  await service.startSignIn();
+  await finishSignIn(service);
+  await service.cancelSignIn(); // Advances the account generation and clears the just-verified sign-in identity.
+  fixture.setUserDelay(25);
+
+  const results = await Promise.all(Array.from({ length: 6 }, () =>
+    service.withAuthenticatedClient(async (_client, user) => user.id)));
+  expect(results).toEqual(Array(6).fill(fixture.user.id));
+  expect(fixture.userRequests()).toBe(2);
+});
+
+it('invalidates cached verification after USER_UPDATED and a changed Supabase session identity', async () => {
+  const fixture = await identityFixture(), service = await makeService(directory(), fixture.env);
+  await service.startSignIn();
+  await finishSignIn(service);
+  await service.withAuthenticatedClient(async () => undefined);
+  const client = (service as unknown as { client: import('@supabase/supabase-js').SupabaseClient }).client;
+
+  await client.auth.updateUser({ data: { full_name: 'Updated storage test' } });
+  const beforeUserUpdateVerification = fixture.userRequests();
+  await service.withAuthenticatedClient(async () => undefined);
+  expect(fixture.userRequests()).toBe(beforeUserUpdateVerification + 1);
+
+  const nextAccountId = '72000000-0000-4000-8000-000000000002';
+  const nextAccessToken = fixture.changeAccount(nextAccountId);
+  await client.auth.setSession({ access_token: nextAccessToken, refresh_token: 'example-second-account-refresh' });
+  const beforeNewAccountVerification = fixture.userRequests();
+  await expect(service.withAuthenticatedClient(async (_client, user) => user.id)).resolves.toBe(nextAccountId);
+  expect(fixture.userRequests()).toBe(beforeNewAccountVerification + 1);
+});
+
+it('invalidates the cached verification after a callback reports a JWT/401 error and after sign-out', async () => {
+  const fixture = await identityFixture(), service = await makeService(directory(), fixture.env);
+  await service.startSignIn();
+  await finishSignIn(service);
+  await service.withAuthenticatedClient(async () => undefined);
+  const beforeUnauthorizedCallback = fixture.userRequests();
+
+  await service.withAuthenticatedClient(async () => ({ error: { status: 401, message: 'JWT expired' } }));
+  await service.withAuthenticatedClient(async () => undefined);
+  expect(fixture.userRequests()).toBe(beforeUnauthorizedCallback + 1);
+
+  await expect(service.withAuthenticatedClient(async () => { throw Object.assign(new Error('JWT expired'), { status: 401 }); }))
+    .rejects.toMatchObject({ status: 401 });
+  await service.withAuthenticatedClient(async () => undefined);
+  expect(fixture.userRequests()).toBe(beforeUnauthorizedCallback + 2);
+
+  await service.signOut();
+  await service.startSignIn();
+  await finishSignIn(service);
+  const beforeFirstNewOperation = fixture.userRequests();
+  await service.withAuthenticatedClient(async () => undefined);
+  expect(fixture.userRequests()).toBe(beforeFirstNewOperation + 1);
 });
 
 it('preserves an opaque saved session after denied or unverified OAuth and restores it on recovery', async () => {

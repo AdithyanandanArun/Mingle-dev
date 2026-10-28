@@ -13,7 +13,28 @@ import { AccountVault, AccountVaultError, writePrivateJson } from './vault.ts';
 import { DesktopAccountStorage } from './desktop-storage.ts';
 
 interface Attempt { server: Server; state: string; timer: NodeJS.Timeout; consumed: boolean }
+interface VerifiedUserCacheEntry {
+  client: SupabaseClient;
+  generation: number;
+  sessionIdentity: string;
+  expiresAt: number;
+  user: User;
+}
+interface VerifiedUserFlight extends Omit<VerifiedUserCacheEntry, 'expiresAt' | 'user'> { promise: Promise<User> }
 const STORAGE_KEY = 'mingle-account-session';
+const VERIFIED_USER_TTL_MS = 60_000;
+
+function isAuthorizationFailure(value: unknown): boolean {
+  if (!value || typeof value !== 'object') return false;
+  const error = value as { status?: unknown; statusCode?: unknown; code?: unknown; message?: unknown; error?: unknown; cause?: unknown };
+  if (error.status === 401 || error.statusCode === 401) return true;
+  const code = typeof error.code === 'string' ? error.code.toLowerCase() : '';
+  if (code === 'bad_jwt' || code === 'pgrst301' || code.includes('jwt') && (code.includes('invalid') || code.includes('expired'))) return true;
+  const message = typeof error.message === 'string' ? error.message.toLowerCase() : '';
+  if (message.includes('jwt') || message.includes('unauthorized')) return true;
+  return (error.error !== value && isAuthorizationFailure(error.error))
+    || (error.cause !== value && isAuthorizationFailure(error.cause));
+}
 
 /** A single local user's account client, separate from provider authentication and local workspace authority. */
 export class AccountService {
@@ -26,6 +47,8 @@ export class AccountService {
   private locked = false;
   private mutationInProgress = false;
   private generation = 0;
+  private verifiedUserCache: VerifiedUserCacheEntry | null = null;
+  private verifiedUserFlight: VerifiedUserFlight | null = null;
   private accountOperations = new AbortController();
   private readonly authenticatedOperationContext = new AsyncLocalStorage<{ client: SupabaseClient; generation: number }>();
   private state: AccountState = {
@@ -116,7 +139,7 @@ export class AccountService {
     this.fenceAccountOperations();
     this.state.connection = { ...connection, url: new URL(connection.url).origin };
     this.state.configured = true;
-    this.client = createClient(connection.url, connection.publishableKey, {
+    const client = createClient(connection.url, connection.publishableKey, {
       auth: { flowType: 'pkce', detectSessionInUrl: false, persistSession: true, autoRefreshToken: true, storageKey: STORAGE_KEY, storage: this.vault! },
       global: { fetch: (input, init) => {
         const context = this.authenticatedOperationContext.getStore();
@@ -126,17 +149,36 @@ export class AccountService {
         return fetch(input, { ...init, signal: AbortSignal.any([this.closing.signal, this.accountOperations.signal, AbortSignal.timeout(15_000), ...(init?.signal ? [init.signal] : [])]) });
       } },
     });
-    this.client.auth.onAuthStateChange((event) => {
+    this.client = client;
+    this.client.auth.onAuthStateChange((event, session) => {
+      if (client !== this.client) return;
       if (event === 'SIGNED_OUT') {
         this.fenceAccountOperations();
         this.notify({ user: null, status: 'signed-out', authorizationUrl: null });
+        return;
+      }
+      const cached = this.verifiedUserCache;
+      const sessionUserId = session?.user.id ?? null;
+      const accountChanged = Boolean(this.state.user && sessionUserId && this.state.user.id !== sessionUserId);
+      const eventSessionIdentity = session ? `${session.user.id}\0${session.access_token}` : '';
+      const tokenChanged = Boolean(cached && cached.client === client && cached.sessionIdentity !== eventSessionIdentity);
+      if (event === 'SIGNED_IN' || event === 'USER_UPDATED'
+        || (event === 'TOKEN_REFRESHED' && (accountChanged || tokenChanged))) this.invalidateVerifiedUser();
+      if (accountChanged) {
+        this.fenceAccountOperations();
+        this.notify({ user: null, status: 'signed-out' });
       }
     });
   }
   private fenceAccountOperations() {
     this.generation++;
+    this.invalidateVerifiedUser();
     this.accountOperations.abort();
     this.accountOperations = new AbortController();
+  }
+  private invalidateVerifiedUser() {
+    this.verifiedUserCache = null;
+    this.verifiedUserFlight = null;
   }
   private async exclusive<T>(work: () => Promise<T>, fenceAccount = false): Promise<T> {
     await this.ready;
@@ -164,10 +206,12 @@ export class AccountService {
       return this.snapshot();
     }, true);
   }
-  private async verifyUser(client: SupabaseClient | null = this.client): Promise<User> {
+  private async verifyUser(client: SupabaseClient | null = this.client, invalidateCache = true): Promise<User> {
+    if (invalidateCache) this.invalidateVerifiedUser();
     if (!client) throw new HttpError(409, 'Configure the Supabase account connection first.');
     const { data, error } = await client.auth.getUser();
     if (error || !data.user || data.user.is_anonymous || !data.user.identities?.some((identity) => identity.provider === 'google')) {
+      this.invalidateVerifiedUser();
       throw new HttpError(401, 'Google sign-in is required. Sign in again.');
     }
     const user = data.user;
@@ -179,9 +223,10 @@ export class AccountService {
     return user;
   }
   /**
-   * Server-only bridge for account-scoped cloud operations. It verifies the live
-   * Supabase user for each call and fences work against sign-in/sign-out so a
-   * stale account cannot be used after a local authority change.
+   * Server-only bridge for account-scoped cloud operations. Supabase RLS validates
+   * the JWT on every database/realtime call, so getUser() per operation only
+   * re-confirms local identity; a bounded verification cache does not widen authorization.
+   * Account changes remain fenced and callbacks can invalidate the cache on JWT errors.
    *
    * Keep callback results inside the server. In particular, never serialize the
    * Supabase client, session, access token or refresh token to the renderer.
@@ -195,7 +240,7 @@ export class AccountService {
     const generation = this.generation;
     let user: User;
     try {
-      user = await this.verifyUser(client);
+      user = await this.verifiedUser(client, generation);
     } catch (error) {
       this.assertAccountGeneration(client, generation);
       throw error;
@@ -205,11 +250,59 @@ export class AccountService {
     try {
       result = await this.authenticatedOperationContext.run({ client, generation }, () => callback(client, user));
     } catch (error) {
+      if (isAuthorizationFailure(error)) this.invalidateVerifiedUser();
       this.assertAccountGeneration(client, generation, user.id);
       throw error;
     }
+    if (isAuthorizationFailure(result)) this.invalidateVerifiedUser();
     this.assertAccountGeneration(client, generation, user.id);
     return result;
+  }
+  private async verifiedUser(client: SupabaseClient, generation: number): Promise<User> {
+    // Minimal account bridges in consumers/tests may expose only getUser; the real Supabase
+    // client always exposes getSession and is the only client eligible for caching.
+    if (typeof client.auth.getSession !== 'function') return this.verifyUser(client, false);
+    const { data, error } = await client.auth.getSession();
+    if (error) {
+      this.invalidateVerifiedUser();
+      throw error;
+    }
+    const session = data.session;
+    const sessionIdentity = session ? `${session.user.id}\0${session.access_token}` : '';
+    const cached = this.verifiedUserCache;
+    if (session && cached && cached.client === client && cached.generation === generation
+      && cached.sessionIdentity === sessionIdentity && cached.expiresAt > Date.now()) return cached.user;
+
+    const inFlight = this.verifiedUserFlight;
+    if (inFlight && inFlight.client === client && inFlight.generation === generation && inFlight.sessionIdentity === sessionIdentity) {
+      return inFlight.promise;
+    }
+
+    const promise = (async () => {
+      const verified = await this.verifyUser(client, false);
+      const { data: currentData, error: currentError } = await client.auth.getSession();
+      if (currentError) throw currentError;
+      const currentSession = currentData.session;
+      const currentIdentity = currentSession ? `${currentSession.user.id}\0${currentSession.access_token}` : '';
+      if (currentIdentity !== sessionIdentity || (session && verified.id !== session.user.id)) {
+        this.invalidateVerifiedUser();
+        throw conflict('The signed-in account changed while it was being verified. Retry with the current account.');
+      }
+      this.assertAccountGeneration(client, generation, verified.id);
+      if (session && !this.closing.signal.aborted && !this.mutationInProgress && this.client === client && this.generation === generation) {
+        this.verifiedUserCache = { client, generation, sessionIdentity, expiresAt: Date.now() + VERIFIED_USER_TTL_MS, user: verified };
+      }
+      return verified;
+    })();
+    const flight: VerifiedUserFlight = { client, generation, sessionIdentity, promise };
+    this.verifiedUserFlight = flight;
+    try { return await promise; }
+    catch (error) {
+      if (isAuthorizationFailure(error)) this.invalidateVerifiedUser();
+      throw error;
+    } finally {
+      if (this.verifiedUserFlight === flight) this.verifiedUserFlight = null;
+    }
   }
   private assertAccountGeneration(client: SupabaseClient, generation: number, userId?: string) {
     if (this.closing.signal.aborted) throw new HttpError(503, 'Account service is shutting down.');
