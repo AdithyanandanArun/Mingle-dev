@@ -124,6 +124,13 @@ it.each([false, true])('invites and joins through two real HTTP applications, Po
     const warmReads = await Promise.all(teamReadPaths.map((route) => leader.api('GET', route)));
     expect(warmReads.map((result) => result.status), JSON.stringify(warmReads.map((result) => result.json))).toEqual([200, 200, 200]);
     await leader.app.projectCollaboration.refreshSnapshot(projectIds[0]);
+    // Inbound invitee messages and push-invalidated refreshes run in the background and share
+    // the global call counter; measure the cached endpoints only once that traffic is quiet.
+    for (let stable = 0, last = cloud.cloudCalls, deadline = Date.now() + 5_000; stable < 4 && Date.now() < deadline;) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      stable = cloud.cloudCalls === last ? stable + 1 : 0;
+      last = cloud.cloudCalls;
+    }
     const cloudBaseline = cloud.cloudCalls;
     const lookupBaseline = accountLookups;
     const cachedReads = await Promise.all(teamReadPaths.map(async (route) => {
