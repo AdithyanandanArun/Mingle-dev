@@ -257,7 +257,8 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
         if (integrationBranch.code !== 0 || !integrationBranch.stdout.trim()) throw new HttpError(409, 'The team integration worktree is detached and cannot accept a worker branch.');
         const alreadyIntegrated = await git(workspace.worktreePath, ['merge-base', '--is-ancestor', review.review_ref, head], { allowFailure: true });
         if (alreadyIntegrated.code !== 0) {
-          const mergedResult = await git(workspace.worktreePath, ['merge', '--no-ff', '--no-edit', review.review_ref], { allowFailure: true, timeoutMs: 120_000 });
+          const mergedResult = await git(workspace.worktreePath,
+            ['-c', 'commit.gpgSign=false', 'merge', '--no-ff', '--no-edit', review.review_ref], { allowFailure: true, timeoutMs: 120_000 });
           if (mergedResult.code !== 0) {
             await git(workspace.worktreePath, ['merge', '--abort'], { allowFailure: true });
             throw new HttpError(409, `The worker branch conflicts with the integration branch. Merge ${review.review_ref} manually in ${workspace.worktreePath}, resolve the conflicts, run the checks, and retry team_accept.`);

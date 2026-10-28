@@ -1011,10 +1011,12 @@ export function createDeviceSide(deps: DeviceSideDeps): {
           if (dirty.stdout.trim()) {
             integrationNote = `Mingle could not merge origin/${integrationBranch} because this worker worktree has uncommitted changes. Keep them and merge the integration branch manually when ready.`;
           } else {
-            const merged = await git(worktreePath, ['merge', '--no-edit', baseRevision], { allowFailure: true, timeoutMs: 120_000 });
+            const merged = await git(worktreePath, ['-c', 'commit.gpgSign=false', 'merge', '--no-edit', baseRevision], { allowFailure: true, timeoutMs: 120_000 });
             if (merged.code !== 0) {
               await git(worktreePath, ['merge', '--abort'], { allowFailure: true });
-              integrationNote = `Mingle could not merge the latest integration commit from origin/${integrationBranch} automatically. Run git pull --no-rebase origin ${integrationBranch} and resolve the conflicts before continuing.`;
+              const detail = safeText(merged.stderr.replace(/\b(?:https?|ssh|git):\/\/[^\s'"<>]+/gi, '[remote]')
+                .replace(/\b[A-Za-z0-9_.-]+@[A-Za-z0-9.-]+:[^\s'"<>]+/g, '[remote]'), 500);
+              integrationNote = `Mingle could not merge the latest integration commit from origin/${integrationBranch} automatically${detail ? `: ${detail}` : ''}. Run git pull --no-rebase origin ${integrationBranch} and resolve the conflicts before continuing.`;
             }
           }
         }

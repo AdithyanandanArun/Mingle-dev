@@ -143,8 +143,15 @@ export async function fetchTeamCompletionBranch(input: {
   });
   if (fetched.code !== 0) throw new Error(safeRemoteDiagnostic(fetched.stderr.trim()).slice(0, 1_500) || 'The origin branch could not be fetched.');
   const resolved = await git(worktreePath, ['rev-parse', '--verify', '--end-of-options', `${ref}^{commit}`], { signal });
-  if (resolved.stdout.trim().toLowerCase() !== commitSha.toLowerCase()) {
-    throw new Error(`Origin branch ${branch} no longer points at the worker-reported commit.`);
+  const fetchedTip = resolved.stdout.trim();
+  const containsCommit = await git(worktreePath, ['merge-base', '--is-ancestor', commitSha, fetchedTip], { allowFailure: true, signal });
+  if (containsCommit.code !== 0) {
+    throw new Error(`Origin branch ${branch} no longer contains the worker-reported commit.`);
   }
-  return { ref, commitSha: resolved.stdout.trim() };
+  // A stable per-agent branch may advance before this completion envelope reaches the host. Keep
+  // the delivery's review ref pinned to its exact reported turn commit, not the later branch tip.
+  if (fetchedTip.toLowerCase() !== commitSha.toLowerCase()) {
+    await git(worktreePath, ['update-ref', ref, commitSha], { signal });
+  }
+  return { ref, commitSha };
 }
