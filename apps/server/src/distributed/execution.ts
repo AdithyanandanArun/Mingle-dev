@@ -86,6 +86,9 @@ type ProjectBindingRow = RemoteProjectBinding & { ownerId: string; deviceId: str
 const EXECUTABLE_PROVIDERS = new Set(['claude', 'codex', 'opencode']);
 const MAX_CONTENT = 20_000;
 const ROSTER_RETRY_MS = 15_000;
+/** Acknowledgements normally arrive within a second; past this window an unacknowledged peer is treated as offline. */
+const ROSTER_ACK_GRACE_MS = 10_000;
+const ROSTER_MAX_BACKOFF_MS = 10 * 60_000;
 const uuid = () => randomUUID();
 const asRow = (value: unknown): Row | null => value && typeof value === 'object' && !Array.isArray(value) ? value as Row : null;
 const asRows = (value: unknown): Row[] => Array.isArray(value) ? value.map(asRow).filter((row): row is Row => !!row) : [];
@@ -686,9 +689,20 @@ export class RemoteExecutionService {
       identity.teamId, sharedProjectId, identity.ownerId, identity.deviceId, peer.id);
       if (Number(state?.acknowledged_version ?? 0) >= version) continue;
       const lastSentAt = typeof state?.last_sent_at === 'string' ? Date.parse(state.last_sent_at) : Number.NaN;
-      if (Number(state?.sent_version ?? 0) === version && Number.isFinite(lastSentAt) && Date.now() - lastSentAt < ROSTER_RETRY_MS) continue;
+      const sentVersion = Number(state?.sent_version ?? 0);
+      const unacknowledged = sentVersion > Number(state?.acknowledged_version ?? 0);
+      const unacknowledgedSends = unacknowledged ? Math.max(1, Number(state?.attempts ?? 0)) : 0;
+      if (Number.isFinite(lastSentAt)) {
+        const elapsed = Date.now() - lastSentAt;
+        if (sentVersion === version && elapsed < ROSTER_RETRY_MS) continue;
+        // Presence heartbeats bump the version every minute. Each one is a durable mailbox envelope, so an
+        // offline peer would otherwise return to hundreds of queued rosters. Back off until it acknowledges;
+        // the next send always carries the latest full roster.
+        if (unacknowledged && elapsed >= ROSTER_ACK_GRACE_MS
+          && elapsed < Math.min(ROSTER_MAX_BACKOFF_MS, ROSTER_RETRY_MS * 2 ** Math.min(10, unacknowledgedSends - 1))) continue;
+      }
       if (client) await this.assertLinkedDevices(client, identity.teamId, identity.deviceId, peer.id);
-      const attempt = Number(state?.sent_version ?? 0) === version ? Number(state?.attempts ?? 0) + 1 : 1;
+      const attempt = unacknowledgedSends + 1;
       const at = nowIso();
       this.run(`INSERT INTO mingle_remote_roster_peer_sync(team_id,shared_project_id,owner_id,device_id,peer_device_id,
         sent_version,acknowledged_version,attempts,last_sent_at) VALUES(?,?,?,?,?,?,0,?,?)

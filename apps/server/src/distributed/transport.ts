@@ -133,7 +133,8 @@ export class TransportService {
   /** Marks work started by an inbound message handler, which runs inside the current sync. */
   private readonly handlerScope = new AsyncLocalStorage<true>();
   private syncAgain = false;
-  private deliveryPromise: Promise<void> = Promise.resolve();
+  /** Handler delivery is serialized per team so one team's mailbox backlog never delays another team. */
+  private readonly deliveryChains = new Map<string, Promise<void>>();
   private readonly teamSyncs = new Map<string, TeamSyncState>();
   private readonly teamRefreshes = new Map<string, Promise<void>>();
   private readonly teamCacheRefreshedAt = new Map<string, number>();
@@ -235,7 +236,21 @@ export class TransportService {
       this.cacheDevice(user.id, row);
       this.markHealthy();
       return this.publicDevice(this.deviceCacheRow(user.id, request.teamId, identity.device_id)!);
-    }).then(async (device) => { await this.sync(); return device; });
+    }).then(async (device) => {
+      // Catch up only the registered team before returning; other teams' mailbox backlogs
+      // (for example after a teammate was offline for hours) continue in the background.
+      await this.syncRegisteredTeam(device.teamId, device.id);
+      void this.sync();
+      return device;
+    });
+  }
+
+  private async syncRegisteredTeam(teamId: string, deviceId: string): Promise<void> {
+    const accountId = this.currentAccountId();
+    const local = accountId ? this.localDevices(accountId).find((row) => row.registered === 1 && row.team_id === teamId && row.device_id === deviceId) : undefined;
+    if (!accountId || !local) return this.sync();
+    if (!await this.requestTeamSync(accountId, local)) return;
+    await this.flushLocalOutbox(accountId, local);
   }
 
   /** Adds this device's unilateral fingerprint pin; delivery is enabled only after the peer pins us too. */
@@ -496,7 +511,7 @@ export class TransportService {
       ...this.teamRefreshes.values(),
       ...this.outboxSyncs.values(),
       ...this.fastDeliveryPromises,
-      this.deliveryPromise,
+      ...this.deliveryChains.values(),
     ]);
     const sendRemovals = this.clearSendChannels();
     const wakeSubscriptions = [...this.wakeSubscriptions.values()];
@@ -640,8 +655,11 @@ export class TransportService {
   }
 
   private enqueuePendingDelivery(accountId: string, teamId: string): Promise<void> {
-    const delivery = this.deliveryPromise.then(() => this.deliverPending(accountId, teamId));
-    this.deliveryPromise = delivery.catch(() => undefined);
+    const key = `${accountId}:${teamId}`;
+    const delivery = (this.deliveryChains.get(key) ?? Promise.resolve()).then(() => this.deliverPending(accountId, teamId));
+    const settled = delivery.catch(() => undefined);
+    this.deliveryChains.set(key, settled);
+    void settled.then(() => { if (this.deliveryChains.get(key) === settled) this.deliveryChains.delete(key); });
     return delivery;
   }
 
@@ -1119,7 +1137,40 @@ export class TransportService {
     if (this.currentAccountId() !== accountId) return;
     const pending = this.db.prepare(`SELECT * FROM mingle_transport_inbox WHERE account_id = ? AND team_id = ? AND status = 'pending' AND next_attempt_at <= ? ORDER BY received_at,id LIMIT 100`)
       .all(accountId, teamId, this.now()) as unknown as LocalEnvelopeRow[];
-    for (const row of pending) await this.deliverInboxRow(accountId, row, false);
+    for (const row of pending) {
+      if (row.kind === 'execution.agents') await this.deliverNewestRoster(accountId, row);
+      const current = this.db.prepare(`SELECT status FROM mingle_transport_inbox WHERE account_id = ? AND team_id = ? AND id = ?`)
+        .get(accountId, row.team_id, row.id) as { status: string } | undefined;
+      if (current?.status !== 'pending') continue;
+      await this.deliverInboxRow(accountId, row, false);
+    }
+  }
+
+  /**
+   * Owners republish their full agent roster as a presence heartbeat, so a device that was offline
+   * for hours finds hundreds of queued rosters from one sender. Only the newest matters: deliver it
+   * first and, once it was authenticated and handled, close the older queued copies (which the
+   * execution service would ignore as stale) without per-message cloud verification.
+   */
+  private async deliverNewestRoster(accountId: string, row: LocalEnvelopeRow): Promise<void> {
+    const current = rosterKeyVersion(row);
+    if (!current) return;
+    const group = (this.db.prepare(`SELECT * FROM mingle_transport_inbox WHERE account_id = ? AND team_id = ? AND to_device_id = ?
+      AND from_device_id = ? AND kind = 'execution.agents' AND status = 'pending' AND idempotency_key LIKE ?`)
+      .all(accountId, row.team_id, row.to_device_id, row.from_device_id, `agents:${current.sharedProjectId}:%`) as unknown as LocalEnvelopeRow[])
+      .map((candidate) => ({ candidate, version: rosterKeyVersion(candidate)?.version ?? 0 }))
+      .filter((entry) => entry.version > 0);
+    if (group.length < 2) return;
+    const newest = group.reduce((best, entry) => entry.version > best.version ? entry : best);
+    await this.deliverInboxRow(accountId, newest.candidate, false);
+    const handled = this.db.prepare(`SELECT status FROM mingle_transport_inbox WHERE account_id = ? AND team_id = ? AND id = ?`)
+      .get(accountId, row.team_id, newest.candidate.id) as { status: string } | undefined;
+    if (handled?.status !== 'handled') return;
+    const supersede = this.db.prepare(`UPDATE mingle_transport_inbox SET status = 'handled', attempts = attempts + 1, next_attempt_at = 0,
+      error = 'Superseded by a newer roster from the same device.' WHERE account_id = ? AND team_id = ? AND id = ? AND status = 'pending'`);
+    for (const entry of group) {
+      if (entry.candidate.id !== newest.candidate.id && entry.version <= newest.version) supersede.run(accountId, row.team_id, entry.candidate.id);
+    }
   }
 
   private receiveRealtimeEnvelope(
@@ -1628,6 +1679,15 @@ function isUuid(value: string): boolean {
  * next send wait for a cloud refresh after every settings or consent change. Unknown peers and
  * senders still force an authoritative refresh on their own.
  */
+/** Roster idempotency keys are `agents:<sharedProjectId>:<version>:<peer>:<attempt>`; see the execution service. */
+function rosterKeyVersion(row: Pick<LocalEnvelopeRow, 'kind' | 'idempotency_key'>): { sharedProjectId: string; version: number } | null {
+  if (row.kind !== 'execution.agents') return null;
+  const match = /^agents:([^:]{1,100}):([1-9][0-9]{0,15}):/.exec(row.idempotency_key);
+  if (!match) return null;
+  const version = Number(match[2]);
+  return Number.isSafeInteger(version) ? { sharedProjectId: match[1]!, version } : null;
+}
+
 function messageInvalidatesTeamTrust(kind: string): boolean {
   return /(?:^|[.-])(?:members?|membership|devices?)(?:$|[.-])/i.test(kind);
 }

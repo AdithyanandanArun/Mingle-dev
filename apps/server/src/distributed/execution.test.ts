@@ -277,7 +277,15 @@ describe('RemoteExecutionService', () => {
     owner.quota = { state: 'available', observedAt: now() };
     await owner.service.publishAgents({ teamId: TEAM, sharedProjectId: SHARED_PROJECT, sessionIds: ['presence_b'] });
     const first = owner.transport.sent.at(-1)!;
-    await source.service.onEnvelope(envelope(DEVICE_B, DEVICE_A, first.kind, first.payload));
+    // An online peer applies each roster and acknowledges it back to the owner.
+    const deliverAndAcknowledge = async (roster: typeof first) => {
+      const acknowledged = source.transport.sent.length;
+      await source.service.onEnvelope(envelope(DEVICE_B, DEVICE_A, roster.kind, roster.payload));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      const acknowledgement = source.transport.sent.slice(acknowledged).find((entry) => entry.kind === 'execution.agents.ack')!;
+      await owner.service.onEnvelope(envelope(DEVICE_A, DEVICE_B, acknowledgement.kind, acknowledgement.payload));
+    };
+    await deliverAndAcknowledge(first);
     const remote = async () => (await source.service.snapshot(TEAM)).agents.find((agent) => agent.deviceId === DEVICE_B)!;
     expect(await remote()).toMatchObject({ presence: 'idle', presenceKnown: true, quotaState: 'available' });
 
@@ -286,8 +294,7 @@ describe('RemoteExecutionService', () => {
     for (let minute = 1; minute <= 7; minute++) {
       vi.setSystemTime(new Date(Date.parse('2026-10-26T06:00:00Z') + minute * 60_000));
       await owner.service.refreshPublishedAgents({ teamId: TEAM, sharedProjectId: SHARED_PROJECT });
-      const heartbeat = owner.transport.sent.at(-1)!;
-      await source.service.onEnvelope(envelope(DEVICE_B, DEVICE_A, heartbeat.kind, heartbeat.payload));
+      await deliverAndAcknowledge(owner.transport.sent.at(-1)!);
       expect(await remote()).toMatchObject({ presence: 'idle', presenceKnown: true, presenceObservedAt: now() });
     }
     expect(owner.transport.sent.filter((entry) => entry.kind === 'execution.agents')).toHaveLength(8);
@@ -298,6 +305,41 @@ describe('RemoteExecutionService', () => {
     // Even a newly received but delayed signed roster must remain stale.
     await source.service.onEnvelope(envelope(DEVICE_B, DEVICE_A, first.kind, first.payload));
     expect(await remote()).toMatchObject({ presence: 'unknown', presenceKnown: false });
+  });
+
+  it('backs off presence heartbeats to a peer that stops acknowledging and resumes once it acknowledges', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const start = Date.parse('2026-10-26T06:00:00Z');
+    vi.setSystemTime(new Date(start));
+    const source = createFixture({ deviceId: DEVICE_A, peerId: DEVICE_B, ownerId: OWNER_A, projectId: 'offline_a', sessionId: 'offline_a', sessionName: 'Source', provider: 'codex' });
+    const owner = createFixture({ deviceId: DEVICE_B, peerId: DEVICE_A, ownerId: OWNER_B, projectId: 'offline_b', sessionId: 'offline_b', sessionName: 'Owner', provider: 'codex' });
+    await source.service.bindProject({ teamId: TEAM, sharedProjectId: SHARED_PROJECT, localProjectId: 'offline_a' });
+    await owner.service.bindProject({ teamId: TEAM, sharedProjectId: SHARED_PROJECT, localProjectId: 'offline_b' });
+    await owner.service.publishAgents({ teamId: TEAM, sharedProjectId: SHARED_PROJECT, sessionIds: ['offline_b'] });
+    const rosters = () => owner.transport.sent.filter((entry) => entry.kind === 'execution.agents');
+
+    // The peer is offline for eight hours while the owner's 30-second metadata timer keeps running.
+    for (let tick = 1; tick <= 8 * 120; tick++) {
+      vi.setSystemTime(new Date(start + tick * 30_000));
+      await owner.service.refreshPublishedAgents({ teamId: TEAM, sharedProjectId: SHARED_PROJECT });
+    }
+    // Without backoff this would queue one durable mailbox envelope per presence renewal (hundreds).
+    expect(rosters().length).toBeLessThan(60);
+    const latest = rosters().at(-1)!;
+    const outgoing = owner.db.prepare("SELECT version FROM mingle_remote_roster_versions WHERE direction='outgoing'").get() as { version: number };
+    expect(outgoing.version).toBeGreaterThan(200);
+    // The newest queued envelope is at most one backoff interval behind the current roster.
+    expect((latest.payload as { version: number }).version).toBeGreaterThan(outgoing.version - 15);
+
+    // When the peer returns, the latest full roster is applied and acknowledged; heartbeats resume at the normal pace.
+    await source.service.onEnvelope(envelope(DEVICE_B, DEVICE_A, latest.kind, latest.payload));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const acknowledgement = source.transport.sent.find((entry) => entry.kind === 'execution.agents.ack')!;
+    await owner.service.onEnvelope(envelope(DEVICE_A, DEVICE_B, acknowledgement.kind, acknowledgement.payload));
+    const beforeResume = rosters().length;
+    vi.setSystemTime(new Date(start + 8 * 3_600_000 + 60_000));
+    await owner.service.refreshPublishedAgents({ teamId: TEAM, sharedProjectId: SHARED_PROJECT });
+    expect(rosters()).toHaveLength(beforeResume + 1);
   });
 
   it('publishes a full-access session without changing its saved policy', async () => {

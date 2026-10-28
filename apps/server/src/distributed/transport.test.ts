@@ -1169,6 +1169,92 @@ describe('TransportService authenticated mailbox', () => {
     }
   });
 
+  it('delivers only the newest queued roster from a sender and closes superseded copies after it was handled', async () => {
+    const { first, second, b } = await pairedServices();
+    const shared = '11111111-2222-4333-8444-555555555555';
+    const delivered: Array<{ kind: string; payload: unknown }> = [];
+    try {
+      for (let version = 1; version <= 5; version += 1) {
+        await first.send({ teamId, toDeviceId: b.id, kind: 'execution.agents', payload: { sharedProjectId: shared, version },
+          idempotencyKey: `agents:${shared}:${version}:${b.id}:1` });
+        if (version === 2) await first.send({ teamId, toDeviceId: b.id, kind: 'collaboration.message', payload: { note: 'kept' }, idempotencyKey: 'between-rosters' });
+      }
+      await second.sync();
+      const unsubscribe = second.onMessage((message) => { delivered.push({ kind: message.kind, payload: message.payload }); });
+      await second.sync();
+      unsubscribe();
+      expect(delivered).toEqual([
+        { kind: 'execution.agents', payload: { sharedProjectId: shared, version: 5 } },
+        { kind: 'collaboration.message', payload: { note: 'kept' } },
+      ]);
+      const db = (second as unknown as { db: DatabaseSync }).db;
+      const rows = db.prepare("SELECT idempotency_key, status, error FROM mingle_transport_inbox WHERE kind = 'execution.agents' ORDER BY idempotency_key").all();
+      expect(rows.map((row) => row.status)).toEqual(['handled', 'handled', 'handled', 'handled', 'handled']);
+      expect(rows.filter((row) => row.error === 'Superseded by a newer roster from the same device.')).toHaveLength(4);
+    } finally {
+      await first.close();
+      await second.close();
+    }
+  });
+
+  it('keeps older rosters queued when the newest copy fails to deliver', async () => {
+    const { first, second, b } = await pairedServices();
+    const shared = '11111111-2222-4333-8444-666666666666';
+    const versions: unknown[] = [];
+    try {
+      for (let version = 1; version <= 3; version += 1) {
+        await first.send({ teamId, toDeviceId: b.id, kind: 'execution.agents', payload: { sharedProjectId: shared, version },
+          idempotencyKey: `agents:${shared}:${version}:${b.id}:1` });
+      }
+      await second.sync();
+      const unsubscribe = second.onMessage((message) => {
+        const version = (message.payload as { version: number }).version;
+        versions.push(version);
+        if (version === 3) throw new Error('handler unavailable');
+      });
+      await second.sync();
+      unsubscribe();
+      expect(versions).toEqual([3, 1, 2]);
+      const db = (second as unknown as { db: DatabaseSync }).db;
+      expect(db.prepare("SELECT count(*) AS superseded FROM mingle_transport_inbox WHERE error LIKE 'Superseded%'").get()).toEqual({ superseded: 0 });
+    } finally {
+      await first.close();
+      await second.close();
+    }
+  });
+
+  it('returns from registering in a new team without waiting for another team\'s mailbox backlog', async () => {
+    const { cloud, first, second, b } = await pairedServices();
+    const otherTeam = '9b1d7f5e-3c2a-4e8f-9d6b-1a2b3c4d5e6f';
+    cloud.members.set(otherTeam, new Set([userA, userB]));
+    let release = () => {};
+    const blocked = new Promise<void>((resolve) => { release = resolve; });
+    let entered = () => {};
+    const handlerEntered = new Promise<void>((resolve) => { entered = resolve; });
+    try {
+      await first.send({ teamId, toDeviceId: b.id, kind: 'collaboration.message', payload: { backlog: true }, idempotencyKey: 'backlog-1' });
+      const unsubscribe = second.onMessage(async (message) => {
+        if (message.teamId !== teamId) return;
+        entered();
+        await blocked;
+      });
+      const backlog = second.sync();
+      await handlerEntered;
+      const registered = await Promise.race([
+        second.register({ teamId: otherTeam, name: 'Desktop' }).then((device) => device.teamId),
+        new Promise<string>((resolve) => setTimeout(() => resolve('timed out'), 2_000)),
+      ]);
+      expect(registered).toBe(otherTeam);
+      release();
+      await backlog;
+      unsubscribe();
+    } finally {
+      release();
+      await first.close();
+      await second.close();
+    }
+  });
+
   it('rejects attempts to register from a user with no current team membership', async () => {
     const cloud = new MailboxCloud();
     const outsider = service(cloud, userOutside);
