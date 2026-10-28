@@ -34,9 +34,10 @@
 .group-result__agents { display: flex; flex-direction: column; }
 
 .group-result__tasks { display: flex; flex-direction: column; gap: 2px; }
-.group-result__tasks li { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; min-width: 0; }
+.group-result__tasks li { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: baseline; gap: 2px 12px; min-width: 0; }
 .group-result__task-title { min-width: 0; overflow-wrap: anywhere; color: var(--fg-0); }
 .group-result__task-status { flex: none; color: var(--fg-2); font-size: 11px; white-space: nowrap; }
+.group-result__task-verification { grid-column: 1 / -1; color: var(--fg-3); font-size: 11px; line-height: 1.45; }
 .group-result__problem { color: var(--err); overflow-wrap: anywhere; }
 
 .group-result__preview {
@@ -63,7 +64,8 @@
 
 @media (max-width: 560px) {
   .group-result__workspace dl { grid-template-columns: minmax(0, 1fr); }
-  .group-result__tasks li { flex-direction: column; gap: 0; }
+  .group-result__tasks li { grid-template-columns: minmax(0, 1fr); gap: 0; }
+  .group-result__task-verification { grid-column: 1; }
 }
 @media (prefers-reduced-motion: reduce) {
   .group-result__details > summary::before { transition: none; }

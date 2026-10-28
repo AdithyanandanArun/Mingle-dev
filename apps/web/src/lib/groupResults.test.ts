@@ -54,3 +54,32 @@ it('uses finalizing only after turns end while the request remains open', () => 
   });
   expect(result?.facts).toContain('1 task still open');
 });
+
+it('shows orchestrator acceptance and its verification summary without requesting human acceptance', () => {
+  const { snapshot, sessions, tasks } = resultFixture('completed');
+  snapshot.requests[0]!.status = 'completed';
+  snapshot.assignments[0]!.acceptedBy = 'orchestrator';
+  snapshot.assignments[0]!.verificationSummary = 'Unit checks passed and the output was reviewed.';
+  tasks[0]!.status = 'review';
+
+  const result = buildGroupResultModel({ snapshot, sessions, messages: [], runs: [], tasks });
+
+  expect(result).toMatchObject({ status: 'accepted', title: 'Tasks accepted', summary: 'The orchestrator accepted all assigned tasks after verification.' });
+  expect(result?.summary).not.toContain('Tasks require your acceptance; they are not accepted automatically.');
+  expect(result?.facts).not.toContain('1 need review');
+  expect(result?.facts).not.toContain('1 task still open');
+  expect(result?.agents[1]?.tasks[0]).toMatchObject({
+    label: 'Accepted by orchestrator', verificationSummary: 'Unit checks passed and the output was reviewed.',
+  });
+});
+
+it('labels unaccepted review tasks as needing the user’s review', () => {
+  const { snapshot, sessions, tasks } = resultFixture('completed');
+  snapshot.requests[0]!.status = 'completed';
+  tasks[0]!.status = 'review';
+
+  const result = buildGroupResultModel({ snapshot, sessions, messages: [], runs: [], tasks });
+
+  expect(result).toMatchObject({ status: 'review', title: 'Ready for your review', summary: '1 task needs your review.' });
+  expect(result?.agents[1]?.tasks[0]?.label).toBe('Needs your review');
+});

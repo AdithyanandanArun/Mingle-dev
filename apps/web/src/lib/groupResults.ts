@@ -14,7 +14,10 @@ export type GroupResultStatus =
   | 'pending' | 'in-progress' | 'paused' | 'failed' | 'stopped' | 'blocked' | 'follow-up' | 'finalizing' | 'unknown' | 'review' | 'accepted' | 'responded';
 export type DeliveryKind = NonNullable<GroupDelivery['kind']>;
 
-export interface ResultTask { id: string; title: string; status: TaskStatus | null; label: string }
+export interface ResultTask {
+  id: string; title: string; status: TaskStatus | null; label: string;
+  acceptedBy?: 'orchestrator'; verificationSummary?: string;
+}
 export interface ResultReport {
   key: string; taskTitles: string[];
   /** Native final assistant text; null when none is recorded. */
@@ -219,9 +222,14 @@ export function buildGroupResultModel({ snapshot, sessions, messages, runs, task
   for (const task of tasks) if (task.projectId === group.projectId) taskById.set(task.id, task);
   const taskFor = (taskId: string): ResultTask => {
     const task = taskById.get(taskId);
+    const acceptance = assignments.find((assignment) => assignment.taskId === taskId && assignment.acceptedBy === 'orchestrator');
+    const status = task?.status ?? null;
+    const acceptedBy = acceptance?.acceptedBy;
     return task
-      ? { id: task.id, title: task.title, status: task.status, label: TASK_STATUS_LABEL[task.status] }
-      : { id: taskId, title: 'Task record unavailable', status: null, label: 'Unknown' };
+      ? { id: task.id, title: task.title, status, label: acceptedBy ? 'Accepted by orchestrator' : task.status === 'review' ? 'Needs your review' : TASK_STATUS_LABEL[task.status],
+          ...(acceptedBy ? { acceptedBy } : {}), ...(acceptance?.verificationSummary ? { verificationSummary: acceptance.verificationSummary } : {}) }
+      : { id: taskId, title: 'Task record unavailable', status: null, label: 'Unknown',
+          ...(acceptedBy ? { acceptedBy } : {}), ...(acceptance?.verificationSummary ? { verificationSummary: acceptance.verificationSummary } : {}) };
   };
   const allTasks = unique(assignments.map((assignment) => assignment.taskId)).map(taskFor);
 
@@ -374,7 +382,8 @@ export function buildGroupResultModel({ snapshot, sessions, messages, runs, task
     };
   }
 
-  const count = (status: TaskStatus) => allTasks.filter((task) => task.status === status).length;
+  const count = (status: TaskStatus) => allTasks.filter((task) => task.acceptedBy === 'orchestrator'
+    ? status === 'done' : task.status === status).length;
   const blocked = count('blocked');
   const unfinished = count('backlog') + count('ready') + count('running');
   const inReview = count('review');
@@ -439,17 +448,21 @@ export function buildGroupResultModel({ snapshot, sessions, messages, runs, task
   } else if (!deliveries.length) {
     status = 'pending'; title = 'Waiting to start'; summary = 'This request has no recorded turns yet.';
   } else {
-    if (allTasks.length && allTasks.every((task) => task.status === 'done')) {
+    if (allTasks.length && allTasks.every((task) => task.acceptedBy === 'orchestrator')) {
+      status = 'accepted'; title = 'Tasks accepted'; summary = 'The orchestrator accepted all assigned tasks after verification.';
+    } else if (allTasks.length && allTasks.every((task) => task.status === 'done')) {
       status = 'accepted'; title = 'Tasks accepted'; summary = 'All assigned tasks are marked done.';
     } else if (allTasks.length) {
-      status = 'review'; title = 'Ready for your review'; summary = 'Tasks require your acceptance; they are not accepted automatically.';
+      status = 'review'; title = 'Ready for your review';
+      const reviewCount = allTasks.filter((task) => task.status === 'review' && task.acceptedBy !== 'orchestrator').length;
+      summary = reviewCount ? `${plural(reviewCount, 'task')} ${reviewCount === 1 ? 'needs' : 'need'} your review.` : 'Some assigned tasks are not accepted yet.';
     } else {
       status = 'responded'; title = 'Team finished responding'; summary = 'No tasks were assigned to this request.';
     }
   }
   if (paused && request.status === 'completed' && !detail) detail = pauseReason ? `Group is paused · ${pauseReason}` : 'Group is paused.';
 
-  const openTaskCount = allTasks.filter((task) => task.status !== null && task.status !== 'done').length;
+  const openTaskCount = allTasks.filter((task) => task.acceptedBy !== 'orchestrator' && task.status !== null && task.status !== 'done').length;
   const facts = [
     agents.length || lead ? plural(unique([...agents.map((agent) => agent.memberId), ...(lead ? [lead.memberId] : [])]).length, 'agent') : null,
     allTasks.length ? plural(allTasks.length, 'task') : null,

@@ -62,7 +62,9 @@ function AgentRow({ agent }: { agent: ResultAgent }) {
       {agent.tasks.length ? (
         <ul className="group-result__tasks" aria-label="Assigned tasks">
           {agent.tasks.map((task) => (
-            <li key={task.id}><span className="group-result__task-title">{task.title}</span><span className="group-result__task-status">{task.label}</span></li>
+            <li key={task.id}><span className="group-result__task-title">{task.title}</span><span className="group-result__task-status">{task.label}</span>
+              {task.verificationSummary ? <small className="group-result__task-verification">Verification · {task.verificationSummary}</small> : null}
+            </li>
           ))}
         </ul>
       ) : null}
