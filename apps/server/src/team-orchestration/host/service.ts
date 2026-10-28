@@ -359,18 +359,14 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
     return account?.status === 'signed-in' ? account.user?.id ?? null : null;
   }
 
-  private async context(projectId: string, refreshAuthority = false): Promise<ProjectContext> {
+  private async context(projectId: string): Promise<ProjectContext> {
     const localProject = this.options.store.getProject(projectId);
     if (!localProject) throw new HttpError(404, 'Project not found.');
-    const localAccountId = this.localAccountId();
-    const accountIdWork = refreshAuthority || !this.options.account.snapshot
-      ? this.options.account.withAuthenticatedClient(async (_client, user) => user.id)
-      : Promise.resolve(localAccountId ?? this.options.account.withAuthenticatedClient(async (_client, user) => user.id));
-    const [shared, accountId] = await Promise.all([
-      refreshAuthority && this.options.collaboration.refreshSnapshot
-        ? this.options.collaboration.refreshSnapshot(projectId) : this.options.collaboration.snapshot(projectId),
-      accountIdWork,
-    ]);
+    // The editor guard uses the persisted team read model and locally verified account state.
+    // Outbound device writes still pass through cloud RLS, which rejects stale membership.
+    const accountId = this.localAccountId();
+    if (!accountId) throw new HttpError(401, 'Sign in to the Mingle account before using team orchestration.');
+    const shared = await this.options.collaboration.snapshot(projectId);
     if (!shared.project) throw new HttpError(409, 'Set up teammate sharing for this project first.');
     const deviceSnapshot = this.options.transport.snapshot(shared.project.teamId);
     if (!deviceSnapshot.deviceId) throw new HttpError(409, 'Register this device with the shared project team first.');
@@ -405,7 +401,7 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
   }
 
   private async requireEditor(projectId: string): Promise<ProjectContext> {
-    const context = await this.context(projectId, true);
+    const context = await this.context(projectId);
     const member = context.members.find((candidate) => candidate.accountId === context.accountId);
     if (!member || !['leader', 'admin'].includes(member.role)) throw new HttpError(403, 'Only a team lead or admin can change team orchestration.');
     if (!context.isHost) throw new HttpError(403, 'Team orchestration settings can be changed only on the host device.');
@@ -538,10 +534,9 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
     const project = this.options.store.getProject(projectId);
     if (!project) throw new HttpError(404, 'Project not found.');
     const accountId = this.localAccountId();
-    const [shared, resolvedAccountId] = await Promise.all([
-      this.options.collaboration.snapshot(projectId),
-      accountId ?? this.options.account.withAuthenticatedClient(async (_client, user) => user.id),
-    ]);
+    if (!accountId) throw new HttpError(401, 'Sign in to the Mingle account before viewing team agents.');
+    const shared = await this.options.collaboration.snapshot(projectId);
+    const resolvedAccountId = accountId;
     if (!shared.project) return { projectId, teamId: null, sharedProjectId: null, canAdd: false, reason: 'This project is not shared with a team.', permissionLevel: null, teamSession: null, agents: [] };
     const sharedProject = shared.project;
     const { teamId, sharedProjectId } = sharedProject;
@@ -1364,7 +1359,8 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
     for (const deviceId of [...new Set(linked)]) {
       if (transport.devices.find((device) => device.id === deviceId)?.status === 'revoked') continue;
       try {
-        await this.options.authorizeTeam({ teamId: context.project.teamId, peerDeviceId: deviceId });
+        // transport.send performs the authenticated cloud write; cloud RLS remains authoritative
+        // for active membership/device links without a separate auth.getUser() round trip here.
         await this.options.transport.send({ teamId: context.project.teamId, toDeviceId: deviceId, kind: 'teamgroup.structure', payload,
           idempotencyKey: `teamgroup-structure:${context.project.sharedProjectId}:${payload.settings.version}:${structureDigest}:${deviceId}`.slice(0, 200) });
       } catch { /* structure remains saved locally and will be broadcast on the next change */ }
@@ -1442,7 +1438,6 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
     this.armDeliveryTimeout(context.deliveryId);
     this.track((async () => {
       try {
-        await this.options.authorizeTeam({ teamId: proxy.team_id, peerDeviceId: proxy.owner_device_id });
         let baseRevision: string | undefined;
         try {
           const head = (await git(groupWorkspace?.worktreePath ?? input.session.worktreePath, ['rev-parse', '--verify', 'HEAD'])).stdout.trim();
@@ -1471,6 +1466,8 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
         const payload = DeliverySchema.parse({ ...basePayload, ...(baseRevision ? { baseRevision } : {}), inputArtifacts, content });
         this.hostRows.prepare('UPDATE mingle_team_host_deliveries SET content=?,updated_at=? WHERE delivery_id=?')
           .run(payload.content, new Date(this.now()).toISOString(), context.deliveryId);
+        // The destination validates current host role, consent and settings before execution;
+        // transport.send's cloud RLS gates mailbox insertion without a duplicate auth lookup here.
         await this.options.transport.send({ teamId: proxy.team_id, toDeviceId: proxy.owner_device_id, kind: 'teamgroup.delivery', payload,
           idempotencyKey: `teamgroup-delivery:${context.deliveryId}:${input.runId}`.slice(0, 200) });
         void this.options.transport.sync().catch(() => undefined);
@@ -1665,6 +1662,7 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
   }
 
   private async verifyOwnerDevice(teamId: string, deviceId: string, accountId: string): Promise<void> {
+    // Consent and activity envelopes claim an owner identity; verify it against current cloud membership/device state.
     await this.options.authorizeTeam({ teamId, peerDeviceId: deviceId });
     await this.options.account.withAuthenticatedClient(async (client, _user) => {
       const device = await client.from('mingle_devices').select('id,owner_id,revoked_at').eq('team_id', teamId).eq('id', deviceId).maybeSingle();
@@ -2064,6 +2062,7 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
             this.assertCompletionStillLive(deliveryId);
             if (!progress.imported) {
               if (!this.options.git) throw new Error('Git artifact import is unavailable on the host.');
+              // Artifact import mutates the host repository, so sender membership/device pins stay fresh.
               await this.options.authorizeTeam({ teamId: delivery.team_id, peerDeviceId: delivery.owner_device_id });
               const imported = await this.options.git.importTeamArtifact({ teamId: delivery.team_id,
                 sharedProjectId: delivery.shared_project_id, deliveryId, artifact: progress.source,
@@ -2481,6 +2480,7 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
         }
         if (!this.options.git) throw new HttpError(409, 'The owner-device artifact cannot be imported because team Git transfer is unavailable.');
         this.assertToolCallStillActive(delivery.delivery_id, active);
+        // A remote tool's artifact transfer is an authority-sensitive repository mutation.
         await this.options.authorizeTeam({ teamId: delivery.team_id, peerDeviceId: delivery.owner_device_id });
         this.assertToolCallStillActive(delivery.delivery_id, active);
         const imported = await this.options.git.importTeamArtifact({ teamId: delivery.team_id,
@@ -2642,6 +2642,7 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
   async receiveActivity(payload: unknown, envelope: import('@mingle/contracts').AuthenticatedTransportMessage): Promise<void> {
     const parsed = TeamActivityPayloadSchema.safeParse(payload);
     if (!parsed.success) throw new HttpError(400, 'Team activity payload is invalid.');
+    // Inbound activity is accepted only from a currently authorized, mutually pinned device.
     await this.options.authorizeTeam({ teamId: envelope.teamId, peerDeviceId: envelope.fromDeviceId });
     if (!parsed.data.runId) return;
     const candidates = this.hostRows.prepare(`SELECT * FROM mingle_team_host_deliveries

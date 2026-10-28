@@ -118,6 +118,7 @@ function node({ projectId, accountId, deviceId, role }: { projectId: string; acc
     }),
     sync: async () => undefined,
     send: async (entry: any) => {
+      if (!networkAllowed) throw new Error('Example peer is offline.');
       const envelope = { ...entry, id: randomUUID(), fromDeviceId: deviceId, toDeviceId: entry.toDeviceId };
       outgoing.push(envelope);
       return envelope.id;

@@ -214,6 +214,8 @@ export class ProjectCollaborationService {
     this.unsubscribeStore = options.store.subscribe((event) => {
       if (!event || event.payload.readModelRefresh === true) return;
       if (event.type === 'team.structure.updated' || event.type === 'team.session.updated') {
+        // Signed structure notifications arrive as these existing events; invalidate and launch
+        // the authoritative refresh immediately rather than waiting for the read-model TTL.
         if (event.projectId) this.invalidateSnapshot(event.projectId);
       }
     });
@@ -272,11 +274,15 @@ export class ProjectCollaborationService {
 
   private withClient<T>(callback: (client: SupabaseClient, user: User) => Promise<T>): Promise<T> {
     this.ensureOpen();
-    // TeamService is the existing cloud authority bridge and delegates each call
-    // to the injected AccountService, including a fresh Supabase auth.getUser().
+    // Cloud mutations, invitation acceptance, and authoritative read-model refreshes use the
+    // verified account client; local cached reads stay off unrelated team write hot paths.
     return this.options.distributed.teams.withClient(async (client, user) => {
-      const verified = await this.options.account.withAuthenticatedClient(async (_sameClient, current) => current);
-      if (verified.id !== user.id) throw conflict('The signed-in account changed while the collaboration request was running. Retry.');
+      // Compare with locally verified session state; a second auth.getUser() adds a network
+      // round trip without strengthening the cloud RLS check already performed by this client.
+      const current = this.options.account.snapshot();
+      if (current.status !== 'signed-in' || current.user?.id !== user.id) {
+        throw conflict('The signed-in account changed while the collaboration request was running. Retry.');
+      }
       return callback(client, user);
     });
   }
@@ -504,7 +510,7 @@ export class ProjectCollaborationService {
     });
   }
 
-  /** Force an authoritative cloud refresh. Unknown inbound identities use this before rejection. */
+  /** Explicit refreshes, push invalidations, and unknown inbound identities use this authoritative cloud read. */
   refreshSnapshot(projectId: string): Promise<ProjectCollaborationSnapshot> {
     this.ensureOpen();
     const existing = this.refreshFlights.get(projectId);

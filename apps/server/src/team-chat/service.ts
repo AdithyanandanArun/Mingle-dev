@@ -159,7 +159,7 @@ export class TeamChatService {
     try {
       const [before, accountId] = await Promise.all([
         this.options.collaboration.snapshot(projectId),
-        this.options.account.withAuthenticatedClient(async (_client, user) => user.id),
+        Promise.resolve(this.localAccountId()),
       ]);
       const project = before.project;
       if (!project || !before.members.some((member) => member.accountId === accountId && member.role === 'leader' && member.status === 'active')) return null;
@@ -174,7 +174,7 @@ export class TeamChatService {
       if (!snapshot || snapshot.group.projectId !== projectId) return null;
       const [after, currentAccountId] = await Promise.all([
         this.options.collaboration.snapshot(projectId),
-        this.options.account.withAuthenticatedClient(async (_client, user) => user.id),
+        Promise.resolve(this.localAccountId()),
       ]);
       const currentAuthority = this.options.store.db.prepare(`SELECT owner_id,team_id,shared_project_id,leader_device_id
         FROM mingle_project_collaboration_sources WHERE local_project_id=?`).get(projectId) as DbRow | undefined;
@@ -213,7 +213,7 @@ export class TeamChatService {
       // Fence authority once more after signing, which may be asynchronous on some transports.
       const [latestCollaboration, signingAccount] = await Promise.all([
         this.options.collaboration.snapshot(projectId),
-        this.options.account.withAuthenticatedClient(async (_client, user) => user.id),
+        Promise.resolve(this.localAccountId()),
       ]);
       const signingDevice = this.options.distributed.transport.snapshot(project.teamId).deviceId;
       const latestAuthority = this.options.store.db.prepare(`SELECT owner_id,team_id,shared_project_id,leader_device_id
@@ -267,12 +267,11 @@ export class TeamChatService {
     if (this.closed) throw new HttpError(503, 'Team chat is closing.');
   }
 
-  private async binding(projectId: string, refresh = false) {
+  private async binding(projectId: string) {
     this.ensureOpen();
     const project = this.options.store.getProject(projectId);
     if (!project) throw notFound('Project not found.');
-    const shared = refresh && this.options.collaboration.refreshSnapshot
-      ? await this.options.collaboration.refreshSnapshot(projectId) : await this.options.collaboration.snapshot(projectId);
+    const shared = await this.options.collaboration.snapshot(projectId);
     if (!shared.project) throw new HttpError(409, 'Set up teammate sharing for this project before opening team chat.');
     return { localProject: project, shared };
   }
@@ -280,13 +279,22 @@ export class TeamChatService {
   private async refreshUnknownAuthors(projectId: string, shared: SharedSnapshot, messages: TeamChatMessage[]): Promise<SharedSnapshot> {
     const unknown = messages.some((message) => {
       const author = message.author;
-      if (author.kind === 'human') return !shared.members.some((member) => member.accountId === author.accountId);
-      if (author.kind === 'agent') return !shared.agents.some((agent) => (agent.id === author.agentId || agent.sessionId === author.agentId)
-        && agent.accountId === author.ownerAccountId && agent.deviceId === message.authorDeviceId);
+      if (author.kind === 'human') return !shared.members.some((member) => member.accountId === author.accountId && member.status === 'active');
+      if (author.kind === 'agent') return !shared.members.some((member) => member.accountId === author.ownerAccountId && member.status === 'active')
+        || !shared.agents.some((agent) => (agent.id === author.agentId || agent.sessionId === author.agentId)
+          && agent.accountId === author.ownerAccountId && agent.deviceId === message.authorDeviceId);
       return false;
     });
     if (!unknown || !this.options.collaboration.refreshSnapshot) return shared;
+    // Cached absence can mean either a newly joined author or a revoked identity. Refresh before
+    // the provenance decision so new members are accepted and removed members stay rejected.
     return this.options.collaboration.refreshSnapshot(projectId);
+  }
+
+  private localAccountId(): string {
+    const account = this.options.account.snapshot();
+    if (account.status !== 'signed-in' || !account.user?.id) throw new HttpError(401, 'Sign in to the Mingle account before using team chat.');
+    return account.user.id;
   }
 
   /** Resolves only persisted local authority so accepting a message never waits for cloud verification. */
@@ -337,10 +345,8 @@ export class TeamChatService {
     if (project.teamId !== message.teamId || project.sharedProjectId !== message.sharedProjectId) {
       throw new HttpError(409, 'The project team changed before the message could be delivered.');
     }
-    const [accountId, transport] = await Promise.all([
-      this.options.account.withAuthenticatedClient(async (_client, user) => user.id),
-      Promise.resolve(this.options.distributed.transport.snapshot(project.teamId)),
-    ]);
+    const accountId = this.localAccountId();
+    const transport = this.options.distributed.transport.snapshot(project.teamId);
     if (message.author.kind !== 'human' || message.author.accountId !== accountId || !transport.deviceId
       || message.authorDeviceId !== transport.deviceId) {
       throw new HttpError(403, 'The signed-in team account or registered device changed before message delivery.');
@@ -416,7 +422,7 @@ export class TeamChatService {
       deviceId: device.id, ownerAccountId: device.ownerId, name: device.name, status: device.status,
       linked: transport.links.some((link) => link.deviceId === transport.deviceId && link.peerDeviceId === device.id && link.mutual),
     }));
-    const currentAccountId = await this.options.account.withAuthenticatedClient(async (_client, user) => user.id);
+    const currentAccountId = this.localAccountId();
     const members = shared.members.map((member) => ({
       accountId: member.accountId,
       displayName: (member.displayName?.trim() || `Teammate ${member.accountId.slice(0, 8)}`).slice(0, 120),
@@ -525,10 +531,9 @@ export class TeamChatService {
     return true;
   }
 
-  private async localAuthor(members: Array<{ accountId: string; displayName: string | null }>): Promise<TeamChatAuthor> {
-    return this.options.account.withAuthenticatedClient(async (_client, user) => ({
-      kind: 'human', accountId: user.id, displayName: memberDisplayName(members, user.id),
-    }));
+  private localAuthor(members: Array<{ accountId: string; displayName: string | null }>): TeamChatAuthor {
+    const accountId = this.localAccountId();
+    return { kind: 'human', accountId, displayName: memberDisplayName(members, accountId) };
   }
 
   private async signMessage(message: TeamChatMessage): Promise<TeamChatMessage> {
@@ -641,7 +646,8 @@ export class TeamChatService {
     for (const peer of linked) {
       if (allowedPeerIds && !allowedPeerIds.has(peer.id)) continue;
       try {
-        await this.options.distributed.authorizeTeam({ teamId, peerDeviceId: peer.id });
+        // transport.send verifies cached device pins and cloud RLS remains authoritative for the write.
+        // Avoid a separate auth.getUser()/membership check for every peer on the chat hot path.
         await this.options.distributed.transport.send({ teamId, toDeviceId: peer.id, kind,
           payload, idempotencyKey: `${idempotencyKey}:${peer.id}`.slice(0, 200) });
         succeeded.push(peer.id);
@@ -756,7 +762,7 @@ export class TeamChatService {
     const { shared } = await this.binding(input.projectId);
     const project = shared.project!;
     const transport = this.options.distributed.transport.snapshot(project.teamId);
-    const accountId = await this.options.account.withAuthenticatedClient(async (_client, user) => user.id);
+    const accountId = this.localAccountId();
     const existing = this.options.store.db.prepare(`SELECT * FROM team_chat_messages WHERE team_id=? AND shared_project_id=?
       AND source_session_id=? AND source_message_id=?`).get(project.teamId, project.sharedProjectId, input.sessionId, input.sourceMessageId) as DbRow | undefined;
     if (existing) {
@@ -771,7 +777,7 @@ export class TeamChatService {
       .find((candidate) => candidate.sessionId === input.sessionId && candidate.local) : undefined;
     const author = agent ? {
       kind: 'agent' as const, agentId: agent.id, agentName: agent.name, ownerAccountId: accountId, provider: agent.provider, model: agent.model,
-    } : await this.localAuthor(shared.members);
+    } : this.localAuthor(shared.members);
     const unsigned = TeamChatMessageSchema.parse({ id: randomUUID(), teamId: project.teamId, sharedProjectId: project.sharedProjectId,
       author, body, mentions: [], ...(input.replyTo ? { replyTo: input.replyTo } : {}), createdAt: nowIso(), deliveryState: 'sending', runState: input.kind === 'agent' ? 'completed' : null,
       source: { sessionId: input.sessionId, messageId: input.sourceMessageId } });
@@ -784,7 +790,7 @@ export class TeamChatService {
   async postOrchestrationStatus(input: { projectId: string; content: string }): Promise<void> {
     const { shared } = await this.binding(input.projectId);
     const project = shared.project!;
-    const author = await this.localAuthor(shared.members);
+    const author = this.localAuthor(shared.members);
     const unsigned = TeamChatMessageSchema.parse({ id: randomUUID(), teamId: project.teamId, sharedProjectId: project.sharedProjectId,
       author, body: redactSecrets(input.content).slice(0, 20_000), mentions: [], createdAt: nowIso(), deliveryState: 'sending', runState: null });
     const signed = await this.signMessage(unsigned);
@@ -868,7 +874,7 @@ export class TeamChatService {
     const { localProject, shared } = await this.binding(projectId);
     const session = this.options.store.getSession(sessionId);
     if (!session || session.projectId !== localProject.id) throw notFound('Choose a session in this shared project.');
-    const user = await this.options.account.withAuthenticatedClient(async (_client, account) => ({ id: account.id }));
+    const user = { id: this.localAccountId() };
     const transport = this.options.distributed.transport.snapshot(shared.project!.teamId);
     const rosterAgent = this.teamAgents(shared.agents, user.id, transport.deviceId).find((agent) => agent.sessionId === session.id && agent.local);
     const sourceMessages = this.options.store.listMessages(session.id, { limit: 2000 })
@@ -930,10 +936,8 @@ export class TeamChatService {
   private async createAgentReply(projectId: string, agentId: string, body: string, replyTo: string | null, idempotencyKey: string): Promise<TeamChatMessage> {
     const { shared } = await this.binding(projectId);
     const project = shared.project!;
-    const [accountId, transport] = await Promise.all([
-      this.options.account.withAuthenticatedClient(async (_client, user) => user.id),
-      Promise.resolve(this.options.distributed.transport.snapshot(project.teamId)),
-    ]);
+    const accountId = this.localAccountId();
+    const transport = this.options.distributed.transport.snapshot(project.teamId);
     const agent = this.teamAgents(shared.agents, accountId, transport.deviceId).find((candidate) => candidate.id === agentId && candidate.local);
     if (!agent) throw new HttpError(403, 'Only a currently published local agent may author a team-chat reply.');
     const sourceMessageId = `team-delivery:${createHash('sha256').update(idempotencyKey).digest('hex').slice(0, 40)}`;
@@ -967,6 +971,8 @@ export class TeamChatService {
     const transport = this.options.distributed.transport.snapshot(envelope.teamId);
     if (!transport.deviceId || envelope.toDeviceId !== transport.deviceId) throw new HttpError(403, 'Team chat envelope is not addressed to this device.');
     await this.options.distributed.authorizeTeam({ teamId: envelope.teamId, peerDeviceId: envelope.fromDeviceId });
+    // Inbound sender/device/project authority is intentionally checked against current cloud state;
+    // stale local membership must never admit a revoked sender.
     const bindingResult = await this.options.account.withAuthenticatedClient(async (client, user) => {
       const [senderResult, memberResult, projectResult] = await Promise.all([
         client.from('mingle_devices').select('id,owner_id').eq('team_id', envelope.teamId).eq('id', envelope.fromDeviceId).is('revoked_at', null).maybeSingle(),
@@ -1049,6 +1055,7 @@ export class TeamChatService {
     }
 
     const deviceIds = [...new Set(authorDeviceIds)];
+    // Resolve current registered keys and revocation state before trusting signed inbound authors.
     const registrations = deviceIds.length ? await this.options.account.withAuthenticatedClient(async (client) => {
       const result = await client.from('mingle_devices').select('id,owner_id,signing_public_key,encryption_public_key,fingerprint,revoked_at')
         .eq('team_id', envelope.teamId).in('id', deviceIds).is('revoked_at', null).limit(500);

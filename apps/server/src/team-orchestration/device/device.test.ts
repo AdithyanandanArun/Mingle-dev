@@ -19,6 +19,7 @@ const SHARED = randomUUID();
 const ACCOUNT = randomUUID();
 const LEAD = randomUUID();
 const OTHER = randomUUID();
+const NEW_MEMBER = randomUUID();
 const OWN_DEVICE = randomUUID();
 const HOST_DEVICE = randomUUID();
 const OTHER_DEVICE = randomUUID();
@@ -30,6 +31,8 @@ interface Fixture {
   projectId: string; root: string; repo: string; worktree: string; worktreeRoot: string; sent: Sent[]; roster: any[]; handler: ((envelope: any) => Promise<void>) | null;
   runtime: FakeRuntime; exportCalls: any[]; importCalls: any[]; executionOrder: string[]; chatReplies: any[]; members: any[];
   collaborationRefreshCount(): number; revokeDevice(deviceId: string): void;
+  authenticatedCalls(): number;
+  setFreshCollaborationSnapshot(members: any[], agents: any[], otherDeviceOwner?: string): void;
   setConsent(permission?: 'supervised' | 'full-access', settingsVersion?: number): Promise<any>;
   failTerminalStatusSends(count: number): void;
   failChatReplies(count: number): void;
@@ -155,19 +158,22 @@ async function fixture(): Promise<Fixture> {
   let terminalStatusFailures = 0;
   const roster: any[] = [];
   const members = [
-    { accountId: LEAD, role: 'leader', displayName: 'Lead' },
-    { accountId: ACCOUNT, role: 'member', displayName: 'Owner' },
-    { accountId: OTHER, role: 'member', displayName: 'Other' },
+    { accountId: LEAD, role: 'leader', displayName: 'Lead', status: 'active' },
+    { accountId: ACCOUNT, role: 'member', displayName: 'Owner', status: 'active' },
+    { accountId: OTHER, role: 'member', displayName: 'Other', status: 'active' },
   ];
   let collaborationRefreshes = 0;
+  let freshCollaborationSnapshot: { members: any[]; agents: any[]; otherDeviceOwner?: string } | null = null;
+  let otherDeviceOwner: string = OTHER;
   let handler: ((envelope: any) => Promise<void>) | null = null;
   const devices: Array<{ id: string; teamId: string; ownerId: string; name: string; revokedAt: string | null; status: string }> = [
     { id: OWN_DEVICE, teamId: TEAM, ownerId: ACCOUNT, name: 'Owner', revokedAt: null, status: 'online' },
     { id: HOST_DEVICE, teamId: TEAM, ownerId: LEAD, name: 'Lead', revokedAt: null, status: 'online' },
-    { id: OTHER_DEVICE, teamId: TEAM, ownerId: OTHER, name: 'Teammate', revokedAt: null, status: 'online' },
+      { id: OTHER_DEVICE, teamId: TEAM, ownerId: otherDeviceOwner, name: 'Teammate', revokedAt: null, status: 'online' },
   ];
   const transport: any = {
-    snapshot: (teamId?: string) => ({ deviceId: OWN_DEVICE, devices: devices.filter((device) => !teamId || device.teamId === teamId),
+    snapshot: (teamId?: string) => ({ deviceId: OWN_DEVICE, devices: devices.map((device) => device.id === OTHER_DEVICE
+      ? { ...device, ownerId: otherDeviceOwner } : device).filter((device) => !teamId || device.teamId === teamId),
       links: [{ deviceId: OWN_DEVICE, peerDeviceId: HOST_DEVICE, mutual: true }, { deviceId: OWN_DEVICE, peerDeviceId: OTHER_DEVICE, mutual: true }] }),
     send: async (input: Sent) => {
       if (input.kind === 'teamgroup.delivery.status' && ['completed', 'failed', 'interrupted'].includes(input.payload?.status) && terminalStatusFailures > 0) {
@@ -179,9 +185,10 @@ async function fixture(): Promise<Fixture> {
     sync: async () => undefined,
     onMessage: (next: (envelope: any) => Promise<void>) => { handler = next; return () => { handler = null; }; },
   };
+  let authenticatedCalls = 0;
   const account: any = {
     snapshot: () => ({ user: { id: ACCOUNT }, status: 'signed-in' }),
-    withAuthenticatedClient: async (callback: (client: any, user: any) => unknown) => callback({}, { id: ACCOUNT }),
+    withAuthenticatedClient: async (callback: (client: any, user: any) => unknown) => { authenticatedCalls += 1; return callback({}, { id: ACCOUNT }); },
   };
   const collaboration: any = {
     snapshot: async (projectId: string) => ({
@@ -192,6 +199,12 @@ async function fixture(): Promise<Fixture> {
     }),
     refreshSnapshot: async (projectId: string) => {
       collaborationRefreshes++;
+      if (freshCollaborationSnapshot) {
+        members.splice(0, members.length, ...freshCollaborationSnapshot.members);
+        roster.splice(0, roster.length, ...freshCollaborationSnapshot.agents);
+        if (freshCollaborationSnapshot.otherDeviceOwner) otherDeviceOwner = freshCollaborationSnapshot.otherDeviceOwner;
+        freshCollaborationSnapshot = null;
+      }
       return collaboration.snapshot(projectId);
     },
   };
@@ -239,6 +252,10 @@ async function fixture(): Promise<Fixture> {
   const result: Fixture = {
     store, get side() { return side; }, routes, projectId: project.id, root, repo, worktree, worktreeRoot, sent, roster, get handler() { return handler; }, runtime, exportCalls, importCalls, executionOrder, chatReplies, members,
     collaborationRefreshCount: () => collaborationRefreshes,
+    authenticatedCalls: () => authenticatedCalls,
+    setFreshCollaborationSnapshot(nextMembers, nextAgents, nextOwner) {
+      freshCollaborationSnapshot = { members: nextMembers, agents: nextAgents, ...(nextOwner ? { otherDeviceOwner: nextOwner } : {}) };
+    },
     revokeDevice(deviceId) { const device = devices.find((candidate) => candidate.id === deviceId); if (device) device.revokedAt = new Date().toISOString(); },
     failTerminalStatusSends(count) { terminalStatusFailures = count; },
     failChatReplies(count) { chatFailures = count; },
@@ -301,6 +318,8 @@ describe('owner-device team orchestration', () => {
     expect(f.store.listEvents().filter((event) => event.type === 'team.structure.updated')).toHaveLength(2);
     const accepted = await f.setConsent();
     expect(accepted).toMatchObject({ state: 'granted', permissionLevel: 'supervised', agentIds: [AGENT_ID], hostSync: 'sent' });
+    expect(f.authenticatedCalls()).toBe(0);
+    expect(f.collaborationRefreshCount()).toBe(0);
     expect(f.sent.some((message) => message.kind === 'teamgroup.consent' && message.toDeviceId === HOST_DEVICE)).toBe(true);
     expect(f.side.localConsent(SHARED)?.state).toBe('granted');
     expect(f.store.listEvents().filter((event) => event.type === 'team.structure.updated').at(-1)?.projectId).toBe(f.projectId);
@@ -309,6 +328,8 @@ describe('owner-device team orchestration', () => {
     expect(paused.state).toBe('paused');
     const revoked = await callRoute(f, 'PATCH', '/api/projects/:projectId/team-consent', { projectId: f.projectId }, { state: 'revoked' });
     expect(revoked.state).toBe('revoked');
+    expect(f.authenticatedCalls()).toBe(0);
+    expect(f.collaborationRefreshCount()).toBe(0);
 
     await f.setConsent();
     await sendStructure(f, structure(2, 'full-access'));
@@ -426,7 +447,7 @@ describe('owner-device team orchestration', () => {
     f.revokeDevice(HOST_DEVICE);
     const beforeRevokedDevice = f.collaborationRefreshCount();
     await f.deliver({ ...payload, deliveryId: `delivery-${randomUUID()}` });
-    expect(f.collaborationRefreshCount()).toBe(beforeRevokedDevice);
+    expect(f.collaborationRefreshCount()).toBeGreaterThan(beforeRevokedDevice);
     expect(f.sent.at(-1)?.payload).toMatchObject({ status: 'rejected', rejection: 'invalid' });
     expect(f.runtime.startCount).toBe(0);
   });
@@ -919,6 +940,38 @@ describe('owner-device team orchestration', () => {
     const remote = await callRoute(f, 'GET', '/api/projects/:projectId/team-agents/:agentId/activity',
       { projectId: f.projectId, agentId: remoteAgent.id });
     expect(remote).toMatchObject({ local: false, entries: [expect.objectContaining({ id: 'entry_remote_1', text: 'Remote answer' })] });
+  });
+
+  it('refreshes before rejecting an activity author removed by a structure notification', async () => {
+    const f = await fixture();
+    const removedAgent = { id: 'agent_removed', name: 'Removed', accountId: OTHER, deviceId: OTHER_DEVICE,
+      sessionId: 'removed-session', provider: 'claude', model: 'claude-sonnet-5-5', state: 'idle' };
+    f.roster.push(removedAgent);
+    // Model the immediate read-model refresh caused by the signed removal notification.
+    f.members.splice(f.members.findIndex((member) => member.accountId === OTHER), 1);
+    f.roster.splice(f.roster.indexOf(removedAgent), 1);
+    await sendStructure(f, structure(2));
+    const before = f.collaborationRefreshCount();
+    await f.handler?.({ id: randomUUID(), teamId: TEAM, fromDeviceId: OTHER_DEVICE, toDeviceId: OWN_DEVICE,
+      kind: 'teamgroup.activity', payload: { sharedProjectId: SHARED, agentId: removedAgent.id, state: 'idle', runId: 'removed-run',
+        entries: [{ id: 'removed-entry', runId: 'removed-run', at: new Date().toISOString(), kind: 'assistant', text: 'must not persist' }] } });
+    expect(f.collaborationRefreshCount()).toBeGreaterThan(before);
+    expect(f.store.db.prepare('SELECT COUNT(*) AS n FROM mingle_team_device_activity WHERE entry_id=?').get('removed-entry')).toEqual({ n: 0 });
+  });
+
+  it('refreshes an unknown activity author and accepts a newly joined member after authority confirms it', async () => {
+    const f = await fixture();
+    await sendStructure(f);
+    const newAgent = { id: 'agent_new_member', name: 'New member agent', accountId: NEW_MEMBER, deviceId: OTHER_DEVICE,
+      sessionId: 'new-member-session', provider: 'claude', model: 'claude-sonnet-5-5', state: 'idle' };
+    const before = f.collaborationRefreshCount();
+    f.setFreshCollaborationSnapshot([...f.members, { accountId: NEW_MEMBER, role: 'member', displayName: 'New teammate', status: 'active' }], [newAgent], NEW_MEMBER);
+    await f.handler?.({ id: randomUUID(), teamId: TEAM, fromDeviceId: OTHER_DEVICE, toDeviceId: OWN_DEVICE,
+      kind: 'teamgroup.activity', payload: { sharedProjectId: SHARED, agentId: newAgent.id, state: 'idle', runId: 'new-member-run',
+        entries: [{ id: 'new-member-entry', runId: 'new-member-run', at: new Date().toISOString(), kind: 'assistant', text: 'accepted after refresh' }] } });
+    expect(f.collaborationRefreshCount()).toBeGreaterThan(before);
+    expect(f.store.db.prepare('SELECT entry_json FROM mingle_team_device_activity WHERE entry_id=?').get('new-member-entry'))
+      .toMatchObject({ entry_json: expect.stringContaining('accepted after refresh') });
   });
 });
 

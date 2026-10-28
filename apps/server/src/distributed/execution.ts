@@ -262,6 +262,8 @@ export class RemoteExecutionService {
     const deadline = new Promise<never>((_resolve, reject) => {
       timer = setTimeout(() => reject(new HttpError(503, 'Timed out while verifying the signed-in account and team membership.')), this.accountTimeoutMs);
     });
+    // Delegation, approval, binding, and other authority-consuming operations keep a fresh
+    // identity/member/device check. Owner-authored roster publication uses withLocalTeam instead.
     const operation = this.options.account.withAuthenticatedClient(async (client, user) => {
       if (timer) clearTimeout(timer);
       signalCallbackStarted();
@@ -285,6 +287,17 @@ export class RemoteExecutionService {
       return await operation;
     }
     finally { if (timer) clearTimeout(timer); }
+  }
+
+  private async withLocalTeam<T>(teamId: string, work: (identity: Identity) => Promise<T>): Promise<T> {
+    this.assertOpen();
+    const transport = await this.options.transport.snapshot(teamId);
+    const deviceId = transport.localDeviceId;
+    const device = transport.devices.find((candidate) => candidate.id === deviceId && candidate.teamId === teamId);
+    if (!deviceId || !device || device.revokedAt || !device.ownerId) throw new HttpError(403, 'The current team device is not active.');
+    // Roster publishing writes only this device's local agent records. Any cross-device update
+    // goes through transport.send and cloud RLS, avoiding a redundant auth.getUser()/membership read.
+    return work({ teamId, ownerId: device.ownerId, deviceId });
   }
 
   private async assertMember(client: AuthenticatedClient, teamId: string, ownerId: string): Promise<void> {
@@ -539,9 +552,8 @@ export class RemoteExecutionService {
 
   async publishAgents(input: unknown): Promise<RemoteAgent[]> {
     const parsed = PublishRemoteAgentsSchema.parse(input);
-    return this.withTeam(parsed.teamId, async (client, identity) => {
+    return this.withLocalTeam(parsed.teamId, async (identity) => {
       const binding = await this.binding(identity, parsed.sharedProjectId);
-      await this.assertSharedProject(client, parsed.teamId, parsed.sharedProjectId);
       const outgoing: RemoteAgent[] = [];
       for (const sessionId of parsed.sessionIds) {
         const session = this.localSession(sessionId);
@@ -582,7 +594,7 @@ export class RemoteExecutionService {
       this.run(`UPDATE mingle_remote_agents SET revoked_at = ? WHERE team_id = ? AND shared_project_id = ? AND device_id = ? AND owner_id = ? AND revoked_at IS NULL
         AND session_id NOT IN (${parsed.sessionIds.map(() => '?').join(',')})`, at, parsed.teamId, parsed.sharedProjectId, identity.deviceId, identity.ownerId, ...parsed.sessionIds);
       const version = this.nextRosterVersion(identity, parsed.sharedProjectId, at);
-      await this.sendRosterToLinkedPeers(client, identity, parsed.sharedProjectId, version, at, outgoing);
+      await this.sendRosterToLinkedPeers(null, identity, parsed.sharedProjectId, version, at, outgoing);
       this.recordEvent(identity, parsed.sharedProjectId, 'agents.published', `Published ${outgoing.length} explicit local agent session(s).`, { agentIds: outgoing.map((agent) => agent.id) });
       this.options.changed();
       this.rosterChanged(identity.teamId, parsed.sharedProjectId);
@@ -663,7 +675,7 @@ export class RemoteExecutionService {
     return Number(row!.version);
   }
 
-  private async sendRosterToLinkedPeers(client: AuthenticatedClient, identity: Identity, sharedProjectId: string,
+  private async sendRosterToLinkedPeers(client: AuthenticatedClient | null, identity: Identity, sharedProjectId: string,
     version: number, generatedAt: string, agents: RemoteAgent[]): Promise<void> {
     const snapshot = await this.options.transport.snapshot(identity.teamId);
     const peers = snapshot.devices.filter((device) => device.id !== identity.deviceId && device.teamId === identity.teamId
@@ -675,7 +687,7 @@ export class RemoteExecutionService {
       if (Number(state?.acknowledged_version ?? 0) >= version) continue;
       const lastSentAt = typeof state?.last_sent_at === 'string' ? Date.parse(state.last_sent_at) : Number.NaN;
       if (Number(state?.sent_version ?? 0) === version && Number.isFinite(lastSentAt) && Date.now() - lastSentAt < ROSTER_RETRY_MS) continue;
-      await this.assertLinkedDevices(client, identity.teamId, identity.deviceId, peer.id);
+      if (client) await this.assertLinkedDevices(client, identity.teamId, identity.deviceId, peer.id);
       const attempt = Number(state?.sent_version ?? 0) === version ? Number(state?.attempts ?? 0) + 1 : 1;
       const at = nowIso();
       this.run(`INSERT INTO mingle_remote_roster_peer_sync(team_id,shared_project_id,owner_id,device_id,peer_device_id,
@@ -1217,6 +1229,8 @@ export class RemoteExecutionService {
   private async withEnvelope<T>(envelope: AuthenticatedEnvelope, work: (client: AuthenticatedClient, identity: Identity, remoteOwnerId: string) => Promise<T>): Promise<T> {
     if (envelope.toDeviceId !== (await this.options.transport.snapshot(envelope.teamId)).localDeviceId) throw new HttpError(403, 'Envelope is not addressed to this device.');
     return this.withTeam(envelope.teamId, async (client, identity) => {
+      // Inbound envelopes retain fresh sender membership/device/link checks so cached roster data
+      // cannot admit a removed author or device before its revocation notification is applied.
       const { ownerId: remoteOwnerId } = await this.assertLinkedDevices(client, envelope.teamId, identity.deviceId, envelope.fromDeviceId);
       const transport = await this.options.transport.snapshot(envelope.teamId);
       if (!transport.devices.some((device) => device.id === envelope.fromDeviceId && device.linked && device.revokedAt === null)) throw new HttpError(403, 'Envelope sender is no longer mutually linked.');

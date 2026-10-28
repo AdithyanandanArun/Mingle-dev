@@ -46,7 +46,11 @@ const cloud = {
 
 function makeAccount(ownerId: string): RemoteExecutionAccount {
   const client = { from: (table: string) => new FakeQuery((cloud as Record<string, CloudRow[]>)[table] ?? []) };
-  return { withAuthenticatedClient: async (work) => work(client as never, { id: ownerId }) };
+  let authenticatedCalls = 0;
+  return {
+    withAuthenticatedClient: async (work) => { authenticatedCalls += 1; return work(client as never, { id: ownerId }); },
+    calls: () => authenticatedCalls,
+  } as RemoteExecutionAccount & { calls(): number };
 }
 
 class FakeTransport implements RemoteExecutionTransport {
@@ -90,6 +94,7 @@ interface Fixture {
   progressListeners: Array<(event: { runId: string; kind: 'status' | 'progress' | 'result'; status?: string; summary?: string; delta?: string; terminal?: boolean }) => void>;
   quota: { state: 'available' | 'exhausted' | 'unknown'; observedAt: string | null };
   alternativeState: 'available' | 'busy' | 'quota-exhausted' | 'provider-unavailable' | 'unknown';
+  authenticatedCalls(): number;
 }
 
 function createFixture(input: { deviceId: string; peerId: string; ownerId: string; projectId: string; sessionId: string; sessionName: string; provider: 'codex' | 'claude' | 'opencode'; seedFailure?: boolean }): Fixture {
@@ -146,10 +151,12 @@ function createFixture(input: { deviceId: string; peerId: string; ownerId: strin
     isUnpublishedWork: async () => false,
     subscribeSession: (_sessionId, listener) => { progressListeners.push(listener); return () => { const index = progressListeners.indexOf(listener); if (index >= 0) progressListeners.splice(index, 1); }; },
   };
-  const service = new RemoteExecutionService({ store: { db }, account: makeAccount(input.ownerId), transport, runtime, providers, workspace, changed: () => undefined });
+  const account = makeAccount(input.ownerId) as RemoteExecutionAccount & { calls(): number };
+  const service = new RemoteExecutionService({ store: { db }, account, transport, runtime, providers, workspace, changed: () => undefined });
   services.push(service);
   return {
     service, workspace, db, transport, runCalls, progressListeners,
+    authenticatedCalls: () => account.calls(),
     get quota() { return quota; }, set quota(value) { quota = value; },
     get alternativeState() { return alternativeState; }, set alternativeState(value) { alternativeState = value; },
   };
@@ -234,6 +241,30 @@ describe('RemoteExecutionService', () => {
     const unchanged = await destination.service.refreshPublishedAgents({ teamId: TEAM, sharedProjectId: SHARED_PROJECT });
     expect(unchanged[0]!.presenceObservedAt).toBe(observedAt);
     expect(destination.transport.sent.filter((entry) => entry.kind === 'execution.agents')).toHaveLength(2);
+  });
+
+  it('pushes signed roster withdrawals immediately and invalidates the receiving read model without fresh auth on publish', async () => {
+    const source = createFixture({ deviceId: DEVICE_A, peerId: DEVICE_B, ownerId: OWNER_A, projectId: 'push_source', sessionId: 'push_source', sessionName: 'Host', provider: 'codex' });
+    const owner = createFixture({ deviceId: DEVICE_B, peerId: DEVICE_A, ownerId: OWNER_B, projectId: 'push_owner', sessionId: 'push_owner', sessionName: 'Teammate', provider: 'claude' });
+    await source.service.bindProject({ teamId: TEAM, sharedProjectId: SHARED_PROJECT, localProjectId: 'push_source' });
+    await owner.service.bindProject({ teamId: TEAM, sharedProjectId: SHARED_PROJECT, localProjectId: 'push_owner' });
+    let rosterInvalidations = 0;
+    source.service.subscribeRosterChanges(() => { rosterInvalidations += 1; });
+
+    const authBeforePublish = owner.authenticatedCalls();
+    await owner.service.publishAgents({ teamId: TEAM, sharedProjectId: SHARED_PROJECT, sessionIds: ['push_owner'] });
+    expect(owner.authenticatedCalls()).toBe(authBeforePublish);
+    const publication = owner.transport.sent.find((entry) => entry.kind === 'execution.agents')!;
+    await source.service.onEnvelope(envelope(DEVICE_B, DEVICE_A, publication.kind, publication.payload));
+    expect(rosterInvalidations).toBe(1);
+    expect((await source.service.snapshot(TEAM)).agents.some((agent) => agent.deviceId === DEVICE_B)).toBe(true);
+
+    await owner.service.publishAgents({ teamId: TEAM, sharedProjectId: SHARED_PROJECT, sessionIds: [] });
+    const withdrawal = owner.transport.sent.filter((entry) => entry.kind === 'execution.agents').at(-1)!;
+    expect(withdrawal.payload).toMatchObject({ agents: [] });
+    await source.service.onEnvelope(envelope(DEVICE_B, DEVICE_A, withdrawal.kind, withdrawal.payload));
+    expect(rosterInvalidations).toBe(2);
+    expect((await source.service.snapshot(TEAM)).agents.some((agent) => agent.deviceId === DEVICE_B)).toBe(false);
   });
 
   it('renews unchanged owner presence, expires missing updates, and never refreshes quota by heartbeat', async () => {

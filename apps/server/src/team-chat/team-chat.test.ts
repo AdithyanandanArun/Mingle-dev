@@ -16,17 +16,21 @@ import { TeamChatService } from './service.ts';
 
 const ACCOUNT = '10000000-0000-4000-8000-000000000001';
 const OTHER_ACCOUNT = '10000000-0000-4000-8000-000000000002';
+const NEW_ACCOUNT = '10000000-0000-4000-8000-000000000003';
 const TEAM = '20000000-0000-4000-8000-000000000001';
 const SHARED = '30000000-0000-4000-8000-000000000001';
 const DEVICE = '40000000-0000-4000-8000-000000000001';
 const PEER = '40000000-0000-4000-8000-000000000002';
 const OTHER_DEVICE = '40000000-0000-4000-8000-000000000003';
+const NEW_DEVICE = '40000000-0000-4000-8000-000000000004';
 const UNKNOWN_AGENT = '50000000-0000-4000-8000-000000000003';
 const PROJECT = 'project-chat-test';
 
 const DEVICE_KEYS = generateDeviceKeyMaterial();
 const PEER_KEYS = generateDeviceKeyMaterial();
 const OTHER_DEVICE_KEYS = generateDeviceKeyMaterial();
+const NEW_DEVICE_KEYS = generateDeviceKeyMaterial();
+let activeCloudAccounts: string[] = [ACCOUNT, OTHER_ACCOUNT, NEW_ACCOUNT];
 
 function cloudClient(): SupabaseClient {
   return {
@@ -49,13 +53,14 @@ function cloudClient(): SupabaseClient {
             { id: DEVICE, owner_id: ACCOUNT, signing_public_key: DEVICE_KEYS.signingPublicKeyDer, encryption_public_key: DEVICE_KEYS.encryptionPublicKeyDer, fingerprint: DEVICE_KEYS.fingerprint, revoked_at: null },
             { id: PEER, owner_id: ACCOUNT, signing_public_key: PEER_KEYS.signingPublicKeyDer, encryption_public_key: PEER_KEYS.encryptionPublicKeyDer, fingerprint: PEER_KEYS.fingerprint, revoked_at: null },
             { id: OTHER_DEVICE, owner_id: OTHER_ACCOUNT, signing_public_key: OTHER_DEVICE_KEYS.signingPublicKeyDer, encryption_public_key: OTHER_DEVICE_KEYS.encryptionPublicKeyDer, fingerprint: OTHER_DEVICE_KEYS.fingerprint, revoked_at: null },
+            { id: NEW_DEVICE, owner_id: NEW_ACCOUNT, signing_public_key: NEW_DEVICE_KEYS.signingPublicKeyDer, encryption_public_key: NEW_DEVICE_KEYS.encryptionPublicKeyDer, fingerprint: NEW_DEVICE_KEYS.fingerprint, revoked_at: null },
           ];
           if (Array.isArray(id)) return devices.filter((device) => id.includes(device.id));
           return devices.filter((device) => device.id === id);
         }
         if (table === 'mingle_projects') return filters.get('id') === SHARED && filters.get('team_id') === TEAM ? [{ id: SHARED }] : [];
         if (table === 'mingle_members') {
-          const allowed = [ACCOUNT, OTHER_ACCOUNT];
+          const allowed = activeCloudAccounts;
           if (Array.isArray(userId)) return (userId as string[]).filter((value) => allowed.includes(value)).map((value) => ({ user_id: value }));
           return typeof userId === 'string' && allowed.includes(userId) ? [{ user_id: userId }] : [];
         }
@@ -67,6 +72,7 @@ function cloudClient(): SupabaseClient {
 }
 
 function fixture(withAgent = false) {
+  activeCloudAccounts = [ACCOUNT, OTHER_ACCOUNT, NEW_ACCOUNT];
   const store = new Store(openDatabase(':memory:'));
   const projectPath = makeRepo();
   const project = store.insertProject({ id: PROJECT, name: 'Shared', path: projectPath });
@@ -91,7 +97,10 @@ function fixture(withAgent = false) {
   const transport = {
     snapshot: () => transportSnapshot(),
     sync: async () => { if (transportGate) await transportGate; },
-    send: async (entry: typeof outgoing[number]) => { outgoing.push(entry); return `envelope-${outgoing.length}`; },
+    send: async (entry: typeof outgoing[number]) => {
+      if (!allowPeer) throw new Error('inactive peer membership');
+      outgoing.push(entry); return `envelope-${outgoing.length}`;
+    },
     signPayloadLocal: (teamId: string, expectedDeviceId: string, payload: string) => {
       if (teamId !== TEAM || expectedDeviceId !== DEVICE) throw new Error('unexpected signing device');
       return signDevicePayload(payload, DEVICE_KEYS);
@@ -105,30 +114,40 @@ function fixture(withAgent = false) {
   const fake = new FakeProviders();
   const runtime = new SessionRuntime(store, { broadcast() {} } as any, fake, new TaskService(store), () => undefined,
     { abortGraceMs: 250, flushIntervalMs: 10 });
+  let members: any[] = [
+    { accountId: ACCOUNT, displayName: 'Ada', email: null, role: 'leader', status: 'active' },
+    { accountId: OTHER_ACCOUNT, displayName: 'Sam', email: null, role: 'member', status: 'active' },
+  ];
+  let agents: any[] = session ? [{ id: session.id, name: session.name, accountId: ACCOUNT, deviceId: DEVICE,
+    projectId: PROJECT, sessionId: session.id, provider: session.provider, model: session.model, state: 'idle' }] : [];
+  let freshSnapshot: { members: any[]; agents: any[] } | null = null;
+  let collaborationRefreshes = 0;
   const collaboration = {
     async snapshot() {
       return {
         project: { teamId: TEAM, sharedProjectId: SHARED, name: 'Shared', repositoryUrl: 'https://example.test/team.git' },
-        members: [
-          { accountId: ACCOUNT, displayName: 'Ada', email: null, role: 'leader', status: 'active' },
-          { accountId: OTHER_ACCOUNT, displayName: 'Sam', email: null, role: 'member', status: 'active' },
-        ],
-        agents: session ? [{ id: session.id, name: session.name, accountId: ACCOUNT, deviceId: DEVICE,
-          projectId: PROJECT, sessionId: session.id, provider: session.provider, model: session.model, state: 'idle' }] : [],
+        members, agents,
         invitations: [], email: { configured: false },
       };
     },
+    async refreshSnapshot() {
+      collaborationRefreshes++;
+      if (freshSnapshot) { members = freshSnapshot.members; agents = freshSnapshot.agents; freshSnapshot = null; }
+      return this.snapshot();
+    },
   };
+  let authenticatedCalls = 0;
   const account = {
     snapshot() { return { status: 'signed-in', user: { id: ACCOUNT, name: 'Ada' } }; },
     async withAuthenticatedClient<T>(work: (client: SupabaseClient, user: User) => Promise<T>) {
+      authenticatedCalls += 1;
       return work(cloudClient(), { id: ACCOUNT, email: 'ada@example.test', aud: 'authenticated', created_at: '2026-01-01T00:00:00Z', app_metadata: {}, user_metadata: { full_name: 'Ada' } } as unknown as User);
     },
   };
   const distributed = {
     transport,
     async authorizeTeam({ peerDeviceId }: { teamId: string; peerDeviceId?: string }) {
-      if (!allowPeer || (peerDeviceId && ![PEER, OTHER_DEVICE].includes(peerDeviceId))) throw new Error('inactive peer membership');
+      if (!allowPeer || (peerDeviceId && ![PEER, OTHER_DEVICE, NEW_DEVICE].includes(peerDeviceId))) throw new Error('inactive peer membership');
     },
   };
   const service = new TeamChatService({ store, account: account as unknown as AccountService,
@@ -136,6 +155,12 @@ function fixture(withAgent = false) {
     collaboration: collaboration as unknown as ProjectCollaborationService });
   return {
     store, project, session, service, outgoing, runtimeCalls: fake.runs, account, collaboration, distributed,
+    authenticatedCalls: () => authenticatedCalls,
+    collaborationRefreshCount: () => collaborationRefreshes,
+    setFreshSnapshot(nextMembers: any[], nextAgents: any[]) { freshSnapshot = { members: nextMembers, agents: nextAgents }; },
+    setCloudAccountActive(accountId: string, active: boolean) {
+      activeCloudAccounts = active ? [...new Set([...activeCloudAccounts, accountId])] : activeCloudAccounts.filter((id) => id !== accountId);
+    },
     receive: (envelope: any) => {
       if (!receive) throw new Error('No team chat transport listener');
       return receive(envelope);
@@ -232,6 +257,52 @@ it('accepts a team-chat message without waiting for account, collaboration, or m
     expect(accepted.deliveryState).toBe('sending');
     expect(f.store.db.prepare('SELECT body FROM team_chat_messages WHERE id=?').get(accepted.id)).toEqual({ body: 'Accepted locally first' });
   } finally { release(); await f.close(); }
+});
+
+it('sends human and agent team-chat writes from the local identity without auth.getUser()', async () => {
+  const f = fixture(true);
+  try {
+    const human = await f.service.send(PROJECT, { body: 'Local hot-path chat', mentions: [] });
+    await until(() => f.outgoing.some((entry) => entry.kind === 'teamchat.message' && (entry.payload as any).id === human.id));
+    const agent = await f.service.postAgentReply(PROJECT, f.session!.id, 'Local agent response', human.id, 'delivery-chat-fast');
+    expect(agent.author).toMatchObject({ kind: 'agent', ownerAccountId: ACCOUNT });
+    expect(f.outgoing.some((entry) => entry.kind === 'teamchat.message' && (entry.payload as any).id === agent.id)).toBe(true);
+    expect(f.authenticatedCalls()).toBe(0);
+    expect(f.collaborationRefreshCount()).toBe(0);
+  } finally { await f.close(); }
+});
+
+it('refreshes an unknown new chat author before accepting its signed message', async () => {
+  const f = fixture();
+  try {
+    const newcomer = { accountId: NEW_ACCOUNT, displayName: 'New teammate', email: null, role: 'member', status: 'active' };
+    f.setFreshSnapshot([
+      { accountId: ACCOUNT, displayName: 'Ada', email: null, role: 'leader', status: 'active' },
+      { accountId: OTHER_ACCOUNT, displayName: 'Sam', email: null, role: 'member', status: 'active' }, newcomer,
+    ], []);
+    const message = f.remoteMessage({ id: randomUUID(), teamId: TEAM, sharedProjectId: SHARED,
+      author: { kind: 'human', accountId: NEW_ACCOUNT, displayName: 'Untrusted incoming name' }, body: 'Welcome aboard', mentions: [],
+      createdAt: new Date().toISOString(), deliveryState: 'sent', runState: null }, NEW_DEVICE, NEW_DEVICE_KEYS);
+    await f.receive({ id: randomUUID(), teamId: TEAM, fromDeviceId: NEW_DEVICE, toDeviceId: DEVICE, kind: 'teamchat.message', payload: message });
+    expect(f.collaborationRefreshCount()).toBe(1);
+    expect(f.store.db.prepare('SELECT author_json FROM team_chat_messages WHERE id=?').get(message.id)).toEqual({
+      author_json: JSON.stringify({ kind: 'human', accountId: NEW_ACCOUNT, displayName: 'New teammate' }),
+    });
+  } finally { await f.close(); }
+});
+
+it('rejects a removed chat author even while the local read model still lists them', async () => {
+  const f = fixture();
+  try {
+    f.setCloudAccountActive(OTHER_ACCOUNT, false);
+    f.store.recordEvent({ projectId: PROJECT, type: 'team.structure.updated', summary: 'Membership removal notification', payload: {} });
+    const message = f.remoteMessage({ id: randomUUID(), teamId: TEAM, sharedProjectId: SHARED,
+      author: { kind: 'human', accountId: OTHER_ACCOUNT, displayName: 'Sam' }, body: 'Removed author', mentions: [],
+      createdAt: new Date().toISOString(), deliveryState: 'sent', runState: null }, OTHER_DEVICE, OTHER_DEVICE_KEYS);
+    await expect(f.receive({ id: randomUUID(), teamId: TEAM, fromDeviceId: OTHER_DEVICE, toDeviceId: DEVICE,
+      kind: 'teamchat.message', payload: message })).rejects.toThrow(/no longer an active team member/i);
+    expect(f.store.db.prepare('SELECT COUNT(*) AS n FROM team_chat_messages WHERE id=?').get(message.id)).toEqual({ n: 0 });
+  } finally { await f.close(); }
 });
 
 it('rejects forged backfill authors, unsolicited responses, and unrostered agent identities before persistence', async () => {

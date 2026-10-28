@@ -54,8 +54,9 @@ function fixture(options: { deviceId?: string; accountId?: string; role?: 'leade
     { id: REMOTE_AGENT, name: 'Remote Codex', accountId: OWNER, deviceId: OWNER_DEVICE, projectId: PROJECT, sessionId: 'owner-session-remote', provider: 'codex', model: 'gpt-6-codex', state: 'idle' },
   ];
   let role = options.role ?? 'leader';
+  let collaborationRefreshes = 0;
   const collaboration = {
-    async snapshot() {
+    async snapshot(_projectId?: string) {
       return {
         project: { teamId: TEAM, sharedProjectId: SHARED, name: 'Shared host fixture', repositoryUrl: 'https://example.test/shared.git' },
         members: [
@@ -65,6 +66,7 @@ function fixture(options: { deviceId?: string; accountId?: string; role?: 'leade
         agents, invitations: [], email: { configured: false },
       };
     },
+    async refreshSnapshot(projectId: string) { collaborationRefreshes++; return this.snapshot(projectId); },
   };
   const outgoing: Array<{ teamId: string; toDeviceId: string; kind: string; payload: unknown; idempotencyKey: string }> = [];
   const artifactImports: unknown[] = [];
@@ -81,23 +83,29 @@ function fixture(options: { deviceId?: string; accountId?: string; role?: 'leade
   };
   let receive: ((envelope: any) => Promise<void>) | null = null;
   let localDeviceId = options.deviceId ?? DEVICE;
+  let extraLinkedPeer: string | null = null;
   let ownerOnline = true;
   let delayedAuthorization: Promise<void> | null = null;
   const transport = {
-    snapshot: () => ({ deviceId: localDeviceId, status: 'ready', error: null,
-      devices: [
+    snapshot: () => {
+      const devices = [
         { id: DEVICE, teamId: TEAM, ownerId: ACCOUNT, name: 'Host device', fingerprint: 'host-fingerprint', signingPublicKey: '', encryptionPublicKey: '', lastSeenAt: new Date().toISOString(), revokedAt: null, createdAt: new Date().toISOString(), status: 'online' },
         { id: OWNER_DEVICE, teamId: TEAM, ownerId: OWNER, name: 'Owner device', fingerprint: 'owner-fingerprint', signingPublicKey: '', encryptionPublicKey: '', lastSeenAt: new Date().toISOString(), revokedAt: null, createdAt: new Date().toISOString(), status: ownerOnline ? 'online' : 'offline' },
-      ],
-      links: [
+      ];
+      if (extraLinkedPeer) devices.push({ id: extraLinkedPeer, teamId: TEAM, ownerId: OWNER, name: 'Second owner device', fingerprint: 'owner-fingerprint-2', signingPublicKey: '', encryptionPublicKey: '', lastSeenAt: new Date().toISOString(), revokedAt: null, createdAt: new Date().toISOString(), status: 'online' });
+      const links = [
         { teamId: TEAM, deviceId: DEVICE, peerDeviceId: OWNER_DEVICE, peerFingerprint: 'owner-fingerprint', createdAt: new Date().toISOString(), mutual: true },
         { teamId: TEAM, deviceId: OWNER_DEVICE, peerDeviceId: DEVICE, peerFingerprint: 'host-fingerprint', createdAt: new Date().toISOString(), mutual: true },
-      ], outbox: [] }),
+      ];
+      if (extraLinkedPeer) links.push({ teamId: TEAM, deviceId: DEVICE, peerDeviceId: extraLinkedPeer, peerFingerprint: 'owner-fingerprint-2', createdAt: new Date().toISOString(), mutual: true });
+      return { deviceId: localDeviceId, status: 'ready', error: null, devices, links, outbox: [] };
+    },
     async send(input: typeof outgoing[number]) { outgoing.push(input); return `envelope-${outgoing.length}`; },
     async sync() {},
     onMessage(handler: (message: any) => Promise<void>) { receive = handler; return () => { receive = null; }; },
   };
   const account = {
+    snapshot() { return { status: 'signed-in', user: { id: options.accountId ?? ACCOUNT } }; },
     async withAuthenticatedClient<T>(callback: (client: SupabaseClient, user: User) => Promise<T>) {
       const cloud = {
         from(table: string) {
@@ -124,6 +132,12 @@ function fixture(options: { deviceId?: string; accountId?: string; role?: 'leade
       return callback(cloud as unknown as SupabaseClient, user);
     },
   };
+  let authenticatedCalls = 0;
+  const authenticate = account.withAuthenticatedClient.bind(account);
+  account.withAuthenticatedClient = (async <T>(callback: (client: SupabaseClient, user: User) => Promise<T>) => {
+    authenticatedCalls += 1;
+    return authenticate(callback);
+  }) as typeof account.withAuthenticatedClient;
   let group: GroupSnapshot | null = null;
   let failNextSync = false;
   let publishLocalAgents: ((input: { teamId: string; sharedProjectId: string; sessionIds: string[] }) => Promise<unknown>) | null = null;
@@ -217,10 +231,13 @@ function fixture(options: { deviceId?: string; accountId?: string; role?: 'leade
   };
   let host = makeHost();
   const fx = {
-    store, project, local, get host() { return host; }, outgoing, finished, enqueued, artifactImports, artifactDiscards, artifactIntegrations, remoteToolCalls, agents, group: () => group, setRole(value: typeof role) { role = value; },
+    store, project, local, get host() { return host; }, outgoing, finished, enqueued, artifactImports, artifactDiscards, artifactIntegrations, remoteToolCalls, agents, group: () => group,
+    authenticatedCalls: () => authenticatedCalls, collaborationRefreshCalls: () => collaborationRefreshes,
+    setRole(value: typeof role) { role = value; },
     setPublisher(callback: typeof publishLocalAgents) { publishLocalAgents = callback; },
     setDevice(deviceId: string) { localDeviceId = deviceId; },
     setOwnerOnline(value: boolean) { ownerOnline = value; },
+    addLinkedPeer() { extraLinkedPeer = '40000000-0000-4000-8000-000000000099'; return extraLinkedPeer; },
     addPublishedAgent(agent: typeof agents[number]) { agents.push(agent); },
     failNextSync() { failNextSync = true; },
     pumpCount() { return pumpCount; },
@@ -292,9 +309,15 @@ it('authorizes host changes, enforces optimistic versions, validates broadcasts,
     .toEqual({ group_id: '' });
   const broadcast = fx.outgoing.find((entry) => entry.kind === 'teamgroup.structure');
   expect(TeamStructurePayloadSchema.safeParse(broadcast?.payload).success).toBe(true);
+  const secondPeer = fx.addLinkedPeer();
   await expect(fx.host.update(PROJECT, { expectedVersion: 99, leaderOrchestration: false })).rejects.toMatchObject({ status: 409 });
+  const beforeSettingsBroadcast = fx.outgoing.filter((entry) => entry.kind === 'teamgroup.structure').length;
   const changedWithoutSession = await fx.host.update(PROJECT, { expectedVersion: 1, permissionLevel: 'full-access' });
   expect(changedWithoutSession).toMatchObject({ settings: { version: 2, permissionLevel: 'full-access' }, teamSession: null });
+  expect(fx.authenticatedCalls()).toBe(0);
+  expect(fx.collaborationRefreshCalls()).toBe(0);
+  expect(fx.outgoing.filter((entry) => entry.kind === 'teamgroup.structure').slice(beforeSettingsBroadcast).map((entry) => entry.toDeviceId).sort())
+    .toEqual([OWNER_DEVICE, secondPeer].sort());
   expect(fx.group()).toBeNull();
 
   const denied = fixture({ role: 'member' });
@@ -840,9 +863,13 @@ it('requires the host lead/admin and clears team-session metadata when the last 
   seedRemoteConsent(fx);
   const group = await fx.host.addAgentToSession(LOCAL_AGENT, { agentId: REMOTE_AGENT });
   const remote = group.members.find((member) => member.sessionId.startsWith('proxy_'))!;
+  const beforeRemovalBroadcasts = fx.outgoing.filter((entry) => entry.kind === 'teamgroup.structure').length;
   fx.removeGroupMember(remote.id);
   await waitFor(() => fx.store.db.prepare('SELECT removed_at FROM mingle_team_host_roster WHERE agent_id=?').get(REMOTE_AGENT)
     && (fx.store.db.prepare('SELECT removed_at FROM mingle_team_host_roster WHERE agent_id=?').get(REMOTE_AGENT) as { removed_at: string | null }).removed_at !== null);
+  await waitFor(() => fx.outgoing.filter((entry) => entry.kind === 'teamgroup.structure').length > beforeRemovalBroadcasts);
+  expect((fx.outgoing.filter((entry) => entry.kind === 'teamgroup.structure').at(-1)?.payload as any).members)
+    .not.toContainEqual(expect.objectContaining({ agentId: REMOTE_AGENT }));
   expect((await fx.host.structure(PROJECT)).teamSession).toMatchObject({ groupId: group.group.id, sessionId: LOCAL_AGENT });
   expect(fx.store.listEvents({ projectId: PROJECT }).filter((event) => event.type === 'team.session.updated').at(-1)?.payload)
     .toMatchObject({ teamSession: { groupId: group.group.id, sessionId: LOCAL_AGENT } });

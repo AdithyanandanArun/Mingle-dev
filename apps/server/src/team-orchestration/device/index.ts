@@ -230,18 +230,19 @@ export function createDeviceSide(deps: DeviceSideDeps): {
       .run(consent.sharedProjectId, consent.accountId, consent.deviceId, JSON.stringify(consent), updatedAt);
   }
 
-  async function binding(projectId: string, refresh = false): Promise<SharedBinding> {
+  async function binding(projectId: string): Promise<SharedBinding> {
     const project = deps.store.getProject(projectId);
     if (!project) throw new HttpError(404, 'Project not found.');
-    const snapshot = refresh && deps.collaboration.refreshSnapshot
-      ? await deps.collaboration.refreshSnapshot(projectId) : await deps.collaboration.snapshot(projectId);
+    const snapshot = await deps.collaboration.snapshot(projectId);
     if (!snapshot.project) throw new HttpError(409, 'Set up teammate sharing for this project before managing team agents.');
     return { projectId, teamId: snapshot.project.teamId, sharedProjectId: snapshot.project.sharedProjectId,
       members: snapshot.members, agents: snapshot.agents };
   }
 
-  async function currentAccountId(): Promise<string> {
-    return deps.account.withAuthenticatedClient(async (_client, user) => user.id);
+  function currentAccountId(): string {
+    const account = deps.account.snapshot();
+    if (account.status !== 'signed-in' || !account.user?.id) throw new HttpError(401, 'Sign in to the Mingle account before changing team consent.');
+    return account.user.id;
   }
 
   async function hostDeviceId(shared: SharedBinding): Promise<string | null> {
@@ -272,26 +273,23 @@ export function createDeviceSide(deps: DeviceSideDeps): {
       refreshed = true;
       return true;
     };
-    let expectedHost = await hostDeviceId(shared);
-    if (!expectedHost || envelope.fromDeviceId !== expectedHost) {
+    const evaluate = async () => {
+      const expectedHost = await hostDeviceId(shared);
+      const device = deps.transport.snapshot(shared.teamId).devices.find((candidate) => candidate.id === envelope.fromDeviceId);
+      const member = device && !device.revokedAt
+        ? shared.members.find((candidate) => candidate.accountId === device.ownerId && candidate.status === 'active') : undefined;
+      return { expectedHost, device, member };
+    };
+    let authority = await evaluate();
+    // New hosts, unknown devices, and cached-removed/role-downgraded senders require a fresh
+    // membership read before rejection; this admits legitimate new admins and fences removals.
+    if (!refreshed && (!authority.expectedHost || envelope.fromDeviceId !== authority.expectedHost
+      || !authority.device || Boolean(authority.device.revokedAt) || !authority.member || !['leader', 'admin'].includes(authority.member.role))) {
       if (!await refreshShared()) return null;
-      expectedHost = await hostDeviceId(shared);
-      if (!expectedHost || envelope.fromDeviceId !== expectedHost) return null;
+      authority = await evaluate();
     }
-    let snapshot = deps.transport.snapshot(shared.teamId);
-    let device = snapshot.devices.find((candidate) => candidate.id === envelope.fromDeviceId);
-    let member = device && !device.revokedAt ? shared.members.find((candidate) => candidate.accountId === device!.ownerId) : undefined;
-    if (!device && !refreshed) {
-      if (!await refreshShared()) return null;
-      expectedHost = await hostDeviceId(shared);
-      if (!expectedHost || envelope.fromDeviceId !== expectedHost) return null;
-      snapshot = deps.transport.snapshot(shared.teamId);
-      device = snapshot.devices.find((candidate) => candidate.id === envelope.fromDeviceId);
-      member = device && !device.revokedAt ? shared.members.find((candidate) => candidate.accountId === device!.ownerId) : undefined;
-    } else if (device && !device.revokedAt && (!member || !['leader', 'admin'].includes(member.role)) && !refreshed) {
-      if (!await refreshShared()) return null;
-      member = shared.members.find((candidate) => candidate.accountId === device!.ownerId);
-    }
+    const { expectedHost, device, member } = authority;
+    if (!expectedHost || envelope.fromDeviceId !== expectedHost) return null;
     if (!device || device.revokedAt) return null;
     if (!member || !['leader', 'admin'].includes(member.role)) return null;
     return { ownerId: device.ownerId, role: member.role };
@@ -493,7 +491,9 @@ export function createDeviceSide(deps: DeviceSideDeps): {
     if (!shared || envelope.toDeviceId !== deps.transport.snapshot(envelope.teamId).deviceId) return;
     let rosterAgent = shared.agents.find((agent) => agent.id === parsed.data.agentId && agent.deviceId === envelope.fromDeviceId)
       ?? shared.agents.find((agent) => agent.sessionId === parsed.data.agentId && agent.deviceId === envelope.fromDeviceId);
-    if (!rosterAgent && deps.collaboration.refreshSnapshot) {
+    const senderIsActive = () => Boolean(rosterAgent && shared?.members.some((member) => member.accountId === rosterAgent!.accountId && member.status === 'active'));
+    if ((!rosterAgent || !senderIsActive()) && deps.collaboration.refreshSnapshot) {
+      // Cached absence can represent a just-published agent or a revoked owner; resolve it authoritatively before deciding.
       const refreshed = await deps.collaboration.refreshSnapshot(shared.projectId).catch(() => null);
       if (refreshed?.project?.teamId === shared.teamId && refreshed.project.sharedProjectId === shared.sharedProjectId) {
         shared = { ...shared, members: refreshed.members, agents: refreshed.agents };
@@ -501,7 +501,7 @@ export function createDeviceSide(deps: DeviceSideDeps): {
           ?? shared.agents.find((agent) => agent.sessionId === parsed.data.agentId && agent.deviceId === envelope.fromDeviceId);
       }
     }
-    if (!rosterAgent || !shared.members.some((member) => member.accountId === rosterAgent.accountId)
+    if (!rosterAgent || !senderIsActive()
       || rosterAgent.accountId === deps.account.snapshot().user?.id && envelope.fromDeviceId === deps.transport.snapshot(envelope.teamId).deviceId) return;
     const safeEntries = parsed.data.entries.flatMap((entry) => {
       const safe = TeamAgentActivityEntrySchema.safeParse({ ...entry, text: safeText(entry.text, 8_000), ...(entry.toolName ? { toolName: safeText(entry.toolName, 120) } : {}) });
