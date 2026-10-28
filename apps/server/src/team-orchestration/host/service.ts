@@ -65,7 +65,9 @@ const CompletionArtifactSchema = z.object({
 const CompletionIntentSchema = z.object({
   kind: z.literal('team-completion'), version: z.literal(1), phase: z.enum(['artifacts', 'finalizing', 'notifying']),
   remoteRunId: z.string().nullable(), at: z.string(), finalText: z.string().max(50_000),
-  pushedBranch: z.object({ name: z.string().min(1).max(240).regex(/^mingle\/[a-z][a-z0-9_-]{1,31}\/[a-z0-9][a-z0-9-]{0,79}$/), commitSha: z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i) }).strict().optional(),
+  pushedBranch: z.object({ name: z.string().min(1).max(240).regex(/^mingle\/[a-z][a-z0-9_-]{1,31}\/[a-z0-9][a-z0-9-]{0,79}$/),
+    commitSha: z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i),
+    baseCommitSha: z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i).optional() }).strict().optional(),
   branchPushFailure: z.string().max(2_000).optional(), reviewRef: z.string().max(255).optional(), branchFetchFailure: z.string().max(2_000).optional(),
   workspaceBefore: z.unknown().nullable(), artifacts: z.array(CompletionArtifactSchema).max(30),
   artifactFailures: z.array(z.string().max(500)).max(30), importedArtifacts: z.array(TeamArtifactRefSchema).max(30),

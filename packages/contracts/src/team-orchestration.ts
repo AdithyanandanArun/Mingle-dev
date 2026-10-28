@@ -276,6 +276,7 @@ export const TeamDeliveryStatusPayloadSchema = z.object({
   pushedBranch: z.object({
     name: z.string().min(1).max(240).regex(/^mingle\/[a-z][a-z0-9_-]{1,31}\/[a-z0-9][a-z0-9-]{0,79}$/),
     commitSha: z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i),
+    baseCommitSha: z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i).optional(),
   }).strict().optional(),
   /** Explicit owner-device push failure; host may use the existing encrypted artifact transfer instead. */
   branchPushFailure: z.string().trim().min(1).max(2_000).optional(),

@@ -1156,15 +1156,14 @@ export function createDeviceSide(deps: DeviceSideDeps): {
     return parsedTransfer;
   }
 
-  async function exportCommits(activeDelivery: ActiveDelivery): Promise<{
-    artifacts: Array<{ revision: string; transferId?: string; taskId?: string; ref?: string }>;
-    pushable: boolean; head: string | null;
+  async function prepareCompletionBranch(activeDelivery: ActiveDelivery): Promise<{
+    pushable: boolean; head: string | null; revisions: string[]; failure: string | null;
   }> {
-    if (activeDelivery.controller.signal.aborted) return { artifacts: [], pushable: false, head: null };
+    if (activeDelivery.controller.signal.aborted) return { pushable: false, head: null, revisions: [], failure: null };
     await commitEligibleChanges(activeDelivery);
-    if (activeDelivery.controller.signal.aborted) return { artifacts: [], pushable: false, head: null };
+    if (activeDelivery.controller.signal.aborted) return { pushable: false, head: null, revisions: [], failure: null };
     const head = trimmed(await git(activeDelivery.worktreePath, ['rev-parse', '--verify', 'HEAD']));
-    if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(head) || head === activeDelivery.turnBase) return { artifacts: [], pushable: false, head: null };
+    if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(head)) return { pushable: false, head: null, revisions: [], failure: 'The worker branch HEAD is not a full commit SHA.' };
     const args = ['rev-list', '--reverse', '--max-count=30', `${activeDelivery.turnBase}..${head}`];
     const revisions = trimmed(await git(activeDelivery.worktreePath, args)).split(/\s+/).filter((id) => /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(id));
     const changes = await committedPaths(activeDelivery.worktreePath, activeDelivery.turnBase, head);
@@ -1175,12 +1174,18 @@ export function createDeviceSide(deps: DeviceSideDeps): {
         protectedPaths.length ? `${protectedPaths.length} protected path change(s)` : '',
         outOfScopePaths.length ? `${outOfScopePaths.length} committed path change(s) outside the assigned scope` : '',
       ].filter(Boolean).join(' and ');
-      const note = `Committed delivery history was not transferred because it contains ${issues}; commits and worktree were retained.`;
+      const note = `Committed delivery history was not published because it contains ${issues}; commits and worktree were retained.`;
       activeDelivery.artifactFailures.push(note);
       activeDelivery.entries.push(TeamAgentActivityEntrySchema.parse({ id: randomUUID(), runId: activeDelivery.runId,
         at: ISO(), kind: 'error', text: note }));
-      return { artifacts: [], pushable: false, head };
+      return { pushable: false, head, revisions, failure: note };
     }
+    return { pushable: true, head, revisions, failure: null };
+  }
+
+  async function exportFallbackArtifacts(activeDelivery: ActiveDelivery, revisions: string[]): Promise<Array<{
+    revision: string; transferId?: string; taskId?: string; ref?: string;
+  }>> {
     const artifacts: Array<{ revision: string; transferId?: string; taskId?: string; ref?: string }> = [];
     for (const revision of revisions) {
       try {
@@ -1198,7 +1203,7 @@ export function createDeviceSide(deps: DeviceSideDeps): {
           at: ISO(), kind: 'error', text: safeText(`Artifact transfer could not be prepared: ${errorMessage(error)}`, 8_000) }));
       }
     }
-    return { artifacts, pushable: true, head };
+    return artifacts;
   }
 
   async function executeDelivery(payload: TeamDeliveryPayload, shared: SharedBinding, sessionId: string): Promise<void> {
@@ -1288,20 +1293,25 @@ export function createDeviceSide(deps: DeviceSideDeps): {
         const initialFinalText = safeText(deps.store.listMessages(sessionId, { limit: 2000 })
           .filter((message) => message.runId === runId && message.role === 'assistant' && message.kind !== 'streaming')
           .map((message) => message.content).join('\n\n').trim(), 50_000);
-        const exported = await exportCommits(live);
-        const artifacts = exported.artifacts;
-        let pushedBranch: { name: string; commitSha: string } | undefined;
+        const prepared = await prepareCompletionBranch(live);
+        let artifacts: Array<{ revision: string; transferId?: string; taskId?: string; ref?: string }> = [];
+        let pushedBranch: { name: string; commitSha: string; baseCommitSha: string } | undefined;
         let branchPushFailure: string | undefined;
-        if (exported.pushable && exported.head && live.branch) {
+        if (prepared.pushable && prepared.head && live.branch) {
           try {
-            const pushed = await pushTeamCompletionBranch({ worktreePath: live.worktreePath, branch: live.branch, expectedHead: exported.head, signal: live.controller.signal });
-            pushedBranch = { name: pushed.branch, commitSha: pushed.commitSha };
+            const pushed = await pushTeamCompletionBranch({ worktreePath: live.worktreePath, branch: live.branch, expectedHead: prepared.head, signal: live.controller.signal });
+            pushedBranch = { name: pushed.branch, commitSha: pushed.commitSha, baseCommitSha: live.turnBase };
             live.entries.push(TeamAgentActivityEntrySchema.parse({ id: randomUUID(), runId: live.runId, at: ISO(), kind: 'artifact',
               text: `Pushed scoped completion branch ${pushed.branch} to origin at ${pushed.commitSha}.` }));
           } catch (error) {
             branchPushFailure = safeText(`Could not push completion branch ${live.branch}: ${errorMessage(error)}`, 2_000);
             live.entries.push(TeamAgentActivityEntrySchema.parse({ id: randomUUID(), runId: live.runId, at: ISO(), kind: 'error', text: branchPushFailure }));
           }
+        } else if (prepared.failure) {
+          branchPushFailure = safeText(`Could not push completion branch ${live.branch ?? '(unknown branch)'}: ${prepared.failure}`, 2_000);
+        }
+        if (!pushedBranch && prepared.pushable && prepared.head && !live.controller.signal.aborted) {
+          artifacts = await exportFallbackArtifacts(live, prepared.revisions);
         }
         if (live.controller.signal.aborted) {
           await sendInterruptedDelivery(live, 'Team sharing was interrupted before terminal artifacts were delivered.');
