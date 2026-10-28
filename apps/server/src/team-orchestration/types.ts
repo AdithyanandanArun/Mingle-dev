@@ -3,6 +3,7 @@ import type { ProjectCollaborationSnapshot } from '../../../../packages/contract
 import type { SessionRuntime, StartOptions } from '../runtime.ts';
 import type { Store } from '../store.ts';
 import type { DistributedWorkspaceService } from '../distributed/service.ts';
+import type { TransportMessageContext } from '../distributed/transport.ts';
 
 export interface TeamRouteContext {
   req: import('node:http').IncomingMessage;
@@ -38,7 +39,7 @@ export type TeamOrchestrationDeviceSideFactory = (dependencies: TeamOrchestratio
 export interface TeamOrchestrationTransport {
   snapshot(teamId?: string): import('@mingle/contracts').TransportSnapshot;
   send(input: { teamId: string; toDeviceId: string; kind: string; payload: unknown; idempotencyKey: string }): Promise<unknown>;
-  onMessage(handler: (message: AuthenticatedTransportMessage) => void | Promise<void>): () => void;
+  onMessage(handler: (message: AuthenticatedTransportMessage, context?: TransportMessageContext) => void | Promise<void>): () => void;
   sync(): Promise<void>;
 }
 

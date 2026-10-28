@@ -56,7 +56,17 @@ export interface TransportServiceOptions {
   syncIntervalMs?: number;
 }
 
-export type TransportMessageHandler = (message: AuthenticatedTransportMessage) => void | Promise<void>;
+/** Ordering may be released once this message's required durable prerequisites are complete. */
+export interface TransportMessageContext { releaseOrdering(): void }
+
+export type TransportMessageHandler = (message: AuthenticatedTransportMessage, context?: TransportMessageContext) => void | Promise<void>;
+
+interface InboxDelivery {
+  /** Resolves when later messages from this sender may begin, independently of handler completion. */
+  ordering: Promise<void>;
+  /** Resolves when every handler for this inbox row has completed. */
+  completed: Promise<void>;
+}
 
 /** A handler can use this when an authenticated message depends on earlier sender work not yet persisted. */
 export class RetryableTransportDeliveryError extends Error {
@@ -139,12 +149,14 @@ export class TransportService {
   private lastSyncAt: number | null = null;
   private syncPromise: Promise<void> | null = null;
   /** Marks work started by an inbound message handler, which runs inside the current sync. */
-  private readonly handlerScope = new AsyncLocalStorage<true>();
+  private readonly handlerScope = new AsyncLocalStorage<TransportMessageContext>();
   private syncAgain = false;
   /** Mailbox scans are serialized per team so one team's backlog never delays another team. */
   private readonly deliveryChains = new Map<string, Promise<void>>();
   /** Both mailbox and Realtime deliveries share sender-scoped handler ordering. */
   private readonly senderDeliveryChains = new Map<string, Promise<void>>();
+  /** Includes work whose sender ordering was deliberately released before its handlers completed. */
+  private readonly activeInboxDeliveries = new Set<Promise<void>>();
   private readonly teamSyncs = new Map<string, TeamSyncState>();
   private readonly teamRefreshes = new Map<string, Promise<void>>();
   private readonly teamCacheRefreshedAt = new Map<string, number>();
@@ -516,14 +528,18 @@ export class TransportService {
     for (const timer of this.wakeRetryTimers.values()) clearTimeout(timer);
     this.wakeRetryTimers.clear();
     await this.syncPromise;
-    await Promise.all([
+    await Promise.allSettled([
       ...[...this.teamSyncs.values()].map((state) => state.promise),
       ...this.teamRefreshes.values(),
       ...this.outboxSyncs.values(),
       ...this.fastDeliveryPromises,
       ...this.deliveryChains.values(),
       ...this.senderDeliveryChains.values(),
+      ...this.activeInboxDeliveries,
     ]);
+    while (this.activeInboxDeliveries.size > 0) {
+      await Promise.allSettled([...this.activeInboxDeliveries]);
+    }
     const sendRemovals = this.clearSendChannels();
     const wakeSubscriptions = [...this.wakeSubscriptions.values()];
     this.wakeSubscriptions.clear();
@@ -1153,7 +1169,7 @@ export class TransportService {
       const current = this.db.prepare(`SELECT status FROM mingle_transport_inbox WHERE account_id = ? AND team_id = ? AND id = ?`)
         .get(accountId, row.team_id, row.id) as { status: string } | undefined;
       if (current?.status !== 'pending') continue;
-      await this.enqueueInboxDelivery(accountId, row, false);
+      await this.enqueueInboxDelivery(accountId, row, false).ordering;
     }
   }
 
@@ -1174,7 +1190,7 @@ export class TransportService {
         entry.version?.sharedProjectId === current.sharedProjectId);
     if (group.length < 2) return;
     const newest = group.reduce((best, entry) => entry.version.version > best.version.version ? entry : best);
-    await this.enqueueInboxDelivery(accountId, newest.candidate, false);
+    await this.enqueueInboxDelivery(accountId, newest.candidate, false).completed;
     const handled = this.db.prepare(`SELECT status FROM mingle_transport_inbox WHERE account_id = ? AND team_id = ? AND id = ?`)
       .get(accountId, row.team_id, newest.candidate.id) as { status: string } | undefined;
     if (handled?.status !== 'handled') return;
@@ -1245,7 +1261,8 @@ export class TransportService {
     const row = this.db.prepare('SELECT * FROM mingle_transport_inbox WHERE account_id = ? AND team_id = ? AND id = ?')
       .get(accountId, teamId, envelope.id) as LocalEnvelopeRow | undefined;
     if (!row) return;
-    const delivery = this.enqueueInboxDelivery(accountId, row, true).finally(() => {
+    const inboxDelivery = this.enqueueInboxDelivery(accountId, row, true);
+    const delivery = inboxDelivery.completed.finally(() => {
       this.notifyIfChanged(before);
       this.fastDeliveryPromises.delete(delivery);
     });
@@ -1302,17 +1319,31 @@ export class TransportService {
     })();
   }
 
-  private enqueueInboxDelivery(accountId: string, row: LocalEnvelopeRow, cacheOnly: boolean): Promise<void> {
+  private enqueueInboxDelivery(accountId: string, row: LocalEnvelopeRow, cacheOnly: boolean): InboxDelivery {
     const key = `${accountId}:${row.team_id}:${row.from_device_id}`;
-    const delivery = (this.senderDeliveryChains.get(key) ?? Promise.resolve())
-      .then(() => this.deliverInboxRow(accountId, row, cacheOnly));
-    const settled = delivery.catch(() => undefined);
-    this.senderDeliveryChains.set(key, settled);
-    void settled.then(() => { if (this.senderDeliveryChains.get(key) === settled) this.senderDeliveryChains.delete(key); });
-    return delivery;
+    const previous = this.senderDeliveryChains.get(key) ?? Promise.resolve();
+    let releaseOrdering!: () => void;
+    const orderingGate = new Promise<void>((resolve) => { releaseOrdering = resolve; });
+    let orderingReleased = false;
+    const context: TransportMessageContext = {
+      releaseOrdering: () => {
+        if (orderingReleased) return;
+        orderingReleased = true;
+        releaseOrdering();
+      },
+    };
+    const completed = previous.then(() => this.deliverInboxRow(accountId, row, cacheOnly, context))
+      .finally(context.releaseOrdering);
+    const ordering = previous.then(() => orderingGate);
+    const settledOrdering = ordering.catch(() => undefined);
+    this.senderDeliveryChains.set(key, settledOrdering);
+    void settledOrdering.then(() => { if (this.senderDeliveryChains.get(key) === settledOrdering) this.senderDeliveryChains.delete(key); });
+    this.activeInboxDeliveries.add(completed);
+    void completed.then(() => this.activeInboxDeliveries.delete(completed), () => this.activeInboxDeliveries.delete(completed));
+    return { ordering, completed };
   }
 
-  private async deliverInboxRow(accountId: string, row: LocalEnvelopeRow, cacheOnly: boolean): Promise<void> {
+  private async deliverInboxRow(accountId: string, row: LocalEnvelopeRow, cacheOnly: boolean, context: TransportMessageContext): Promise<void> {
     if (Date.parse(row.expires_at) <= this.now()) {
       this.db.prepare(`UPDATE mingle_transport_inbox SET status = 'rejected', error = 'Message expired before delivery.' WHERE account_id = ? AND team_id = ? AND id = ?`)
         .run(accountId, row.team_id, row.id);
@@ -1373,7 +1404,7 @@ export class TransportService {
         .run(accountId, row.team_id, row.id, this.now());
       if (claim.changes !== 1) return;
       if (messageInvalidatesTeamTrust(message.kind)) this.invalidateTeamTrust(row.team_id);
-      for (const handler of this.handlers) await this.handlerScope.run(true, () => handler(message));
+      for (const handler of this.handlers) await this.handlerScope.run(context, () => handler(message, context));
       this.db.prepare(`UPDATE mingle_transport_inbox SET status = 'handled', attempts = attempts + 1, next_attempt_at = 0, error = NULL WHERE account_id = ? AND team_id = ? AND id = ? AND status = 'dispatching'`)
         .run(accountId, row.team_id, row.id);
     } catch (error) {

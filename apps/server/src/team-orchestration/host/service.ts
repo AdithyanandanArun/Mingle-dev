@@ -20,6 +20,7 @@ import type {
   TeamOrchestrationCollaboration, TeamOrchestrationDeviceSide, TeamOrchestrationGroups,
   TeamOrchestrationTransport, TeamProxyRuntimeService, TeamProxyStartInput,
 } from '../types.ts';
+import type { TransportMessageContext } from '../../distributed/transport.ts';
 import { HttpError } from '../../util.ts';
 import { git } from '../../repository/git-run.ts';
 import { captureRunTree, compareRunTrees, type RunTreeSnapshot } from '../../run-changes.ts';
@@ -154,7 +155,7 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
         delivery_id TEXT PRIMARY KEY, branch TEXT, commit_sha TEXT, review_ref TEXT, fetch_failure TEXT,
         push_failure TEXT, accepted_at TEXT, verification_summary TEXT, merged_at TEXT
       );`);
-    this.unsubscribe = options.transport.onMessage((message) => this.onEnvelope(message));
+    this.unsubscribe = options.transport.onMessage((message, context) => this.onEnvelope(message, context));
     this.unsubscribeStore = options.store.subscribe((event) => {
       if (!event) return;
       if (event.type === 'group.message.sent' && typeof event.payload.groupId === 'string' && typeof event.payload.messageId === 'string') {
@@ -1857,7 +1858,7 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
     return approval;
   }
 
-  private async onEnvelope(envelope: import('@mingle/contracts').AuthenticatedTransportMessage): Promise<void> {
+  private async onEnvelope(envelope: import('@mingle/contracts').AuthenticatedTransportMessage, context?: TransportMessageContext): Promise<void> {
     // Other teamgroup.* kinds belong to the owner-device side sharing this transport.
     const hostKinds = ['execution.agents', 'teamgroup.consent', 'teamgroup.delivery.status', 'teamgroup.delivery.heartbeat',
       'teamgroup.activity', 'teamgroup.tool.call', 'teamgroup.approval.request'];
@@ -1866,10 +1867,10 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
     if (!localDevice || envelope.toDeviceId !== localDevice) throw new HttpError(403, 'Team orchestration envelope is not addressed to this device.');
     if (envelope.kind === 'execution.agents') return this.onPublishedAgents(envelope);
     if (envelope.kind === 'teamgroup.consent') return this.receiveConsent(envelope);
-    if (envelope.kind === 'teamgroup.delivery.status') return this.receiveStatus(envelope);
+    if (envelope.kind === 'teamgroup.delivery.status') return this.receiveStatus(envelope, context);
     if (envelope.kind === 'teamgroup.delivery.heartbeat') return this.receiveHeartbeat(envelope);
     if (envelope.kind === 'teamgroup.activity') return this.receiveActivity(envelope.payload, envelope);
-    if (envelope.kind === 'teamgroup.tool.call') return this.receiveToolCall(envelope);
+    if (envelope.kind === 'teamgroup.tool.call') return this.receiveToolCall(envelope, context);
     if (envelope.kind === 'teamgroup.approval.request') return this.receiveApproval(envelope);
   }
 
@@ -2194,7 +2195,7 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
     } catch { return undefined; }
   }
 
-  private async receiveStatus(envelope: import('@mingle/contracts').AuthenticatedTransportMessage): Promise<void> {
+  private async receiveStatus(envelope: import('@mingle/contracts').AuthenticatedTransportMessage, context?: TransportMessageContext): Promise<void> {
     const parsed = TeamDeliveryStatusPayloadSchema.safeParse(envelope.payload);
     if (!parsed.success) throw new HttpError(400, 'Team delivery status payload is invalid.');
     const observed = this.delivery(parsed.data.deliveryId);
@@ -2260,6 +2261,8 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
         return nextIntent;
       });
       if (intent) {
+        // The completion intent is durable now; artifact import may wait for more envelopes from this sender.
+        context?.releaseOrdering();
         const work = this.processCompletion(delivery.delivery_id);
         this.track(work);
         await work;
@@ -2771,7 +2774,7 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
     return delivery;
   }
 
-  private async receiveToolCall(envelope: import('@mingle/contracts').AuthenticatedTransportMessage): Promise<void> {
+  private async receiveToolCall(envelope: import('@mingle/contracts').AuthenticatedTransportMessage, context?: TransportMessageContext): Promise<void> {
     const parsed = TeamToolCallPayloadSchema.safeParse(envelope.payload);
     if (!parsed.success) throw new HttpError(400, 'Team tool call payload is invalid.');
     const delivery = this.delivery(parsed.data.deliveryId);
@@ -2785,6 +2788,9 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
     const active = this.active.get(delivery.session_id);
     if (!active || active.runId !== delivery.run_id) throw new HttpError(409, 'The team tool call run is no longer active.');
     this.assertToolCallStillActive(delivery.delivery_id, active);
+    // The inbox row durably records this call. Import and the remote MCP result can both depend on
+    // later messages from this peer, so let those reach their handlers while this call is in flight.
+    context?.releaseOrdering();
     let result: unknown;
     let error: string | undefined;
     try {

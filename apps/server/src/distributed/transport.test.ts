@@ -497,6 +497,55 @@ it('orders Realtime and mailbox handler work per sender while unrelated senders 
   }
 });
 
+it('releases sender ordering for a handler awaiting a later message and drains the handler on close', async () => {
+  const { first, second, b } = await pairedServices();
+  let markFirstEntered!: () => void;
+  let resolveSecondEffect!: () => void;
+  let resolveFinishFirst!: () => void;
+  const firstEntered = new Promise<void>((resolve) => { markFirstEntered = resolve; });
+  const secondEffect = new Promise<void>((resolve) => { resolveSecondEffect = resolve; });
+  const finishFirst = new Promise<void>((resolve) => { resolveFinishFirst = resolve; });
+  let secondWasHandled = false;
+  let firstCompleted = false;
+  const unsubscribe = second.onMessage(async (message, context) => {
+    const text = (message.payload as { text: string }).text;
+    if (text === 'wait-for-second') {
+      markFirstEntered();
+      context?.releaseOrdering();
+      await secondEffect;
+      await finishFirst;
+      firstCompleted = true;
+    } else if (text === 'second-effect') {
+      resolveSecondEffect();
+      secondWasHandled = true;
+    }
+  });
+  try {
+    await first.send({ teamId, toDeviceId: b.id, kind: 'collaboration.message', payload: { text: 'wait-for-second' }, idempotencyKey: 'release-order-first' });
+    const firstSync = second.sync();
+    await firstEntered;
+    await first.send({ teamId, toDeviceId: b.id, kind: 'collaboration.message', payload: { text: 'second-effect' }, idempotencyKey: 'release-order-second' });
+    const secondSync = second.sync();
+    await vi.waitFor(() => expect(secondWasHandled).toBe(true), { timeout: 1_000 });
+    await Promise.all([firstSync, secondSync]);
+
+    let closeFinished = false;
+    unsubscribe();
+    const closing = second.close().then(() => { closeFinished = true; });
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(closeFinished).toBe(false);
+    resolveFinishFirst();
+    await closing;
+    expect(firstCompleted).toBe(true);
+  } finally {
+    resolveSecondEffect();
+    resolveFinishFirst();
+    unsubscribe();
+    await first.close();
+    await second.close();
+  }
+});
+
 it('delivers a small encrypted envelope on a fingerprint-derived Realtime topic', async () => {
   const cloud = new MailboxCloud(true);
   const { first, second, b } = await pairedServices(cloud);
