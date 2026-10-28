@@ -196,9 +196,12 @@ it('shares imported session history and team messages over HTTP and the encrypte
       teamGroupId = added.json.group.id;
     }
     expect(teamGroupId).toEqual(expect.any(String));
-    expect(secondAgent).toMatchObject({ consent: 'granted', groupId: null });
-    const addSecondAgent = await leader.api('POST', `/api/groups/${teamGroupId}/team-agents`, { agentId: secondAgentId });
-    expect(addSecondAgent.status, JSON.stringify(addSecondAgent.json)).toBe(200);
+    expect(secondAgent).toMatchObject({ consent: 'granted' });
+    // A consented teammate agent joins the established team session without a manual leader step.
+    await waitFor(async () => {
+      const response = await leader.api('GET', `/api/projects/${projects[0]}/team-agents`);
+      return response.json.agents.some((agent: { agentId: string; groupId: string | null }) => agent.agentId === secondAgentId && agent.groupId === teamGroupId);
+    }, 6000, 'automatic team-session membership for the second consented agent');
     const proxySessionId = (leader.app.store.db.prepare(`SELECT session_id FROM mingle_team_proxy_sessions
       WHERE team_id=? AND shared_project_id=? AND agent_id=?`).get(join.json.teamId, join.json.sharedProjectId, secondAgentId) as { session_id: string }).session_id;
     const firstProxySessionId = (leader.app.store.db.prepare(`SELECT session_id FROM mingle_team_proxy_sessions

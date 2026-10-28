@@ -311,10 +311,11 @@ function fixture(options: { deviceId?: string; accountId?: string; role?: 'leade
 const enableInput = (orchestratorAgentId = LOCAL_AGENT) => ({ leaderOrchestration: true, permissionLevel: 'supervised', orchestratorAgentId,
   fallbackAgentIds: orchestratorAgentId === LOCAL_AGENT ? [] : [LOCAL_AGENT] });
 
-async function grantRemote(fx: ReturnType<typeof fixture>, settingsVersion = 1): Promise<void> {
+async function grantRemote(fx: ReturnType<typeof fixture>, settingsVersion = 1,
+  options: { state?: 'granted' | 'paused' | 'revoked'; permissionLevel?: 'supervised' | 'full-access'; at?: string } = {}): Promise<void> {
   await fx.incoming('teamgroup.consent', {
-    sharedProjectId: SHARED, agentIds: [REMOTE_AGENT], permissionLevel: 'supervised', settingsVersion,
-    disclaimerVersion: TEAM_CONSENT_DISCLAIMER_VERSION, state: 'granted', at: new Date().toISOString(),
+    sharedProjectId: SHARED, agentIds: [REMOTE_AGENT], permissionLevel: options.permissionLevel ?? 'supervised', settingsVersion,
+    disclaimerVersion: TEAM_CONSENT_DISCLAIMER_VERSION, state: options.state ?? 'granted', at: options.at ?? new Date().toISOString(),
   });
 }
 
@@ -833,6 +834,76 @@ it('rebroadcasts structure after published agents, permission changes, and renew
   await fx.incoming('execution.agents', { sharedProjectId: SHARED, version: 3, agents: [] });
   expect(fx.outgoing.filter((entry) => entry.kind === 'teamgroup.structure')).toHaveLength(structuresBeforeWithdrawal + 1);
   expect(fx.store.listEvents().filter((event) => event.type === 'team.structure.updated')).toHaveLength(eventsBeforeWithdrawal + 1);
+});
+
+it('automatically adds a teammate agent when eligible consent is granted to an active team session', async () => {
+  const fx = fixture();
+  const shared = await fx.host.shareSession(PROJECT, { sessionId: LOCAL_AGENT, permissionLevel: 'supervised' });
+
+  await grantRemote(fx);
+
+  const proxySessionId = (fx.store.db.prepare('SELECT session_id FROM mingle_team_proxy_sessions WHERE agent_id=?').get(REMOTE_AGENT) as { session_id: string }).session_id;
+  expect(fx.group()?.group.id).toBe(shared.teamSession?.groupId);
+  expect(fx.group()?.members).toContainEqual(expect.objectContaining({ sessionId: proxySessionId, role: 'worker' }));
+  expect((await fx.host.structure(PROJECT)).members).toContainEqual(expect.objectContaining({ agentId: REMOTE_AGENT, consent: 'granted' }));
+  expect((fx.outgoing.filter((entry) => entry.kind === 'teamgroup.structure').at(-1)?.payload as any).members)
+    .toContainEqual(expect.objectContaining({ agentId: REMOTE_AGENT, consent: 'granted' }));
+  expect(fx.host.activeCount()).toBe(0);
+  expect(fx.outgoing.some((entry) => entry.kind === 'teamgroup.delivery')).toBe(false);
+});
+
+it('backfills a previously granted consent on the next team-structure reconciliation', async () => {
+  const fx = fixture();
+  await fx.host.shareSession(PROJECT, { sessionId: LOCAL_AGENT, permissionLevel: 'supervised' });
+  seedRemoteConsent(fx);
+
+  const structure = await fx.host.structure(PROJECT);
+
+  expect(structure.members).toContainEqual(expect.objectContaining({ agentId: REMOTE_AGENT, consent: 'granted' }));
+  expect(fx.group()?.members.some((member) => member.sessionId.startsWith('proxy_'))).toBe(true);
+  expect(fx.host.activeCount()).toBe(0);
+});
+
+it('does not re-add a leader-removed teammate until a newer grant is received', async () => {
+  const fx = fixture();
+  await fx.host.shareSession(PROJECT, { sessionId: LOCAL_AGENT, permissionLevel: 'supervised' });
+  await grantRemote(fx);
+  const group = fx.group()!;
+  const remote = group.members.find((member) => member.sessionId.startsWith('proxy_'))!;
+  const priorConsent = (fx.store.db.prepare(`SELECT updated_at FROM mingle_team_host_consents WHERE team_id=? AND shared_project_id=? AND agent_id=?`)
+    .get(TEAM, SHARED, REMOTE_AGENT) as { updated_at: string }).updated_at;
+
+  fx.removeGroupMember(remote.id);
+  await waitFor(() => Boolean(fx.store.db.prepare(`SELECT 1 FROM mingle_team_host_auto_add_holds WHERE team_id=? AND shared_project_id=? AND agent_id=?`)
+    .get(TEAM, SHARED, REMOTE_AGENT)));
+  await fx.host.structure(PROJECT);
+  expect(fx.group()?.members.some((member) => member.sessionId === remote.sessionId && !member.removedAt)).toBe(false);
+
+  await grantRemote(fx, 1, { at: new Date(Date.parse(priorConsent) - 1000).toISOString() });
+  await fx.host.structure(PROJECT);
+  expect(fx.group()?.members.some((member) => member.sessionId === remote.sessionId && !member.removedAt)).toBe(false);
+
+  await grantRemote(fx, 1, { at: new Date(Date.now() + 60_000).toISOString() });
+  expect(fx.group()?.members.some((member) => member.sessionId === remote.sessionId && !member.removedAt)).toBe(true);
+  expect(fx.store.db.prepare(`SELECT 1 FROM mingle_team_host_auto_add_holds WHERE team_id=? AND shared_project_id=? AND agent_id=?`)
+    .get(TEAM, SHARED, REMOTE_AGENT)).toBeUndefined();
+});
+
+it.each([
+  { label: 'paused', state: 'paused' as const, permissionLevel: 'supervised' as const, teamPermission: 'supervised' as const },
+  { label: 'revoked', state: 'revoked' as const, permissionLevel: 'supervised' as const, teamPermission: 'supervised' as const },
+  { label: 'insufficient permission', state: 'granted' as const, permissionLevel: 'supervised' as const, teamPermission: 'full-access' as const },
+])('does not auto-add a teammate with $label consent', async ({ state, permissionLevel, teamPermission }) => {
+  const fx = fixture();
+  await fx.host.shareSession(PROJECT, { sessionId: LOCAL_AGENT, permissionLevel: teamPermission });
+
+  await grantRemote(fx, 1, { state, permissionLevel });
+
+  expect(fx.group()?.members).toHaveLength(1);
+  expect((await fx.host.structure(PROJECT)).members).not.toContainEqual(expect.objectContaining({ agentId: REMOTE_AGENT }));
+  expect(fx.store.db.prepare(`SELECT state FROM mingle_team_host_consents WHERE team_id=? AND shared_project_id=? AND agent_id=?`)
+    .get(TEAM, SHARED, REMOTE_AGENT)).toEqual({ state: state === 'granted' ? 'needs-reconsent' : state });
+  expect(fx.host.activeCount()).toBe(0);
 });
 
 it('converts one session into its team group, creates a remote proxy member, and routes it to the owner device', async () => {
