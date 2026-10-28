@@ -29,7 +29,7 @@ import type { ProjectCollaborationSnapshot } from '../../../../../packages/contr
 import { KeyedLock } from '../../repository/lock.ts';
 import { normalizeScopes, safeArtifactPath } from '../../groups/routing.ts';
 import { isDeniedName } from '../../paths.ts';
-import { fetchTeamCompletionBranch } from '../../repository/team-branch.ts';
+import { fetchTeamCompletionBranch, teamAgentBranch } from '../../repository/team-branch.ts';
 
 type Row = Record<string, unknown>;
 type HostRow = {
@@ -75,6 +75,15 @@ const CompletionIntentSchema = z.object({
   workspaceChanges: z.unknown().optional(),
 }).strict();
 const DeliverySchema = TeamDeliveryPayloadSchema;
+function isSafeGitBranchName(value: string): boolean {
+  return value.length <= 200 && /^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(value) && !value.includes('..')
+    && !value.includes('//') && !value.includes('@{') && !value.endsWith('/')
+    && value.split('/').every((part) => part && part !== '.' && part !== '..' && !part.endsWith('.lock'));
+}
+function safeRemoteText(value: string): string {
+  return value.replace(/\b(?:https?|ssh|git):\/\/[^\s'"<>]+/gi, '[remote]')
+    .replace(/\b[A-Za-z0-9_.-]+@[A-Za-z0-9.-]+:[^\s'"<>]+/g, '[remote]');
+}
 type CompletionIntent = z.infer<typeof CompletionIntentSchema> & { workspaceBefore: RunTreeSnapshot | null };
 class CompletionAuthorityError extends Error {}
 type ProjectContext = ProjectCollaborationSnapshot & {
@@ -154,9 +163,13 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
         PRIMARY KEY(team_id,shared_project_id,agent_id)
       );
       CREATE TABLE IF NOT EXISTS mingle_team_host_review_branches (
-        delivery_id TEXT PRIMARY KEY, branch TEXT, commit_sha TEXT, review_ref TEXT, fetch_failure TEXT,
+        delivery_id TEXT PRIMARY KEY, branch TEXT, commit_sha TEXT, base_commit_sha TEXT, review_ref TEXT, fetch_failure TEXT,
         push_failure TEXT, accepted_at TEXT, verification_summary TEXT, merged_at TEXT
       );`);
+    const reviewColumns = this.hostRows.prepare('PRAGMA table_info(mingle_team_host_review_branches)').all() as Array<{ name: string }>;
+    if (!reviewColumns.some((column) => column.name === 'base_commit_sha')) {
+      this.hostRows.exec('ALTER TABLE mingle_team_host_review_branches ADD COLUMN base_commit_sha TEXT');
+    }
     this.unsubscribe = options.transport.onMessage((message, context) => this.onEnvelope(message, context));
     this.unsubscribeStore = options.store.subscribe((event) => {
       if (!event) return;
@@ -221,8 +234,8 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
         throw new HttpError(409, 'The task or worker delivery changed before acceptance.');
       }
       await this.assertCompletionAuthority(currentDelivery);
-      const review = this.hostRows.prepare(`SELECT branch,commit_sha,review_ref,fetch_failure FROM mingle_team_host_review_branches WHERE delivery_id=?`)
-        .get(delivery.delivery_id) as { branch: string | null; commit_sha: string | null; review_ref: string | null; fetch_failure: string | null } | undefined;
+      const review = this.hostRows.prepare(`SELECT branch,commit_sha,base_commit_sha,review_ref,fetch_failure FROM mingle_team_host_review_branches WHERE delivery_id=?`)
+        .get(delivery.delivery_id) as { branch: string | null; commit_sha: string | null; base_commit_sha: string | null; review_ref: string | null; fetch_failure: string | null } | undefined;
       let merged = false;
       let mergedRef: string | undefined;
       if (review?.review_ref && review.branch && review.commit_sha) {
@@ -236,7 +249,7 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
         const imported = TeamArtifactRefSchema.parse({ revision: review.commit_sha, ref: review.review_ref,
           ...(currentAuthority.task_id ? { taskId: currentAuthority.task_id } : {}) });
         await this.options.authorizeTeam({ teamId: delivery.team_id, peerDeviceId: delivery.owner_device_id });
-        await this.validateArtifactHistory(currentDelivery, currentAuthority, imported, workspace.worktreePath, false);
+        await this.validateArtifactHistory(currentDelivery, currentAuthority, imported, workspace.worktreePath, false, review.base_commit_sha ?? undefined);
         const dirty = await git(workspace.worktreePath, ['status', '--porcelain=v1', '--untracked-files=all'], { maxBuffer: 8 * 1024 * 1024 });
         if (dirty.stdout.trim()) throw new HttpError(409, 'The team integration worktree has uncommitted changes. Commit or move them before accepting this branch.');
         const head = (await git(workspace.worktreePath, ['rev-parse', '--verify', 'HEAD'])).stdout.trim();
@@ -244,7 +257,11 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
         if (integrationBranch.code !== 0 || !integrationBranch.stdout.trim()) throw new HttpError(409, 'The team integration worktree is detached and cannot accept a worker branch.');
         const alreadyIntegrated = await git(workspace.worktreePath, ['merge-base', '--is-ancestor', review.review_ref, head], { allowFailure: true });
         if (alreadyIntegrated.code !== 0) {
-          await git(workspace.worktreePath, ['merge', '--ff-only', '--no-edit', review.review_ref], { timeoutMs: 120_000 });
+          const mergedResult = await git(workspace.worktreePath, ['merge', '--no-ff', '--no-edit', review.review_ref], { allowFailure: true, timeoutMs: 120_000 });
+          if (mergedResult.code !== 0) {
+            await git(workspace.worktreePath, ['merge', '--abort'], { allowFailure: true });
+            throw new HttpError(409, `The worker branch conflicts with the integration branch. Merge ${review.review_ref} manually in ${workspace.worktreePath}, resolve the conflicts, run the checks, and retry team_accept.`);
+          }
           merged = true;
         }
         mergedRef = review.review_ref;
@@ -1702,10 +1719,18 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
     this.track((async () => {
       try {
         let baseRevision: string | undefined;
+        let integrationBranch: string | undefined;
+        const integrationPath = groupWorkspace?.worktreePath ?? input.session.worktreePath;
         try {
-          const head = (await git(groupWorkspace?.worktreePath ?? input.session.worktreePath, ['rev-parse', '--verify', 'HEAD'])).stdout.trim();
+          const head = (await git(integrationPath, ['rev-parse', '--verify', 'HEAD'])).stdout.trim();
           if (/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(head)) baseRevision = head;
         } catch { /* A delivery can proceed without a transfer base when Git state is unavailable. */ }
+        try {
+          const branchResult = await git(integrationPath, ['symbolic-ref', '--quiet', '--short', 'HEAD'], { allowFailure: true });
+          const branchName = branchResult.code === 0 ? branchResult.stdout.trim() : '';
+          const branchRef = branchName ? await git(integrationPath, ['check-ref-format', `refs/heads/${branchName}`], { allowFailure: true }) : null;
+          if (branchName && branchRef?.code === 0 && isSafeGitBranchName(branchName)) integrationBranch = branchName;
+        } catch { /* A detached or unavailable integration worktree has no branch hint. */ }
         const trustedScope = assignment?.scope.length ? normalizeScopes(assignment.scope) : null;
         const trustedTaskId = assignment?.taskId ?? basePayload.taskId ?? null;
         this.hostRows.prepare(`INSERT INTO mingle_team_host_artifact_authority(delivery_id,team_id,shared_project_id,group_id,session_id,
@@ -1726,7 +1751,8 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
         const content = artifactContext
           ? `${basePayload.content.slice(0, Math.max(0, 100_000 - artifactContext.length))}${artifactContext}`
           : basePayload.content;
-        const payload = DeliverySchema.parse({ ...basePayload, ...(baseRevision ? { baseRevision } : {}), inputArtifacts, content });
+        const payload = DeliverySchema.parse({ ...basePayload, ...(baseRevision ? { baseRevision } : {}),
+          ...(integrationBranch ? { integrationBranch } : {}), inputArtifacts, content });
         this.hostRows.prepare('UPDATE mingle_team_host_deliveries SET content=?,updated_at=? WHERE delivery_id=?')
           .run(payload.content, new Date(this.now()).toISOString(), context.deliveryId);
         // The destination validates current host role, consent and settings before execution;
@@ -2249,7 +2275,7 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
           kind: 'team-completion', version: 1, phase: 'artifacts', remoteRunId: parsed.data.runId,
           at: parsed.data.at, finalText: parsed.data.finalText ?? '', workspaceBefore: null,
           ...(parsed.data.pushedBranch ? { pushedBranch: parsed.data.pushedBranch } : {}),
-          ...(parsed.data.branchPushFailure ? { branchPushFailure: parsed.data.branchPushFailure } : {}),
+          ...(parsed.data.branchPushFailure ? { branchPushFailure: safeRemoteText(redactSecrets(parsed.data.branchPushFailure)).slice(0, 2_000) } : {}),
           artifacts: parsed.data.artifacts.map((artifact) => ({ source: TeamArtifactRefSchema.parse(artifact), state: 'pending' as const })),
           artifactFailures: [], importedArtifacts: [], integratedArtifacts: [],
         };
@@ -2353,26 +2379,29 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
             this.assertCompletionStillLive(deliveryId);
             const fetched = await fetchTeamCompletionBranch({ worktreePath: workspace.worktreePath,
               branch: pushedBranch.name, commitSha: pushedBranch.commitSha, deliveryId });
+            await git(workspace.worktreePath, ['fetch', '--no-tags', 'origin',
+              `refs/heads/${pushedBranch.name}:refs/remotes/origin/${pushedBranch.name}`],
+            { network: true, allowFailure: true, timeoutMs: 120_000 });
             const authority = this.artifactAuthority(delivery);
             const reviewArtifact = TeamArtifactRefSchema.parse({ revision: fetched.commitSha, ref: fetched.ref,
               ...(authority.task_id ? { taskId: authority.task_id } : {}) });
-            await this.validateArtifactHistory(delivery, authority, reviewArtifact, workspace.worktreePath, false);
+            await this.validateArtifactHistory(delivery, authority, reviewArtifact, workspace.worktreePath, false, pushedBranch.baseCommitSha);
             this.assertCompletionStillLive(deliveryId);
             intent = { ...intent, reviewRef: fetched.ref };
-            this.hostRows.prepare(`INSERT INTO mingle_team_host_review_branches(delivery_id,branch,commit_sha,review_ref,fetch_failure,push_failure)
-              VALUES(?,?,?,?,NULL,?) ON CONFLICT(delivery_id) DO UPDATE SET branch=excluded.branch,commit_sha=excluded.commit_sha,
-              review_ref=excluded.review_ref,fetch_failure=NULL,push_failure=excluded.push_failure`)
-              .run(deliveryId, pushedBranch.name, fetched.commitSha, fetched.ref, intent.branchPushFailure ?? null);
+            this.hostRows.prepare(`INSERT INTO mingle_team_host_review_branches(delivery_id,branch,commit_sha,base_commit_sha,review_ref,fetch_failure,push_failure)
+              VALUES(?,?,?,?,?,NULL,?) ON CONFLICT(delivery_id) DO UPDATE SET branch=excluded.branch,commit_sha=excluded.commit_sha,
+              base_commit_sha=excluded.base_commit_sha,review_ref=excluded.review_ref,fetch_failure=NULL,push_failure=excluded.push_failure`)
+              .run(deliveryId, pushedBranch.name, fetched.commitSha, pushedBranch.baseCommitSha ?? null, fetched.ref, intent.branchPushFailure ?? null);
             this.persistCompletionIntent(deliveryId, intent);
           } catch (error) {
             if (error instanceof CompletionAuthorityError) throw error;
             this.assertCompletionStillLive(deliveryId);
             const failure = redactSecrets(error instanceof Error ? error.message : 'The worker branch could not be fetched and verified.').slice(0, 2_000);
             intent = { ...intent, branchFetchFailure: failure };
-            this.hostRows.prepare(`INSERT INTO mingle_team_host_review_branches(delivery_id,branch,commit_sha,fetch_failure,push_failure)
-              VALUES(?,?,?,?,?) ON CONFLICT(delivery_id) DO UPDATE SET branch=excluded.branch,commit_sha=excluded.commit_sha,
-              fetch_failure=excluded.fetch_failure,push_failure=excluded.push_failure`)
-              .run(deliveryId, pushedBranch.name, pushedBranch.commitSha, failure, intent.branchPushFailure ?? null);
+            this.hostRows.prepare(`INSERT INTO mingle_team_host_review_branches(delivery_id,branch,commit_sha,base_commit_sha,fetch_failure,push_failure)
+              VALUES(?,?,?,?,?,?) ON CONFLICT(delivery_id) DO UPDATE SET branch=excluded.branch,commit_sha=excluded.commit_sha,
+              base_commit_sha=excluded.base_commit_sha,fetch_failure=excluded.fetch_failure,push_failure=excluded.push_failure`)
+              .run(deliveryId, pushedBranch.name, pushedBranch.commitSha, pushedBranch.baseCommitSha ?? null, failure, intent.branchPushFailure ?? null);
             this.persistCompletionIntent(deliveryId, intent);
           }
         } else if (intent.branchPushFailure) {
@@ -2447,7 +2476,7 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
             ? `\n\nWorker branch pushed and fetched for review: origin/${safeArtifactText(intent.pushedBranch.name, 240)} @ ${intent.pushedBranch.commitSha}.\nLocal review ref: ${safeArtifactText(intent.reviewRef, 255)}\nIntegration worktree: ${safeArtifactText(workspace.worktreePath, 4_096)}\nInspect with git show / git diff from that ref, run the project checks, and inspect the running site before accepting.`
             : `\n\nWorker pushed origin/${safeArtifactText(intent.pushedBranch.name, 240)} @ ${intent.pushedBranch.commitSha}, but the host could not fetch and verify it: ${safeArtifactText(intent.branchFetchFailure ?? 'The host review ref is unavailable.', 2_000)}. The existing committed-artifact handoff was used if available.`
           : intent.branchPushFailure
-            ? `\n\nWorker branch push failed: ${safeArtifactText(intent.branchPushFailure, 2_000)}. The existing committed-artifact handoff was used if available.` : '';
+            ? `\n\nWorker branch push failed: ${safeArtifactText(safeRemoteText(intent.branchPushFailure), 2_000)}. The existing committed-artifact handoff was used if available.` : '';
         const workspaceSummary = intent.integratedArtifacts.length
           ? workspaceChanges?.summary.status === 'available'
             ? workspaceChanges.summary.files.length
@@ -2484,6 +2513,7 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
   private async notifyCompletedDelivery(delivery: DeliveryRow, intent: CompletionIntent): Promise<void> {
     if (this.closed) return;
     this.options.groups.onRunFinished(delivery.session_id, delivery.run_id, 'completed');
+    await this.notifyRemoteWorkerCompletion(delivery, intent);
     const project = this.readHost(delivery.team_id, delivery.shared_project_id);
     if (delivery.source_chat_message_id && this.chat && project) {
       // The owner device publishes its signed, delivery-idempotent agent reply. This host
@@ -2497,6 +2527,47 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
     this.hostRows.prepare(`UPDATE mingle_team_host_deliveries SET failure_json=NULL,updated_at=?
       WHERE delivery_id=? AND status='completed' AND failure_json IS NOT NULL`)
       .run(new Date(this.now()).toISOString(), delivery.delivery_id);
+  }
+
+  private async notifyRemoteWorkerCompletion(delivery: DeliveryRow, intent: CompletionIntent): Promise<void> {
+    let group: ReturnType<TeamOrchestrationGroups['get']>;
+    try { group = this.options.groups.get(delivery.group_id); } catch { return; }
+    const groupDelivery = group.deliveries.find((candidate) => candidate.id === delivery.delivery_id);
+    const worker = group.members.find((candidate) => candidate.sessionId === delivery.session_id && !candidate.removedAt);
+    if (!groupDelivery || !worker || !this.isProxySession(worker.sessionId) || groupDelivery.kind === 'assignment'
+      || !['request', 'message'].includes(groupDelivery.kind ?? 'request')
+      || worker.role === 'orchestrator' || group.group.orchestratorMemberId === worker.id) return;
+    if (!intent.reviewRef && !intent.branchPushFailure && !intent.branchFetchFailure) return;
+    const workspace = this.groupWorkspace(delivery.group_id);
+    const settings = this.readHost(delivery.team_id, delivery.shared_project_id);
+    const permissionLevel = settings ? this.settings(settings).permissionLevel : null;
+    let integrationBranch: string | null = null;
+    if (workspace) {
+      try {
+        const result = await git(workspace.worktreePath, ['symbolic-ref', '--quiet', '--short', 'HEAD'], { allowFailure: true });
+        const candidate = result.code === 0 ? result.stdout.trim() : '';
+        const ref = candidate ? await git(workspace.worktreePath, ['check-ref-format', `refs/heads/${candidate}`], { allowFailure: true }) : null;
+        if (candidate && ref?.code === 0 && isSafeGitBranchName(candidate)) integrationBranch = candidate;
+      } catch { /* The notification still explains the available review ref and worktree. */ }
+    }
+    const branch = intent.pushedBranch?.name ?? teamAgentBranch(worker.handle);
+    const summary = [
+      `Remote worker @${safeArtifactText(worker.handle, 32)} completed a non-assignment delivery.`,
+      intent.pushedBranch?.commitSha
+        ? `Branch: origin/${safeArtifactText(branch, 240)} @ ${intent.pushedBranch.commitSha}.`
+        : `Branch: origin/${safeArtifactText(branch, 240)}; push failed, so no origin commit SHA is available. ${safeArtifactText(safeRemoteText(intent.branchPushFailure ?? ''), 1_500)}`,
+      intent.reviewRef ? `Local review ref: ${safeArtifactText(intent.reviewRef, 255)}.`
+        : intent.importedArtifacts.length ? `Imported artifact ref(s): ${intent.importedArtifacts.map((artifact) => safeArtifactText(artifact.ref ?? '', 255)).filter(Boolean).join(', ')}.`
+          : `Local review ref: unavailable${intent.branchFetchFailure ? ` (${safeArtifactText(intent.branchFetchFailure, 1_000)})` : ''}.`,
+      `Integration worktree: ${safeArtifactText(workspace?.worktreePath ?? 'unavailable', 4_096)}.`,
+      'Review the worker diff, merge the accepted changes into the integration branch, and run the project checks.',
+      permissionLevel === 'full-access' && integrationBranch
+        ? `Full-access: after review and checks, push the integration branch normally (never force-push) with git push origin HEAD:${integrationBranch}, then use team_message to tell @${safeArtifactText(worker.handle, 32)} to run git pull --no-rebase origin ${integrationBranch}.`
+        : permissionLevel === 'supervised'
+          ? 'Supervised: ask the human before pushing the integration branch; after approval, use team_message to tell the worker which integration branch to pull.'
+          : 'Integration branch or team permission is unavailable; confirm it before any push, then tell the worker what branch to pull.',
+    ].join('\n');
+    this.options.groups.notifyRemoteCompletion({ groupId: delivery.group_id, deliveryId: delivery.delivery_id, content: summary });
   }
 
   private async assertCompletionAuthority(delivery: DeliveryRow): Promise<void> {
@@ -2725,7 +2796,7 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
   }
 
   private async validateArtifactHistory(delivery: DeliveryRow, authority: ArtifactAuthorityRow, artifact: TeamArtifactRef,
-    worktreePath: string, requireDeclaredPath: boolean): Promise<void> {
+    worktreePath: string, requireDeclaredPath: boolean, branchBaseCommitSha?: string): Promise<void> {
     if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(artifact.revision) || !artifact.ref) {
       throw new HttpError(403, 'A transferred artifact must identify a full revision and verified isolated ref.');
     }
@@ -2741,28 +2812,50 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
     if (base && !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(base)) throw new HttpError(403, 'The host-owned artifact base revision is invalid.');
     const resolved = await git(worktreePath, ['rev-parse', '--verify', '--end-of-options', `${artifact.ref}^{commit}`]);
     if (resolved.stdout.trim().toLowerCase() !== artifact.revision.toLowerCase()) throw new HttpError(403, 'The transferred ref does not resolve to the exact artifact revision.');
-    let range = artifact.revision;
-    if (base) {
+    let scopeRange = artifact.revision;
+    if (branchBaseCommitSha !== undefined) {
+      if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(branchBaseCommitSha)) throw new HttpError(403, 'The worker branch base commit is invalid.');
+      const ancestor = await git(worktreePath, ['merge-base', '--is-ancestor', branchBaseCommitSha, artifact.revision], { allowFailure: true });
+      if (ancestor.code !== 0) throw new HttpError(403, 'The worker branch result is not descended from its reported turn base.');
+      scopeRange = `${branchBaseCommitSha}..${artifact.revision}`;
+    } else if (base) {
       const ancestor = await git(worktreePath, ['merge-base', '--is-ancestor', base, artifact.revision], { allowFailure: true });
       if (ancestor.code !== 0) throw new HttpError(403, 'The transferred artifact is not descended from the host-recorded assignment base.');
-      range = `${base}..${artifact.revision}`;
+      scopeRange = `${base}..${artifact.revision}`;
     }
-    const count = Number((await git(worktreePath, ['rev-list', '--count', range])).stdout.trim());
-    if (!Number.isSafeInteger(count) || count > 10_000) throw new HttpError(403, 'Transferred artifact history exceeds the host verification limit.');
-    const output = count ? await git(worktreePath,
-      ['log', '--format=', '--name-only', '--no-renames', '--root', '-m', '-z', range], { maxBuffer: 8 * 1024 * 1024 }) : { stdout: '' };
-    const changedPaths = [...new Set(output.stdout.split('\0').filter(Boolean))];
-    const normalizedChanges = changedPaths.map((file) => {
+    const readChangedPaths = async (range: string): Promise<string[]> => {
+      if (!range) return [];
+      const count = Number((await git(worktreePath, ['rev-list', '--count', range])).stdout.trim());
+      if (!Number.isSafeInteger(count) || count > 10_000) throw new HttpError(403, 'Transferred artifact history exceeds the host verification limit.');
+      const output = count ? await git(worktreePath,
+        ['log', '--format=', '--name-only', '--no-renames', '--root', '-m', '-z', range], { maxBuffer: 8 * 1024 * 1024 }) : { stdout: '' };
+      return [...new Set(output.stdout.split('\0').filter(Boolean))];
+    };
+    let protectedRange = scopeRange;
+    if (branchBaseCommitSha !== undefined) {
+      const integrationHead = (await git(worktreePath, ['rev-parse', '--verify', 'HEAD'])).stdout.trim();
+      const alreadyContained = await git(worktreePath, ['merge-base', '--is-ancestor', artifact.revision, integrationHead], { allowFailure: true });
+      protectedRange = alreadyContained.code === 0 ? '' : `${integrationHead}..${artifact.revision}`;
+    }
+    const scopeChanges = await readChangedPaths(scopeRange);
+    const protectedChanges = protectedRange === scopeRange ? scopeChanges : await readChangedPaths(protectedRange);
+    const normalize = (files: string[]) => files.map((file) => {
       let normalized: string;
       try { normalized = safeArtifactPath(file); } catch { throw new HttpError(403, 'The transferred history contains an unsafe path.'); }
-      if (file.split('/').some(isDeniedName)) throw new HttpError(403, 'The transferred history contains a protected path.');
-      if (scope && !isPathWithinArtifactScope(normalized, scope)) throw new HttpError(403, `The transferred history changes out-of-scope path ${normalized}.`);
       return normalized;
     });
+    const normalizedScopeChanges = normalize(scopeChanges);
+    const normalizedProtectedChanges = normalize(protectedChanges);
+    for (const file of normalizedProtectedChanges) {
+      if (file.split('/').some(isDeniedName)) throw new HttpError(403, 'The transferred history contains a protected path.');
+    }
+    for (const normalized of normalizedScopeChanges) {
+      if (scope && !isPathWithinArtifactScope(normalized, scope)) throw new HttpError(403, `The transferred history changes out-of-scope path ${normalized}.`);
+    }
     if (requireDeclaredPath) {
       if (!artifact.path) throw new HttpError(403, 'An explicit team artifact must name its committed file.');
       const declared = safeArtifactPath(artifact.path);
-      if (!normalizedChanges.includes(declared)) throw new HttpError(403, 'The declared artifact path is not changed in this transferred history.');
+      if (!normalizedScopeChanges.includes(declared)) throw new HttpError(403, 'The declared artifact path is not changed in this transferred history.');
       if (scope && !isPathWithinArtifactScope(declared, scope)) throw new HttpError(403, 'The declared artifact path is outside the host-owned assignment scope.');
     }
   }

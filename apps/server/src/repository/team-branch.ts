@@ -5,6 +5,10 @@ import { parseRemoteUrl } from './remote.ts';
 
 const FULL_SHA = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i;
 const TEAM_BRANCH = /^mingle\/[a-z][a-z0-9_-]{1,31}\/[a-z0-9][a-z0-9-]{0,79}$/;
+const SAFE_BRANCH = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$/;
+const safeRemoteDiagnostic = (text: string) => text
+  .replace(/\b(?:https?|ssh|git):\/\/[^\s'"<>]+/gi, '[remote]')
+  .replace(/\b[A-Za-z0-9_.-]+@[A-Za-z0-9.-]+:[^\s'"<>]+/g, '[remote]');
 
 function slug(value: string, max: number): string {
   return value.normalize('NFKD').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, max).replace(/-+$/g, '');
@@ -45,6 +49,22 @@ export async function fetchTeamAgentBranch(input: {
   // A failed fetch may simply mean the network is offline. An existing tracking ref remains a
   // usable fallback, but never expose remote stderr (which can contain credentials or URLs).
   return tracked.stdout.trim();
+}
+
+/** Offline-tolerant fetch used only to make a host-supplied integration branch commit available. */
+export async function fetchTeamIntegrationBranch(input: {
+  worktreePath: string; branch: string; signal?: AbortSignal;
+}): Promise<boolean> {
+  const { worktreePath, branch, signal } = input;
+  if (!SAFE_BRANCH.test(branch) || branch.includes('..') || branch.includes('//') || branch.includes('@{')
+    || branch.endsWith('/') || branch.split('/').some((part) => !part || part === '.' || part === '..' || part.endsWith('.lock'))) return false;
+  const validRef = await git(worktreePath, ['check-ref-format', `refs/heads/${branch}`], { allowFailure: true, signal });
+  if (validRef.code !== 0) return false;
+  try { await assertOriginSafe(worktreePath, 'fetch', signal); }
+  catch { return false; }
+  const fetched = await git(worktreePath, ['fetch', '--no-tags', '--no-recurse-submodules', 'origin', branch],
+    { network: true, allowFailure: true, signal, timeoutMs: 120_000 });
+  return fetched.code === 0;
 }
 
 async function assertOriginSafe(top: string, action: 'push' | 'fetch', signal?: AbortSignal): Promise<void> {
@@ -99,7 +119,7 @@ export async function pushTeamCompletionBranch(input: {
   const result = await git(worktreePath, ['push', '--no-follow-tags', '--recurse-submodules=no', '--', 'origin', `refs/heads/${branch}:refs/heads/${branch}`], {
     network: true, allowFailure: true, signal, timeoutMs: 120_000,
   });
-  if (result.code !== 0) throw new Error(result.stderr.trim().slice(0, 1_500) || 'The origin rejected the team branch push.');
+  if (result.code !== 0) throw new Error(safeRemoteDiagnostic(result.stderr.trim()).slice(0, 1_500) || 'The origin rejected the team branch push.');
   return { branch, commitSha: head };
 }
 
@@ -121,7 +141,7 @@ export async function fetchTeamCompletionBranch(input: {
   const fetched = await git(worktreePath, ['fetch', '--no-tags', '--no-recurse-submodules', 'origin', refspec], {
     network: true, allowFailure: true, signal, timeoutMs: 120_000,
   });
-  if (fetched.code !== 0) throw new Error(fetched.stderr.trim().slice(0, 1_500) || 'The origin branch could not be fetched.');
+  if (fetched.code !== 0) throw new Error(safeRemoteDiagnostic(fetched.stderr.trim()).slice(0, 1_500) || 'The origin branch could not be fetched.');
   const resolved = await git(worktreePath, ['rev-parse', '--verify', '--end-of-options', `${ref}^{commit}`], { signal });
   if (resolved.stdout.trim().toLowerCase() !== commitSha.toLowerCase()) {
     throw new Error(`Origin branch ${branch} no longer points at the worker-reported commit.`);

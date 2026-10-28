@@ -63,6 +63,7 @@ export interface TeamOrchestrationGroups {
   setTeamDispatchGuard(guard: (sessionId: string, groupId: string) => Promise<boolean>): void;
   setTeamRunFinishedHook(hook: (input: { sessionId: string; runId: string; outcome: 'completed' | 'failed' | 'interrupted'; groupId: string; deliveryId: string }) => void): void;
   holdTeamMember(sessionId: string, reason: string): void;
+  notifyRemoteCompletion(input: { groupId: string; deliveryId: string; content: string }): boolean;
 }
 
 export interface TeamOrchestrationCollaboration {

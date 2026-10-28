@@ -14,6 +14,9 @@ import { AgentHandleSchema, GroupModeSchema } from './groups';
 const Id = z.string().trim().min(1).max(100);
 const Uuid = z.string().uuid();
 const IsoTime = z.string().datetime({ offset: true });
+const SafeGitBranchNameSchema = z.string().min(1).max(200).regex(/^[A-Za-z0-9][A-Za-z0-9._/-]*$/)
+  .refine((branch) => !branch.includes('..') && !branch.includes('//') && !branch.includes('@{') && !branch.endsWith('/')
+    && branch.split('/').every((part) => part && part !== '.' && part !== '..' && !part.endsWith('.lock')));
 
 /** Group-wide permission level chosen by the team lead. Applies to every agent in the group. */
 export const TeamPermissionLevelSchema = z.enum(['supervised', 'full-access']);
@@ -255,6 +258,8 @@ export const TeamDeliveryPayloadSchema = z.object({
   scope: z.array(z.string().min(1).max(1000)).min(1).max(40).optional(),
   /** Git base the run should start from, if known. */
   baseRevision: z.string().regex(/^[0-9a-f]{40}([0-9a-f]{24})?$/).optional(),
+  /** Host integration branch name, used for the owner's safe start-of-turn pull. */
+  integrationBranch: SafeGitBranchNameSchema.optional(),
   inputArtifacts: z.array(TeamArtifactRefSchema).max(30).default([]),
   /** Device that should receive committed artifacts (the orchestrator's device). */
   integrationDeviceId: Uuid,

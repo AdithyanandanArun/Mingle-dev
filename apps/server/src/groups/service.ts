@@ -122,6 +122,9 @@ export class GroupService {
   constructor(options: GroupServiceOptions) {
     this.store = options.store;
     this.repo = new GroupRepo(options.store.db);
+    this.store.db.exec(`CREATE TABLE IF NOT EXISTS group_remote_completion_notifications (
+      delivery_id TEXT PRIMARY KEY, result_delivery_id TEXT NOT NULL, created_at TEXT NOT NULL
+    )`);
     this.workspace = options.workspace;
     this.tasks = options.tasks;
     this.handoffs = options.handoffs;
@@ -2618,6 +2621,48 @@ export class GroupService {
       this.event(group, 'group.result.queued', 'Worker results queued for the coordinator', { requestId: request.id, workers: reportable.length });
       if (blockedByBudget) this.holdBudget(group, request.id, 'Worker results are ready, but reviewing them needs another model turn or message hop. The result delivery is retained; raise the applicable group limit and resume, or address the coordinator in a new request.');
     }
+  }
+
+  /** Durable one-shot review wakeup for completed cross-device worker requests/messages. */
+  notifyRemoteCompletion(input: { groupId: string; deliveryId: string; content: string }): boolean {
+    if (this.closed) return false;
+    const source = this.repo.getDelivery(input.deliveryId);
+    if (!source || source.groupId !== input.groupId || source.status !== 'completed'
+      || source.kind === 'assignment' || !['request', 'message'].includes(source.kind)) return false;
+    const group = this.repo.getGroup(source.groupId);
+    const request = this.repo.getRequest(source.requestId);
+    const worker = this.repo.getMember(source.memberId);
+    if (!group || !request || !worker || worker.removedAt || worker.role !== 'worker'
+      || !this.store.db.prepare('SELECT 1 AS found FROM mingle_team_proxy_sessions WHERE session_id=?').get(worker.sessionId)) return false;
+    const targetId = group.mode === 'cowork' ? request.plannerMemberId : group.orchestratorMemberId ?? request.plannerMemberId;
+    const target = this.repo.getMember(targetId);
+    if (!target || target.removedAt || target.id === worker.id) return false;
+    const hop = source.hop + 1;
+    const committed = request.turnsUsed + this.repo.requestDeliveries(request.id, ['queued']).length;
+    const turnLimit = effectiveTurnLimit(group);
+    const blockedByBudget = hop > group.maxHops || (turnLimit !== null && committed >= turnLimit);
+    const resultDeliveryId = deliveryId();
+    let inserted = false;
+    this.store.tx(() => {
+      const prior = this.store.db.prepare('SELECT 1 AS found FROM group_remote_completion_notifications WHERE delivery_id=?')
+        .get(source.id);
+      if (prior) return;
+      const message = this.repo.insertMessage({ groupId: group.id, senderMemberId: null, recipients: [target.id], kind: 'status',
+        content: clean(input.content, LIMITS.message), requestId: request.id, sourceRunId: source.runId });
+      this.repo.insertDelivery({ id: resultDeliveryId, groupId: group.id, requestId: request.id, messageId: message.id,
+        memberId: target.id, kind: 'result', hop });
+      this.store.db.prepare('INSERT INTO group_remote_completion_notifications(delivery_id,result_delivery_id,created_at) VALUES(?,?,?)')
+        .run(source.id, resultDeliveryId, nowIso());
+      this.repo.updateRequest(request.id, { status: 'active' });
+      this.event(group, 'group.result.queued', 'Remote worker completion queued for the orchestrator',
+        { requestId: request.id, deliveryId: source.id, resultDeliveryId, worker: worker.handle });
+      inserted = true;
+    });
+    if (!inserted) return false;
+    if (blockedByBudget) this.holdBudget(group, request.id,
+      'A remote worker result is ready, but reviewing it needs another model turn or message hop. The result delivery is retained; raise the applicable group limit and resume, or address the coordinator in a new request.');
+    this.schedule(group.id);
+    return true;
   }
 
   /** A worker's already-queued reply request carries its completion note; do not add a duplicate result turn. */

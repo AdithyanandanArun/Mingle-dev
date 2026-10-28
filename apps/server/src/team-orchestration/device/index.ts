@@ -27,7 +27,7 @@ import { git, trimmed } from '../../repository/git-run.ts';
 import { TeamMcpProxy } from './mcp-proxy.ts';
 import { createCommit } from '../../repository/commit.ts';
 import { signingConfigured } from '../../repository/inspect.ts';
-import { fetchTeamAgentBranch, pushTeamCompletionBranch, teamAgentBranch } from '../../repository/team-branch.ts';
+import { fetchTeamAgentBranch, fetchTeamIntegrationBranch, pushTeamCompletionBranch, teamAgentBranch } from '../../repository/team-branch.ts';
 import { isDeniedName, normalizeRelative } from '../../paths.ts';
 import { normalizeScopes, safeArtifactPath, scopesOverlap } from '../../groups/routing.ts';
 
@@ -982,7 +982,7 @@ export function createDeviceSide(deps: DeviceSideDeps): {
       if (!branchExists && !remoteBranch && baseRevision) {
         const baseExists = await git(projectRoot, ['cat-file', '-e', `${baseRevision}^{commit}`], { allowFailure: true, maxBuffer: 4096 });
         if (baseExists.code !== 0 && integrationBranch) {
-          await git(projectRoot, ['fetch', '--no-tags', 'origin', integrationBranch], { network: true, allowFailure: true, timeoutMs: 120_000 });
+          await fetchTeamIntegrationBranch({ worktreePath: projectRoot, branch: integrationBranch });
         }
         const verifiedBase = await git(projectRoot, ['cat-file', '-e', `${baseRevision}^{commit}`], { allowFailure: true, maxBuffer: 4096 });
         if (verifiedBase.code !== 0) throw new HttpError(409, 'The delivery base revision is not available in the owner-selected project repository.');
@@ -1002,7 +1002,7 @@ export function createDeviceSide(deps: DeviceSideDeps): {
       const head = trimmed(await git(worktreePath, ['rev-parse', '--verify', 'HEAD']));
       const isAncestor = await git(worktreePath, ['merge-base', '--is-ancestor', baseRevision, head], { allowFailure: true });
       if (isAncestor.code !== 0) {
-        await git(worktreePath, ['fetch', '--no-tags', 'origin', integrationBranch], { network: true, allowFailure: true, timeoutMs: 120_000 });
+        await fetchTeamIntegrationBranch({ worktreePath, branch: integrationBranch });
         const available = await git(worktreePath, ['cat-file', '-e', `${baseRevision}^{commit}`], { allowFailure: true, maxBuffer: 4096 });
         if (available.code !== 0) {
           integrationNote = `Mingle could not update from origin/${integrationBranch}: host integration commit ${baseRevision} is not available locally. The host may not have pushed it yet; continue on your existing branch.`;
