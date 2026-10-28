@@ -2539,6 +2539,10 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
       || !['request', 'message'].includes(groupDelivery.kind ?? 'request')
       || worker.role === 'orchestrator' || group.group.orchestratorMemberId === worker.id) return;
     if (!intent.reviewRef && !intent.branchPushFailure && !intent.branchFetchFailure) return;
+    // A reply turn that only re-published the unchanged branch has nothing new to review.
+    const pushed = intent.pushedBranch;
+    if (pushed?.baseCommitSha && pushed.baseCommitSha.toLowerCase() === pushed.commitSha.toLowerCase()
+      && !intent.branchPushFailure && !intent.branchFetchFailure) return;
     const workspace = this.groupWorkspace(delivery.group_id);
     const settings = this.readHost(delivery.team_id, delivery.shared_project_id);
     const permissionLevel = settings ? this.settings(settings).permissionLevel : null;

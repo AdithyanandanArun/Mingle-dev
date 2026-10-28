@@ -1524,6 +1524,36 @@ it('queues one review wake for a remote worker request but not when the completi
   expect(orchestratorFx.remoteCompletionNotices).toEqual([]);
 });
 
+it('does not wake the orchestrator when a remote reply turn re-publishes an unchanged branch', async () => {
+  const fx = fixture();
+  const originRoot = tmpDir('mingle-team-host-origin-'); paths.push(originRoot);
+  const origin = path.join(originRoot, 'origin.git');
+  mkdirSync(origin);
+  execFileSync('git', ['init', '-q', '--bare', '--initial-branch=main', origin]);
+  runGit(fx.project.path, 'remote', 'add', 'origin', origin);
+  runGit(fx.project.path, 'push', '-u', 'origin', 'main');
+  const head = runGit(fx.project.path, 'rev-parse', 'HEAD').trim();
+  const group = await addRemoteToSession(fx);
+  const worker = group.members.find((member) => member.sessionId.startsWith('proxy_'))!;
+  const branch = teamAgentBranch(worker.handle);
+  runGit(fx.project.path, 'push', 'origin', `${head}:refs/heads/${branch}`);
+  const deliveryId = `unchanged-reply-${randomUUID()}`;
+  const requestId = `unchanged-request-${randomUUID()}`;
+  const runId = `unchanged-run-${randomUUID()}`;
+  group.deliveries.push({ id: deliveryId, groupId: group.group.id, requestId, messageId: `message-${deliveryId}`, memberId: worker.id,
+    status: 'running', runId, hop: 0, error: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), kind: 'message' });
+  const userMessage = fx.store.insertMessage({ sessionId: worker.sessionId, role: 'user', content: 'Did you pull?', runId, kind: 'group-delivery' });
+  fx.store.insertRun({ id: runId, sessionId: worker.sessionId, userMessageId: userMessage.id, provider: 'codex', model: 'test-model', startedAt: new Date().toISOString() });
+  fx.host.start({ session: fx.store.getSession(worker.sessionId)!, runId, content: 'Did you pull?', options: { groupDeliveryId: deliveryId },
+    context: { groupId: group.group.id, memberId: worker.id, requestId, deliveryId, hop: 0, instructions: 'Team instructions' } });
+  await waitFor(() => fx.outgoing.some((entry) => entry.kind === 'teamgroup.delivery' && (entry.payload as { deliveryId?: string }).deliveryId === deliveryId));
+  await fx.incoming('teamgroup.delivery.status', { sharedProjectId: SHARED, deliveryId, agentId: REMOTE_AGENT, status: 'completed',
+    runId: `owner-${runId}`, finalText: 'Yes, already up to date.', artifacts: [],
+    pushedBranch: { name: branch, commitSha: head, baseCommitSha: head }, at: new Date().toISOString() });
+  await waitFor(() => fx.finished.some((entry) => entry.runId === runId));
+  expect(fx.remoteCompletionNotices).toEqual([]);
+});
+
 it('releases sender ordering after persisting completion before waiting on a retrying artifact import', async () => {
   let markImportEntered!: () => void;
   let releaseImport!: () => void;
