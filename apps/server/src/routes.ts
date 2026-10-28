@@ -368,7 +368,12 @@ export function buildRouter(s: Services) {
     const patch = await ctx.body(UpdateSessionSchema);
     const session = s.store.getSession(id);
     if (s.groups.forSession(id) && patch.provider && patch.provider !== session?.provider) throw conflict('Group members retain their provider identity. Add another agent to use a different provider.');
-    return s.workspace.updateSession(id, patch);
+    const updated = s.workspace.updateSession(id, patch);
+    if (patch.policy !== undefined && patch.policy !== session?.policy) {
+      await s.teamOrchestration.host.sessionPolicyChanged(id);
+      return s.store.getSession(id) ?? updated;
+    }
+    return updated;
   });
   add('DELETE', '/api/sessions/:id', async (ctx) => {
     const id = param(ctx, 'id');

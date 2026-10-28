@@ -11,7 +11,7 @@ import {
   TeamStructurePayloadSchema, TeamAgentActivityEntrySchema, TeamArtifactRefSchema, TeamArtifactSchema, UpdateTeamConsentSchema,
 } from '@mingle/contracts';
 import type {
-  Policy, ProviderFailure, TeamAgentActivity, TeamAgentActivityEntry, TeamArtifactRef, TeamConsent, TeamConsentState,
+  ProviderFailure, TeamAgentActivity, TeamAgentActivityEntry, TeamArtifactRef, TeamConsent, TeamConsentState,
   TeamDeliveryPayload, TeamPermissionLevel, TeamStructurePayload,
 } from '@mingle/contracts';
 import { ProviderFailureSchema } from '@mingle/contracts';
@@ -103,10 +103,6 @@ function nextConsentAt(previous?: Pick<TeamConsent, 'updatedAt'>): string {
   return date.toISOString();
 }
 const permissionRank = (value: TeamPermissionLevel) => value === 'supervised' ? 0 : 1;
-const policyRank: Record<Policy, number> = { supervised: 0, balanced: 1, auto: 2, 'full-access': 3 };
-function mostRestrictivePolicy(...policies: Policy[]): Policy {
-  return policies.reduce((strictest, policy) => policyRank[policy] < policyRank[strictest] ? policy : strictest);
-}
 
 function pathInAssignmentScope(file: string, scope: string[] | null): boolean {
   if (!scope) return true;
@@ -1124,7 +1120,11 @@ export function createDeviceSide(deps: DeviceSideDeps): {
       const consent = localConsent(payload.sharedProjectId);
       const session = deps.store.getSession(sessionId);
       if (!consent || consent.state !== 'granted' || !session) throw new HttpError(409, 'The local agent consent or session changed before execution.');
-      const runPolicy = mostRestrictivePolicy(session.policy, payload.permissionLevel, consent.permissionLevel);
+      // Keep the owner runtime's native gate at its conservative mode for the whole delivery.
+      // The host can then raise or lower team authority while the provider is still running:
+      // each native approval is mirrored, and the host auto-approves only when current team
+      // settings and the owner's consent both permit it.
+      const runPolicy = 'supervised' as const;
       const controller = new AbortController();
       const requestEntry = TeamAgentActivityEntrySchema.parse({ id: randomUUID(), runId: null, at: ISO(), kind: 'request',
         text: safeText(payload.content, 8_000) });

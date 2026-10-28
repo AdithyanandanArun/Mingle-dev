@@ -8,7 +8,7 @@ import {
   TeamToolResultPayloadSchema, TeamArtifactRefSchema,
   type ProviderFailure, type TeamAgentRole, type TeamAgentState, type TeamConsentState,
   type TeamAvailableAgentsSnapshot, type TeamLeaderChange, type TeamPermissionLevel, type TeamStructureMember, type TeamSessionRef,
-  type TeamArtifactRef, type TeamOrchestrationSettings, type TeamStructureSnapshot,
+  type TeamArtifactRef, type TeamOrchestrationSettings, type TeamStructureSnapshot, type Session,
 } from '@mingle/contracts';
 import { ProviderFailureSchema, ProviderSchema, TeamStructurePayloadSchema as StructureSchema } from '@mingle/contracts';
 import type { DatabaseSync } from 'node:sqlite';
@@ -79,6 +79,7 @@ type ProjectContext = ProjectCollaborationSnapshot & {
 
 const liveDelivery = (status: string) => ['queued', 'accepted', 'running', 'awaiting-approval'].includes(status);
 const rankPermission = (value: TeamPermissionLevel): number => value === 'full-access' ? 1 : 0;
+const teamPermissionForPolicy = (policy: Session['policy']): TeamPermissionLevel => policy === 'full-access' ? 'full-access' : 'supervised';
 const publishableLocalProviders = new Set(['claude', 'codex', 'opencode']);
 const safeJson = <T>(text: string, fallback: T): T => { try { return JSON.parse(text) as T; } catch { return fallback; } };
 const safeArtifactText = (value: string, max: number): string => redactSecrets(value).replace(/[\u0000-\u001f\u007f]/g, ' ').slice(0, max);
@@ -510,7 +511,7 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
         const session = this.options.store.getSession(sessionId, true);
         if (!session) {
           this.options.store.insertSession({ id: sessionId, projectId: context.localProjectId, name: `${agent.name} (team proxy)`.slice(0, 100),
-            provider: provider.data, model: agent.model, effort: 'medium', status: 'idle', policy: 'supervised', isolated: false,
+            provider: provider.data, model: agent.model, effort: 'medium', status: 'idle', policy: settings.permissionLevel, isolated: false,
             worktreePath: this.options.store.getProject(context.localProjectId)!.path, branch: null });
         } else {
           if (!this.options.store.getSession(sessionId)) this.options.store.restoreSession(sessionId);
@@ -518,6 +519,7 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
             ...(session.name !== `${agent.name} (team proxy)`.slice(0, 100) ? { name: `${agent.name} (team proxy)`.slice(0, 100) } : {}),
             ...(session.provider !== provider.data ? { provider: provider.data } : {}),
             ...(session.model !== agent.model ? { model: agent.model } : {}),
+            ...(session.policy !== settings.permissionLevel ? { policy: settings.permissionLevel } : {}),
           };
           if (Object.keys(patch).length) this.options.store.updateSession(sessionId, patch);
         }
@@ -654,9 +656,6 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
       const settings = prior!;
       if (input.permissionLevel === settings.permissionLevel) return this.structureSnapshot(projectId, { reconcileRoster: false });
       if (input.expectedVersion === undefined) throw new HttpError(409, 'Include the current expectedVersion when changing team orchestration settings.');
-      if (boundGroup.deliveries.some((delivery) => delivery.status === 'running')) {
-        throw new HttpError(409, 'Wait for active team deliveries before changing orchestration settings.');
-      }
       const next = TeamOrchestrationSettingsSchema.parse({ ...settings, permissionLevel: input.permissionLevel,
         version: settings.version + 1, updatedAt: new Date(this.now()).toISOString(), updatedByAccountId: context.accountId });
       this.options.store.tx(() => {
@@ -664,9 +663,12 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
         if (!latest || this.settings(latest).version !== settings.version) throw new HttpError(409, 'Team orchestration settings changed. Refresh and try again.');
         this.persistSettings(latest, next);
         this.markLowerConsentsForReconsent(context, settings.permissionLevel, next);
+        this.syncTeamRoster(context, row!.group_id, next);
+        this.syncTeamSessionPolicyInStore(boundGroup!.group.anchorSessionId, next.permissionLevel);
       });
       row = this.readHost(context.project.teamId, context.project.sharedProjectId)!;
       await this.broadcastStructure(context, row, { reconcileRoster: false });
+      if (rankPermission(next.permissionLevel) > rankPermission(settings.permissionLevel)) this.autoApproveEligibleApprovals(row);
       return this.structureSnapshot(projectId, { reconcileRoster: false });
     }
     if (!row && input.expectedVersion !== undefined) throw new HttpError(409, 'Team orchestration settings changed. Refresh and try again.');
@@ -780,6 +782,7 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
     const groupId = boundGroup?.group.id ?? `group_${randomUUID().replaceAll('-', '')}`;
     this.options.store.tx(() => {
       this.syncSessions(context, settings, { agentIds: new Set(teamSessionAgents.map(({ agent }) => agent.id)), restoreRemoved: true });
+      this.syncTeamSessionPolicyInStore(session.id, settings.permissionLevel);
       for (const { agent, groupMember } of teamSessionAgents) {
         if (!groupMember) continue;
         const role: TeamAgentRole = agent.id === orchestratorAgentId ? 'orchestrator' : groupMember.held ? 'idle' : 'worker';
@@ -828,7 +831,9 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
         throw new HttpError(404, `Team agent ${input.agentId} is unknown or unusable.`);
       }
       const currentRow = this.readHost(teamId, sharedProjectId);
-      const permissionLevel = currentRow ? this.settings(currentRow).permissionLevel : 'supervised';
+      const defaultAnchorSessionId = anchorSessionId ?? (requestedGroupId ? this.groupOrNull(requestedGroupId)?.group.anchorSessionId : undefined);
+      const defaultAnchor = defaultAnchorSessionId ? this.options.store.getSession(defaultAnchorSessionId, true) : undefined;
+      const permissionLevel = currentRow ? this.settings(currentRow).permissionLevel : teamPermissionForPolicy(defaultAnchor?.policy ?? 'supervised');
       const consentRow = this.consentRowForAddition(context, agent, permissionLevel);
 
       let groupId = requestedGroupId;
@@ -910,7 +915,8 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
       ?? activeMembers.find((member) => member.sessionId === group.anchorSessionId);
     if (!orchestratorMember) throw new HttpError(409, 'Choose an active group orchestrator before adding a teammate agent.');
     const orchestratorAgent = context.agents.find((candidate) => candidate.sessionId === orchestratorMember.sessionId && candidate.deviceId === context.localDeviceId);
-    const permissionLevel = currentRow ? this.settings(currentRow).permissionLevel : 'supervised';
+    const anchorSession = this.options.store.getSession(groupSnapshot.group.anchorSessionId, true);
+    const permissionLevel = currentRow ? this.settings(currentRow).permissionLevel : teamPermissionForPolicy(anchorSession?.policy ?? 'supervised');
     const minimumVersion = Math.max(1, Number(consentRow.settings_version) || 1);
     const priorSettings = currentRow?.group_id === groupId ? this.settings(currentRow) : null;
     const nextVersion = currentRow ? Math.max(this.settings(currentRow).version + 1, minimumVersion) : minimumVersion;
@@ -1140,9 +1146,14 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
   }
 
   private async enableLocked(projectId: string, rawInput: unknown): Promise<TeamStructureSnapshot> {
-    const input = EnableTeamOrchestrationSchema.parse(rawInput);
     const context = await this.requireEditor(projectId);
     const { teamId, sharedProjectId } = context.project;
+    const submitted = rawInput && typeof rawInput === 'object' && !Array.isArray(rawInput) ? rawInput as Record<string, unknown> : {};
+    const selectedId = typeof submitted.orchestratorAgentId === 'string' ? submitted.orchestratorAgentId : '';
+    const selectedForDefault = context.agents.find((agent) => agent.id === selectedId);
+    const selectedSessionForDefault = selectedForDefault?.sessionId ? this.options.store.getSession(selectedForDefault.sessionId, true) : undefined;
+    const input = EnableTeamOrchestrationSchema.parse({ ...submitted,
+      permissionLevel: submitted.permissionLevel ?? teamPermissionForPolicy(selectedSessionForDefault?.policy ?? 'supervised') });
     const current = this.readHost(teamId, sharedProjectId);
     if (current) throw new HttpError(409, 'Team orchestration is already enabled.');
     const selected = context.agents.find((agent) => agent.id === input.orchestratorAgentId);
@@ -1161,6 +1172,7 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
     this.options.store.tx(() => {
       // Explicit enable preserves the historic behavior of adopting all currently published agents.
       const members = this.syncSessions({ ...context, isHost: true }, settings, { includeUnlisted: true });
+      if (selected.deviceId === context.localDeviceId) this.syncTeamSessionPolicyInStore(selected.sessionId!, settings.permissionLevel);
       const orchestrator = context.agents.find((agent) => agent.id === settings.orchestratorAgentId)!;
       const orchestratorMember = members.find((member) => member.handle === this.handleFor(teamId, sharedProjectId, orchestrator.id));
       if (!orchestratorMember) throw new HttpError(409, 'The selected orchestrator has no usable local or proxy session.');
@@ -1185,15 +1197,17 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
       .extend({ fallbackAgentIds: TeamOrchestrationSettingsSchema.shape.fallbackAgentIds.optional(), expectedVersion: TeamOrchestrationSettingsSchema.shape.version }).strict().parse(rawInput);
     const { context, row } = await this.loadContextForHost(projectId);
     const group = this.groupOrNull(row.group_id);
-    if (group?.deliveries.some((delivery) => delivery.status === 'running')) {
-      throw new HttpError(409, 'Wait for active team deliveries before changing orchestration settings.');
-    }
     const member = context.members.find((candidate) => candidate.accountId === context.accountId);
     if (!member || !['leader', 'admin'].includes(member.role)) throw new HttpError(403, 'Only a team lead or admin can change team orchestration.');
     const prior = this.settings(row);
     if (input.expectedVersion !== prior.version) throw new HttpError(409, 'Team orchestration settings changed. Refresh and try again.');
     const { expectedVersion: _expectedVersion, ...patch } = input;
     const fallbackIds = input.fallbackAgentIds ?? prior.fallbackAgentIds;
+    const otherSettingsChanged = input.leaderOrchestration !== undefined && input.leaderOrchestration !== prior.leaderOrchestration
+      || input.fallbackAgentIds !== undefined && JSON.stringify(input.fallbackAgentIds) !== JSON.stringify(prior.fallbackAgentIds);
+    if (otherSettingsChanged && group?.deliveries.some((delivery) => liveDelivery(delivery.status))) {
+      throw new HttpError(409, 'Wait for active team deliveries before changing orchestration settings.');
+    }
     const activeRoster = this.hostRows.prepare(`SELECT agent_id,role FROM mingle_team_host_roster WHERE team_id=? AND shared_project_id=? AND removed_at IS NULL`)
       .all(context.project.teamId, context.project.sharedProjectId) as Array<{ agent_id: string; role: TeamAgentRole }>;
     if (new Set(fallbackIds).size !== fallbackIds.length || fallbackIds.includes(prior.orchestratorAgentId ?? '')
@@ -1205,19 +1219,14 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
       updatedAt: new Date(this.now()).toISOString(), updatedByAccountId: context.accountId });
     this.options.store.tx(() => {
       this.persistSettings(row, next);
-      if (rankPermission(next.permissionLevel) > rankPermission(prior.permissionLevel)) {
-        // Only consents given below the new level need renewing; an owner who already allowed it keeps sharing.
-        const below = TeamPermissionLevelSchema.options.filter((level) => rankPermission(level) < rankPermission(next.permissionLevel));
-        if (below.length) {
-          this.hostRows.prepare(`UPDATE mingle_team_host_consents SET state='needs-reconsent',updated_at=? WHERE team_id=? AND shared_project_id=? AND state='granted'
-            AND permission_level IN (${below.map(() => '?').join(',')})`)
-            .run(next.updatedAt, context.project.teamId, context.project.sharedProjectId, ...below);
-        }
-      }
+      this.markLowerConsentsForReconsent(context, prior.permissionLevel, next);
       if (group) this.syncTeamRoster(context, row.group_id, next);
       else this.syncSessions(context, next);
+      if (group) this.syncTeamSessionPolicyInStore(group.group.anchorSessionId, next.permissionLevel);
     });
-    await this.broadcastStructure(context, this.readHost(context.project.teamId, context.project.sharedProjectId)!);
+    const updatedRow = this.readHost(context.project.teamId, context.project.sharedProjectId)!;
+    await this.broadcastStructure(context, updatedRow);
+    if (rankPermission(next.permissionLevel) > rankPermission(prior.permissionLevel)) this.autoApproveEligibleApprovals(updatedRow);
     return this.structureSnapshot(projectId);
   }
 
@@ -1340,8 +1349,80 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
       .run(next.updatedAt, context.project.teamId, context.project.sharedProjectId, ...lowerLevels);
   }
 
+  /** Keeps the persisted anchor policy and host-only proxy policies aligned with the team setting. */
+  private syncTeamSessionPolicyInStore(sessionId: string, permissionLevel: TeamPermissionLevel): void {
+    const session = this.options.store.getSession(sessionId, true);
+    if (session && session.policy !== permissionLevel) this.options.store.updateSession(sessionId, { policy: permissionLevel });
+  }
+
+  /**
+   * The ordinary session policy control is authoritative for the canonical team-session anchor.
+   * The reverse direction is applied by team-setting mutations above; direct Store writes here do
+   * not emit session.updated events, so the two paths cannot echo each other.
+   */
+  async sessionPolicyChanged(sessionId: string): Promise<void> {
+    const session = this.options.store.getSession(sessionId, true);
+    if (!session) return;
+    const rows = this.hostRows.prepare(`SELECT * FROM mingle_team_host_projects
+      WHERE local_project_id=? AND group_id!=''`).all(session.projectId) as HostRow[];
+    for (const candidate of rows) {
+      const group = this.groupOrNull(candidate.group_id);
+      if (!group || group.group.anchorSessionId !== sessionId) continue;
+      await this.mutations.run(`${candidate.team_id}\0${candidate.shared_project_id}`, async () => {
+        const context = await this.requireEditor(session.projectId);
+        const row = this.readHost(candidate.team_id, candidate.shared_project_id);
+        const currentGroup = row ? this.groupOrNull(row.group_id) : null;
+        if (!row || !currentGroup || currentGroup.group.anchorSessionId !== sessionId) return;
+        const prior = this.settings(row);
+        const currentSession = this.options.store.getSession(sessionId, true);
+        if (!currentSession) return;
+        const permissionLevel = teamPermissionForPolicy(currentSession.policy);
+        const changed = permissionLevel !== prior.permissionLevel;
+        const next = changed ? TeamOrchestrationSettingsSchema.parse({ ...prior, permissionLevel,
+          version: prior.version + 1, updatedAt: new Date(this.now()).toISOString(), updatedByAccountId: context.accountId }) : prior;
+        this.options.store.tx(() => {
+          const latest = this.readHost(candidate.team_id, candidate.shared_project_id);
+          if (!latest || this.settings(latest).version !== prior.version) throw new HttpError(409, 'Team orchestration settings changed. Refresh and try again.');
+          if (changed) {
+            this.persistSettings(latest, next);
+            this.markLowerConsentsForReconsent(context, prior.permissionLevel, next);
+          }
+          this.syncTeamRoster(context, row.group_id, next);
+          this.syncTeamSessionPolicyInStore(sessionId, next.permissionLevel);
+        });
+        const updatedRow = this.readHost(candidate.team_id, candidate.shared_project_id)!;
+        await this.broadcastStructure(context, updatedRow, { reconcileRoster: false });
+        if (changed && rankPermission(next.permissionLevel) > rankPermission(prior.permissionLevel)) this.autoApproveEligibleApprovals(updatedRow);
+      });
+    }
+  }
+
+  /** Approves host-mirrored requests only when both the team setting and owner consent allow it. */
+  private autoApproveEligibleApprovals(row: HostRow): void {
+    const settings = this.settings(row);
+    if (settings.permissionLevel !== 'full-access') return;
+    const pending = this.hostRows.prepare(`SELECT a.approval_id,d.agent_id FROM mingle_team_host_approvals a
+      JOIN mingle_team_host_deliveries d ON d.delivery_id=a.delivery_id
+      WHERE a.team_id=? AND a.shared_project_id=? AND a.state='pending'
+        AND d.status IN ('queued','accepted','running','awaiting-approval')`)
+      .all(row.team_id, row.shared_project_id) as Array<{ approval_id: string; agent_id: string }>;
+    for (const item of pending) {
+      const consent = this.hostRows.prepare(`SELECT state,permission_level FROM mingle_team_host_consents
+        WHERE team_id=? AND shared_project_id=? AND agent_id=?`).get(row.team_id, row.shared_project_id, item.agent_id) as
+          { state: string; permission_level: string } | undefined;
+      const parsed = TeamPermissionLevelSchema.safeParse(consent?.permission_level);
+      if (consent?.state !== 'granted' || !parsed.success || rankPermission(parsed.data) < rankPermission(settings.permissionLevel)) continue;
+      try { this.decideApproval(item.approval_id, 'approved'); }
+      catch { /* A stale request is left to its existing expiry/recovery path. */ }
+    }
+  }
+
   async structure(projectId: string): Promise<TeamStructureSnapshot> {
     const context = await this.context(projectId);
+    const hostRow = context.isHost ? this.readHost(context.project.teamId, context.project.sharedProjectId) : undefined;
+    const boundGroup = hostRow?.group_id ? this.groupOrNull(hostRow.group_id) : null;
+    const anchor = boundGroup ? this.options.store.getSession(boundGroup.group.anchorSessionId, true) : undefined;
+    if (anchor && hostRow && anchor.policy !== this.settings(hostRow).permissionLevel) await this.sessionPolicyChanged(anchor.id);
     return this.mutations.run(this.mutationKey(context), async () => {
       const currentContext = await this.context(projectId);
       const row = this.readHost(currentContext.project.teamId, currentContext.project.sharedProjectId);
@@ -2656,6 +2737,8 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
       VALUES(?,?,?,?,?,?,'pending',?)`).run(approval.id, delivery.team_id, delivery.shared_project_id, delivery.delivery_id, parsed.data.approvalId,
       delivery.owner_device_id, parsed.data.expiresAt);
     this.options.store.touch();
+    const hostRow = this.readHost(delivery.team_id, delivery.shared_project_id);
+    if (hostRow) this.autoApproveEligibleApprovals(hostRow);
   }
 
   private async guardDispatch(sessionId: string, groupId: string): Promise<boolean> {

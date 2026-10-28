@@ -11,6 +11,7 @@ import { UsagePanel } from './UsagePanel';
 import { GitBar } from './git/GitBar';
 import { AttachmentDrafts, AttachmentTray, useAttachmentDraft } from './AttachmentDrafts';
 import { usePresence } from '../lib/motion';
+import { useTeamStructure } from '../lib/team-structure-context';
 import {
   appendContextReference, ContextReferenceChips, EMPTY_CONTEXT_REFS, FileContextPicker,
   findFileMentionTrigger, removeFileMentionTrigger, type FileMentionTrigger,
@@ -29,6 +30,7 @@ export function Composer({ session }: { session: Session }) {
   const provider = useMingle((s) => s.boot?.providers.find((p) => p.id === session.provider));
   const providers = useMingle((s) => s.boot?.providers);
   const project = useMingle((s) => s.boot?.projects.find((p) => p.id === session.projectId));
+  const teamStructure = useTeamStructure().snapshot;
   const ref = useRef<HTMLTextAreaElement>(null);
   const compactController = useRef<{ controller: AbortController; targetSessionId: string; operationId: string } | null>(null);
   const [sending, setSending] = useState(false);
@@ -330,7 +332,12 @@ export function Composer({ session }: { session: Session }) {
   const combinedDisplay = hasCurrentEffort
     ? `${effortLabel(session.effort)}${currentTier === 'standard' ? '' : ` · ${selectedTier ? tierName(selectedTier.id, selectedTier.name) : currentTier}`}`
     : selectedTier ? tierName(selectedTier.id, selectedTier.name) : currentTier;
-  const policyChoices = currentModel?.policies ?? currentProvider?.policies ?? [];
+  const availablePolicyChoices = currentModel?.policies ?? currentProvider?.policies ?? [];
+  const isTeamSessionAnchor = teamStructure?.projectId === session.projectId && teamStructure.host.isThisDevice
+    && teamStructure.teamSession?.sessionId === session.id;
+  const policyChoices = isTeamSessionAnchor
+    ? availablePolicyChoices.filter((value) => value === 'supervised' || value === 'full-access')
+    : availablePolicyChoices;
   const policyLabels: Record<string, [string, string]> = {
     supervised: ['Supervised', 'Ask before taking actions that change files or run commands.'],
     balanced: ['Auto-accept edits', 'Allow file edits while keeping command approvals.'],
@@ -487,7 +494,7 @@ export function Composer({ session }: { session: Session }) {
             <SelectMenu triggerRef={reasoningControl} className="composer__select" label="Reasoning effort and service tier" value={combinedValue} selectedValues={combinedSelectedValues} displayValue={combinedDisplay} openRequest={reasoningOpenRequest} disabled={disabled}
               options={combinedOptions}
               onChange={(value) => { const [kind, option] = value.split(':'); if (kind === 'effort') void configure({ effort: option }); else if (kind === 'tier') void configure({ serviceTier: option }); }} placement="top" />
-            <SelectMenu triggerRef={policyControl} openRequest={policyOpenRequest} className="composer__select composer__select--policy" label="Approval policy" value={session.policy} disabled={disabled || policyChoices.length === 0}
+            <SelectMenu triggerRef={policyControl} openRequest={policyOpenRequest} className="composer__select composer__select--policy" label={isTeamSessionAnchor ? 'Team permission level' : 'Approval policy'} value={session.policy} disabled={disabled || policyChoices.length === 0}
               displayValue={policyChoices.length ? policyChoices.includes(session.policy) ? undefined : 'Not available' : 'Native/default'}
               options={policyChoices.map((value) => ({ value, label: policyLabels[value]?.[0] ?? value, description: policyLabels[value]?.[1] }))}
               onChange={(value) => void configure({ policy: value as Session['policy'] })} placement="top" />

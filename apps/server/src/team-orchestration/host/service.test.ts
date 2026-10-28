@@ -411,6 +411,77 @@ it('keeps a full-access consent granted when the team level is raised to full ac
   expect((await fx.host.availableAgents(PROJECT)).agents.find((agent) => agent.agentId === REMOTE_AGENT)).toMatchObject({ consent: 'granted' });
 });
 
+it('defaults team enablement to the selected anchor session policy and applies it to proxy sessions', async () => {
+  const fx = fixture();
+  fx.store.updateSession(LOCAL_AGENT, { policy: 'full-access' });
+  const enabled = await fx.host.enable(PROJECT, { leaderOrchestration: true, orchestratorAgentId: LOCAL_AGENT, fallbackAgentIds: [] });
+  const proxyId = (fx.store.db.prepare('SELECT session_id FROM mingle_team_proxy_sessions WHERE agent_id=?').get(REMOTE_AGENT) as { session_id: string }).session_id;
+
+  expect(enabled.settings?.permissionLevel).toBe('full-access');
+  expect(fx.store.getSession(LOCAL_AGENT)?.policy).toBe('full-access');
+  expect(fx.store.getSession(proxyId)?.policy).toBe('full-access');
+});
+
+it('syncs canonical session policy changes into team settings and broadcasts the updated proxy policy', async () => {
+  const fx = fixture();
+  await grantRemote(fx, 1, { permissionLevel: 'full-access' });
+  await fx.host.addAgentToSession(LOCAL_AGENT, { agentId: REMOTE_AGENT });
+  const proxyId = (fx.store.db.prepare('SELECT session_id FROM mingle_team_proxy_sessions WHERE agent_id=?').get(REMOTE_AGENT) as { session_id: string }).session_id;
+
+  fx.store.updateSession(LOCAL_AGENT, { policy: 'full-access' });
+
+  expect((await fx.host.structure(PROJECT)).settings).toMatchObject({ permissionLevel: 'full-access', version: 2 });
+  expect(fx.store.getSession(LOCAL_AGENT)?.policy).toBe('full-access');
+  expect(fx.store.getSession(proxyId)?.policy).toBe('full-access');
+  expect(fx.store.db.prepare('SELECT state FROM mingle_team_host_consents WHERE agent_id=?').get(REMOTE_AGENT)).toEqual({ state: 'granted' });
+  expect(fx.outgoing.filter((entry) => entry.kind === 'teamgroup.structure').at(-1)?.payload).toMatchObject({
+    settings: { permissionLevel: 'full-access', version: 2 },
+  });
+});
+
+it('changes team permission during an active delivery and auto-approves pending requests only for consenting agents', async () => {
+  const fx = fixture();
+  await grantRemote(fx, 1, { permissionLevel: 'full-access' });
+  const group = await fx.host.addAgentToSession(LOCAL_AGENT, { agentId: REMOTE_AGENT });
+  const proxyId = (fx.store.db.prepare('SELECT session_id FROM mingle_team_proxy_sessions WHERE agent_id=?').get(REMOTE_AGENT) as { session_id: string }).session_id;
+  const member = group.members.find((candidate) => candidate.sessionId === proxyId)!;
+  const deliveryId = 'live-policy-change-delivery';
+  const requestId = 'live-policy-change-request';
+  const runId = 'live-policy-change-run';
+  group.deliveries.push({ id: deliveryId, groupId: group.group.id, requestId, messageId: 'live-policy-change-message', memberId: member.id,
+    status: 'running', runId, hop: 0, error: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), kind: 'request' });
+  const userMessage = fx.store.insertMessage({ sessionId: proxyId, role: 'user', content: 'Continue while permissions change', runId, kind: 'group-delivery' });
+  const proxy = fx.store.getSession(proxyId)!;
+  fx.store.insertRun({ id: runId, sessionId: proxyId, userMessageId: userMessage.id, provider: proxy.provider, model: proxy.model, startedAt: new Date().toISOString() });
+  fx.host.start({ session: proxy, runId, content: 'Continue while permissions change', options: { groupDeliveryId: deliveryId },
+    context: { groupId: group.group.id, memberId: member.id, requestId, deliveryId, hop: 0, instructions: 'Team instructions' } });
+  await waitFor(() => fx.outgoing.some((entry) => entry.kind === 'teamgroup.delivery'
+    && (entry.payload as { deliveryId?: string }).deliveryId === deliveryId));
+  await fx.incoming('teamgroup.delivery.status', { sharedProjectId: SHARED, deliveryId, agentId: REMOTE_AGENT,
+    status: 'running', runId: 'owner-live-policy-run', at: new Date().toISOString() });
+  await fx.incoming('teamgroup.approval.request', { sharedProjectId: SHARED, deliveryId, approvalId: 'owner-live-policy-approval',
+    agentId: REMOTE_AGENT, summary: 'Run a command', kind: 'command', expiresAt: new Date(Date.now() + 30_000).toISOString() });
+  const approval = fx.store.pendingApprovals(proxyId)[0]!;
+
+  const updated = await fx.host.update(PROJECT, { expectedVersion: 1, permissionLevel: 'full-access' });
+
+  expect(updated.settings).toMatchObject({ permissionLevel: 'full-access', version: 2 });
+  expect(fx.store.getApproval(approval.id)?.status).toBe('approved');
+  expect(fx.store.db.prepare('SELECT state FROM mingle_team_host_approvals WHERE approval_id=?').get(approval.id)).toEqual({ state: 'approved' });
+  expect(fx.outgoing.find((entry) => entry.kind === 'teamgroup.approval.decision')?.payload)
+    .toMatchObject({ approvalId: 'owner-live-policy-approval', decision: 'approved' });
+  expect(fx.store.getSession(proxyId)?.policy).toBe('full-access');
+
+  const lowered = await fx.host.update(PROJECT, { expectedVersion: 2, permissionLevel: 'supervised' });
+  await fx.incoming('teamgroup.approval.request', { sharedProjectId: SHARED, deliveryId, approvalId: 'owner-after-lowering',
+    agentId: REMOTE_AGENT, summary: 'A later command', kind: 'command', expiresAt: new Date(Date.now() + 30_000).toISOString() });
+  const laterApproval = fx.store.pendingApprovals(proxyId)[0]!;
+  expect(lowered.settings).toMatchObject({ permissionLevel: 'supervised', version: 3 });
+  expect(fx.store.getSession(proxyId)?.policy).toBe('supervised');
+  expect(laterApproval.input).toMatchObject({ remoteApprovalId: 'owner-after-lowering' });
+  expect(laterApproval.status).toBe('pending');
+});
+
 it('orders owner consent by its durable timestamp across clock correction, replay, and host restart', async () => {
   const fx = fixture();
   const grantAt = '2099-01-01T00:00:00.000Z';

@@ -92,7 +92,7 @@ it('shares imported session history and team messages over HTTP and the encrypte
       expect(created.status, JSON.stringify(created.json)).toBe(201);
       projects.push(created.json.id);
     }
-    const sessionResponse = await leader.api('POST', '/api/sessions', { projectId: projects[0], name: 'History to share', provider: 'opencode', model: 'fake-opencode', effort: 'none', policy: 'full-access' });
+    const sessionResponse = await leader.api('POST', '/api/sessions', { projectId: projects[0], name: 'History to share', provider: 'opencode', model: 'fake-opencode', effort: 'none', policy: 'supervised' });
     expect(sessionResponse.status, JSON.stringify(sessionResponse.json)).toBe(201);
     const sessionId = sessionResponse.json.id as string;
     leader.app.store.insertMessage({ sessionId, role: 'user', content: 'The team agreed to use a small API surface.', createdAt: '2026-10-20T10:00:00.000Z' });

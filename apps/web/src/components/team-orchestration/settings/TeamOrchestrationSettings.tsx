@@ -7,6 +7,8 @@ import { TeamOrchestrationApiError, teamOrchestrationApi } from './api';
 import { teamSessionShareEligibility } from './share-eligibility';
 import './team-orchestration-settings.css';
 
+const policyPermissionLevel = (policy: Session['policy'] | undefined): TeamPermissionLevel => policy === 'full-access' ? 'full-access' : 'supervised';
+
 export function TeamOrchestrationSettings({ projectId, currentSession, onShared, onOpenProject }: {
   projectId: string;
   /** Captured when the Teammates dialog opens; never follows later workspace navigation. */
@@ -17,7 +19,7 @@ export function TeamOrchestrationSettings({ projectId, currentSession, onShared,
   const activeProjectId = useMingle((state) => state.activeProjectId);
   const boot = useMingle((state) => state.boot);
   const [snapshot, setSnapshot] = useState<TeamStructureSnapshot | null>(null);
-  const [permissionLevel, setPermissionLevel] = useState<TeamPermissionLevel>('supervised');
+  const [permissionLevel, setPermissionLevel] = useState<TeamPermissionLevel>(() => policyPermissionLevel(currentSession?.policy));
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
@@ -60,7 +62,7 @@ export function TeamOrchestrationSettings({ projectId, currentSession, onShared,
       const next = await teamOrchestrationApi.structure(projectId, signal);
       if (!canApply(sequence, signal)) return;
       setSnapshot(next);
-      setPermissionLevel(next.settings?.permissionLevel ?? 'supervised');
+      setPermissionLevel(next.settings?.permissionLevel ?? policyPermissionLevel(currentSession?.policy));
     } catch (cause) {
       if (canApply(sequence, signal)) setError(cause instanceof Error ? cause.message : 'Could not load team settings.');
     } finally {
@@ -71,7 +73,7 @@ export function TeamOrchestrationSettings({ projectId, currentSession, onShared,
   useEffect(() => {
     const controller = new AbortController();
     setSnapshot(null);
-    setPermissionLevel('supervised');
+    setPermissionLevel(policyPermissionLevel(currentSession?.policy));
     void load(controller.signal);
     return () => { operation.current++; controller.abort(); };
     // projectId identifies this dialog's backing project.
@@ -87,7 +89,7 @@ export function TeamOrchestrationSettings({ projectId, currentSession, onShared,
   const refreshAfterShare = async (latest: TeamStructureSnapshot, targetSessionId: string, navigate: boolean, sequence: number) => {
     if (!canApply(sequence)) return;
     setSnapshot(latest);
-    setPermissionLevel(latest.settings?.permissionLevel ?? permissionLevel);
+    setPermissionLevel(latest.settings?.permissionLevel ?? policyPermissionLevel(currentSession?.policy));
     const store = useMingle.getState();
     store.setTeamSessionInfo(projectId, latest.teamSession ?? null, latest.host.isThisDevice);
     await store.refreshNow();
@@ -162,7 +164,7 @@ export function TeamOrchestrationSettings({ projectId, currentSession, onShared,
   return <section className="team-orch-settings" aria-labelledby="team-orch-settings-title" aria-busy={loading || saving}>
     <header className="team-orch-settings__heading">
       <span className="team-orch-settings__icon"><Crown size={16} /></span>
-      <div><h3 id="team-orch-settings-title">Share a session with the team</h3><p>Share this conversation and set its maximum permission.</p></div>
+      <div><h3 id="team-orch-settings-title">Share a session with the team</h3><p>The shared session’s access policy also sets the maximum permission for teammate runs.</p></div>
       <Button size="sm" variant="ghost" disabled={loading || saving} onClick={() => void load()} aria-label="Refresh team orchestration settings"><RefreshCw size={13} /></Button>
     </header>
     {loading && !snapshot ? <p className="team-orch-settings__status" role="status">Loading team settings…</p> : null}
@@ -189,7 +191,7 @@ export function TeamOrchestrationSettings({ projectId, currentSession, onShared,
               { value: 'supervised', label: 'Supervised' }, { value: 'full-access', label: 'Full access' },
             ]} />
             <p>{choosingFullAccess
-              ? 'Full access allows file and command actions after owner consent. Raising to Full access requires every teammate to consent again before new work is delivered.'
+              ? 'Full access allows file and command actions after owner consent. Owners who already consented to Full access keep sharing; other owners must renew consent. The session policy is updated to match.'
               : 'Supervised asks owners to approve file or command actions. Sharing can be paused or revoked at any time.'}</p>
           </div>
         </fieldset> : snapshot.settings ? <p className="team-orch-settings__summary"><Users size={14} /> Team permission: {snapshot.settings.permissionLevel === 'supervised' ? 'Supervised' : 'Full access'}</p> : null}

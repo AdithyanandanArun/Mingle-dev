@@ -769,7 +769,7 @@ describe('owner-device team orchestration', () => {
     expect(f.runtime.startCount).toBe(2);
   });
 
-  it('bounds each teammate-triggered run by the saved session, team, and owner-consent policies', async () => {
+  it('keeps teammate-triggered runs dynamically permissioned by the host for their full duration', async () => {
     const f = await fixture();
     const sessionId = f.store.listSessions(f.projectId)[0]!.id;
     f.store.db.prepare("UPDATE sessions SET policy = 'full-access' WHERE id = ?").run(sessionId);
@@ -789,7 +789,7 @@ describe('owner-device team orchestration', () => {
     await f.deliver(fullAccessDelivery);
     await waitFor(() => f.sent.some((message) => message.payload.deliveryId === fullAccessDelivery.deliveryId && message.payload.status === 'completed'));
     const startedRuns = [...f.runtime.optionsByRun.values()];
-    expect(startedRuns.map((options) => options.runPolicy)).toEqual(['supervised', 'full-access']);
+    expect(startedRuns.map((options) => options.runPolicy)).toEqual(['supervised', 'supervised']);
     expect(f.store.getSession(sessionId)?.policy).toBe('full-access');
   });
 
