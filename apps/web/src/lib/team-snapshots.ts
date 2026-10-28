@@ -1,5 +1,39 @@
 import type { TeamChatGroupView, TeamChatSnapshot, TeamStructureSnapshot } from '@mingle/contracts';
 
+export interface CachedTeamChatSnapshot {
+  snapshot: TeamChatSnapshot;
+  accountScope: { projectId: string; accountId: string };
+}
+
+const TEAM_CHAT_SNAPSHOT_CACHE_LIMIT = 8;
+const teamChatSnapshotCache = new Map<string, CachedTeamChatSnapshot>();
+
+function teamChatSnapshotCacheKey(projectId: string, groupId: string): string {
+  return `${projectId}:${groupId}`;
+}
+
+/** Read a recently visible shared conversation without mutating render-time cache state. */
+export function getCachedTeamChatSnapshot(projectId: string, groupId: string): CachedTeamChatSnapshot | null {
+  const key = teamChatSnapshotCacheKey(projectId, groupId);
+  return teamChatSnapshotCache.get(key) ?? null;
+}
+
+/** Retain only a small number of authorized conversation snapshots for fast remounts. */
+export function cacheTeamChatSnapshot(projectId: string, groupId: string, snapshot: TeamChatSnapshot, accountId: string): void {
+  const key = teamChatSnapshotCacheKey(projectId, groupId);
+  teamChatSnapshotCache.delete(key);
+  teamChatSnapshotCache.set(key, { snapshot, accountScope: { projectId, accountId } });
+  while (teamChatSnapshotCache.size > TEAM_CHAT_SNAPSHOT_CACHE_LIMIT) {
+    const oldest = teamChatSnapshotCache.keys().next().value;
+    if (oldest === undefined) break;
+    teamChatSnapshotCache.delete(oldest);
+  }
+}
+
+export function clearCachedTeamChatSnapshot(projectId: string, groupId: string): void {
+  teamChatSnapshotCache.delete(teamChatSnapshotCacheKey(projectId, groupId));
+}
+
 function sameData(left: unknown, right: unknown): boolean {
   return left === right || JSON.stringify(left) === JSON.stringify(right);
 }

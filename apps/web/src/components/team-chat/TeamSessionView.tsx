@@ -14,7 +14,7 @@ import { Popover } from '../git/Popover';
 import { GitBar } from '../git/GitBar';
 import { subscribeToTeamUpdates } from '../../lib/team-live-updates';
 import { useTeamStructure } from '../../lib/team-structure-context';
-import { reconcileTeamChatSnapshot } from '../../lib/team-snapshots';
+import { cacheTeamChatSnapshot, clearCachedTeamChatSnapshot, getCachedTeamChatSnapshot, reconcileTeamChatSnapshot } from '../../lib/team-snapshots';
 import './team-session.css';
 import './team-session-premium.css';
 
@@ -317,7 +317,8 @@ export function TeamSessionView({ projectId, teamSession, structure }: {
   const connection = useMingle((state) => state.connection);
   const contextOpen = useMingle((state) => state.contextOpen);
   const teamStructure = useTeamStructure();
-  const [snapshot, setSnapshot] = useState<Awaited<ReturnType<typeof api.projectTeamChat>> | null>(null);
+  const cachedSnapshot = getCachedTeamChatSnapshot(projectId, teamSession.groupId);
+  const [snapshot, setSnapshot] = useState<Awaited<ReturnType<typeof api.projectTeamChat>> | null>(() => cachedSnapshot?.snapshot ?? null);
   const [loading, setLoading] = useState(true);
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -327,7 +328,14 @@ export function TeamSessionView({ projectId, teamSession, structure }: {
   const refreshSequence = useRef(0);
   const refreshInFlight = useRef<number | null>(null);
   const refreshAgain = useRef(false);
-  const accountScope = useRef<{ projectId: string; accountId: string } | null>(null);
+  const accountScope = useRef<{ projectId: string; accountId: string } | null>(cachedSnapshot?.accountScope ?? null);
+
+  useEffect(() => {
+    const scope = accountScope.current;
+    if (snapshot && scope?.projectId === projectId) {
+      cacheTeamChatSnapshot(projectId, teamSession.groupId, snapshot, scope.accountId);
+    }
+  }, [projectId, snapshot, teamSession.groupId]);
 
   const refresh = useCallback(async (signal?: AbortSignal) => {
     if (signal?.aborted) return;
@@ -335,14 +343,24 @@ export function TeamSessionView({ projectId, teamSession, structure }: {
     const requestId = ++refreshSequence.current;
     refreshInFlight.current = requestId;
     try {
-      const [account, latest] = await Promise.all([
-        api.account(signal), api.projectTeamChat(projectId, { limit: 100 }, signal),
+      const [account, latestResult] = await Promise.all([
+        api.account(signal),
+        api.projectTeamChat(projectId, { limit: 100 }, signal)
+          .then((value) => ({ value } as const), (cause: unknown) => ({ cause } as const)),
       ]);
       const accountId = account.status === 'signed-in' ? account.user?.id ?? null : null;
       if (signal?.aborted || useMingle.getState().activeProjectId !== projectId) return;
       const priorScope = accountScope.current;
-      if (priorScope && (priorScope.projectId !== projectId || priorScope.accountId !== accountId)) setSnapshot(null);
-      if (!accountId) throw new Error('Sign in to the invited team account to view this shared conversation.');
+      if (priorScope && (priorScope.projectId !== projectId || priorScope.accountId !== accountId)) {
+        clearCachedTeamChatSnapshot(projectId, teamSession.groupId);
+        setSnapshot(null);
+      }
+      if (!accountId) {
+        accountScope.current = null;
+        clearCachedTeamChatSnapshot(projectId, teamSession.groupId);
+        setSnapshot(null);
+        throw new Error('Sign in to the invited team account to view this shared conversation.');
+      }
       const requestScope = priorScope?.projectId === projectId && priorScope.accountId === accountId
         ? priorScope : { projectId, accountId };
       accountScope.current = requestScope;
@@ -353,12 +371,14 @@ export function TeamSessionView({ projectId, teamSession, structure }: {
       if (confirmedAccountId !== accountId || accountScope.current !== requestScope || useMingle.getState().activeProjectId !== projectId) {
         if (accountScope.current === requestScope && confirmedAccountId !== accountId) {
           accountScope.current = confirmedAccountId ? { projectId, accountId: confirmedAccountId } : null;
+          clearCachedTeamChatSnapshot(projectId, teamSession.groupId);
           setSnapshot(null);
           throw new Error('The signed-in team account changed while this conversation was loading. Refresh to continue.');
         }
         return;
       }
-      setSnapshot((current) => reconcileTeamChatSnapshot(current, latest));
+      if ('cause' in latestResult) throw latestResult.cause;
+      setSnapshot((current) => reconcileTeamChatSnapshot(current, latestResult.value));
       setError(null);
     } finally {
       if (refreshInFlight.current === requestId) {
@@ -373,7 +393,7 @@ export function TeamSessionView({ projectId, teamSession, structure }: {
 
   useEffect(() => {
     const controller = new AbortController();
-    setSnapshot(null); setLoading(true); setError(null);
+    setLoading(true); setError(null);
     void refresh(controller.signal).catch((cause) => { if (!controller.signal.aborted) setError(errorMessage(cause)); }).finally(() => { if (!controller.signal.aborted) setLoading(false); });
     const unsubscribe = subscribeToTeamUpdates(projectId, () => {
       void refresh(controller.signal).catch((cause) => { if (!controller.signal.aborted) setError(errorMessage(cause)); });
@@ -419,6 +439,11 @@ export function TeamSessionView({ projectId, teamSession, structure }: {
       const accountId = account.status === 'signed-in' ? account.user?.id ?? null : null;
       if (accountScope.current !== requestScope || accountId !== requestScope.accountId || useMingle.getState().activeProjectId !== projectId) {
         olderHeight.current = null;
+        if (accountScope.current === requestScope && accountId !== requestScope.accountId) {
+          accountScope.current = accountId ? { projectId, accountId } : null;
+          clearCachedTeamChatSnapshot(projectId, teamSession.groupId);
+          setSnapshot(null);
+        }
         return;
       }
       setSnapshot((current) => current ? {

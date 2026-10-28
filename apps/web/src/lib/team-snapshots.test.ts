@@ -1,6 +1,6 @@
 import { expect, it } from 'vitest';
 import type { TeamChatSnapshot, TeamStructureSnapshot } from '@mingle/contracts';
-import { reconcileTeamChatSnapshot, retainTeamStructureSnapshot } from './team-snapshots';
+import { cacheTeamChatSnapshot, clearCachedTeamChatSnapshot, getCachedTeamChatSnapshot, reconcileTeamChatSnapshot, retainTeamStructureSnapshot } from './team-snapshots';
 
 const at = '2026-10-28T12:00:00.000Z';
 
@@ -61,4 +61,16 @@ it('retains the same team structure reference when a structure refetch has no ch
   } as unknown as TeamStructureSnapshot;
 
   expect(retainTeamStructureSnapshot(current, structuredClone(current))).toBe(current);
+});
+
+it('restores a cached team chat snapshot with the account scope that authorized it', () => {
+  const current = chatSnapshot([message('cached-message', 'Cached team conversation')]);
+  cacheTeamChatSnapshot('cache-project', 'cache-group', current, 'account-a');
+
+  expect(getCachedTeamChatSnapshot('cache-project', 'cache-group')).toEqual({
+    snapshot: current, accountScope: { projectId: 'cache-project', accountId: 'account-a' },
+  });
+
+  clearCachedTeamChatSnapshot('cache-project', 'cache-group');
+  expect(getCachedTeamChatSnapshot('cache-project', 'cache-group')).toBeNull();
 });
