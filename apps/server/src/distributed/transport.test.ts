@@ -712,7 +712,7 @@ it('uses the durable mailbox after a trust invalidation refresh fails', async ()
   }
 });
 
-it.each(['execution.agents', 'teamgroup.structure'])('automatically invalidates team trust after delivered %s messages', async (kind) => {
+it.each(['collaboration.members', 'collaboration.device.revoked'])('automatically invalidates team trust after delivered %s messages', async (kind) => {
   const cloud = new MailboxCloud(true);
   const { first, second, b } = await pairedServices(cloud);
   const received: string[] = [];
@@ -723,6 +723,30 @@ it.each(['execution.agents', 'teamgroup.structure'])('automatically invalidates 
     await first.send({ teamId, toDeviceId: b.id, kind, payload: { version: 2 }, idempotencyKey: `trust-invalidation-${kind}` });
     await vi.waitFor(() => expect(received).toContain(kind), { timeout: 1_000 });
     await vi.waitFor(() => expect(cloud.postgrestRequestsByUser.get(userB) ?? 0).toBeGreaterThan(previousQueries), { timeout: 1_000 });
+  } finally {
+    unsubscribe();
+    await first.close();
+    await second.close();
+  }
+});
+
+it.each(['execution.agents', 'teamgroup.structure'])('keeps team trust warm after delivered %s messages', async (kind) => {
+  const cloud = new MailboxCloud(true);
+  const { first, second, b } = await pairedServices(cloud);
+  const received: string[] = [];
+  const unsubscribe = second.onMessage((message) => { received.push(message.kind); });
+  try {
+    await second.sync();
+    // Receiving any envelope clears its mailbox copy; compare against an ordinary chat message.
+    const queriesFor = async (messageKind: string) => {
+      const before = cloud.postgrestRequestsByUser.get(userB) ?? 0;
+      await first.send({ teamId, toDeviceId: b.id, kind: messageKind, payload: { version: 2 }, idempotencyKey: `trust-warm-${messageKind}` });
+      await vi.waitFor(() => expect(received).toContain(messageKind), { timeout: 1_000 });
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      return (cloud.postgrestRequestsByUser.get(userB) ?? 0) - before;
+    };
+    const baseline = await queriesFor('collaboration.message');
+    expect(await queriesFor(kind)).toBe(baseline);
   } finally {
     unsubscribe();
     await first.close();

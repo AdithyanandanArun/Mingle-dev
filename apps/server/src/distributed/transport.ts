@@ -1622,9 +1622,14 @@ function isUuid(value: string): boolean {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
 }
 
+/**
+ * Trust covers team membership, devices and device links. Agent rosters (`execution.agents`) and
+ * group structure (`teamgroup.structure`) never change those, and invalidating on them made the
+ * next send wait for a cloud refresh after every settings or consent change. Unknown peers and
+ * senders still force an authoritative refresh on their own.
+ */
 function messageInvalidatesTeamTrust(kind: string): boolean {
-  if (kind === 'execution.agents' || kind === 'teamgroup.structure' || kind.startsWith('project-collaboration.')) return true;
-  return /(?:^|[.-])(?:roster|members?|membership|structure|devices?)(?:$|[.-])/i.test(kind);
+  return /(?:^|[.-])(?:members?|membership|devices?)(?:$|[.-])/i.test(kind);
 }
 
 function parseRealtimeEnvelope(value: unknown): SignedEnvelope | null {
