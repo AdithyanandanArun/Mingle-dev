@@ -155,7 +155,7 @@ export class TeamMcpBridge {
       register('team_remote_recover', 'Propose exceptional recovery of a stopped task on a linked device after verified local provider exhaustion. The host checks the current group planning authority and source failure. Acceptance only queues a request for the destination device owner; it never grants execution, quota, Git push or command permissions.',
         distributed.recoveryShape, { readOnly: false, idempotent: true }, (args) => distributed.recover(ctx, binding.sessionId, args));
     }
-    if (this.acceptanceHandler) register('team_accept', 'Accept a completed worker task after reviewing its changes and running applicable verification. Requires the current full-access team permission, a task in Review, and a concise verificationSummary; Mingle merges an available fetched worker branch locally but never pushes the host branch. Supervised teams must leave tasks for human acceptance.',
+    if (this.acceptanceHandler) register('team_accept', 'Accept a completed worker task after reviewing its changes and running applicable verification. Requires the current full-access team permission, a task in Review, and a concise verificationSummary; Mingle merges the fetched worker branch locally, including a non-fast-forward merge when needed, but never pushes the host branch. Merge conflicts return 409 and must be resolved manually. Supervised teams must leave tasks for human acceptance.',
       TeamAcceptTaskSchema.shape, { readOnly: false, idempotent: true }, (args) => this.acceptanceHandler!(ctx, binding.sessionId, TeamAcceptTaskSchema.parse(args)));
     return server;
   }

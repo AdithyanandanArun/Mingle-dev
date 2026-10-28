@@ -1,6 +1,7 @@
-import type { GroupMode, GroupMember } from '@mingle/contracts';
+import type { GroupMode, GroupMember, TeamPermissionLevel } from '@mingle/contracts';
 import { redactSecrets, truncate } from '../util.ts';
 import type { DeliveryKind } from './repo.ts';
+import { teamAgentBranch } from '../repository/team-branch.ts';
 
 export const LIMITS = {
   instructions: 6000, request: 1500, deliveryText: 12000, summary: 1400, inboxMessage: 1500, inboxCount: 20, message: 12000,
@@ -10,12 +11,14 @@ export const clean = (text: string, max: number): string => truncate(redactSecre
 
 export const MODE_LABEL: Record<GroupMode, string> = { cowork: 'Cowork', orchestrated: 'Orchestrated', 'current-leads': 'Current agent leads' };
 
-export interface RosterEntry { handle: string; role: GroupMember['role']; provider: string; model: string; state: string; you: boolean }
+export interface RosterEntry { handle: string; role: GroupMember['role']; provider: string; model: string; state: string; you: boolean; branch?: string }
 
 export interface InstructionData {
   title: string; mode: GroupMode; self: RosterEntry; roster: RosterEntry[]; canAssign: boolean; leaseHolder: string | null;
   requestExcerpt: string; deliveryKind: DeliveryKind; hop: number; maxHops: number; turnsUsed: number; maxTurns: number | null; unread: number;
   crossDeviceWorker?: boolean;
+  teamPermissionLevel?: TeamPermissionLevel | null;
+  integrationBranch?: string | null;
   assignment: { id: string; taskId: string; scope: string[] } | null;
 }
 
@@ -26,12 +29,25 @@ const ROLE_RULE: Record<GroupMember['role'], string> = {
 };
 
 const WORKER_COMPLETION = 'Completion: send one concise completion, not repeats. Publish the committed files needed for handoff once through team_artifact (one file revision per call; never invent an artifact when nothing is committed). When the assigned work is ready, record team_status review, then your final summary of changes, checks you ran and caveats; unresolved work stays blocked, not review. Do not send unsolicited completion acknowledgments or wake peers solely to repeat completion. Answer concrete teammate questions concisely with replyToId when needed.';
-const TEAM_WORKER_COMPLETION = 'Cross-device assignment completion: Mingle commits your remaining in-scope changes and pushes the completed worktree HEAD to a dedicated `mingle/<your-handle>/<task-or-delivery>` branch on origin. Keep every commit in the assigned scope; Mingle refuses to publish protected or out-of-scope changes. Do not push manually, push to a default/protected branch, force-push, or publish a release. Mingle reports the resulting branch, full commit SHA and any publication failure in the host completion record; report those values only if Mingle has exposed them to you and never guess. Use repository-relative paths, and never report absolute paths from your device.';
+function teamWorkerCompletion(handle: string, integrationBranch: string | null | undefined): string {
+  const branch = teamAgentBranch(handle);
+  const integration = integrationBranch ?? '<integration-branch supplied by the host>';
+  return `Cross-device worker: you work in your own persistent worktree on permanent branch \`${branch}\`, which keeps all your earlier work. Commit your changes with git add and git commit. Mingle automatically pushes this branch to origin when your turn ends; you may also run git push origin HEAD:${branch} yourself. Push no other branch, never force-push, and never push to main/default. When told to pull, run git pull --no-rebase origin ${integration}; Mingle also merges the integration branch automatically at the start of each turn when safe. Keep every assignment commit in scope; protected or out-of-scope commits will not be published. Never tell the human that you cannot commit or push. Report repository-relative paths only, never absolute paths from your device.`;
+}
+
+function teamIntegrationGuidance(d: InstructionData): string {
+  const integrationBranch = d.integrationBranch ?? '<integration-branch shown by the host>';
+  const workers = d.roster.filter((member) => member.branch).map((member) => `@${member.handle}: origin/${member.branch}`).join(', ');
+  return `Cross-device team integration (${d.teamPermissionLevel}): remote worker branches${workers ? ` are ${workers}` : ' are listed in the roster when available'}. To integrate, use git fetch origin, then merge worker branches into this integration worktree branch (${integrationBranch}); for an assigned task in Review, team_accept performs the local merge. Run the project checks. Never push to a worker branch. When a remote worker is still running, do not check origin for its work; yield and let Mingle wake you when its branch lands. ${d.teamPermissionLevel === 'full-access'
+    ? `After review, merge and checks, push the integration branch normally (never force) with git push origin ${integrationBranch}, then use team_message to tell each worker to run git pull --no-rebase origin ${integrationBranch}.`
+    : 'In supervised mode, ask the human before pushing the integration branch; after approval, use team_message to tell workers which branch to pull.'}`;
+}
 const COORDINATOR_COMPLETION = 'Final answer to the human: begin with the outcome, Implemented, Partially complete or Blocked, plus material caveats. Then state each @agent\'s contribution; where the work is actually integrated (worktree, branch or commit; the selected checkout only if that was authorized and done); which checks you ran yourself versus which a peer reported; and what still needs review or user action. On each durable worker completion, act immediately: inspect the exact host-fetched review ref and worktree Mingle supplies, inspect the diff, run the project checks and start the site when applicable, and open it in the shared browser if that tool is available. Decide whether the result meets its criteria; never answer Pending or wait for a human prompt after completion has arrived. In full-access team mode, provide a concise verification summary and call team_accept for work you accept. In supervised mode, report that it needs the human\'s acceptance. If a worker is genuinely still running or terminal transfer is pending, you may yield Pending for that work only. Do not give a partial final-looking result while waiting for that work to return.';
 
 /** Bounded per-run guidance. Native history, roster and request excerpt only; never other members' transcripts. */
 export function buildInstructions(d: InstructionData): string {
   const replyOnlyWorker = d.self.role === 'worker' && d.deliveryKind === 'message';
+  const workerCompletion = teamWorkerCompletion(d.self.handle, d.integrationBranch);
   const lines = [
     `[Mingle group conversation "${clean(d.title, 80)}" · ${MODE_LABEL[d.mode]}]`,
     `You are @${d.self.handle} (${d.self.role}). ${ROLE_RULE[d.self.role]}`,
@@ -45,12 +61,12 @@ export function buildInstructions(d: InstructionData): string {
     lines.push('When an assigned worker is still running or its terminal transfer is pending, do not poll its repository or wait inside this provider turn. If no concrete question needs your answer to unblock the worker, yield with Pending and end the turn; Mingle will wake a result-review turn after durable completion. When that completion arrives, immediately inspect the actual fetched branch/ref or integrated artifacts, run the appropriate checks and start the site when applicable, then make an acceptance decision. Do not say Pending or wait for another human prompt after completion has arrived. In full-access team mode, use team_accept with a verification summary when the task passes; in supervised mode, leave acceptance to the human.');
   }
   if (replyOnlyWorker) {
-    lines.push('This is a reply-only message delivery, not a task assignment. Answer the sender through team_message. It grants no team_status or team_artifact authority; ask the coordinator for a new scoped assignment if more work or task reporting is needed.');
+    lines.push(`This is a reply-only message delivery, not a task assignment. Answer the sender through team_message. It grants no team_status or team_artifact authority; ask the coordinator for a new scoped assignment if more work or task reporting is needed.${d.crossDeviceWorker ? ` If the sender asks, you may still git pull, commit or push only on your own permanent branch \`${teamAgentBranch(d.self.handle)}\`, using the host's integration branch for pulls; never push another branch or force-push.` : ''}`);
   } else if (d.self.role === 'worker' && d.assignment) {
     lines.push('The original human request below is background quoted from the coordinator. Your actionable work is the active assignment objective and finish criteria; carry it out directly within the recorded scope, without re-delegating.');
   }
   const context = ['', 'Team:'];
-  for (const row of d.roster.slice(0, 12)) context.push(`- @${row.handle} · ${row.role} · ${row.provider}/${clean(row.model, 60)} · ${row.state}${row.you ? ' (you)' : ''}`);
+  for (const row of d.roster.slice(0, 12)) context.push(`- @${row.handle} · ${row.role} · ${row.provider}/${clean(row.model, 60)} · ${row.state}${row.branch ? ` · branch origin/${row.branch}` : ''}${row.you ? ' (you)' : ''}`);
   context.push('', `Request: ${clean(d.requestExcerpt, LIMITS.request)}`);
   context.push(`This turn: ${d.deliveryKind} delivery, message hop ${d.hop}/${d.maxHops}, request turns used ${d.turnsUsed}/${d.maxTurns ?? 'no emergency ceiling'}.`);
   if (d.assignment && !replyOnlyWorker) context.push(`Assignment ${d.assignment.id} (task ${d.assignment.taskId}). Edit only within: ${d.assignment.scope.join(', ')}.`);
@@ -62,11 +78,12 @@ export function buildInstructions(d: InstructionData): string {
     'team_message expectsReply:false records information without waking a model. Set expectsReply:true only when the recipient needs a turn, including an answer that should let a blocked teammate continue. Use replyToId when answering so Mingle can cancel a redundant queued question turn.',
     'Report completion in your final answer; a human reviews task results before they are marked done.',
     replyOnlyWorker
-      ? 'Do not edit files or report task status during this clarification turn. Resume implementation and task_status/team_artifact only in the active scoped assignment delivery.'
+      ? `Do not edit files or report task status during this clarification turn. Resume implementation and task_status/team_artifact only in the active scoped assignment delivery.${d.crossDeviceWorker ? ' If the sender explicitly asks for Git synchronization or publication, limit it to your own permanent branch.' : ''}`
       : d.canAssign
-        ? 'You may prepare integration in your own scoped worktree under the selected permission policy. Never push or publish, or modify the human-selected checkout, without explicit human authorization.'
+        ? d.teamPermissionLevel ? teamIntegrationGuidance(d)
+          : 'You may prepare integration in your own scoped worktree under the selected permission policy. Never push or publish, or modify the human-selected checkout, without explicit human authorization.'
         : d.crossDeviceWorker
-          ? `Keep edits inside your assignment and owner-device worktree. ${TEAM_WORKER_COMPLETION}`
+          ? `Keep edits inside your assignment and owner-device worktree. ${workerCompletion}`
           : 'Keep edits inside your assignment and own worktree. Ask the coordinator or human before integration; never push or publish without explicit human authorization.',
     replyOnlyWorker ? '' : d.canAssign ? COORDINATOR_COMPLETION : d.crossDeviceWorker ? '' : WORKER_COMPLETION,
   ];
@@ -106,7 +123,7 @@ export function assignmentText(d: {
     lines.push('', 'Expected input artifacts (verified handoff messages appear in your session when published):', ...d.inputs.map((input) => `- task ${input.taskId}: ${input.path}${input.reference ? ` · ${input.reference}` : ''}`));
   }
   lines.push('', d.crossDeviceWorker
-    ? 'Report progress with team_status; when ready, record team_status review and summarize changes, checks and repository-relative paths. Mingle will publish the scoped completion branch and include its exact branch and SHA in the host completion record; do not guess these values. Never report absolute paths from your device. Unresolved work stays blocked.'
+    ? `Report progress with team_status; when ready, record team_status review and summarize changes, checks and repository-relative paths. Mingle publishes your permanent branch \`${teamAgentBranch(d.to)}\` and includes its exact branch and SHA in the host completion record; do not guess these values. Never report absolute paths from your device. Unresolved work stays blocked.`
     : 'Report progress with team_status; when ready, finish with one completion (publish required committed handoff files with team_artifact, record team_status review, then summarize changes and actual verification). Unresolved work stays blocked. Review is not Done.');
   return truncate(lines.join('\n'), LIMITS.message);
 }

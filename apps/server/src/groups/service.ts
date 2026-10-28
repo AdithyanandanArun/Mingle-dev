@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import {
-  nativeActionCommands, nativeActionSkills,
+  nativeActionCommands, nativeActionSkills, TeamOrchestrationSettingsSchema,
 } from '@mingle/contracts';
 import type {
   AddGroupAgent, AgentConfiguration, AutonomyConfig, ConversationGroup, CreateGroup, GroupAssignment, GroupDelivery, GroupMember, GroupMessage, GroupMode, MessageContextRef, SessionPlan,
@@ -28,6 +28,7 @@ import {
   LIMITS, MODE_LABEL, assignmentText, buildInstructions, clean, deriveAcceptanceCriteria, messageDeliveryText, requestDeliveryText, resultText, type ResultLine, type RosterEntry,
 } from './prompt.ts';
 import { RESERVED_HANDLES, extractMentions, normalizeScopes, safeArtifactPath, scopesOverlap } from './routing.ts';
+import { teamAgentBranch } from '../repository/team-branch.ts';
 
 function resolveProviderSkill(provider: Session['provider'], skills: ProviderSkill[], id: string, name: string): ProviderSkill | undefined {
   const eligible = nativeActionSkills(provider, skills).some((skill) => skill.id === id && skill.name === name);
@@ -82,6 +83,11 @@ const FULL_SHA = /^[0-9a-f]{40,64}$/i;
 const DEFAULT_LIMITS = { maxParallel: 2, maxTurns: 80, maxHops: 6 };
 const MAX_SAFE_RETRIES = 1;
 const MAX_SAFE_RETRY_DELAY_MS = 24 * 60 * 60 * 1000;
+function isSafeBranchName(value: string): boolean {
+  return value.length <= 200 && /^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(value) && !value.includes('..')
+    && !value.includes('//') && !value.includes('@{') && !value.endsWith('/')
+    && value.split('/').every((part) => part && part !== '.' && part !== '..' && !part.endsWith('.lock'));
+}
 const forbidden = (message: string) => new HttpError(403, message);
 const effectiveTurnLimit = (group: ConversationGroup): number | null => {
   const autonomy = group.autonomy;
@@ -1955,11 +1961,26 @@ export class GroupService {
     const assignment = delivery.assignmentId ? this.repo.getAssignment(delivery.assignmentId) : undefined;
     const roster = this.roster(group, member);
     const lease = group.mode === 'cowork' ? this.repo.getMember(request.plannerMemberId)?.handle ?? null : null;
+    let teamPermissionLevel: 'supervised' | 'full-access' | null = null;
+    let integrationBranch: string | null = null;
+    try {
+      const teamRow = this.store.db.prepare(`SELECT settings_json FROM mingle_team_host_projects WHERE group_id=? AND group_id!=''`)
+        .get(group.id) as { settings_json: string } | undefined;
+      if (teamRow) {
+        const settings = TeamOrchestrationSettingsSchema.safeParse(JSON.parse(teamRow.settings_json));
+        if (settings.success) {
+          teamPermissionLevel = settings.data.permissionLevel;
+          const anchor = this.store.getSession(group.anchorSessionId);
+          if (anchor?.branch && isSafeBranchName(anchor.branch)) integrationBranch = anchor.branch;
+        }
+      }
+    } catch { /* Non-team groups, older databases and malformed settings retain conservative guidance. */ }
     const instructions = buildInstructions({
       title: group.title, mode: group.mode, self: roster.find((r) => r.you)!, roster, canAssign: this.mayAssign(group, member, request.plannerMemberId), leaseHolder: lease,
       requestExcerpt: this.repo.getMessage(request.messageId)?.content ?? '', deliveryKind: delivery.kind, hop: delivery.hop, maxHops: group.maxHops,
       turnsUsed: request.turnsUsed, maxTurns: effectiveTurnLimit(group), unread: this.repo.countAddressedAfter(group.id, member.id, member.lastReadSeq),
       crossDeviceWorker: member.role === 'worker' && Boolean(this.store.db.prepare('SELECT 1 AS found FROM mingle_team_proxy_sessions WHERE session_id=?').get(member.sessionId)),
+      teamPermissionLevel, integrationBranch,
       assignment: assignment ? { id: assignment.id, taskId: assignment.taskId, scope: assignment.scope } : null,
     });
     return { groupId: group.id, memberId: member.id, requestId: request.id, deliveryId: delivery.id, hop: delivery.hop, instructions };
@@ -2577,7 +2598,11 @@ export class GroupService {
       const session = this.store.getSession(m.sessionId);
       const running = this.repo.memberDeliveries(m.id, ['running']).length > 0;
       const state = m.held ? 'stopped' : running ? 'running' : queued.get(m.id) ? `idle, ${queued.get(m.id)} queued` : session && this.sessionBusy(session) ? 'busy' : 'idle';
-      return { handle: m.handle, role: m.role, provider: session?.provider ?? 'unknown', model: session?.model ?? 'unknown', state, you: m.id === self.id };
+      let remote = false;
+      try { remote = Boolean(this.store.db.prepare('SELECT 1 AS found FROM mingle_team_proxy_sessions WHERE session_id=?').get(m.sessionId)); }
+      catch { /* The team proxy table is optional for local-only groups. */ }
+      return { handle: m.handle, role: m.role, provider: session?.provider ?? 'unknown', model: session?.model ?? 'unknown', state,
+        you: m.id === self.id, ...(remote ? { branch: teamAgentBranch(m.handle) } : {}) };
     });
   }
 
