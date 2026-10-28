@@ -12,7 +12,7 @@ import { openDatabase } from '../../db.ts';
 import { Store } from '../../store.ts';
 import { makeRepo, runGit, tmpDir, waitFor } from '../../test-utils.ts';
 import { HttpError } from '../../util.ts';
-import { teamCompletionBranch } from '../../repository/team-branch.ts';
+import { teamAgentBranch } from '../../repository/team-branch.ts';
 import { TeamOrchestrationHost } from './service.ts';
 
 const ACCOUNT = '10000000-0000-4000-8000-000000000001';
@@ -169,6 +169,7 @@ function fixture(options: { deviceId?: string; accountId?: string; role?: 'leade
   let afterRunFinished: ((sessionId: string, runId: string, outcome: string) => void) | null = null;
   const finished: Array<{ sessionId: string; runId: string; outcome: string }> = [];
   const enqueued: Array<{ content: string; recipients?: string[]; clientMessageId: string }> = [];
+  const remoteCompletionNotices: Array<{ groupId: string; deliveryId: string; content: string }> = [];
   const groupService = {
     createTeamGroup(input: { id: string; projectId: string; title: string; orchestratorSessionId: string; mode?: 'cowork' | 'orchestrated' | 'current-leads'; members: Array<{ sessionId: string; handle: string; role: 'orchestrator' | 'worker' | 'idle'; held: boolean }> }) {
       // Mirrors GroupService.createTeamGroup: cowork groups have only peers and no orchestrator.
@@ -224,6 +225,7 @@ function fixture(options: { deviceId?: string; accountId?: string; role?: 'leade
       afterRunFinished = null;
       hook?.(sessionId, runId, outcome);
     },
+    notifyRemoteCompletion(input: typeof remoteCompletionNotices[number]) { remoteCompletionNotices.push(input); return true; },
     acceptTask(_context: any, input: { taskId: string; verificationSummary: string }) {
       const task = store.getTask(input.taskId);
       if (!task || task.status !== 'review') throw new HttpError(409, 'Task is not ready for acceptance.');
@@ -263,7 +265,7 @@ function fixture(options: { deviceId?: string; accountId?: string; role?: 'leade
   };
   let host = makeHost();
   const fx = {
-    store, project, local, get host() { return host; }, outgoing, finished, enqueued, artifactImports, artifactDiscards, artifactIntegrations, remoteToolCalls, agents, group: () => group,
+    store, project, local, get host() { return host; }, outgoing, finished, enqueued, remoteCompletionNotices, artifactImports, artifactDiscards, artifactIntegrations, remoteToolCalls, agents, group: () => group,
     authenticatedCalls: () => authenticatedCalls, collaborationRefreshCalls: () => collaborationRefreshes,
     authorizeCalls: () => authorizeCalls, maxConcurrentCloudQueries: () => maxConcurrentCloudQueries,
     cloudQueryTables: () => [...cloudQueryTables],
@@ -1341,7 +1343,7 @@ it('imports remote artifacts into isolated refs and includes those ref names in 
   expect(assistant?.content).toContain('Artifact import/integration failures');
 });
 
-it('fetches a pushed worker branch for review and lets only a full-access orchestrator accept and merge it locally', async () => {
+it('fetches permanent worker branches and merges diverging results locally for full-access acceptance', async () => {
   const fx = fixture();
   const originRoot = tmpDir('mingle-team-host-origin-'); paths.push(originRoot);
   const origin = path.join(originRoot, 'origin.git');
@@ -1373,7 +1375,7 @@ it('fetches a pushed worker branch for review and lets only a full-access orches
   const ownerRoot = tmpDir('mingle-team-owner-'); paths.push(ownerRoot);
   const ownerClone = path.join(ownerRoot, 'repo');
   execFileSync('git', ['clone', '-q', origin, ownerClone]);
-  const branch = teamCompletionBranch(worker.handle, taskId, deliveryId);
+  const branch = teamAgentBranch(worker.handle);
   runGit(ownerClone, 'switch', '-c', branch);
   mkdirSync(path.join(ownerClone, 'src/features'), { recursive: true });
   writeFileSync(path.join(ownerClone, 'src/features/landing.ts'), 'export const landing = true;\n');
@@ -1381,17 +1383,25 @@ it('fetches a pushed worker branch for review and lets only a full-access orches
   runGit(ownerClone, '-c', 'user.name=Owner test', '-c', 'user.email=owner-test@example.invalid', 'commit', '-m', 'Scoped worker result');
   const commitSha = runGit(ownerClone, 'rev-parse', 'HEAD').trim();
   runGit(ownerClone, 'push', 'origin', `${branch}:${branch}`);
+  writeFileSync(path.join(ownerClone, 'later-turn.txt'), 'a later turn advanced the permanent branch\n');
+  runGit(ownerClone, 'add', '--', 'later-turn.txt');
+  runGit(ownerClone, '-c', 'user.name=Owner test', '-c', 'user.email=owner-test@example.invalid', 'commit', '-m', 'Later worker turn');
+  const branchTip = runGit(ownerClone, 'rev-parse', 'HEAD').trim();
+  runGit(ownerClone, 'push', 'origin', `${branch}:${branch}`);
 
   await fx.incoming('teamgroup.delivery.status', { sharedProjectId: SHARED, deliveryId, agentId: REMOTE_AGENT, status: 'completed',
-    runId: 'owner-branch-run', finalText: 'Added the landing module.', artifacts: [], pushedBranch: { name: branch, commitSha }, at: new Date().toISOString() });
+    runId: 'owner-branch-run', finalText: 'Added the landing module.', artifacts: [],
+    pushedBranch: { name: branch, commitSha, baseCommitSha: baseRevision }, at: new Date().toISOString() });
   const completion = fx.store.listMessages(worker.sessionId, { limit: 20 }).find((message) => message.role === 'assistant');
   expect(completion?.content).toContain(`origin/${branch} @ ${commitSha}`);
   expect(completion?.content).toContain('Local review ref: refs/mingle/team/review/');
   expect(completion?.content).toContain(`Integration worktree: ${fx.project.path}`);
-  const review = fx.store.db.prepare(`SELECT branch,commit_sha,review_ref FROM mingle_team_host_review_branches WHERE delivery_id=?`).get(deliveryId) as {
-    branch: string; commit_sha: string; review_ref: string;
+  const review = fx.store.db.prepare(`SELECT branch,commit_sha,base_commit_sha,review_ref FROM mingle_team_host_review_branches WHERE delivery_id=?`).get(deliveryId) as {
+    branch: string; commit_sha: string; base_commit_sha: string; review_ref: string;
   };
   expect(runGit(fx.project.path, 'rev-parse', review.review_ref).trim()).toBe(commitSha);
+  expect(review).toMatchObject({ branch, commit_sha: commitSha, base_commit_sha: baseRevision });
+  expect(runGit(fx.project.path, 'rev-parse', `refs/remotes/origin/${branch}`).trim()).toBe(branchTip);
   expect(runGit(fx.project.path, 'rev-parse', 'HEAD').trim()).toBe(baseRevision);
 
   const context = { groupId: group.group.id, memberId: orchestrator.id, requestId, deliveryId, hop: 1, instructions: 'Review result' };
@@ -1399,13 +1409,119 @@ it('fetches a pushed worker branch for review and lets only a full-access orches
     .rejects.toMatchObject({ status: 403 });
   await fx.host.update(PROJECT, { expectedVersion: 1, permissionLevel: 'full-access' });
   await grantRemote(fx, 2, { permissionLevel: 'full-access' });
+  runGit(fx.project.path, 'config', 'user.name', 'Host integration');
+  runGit(fx.project.path, 'config', 'user.email', 'host-integration@example.test');
 
   const accepted = await fx.host.acceptTask(context, fx.local.id, { taskId, verificationSummary: 'Tests pass and I inspected the diff.' });
   expect(accepted).toMatchObject({ acceptedBy: 'orchestrator', taskId, status: 'done', branch, commitSha, localRef: review.review_ref, merged: true });
   expect(fx.store.getTask(taskId)?.status).toBe('done');
   expect(group.assignments[0]).toMatchObject({ acceptedBy: 'orchestrator', verificationSummary: 'Tests pass and I inspected the diff.' });
-  expect(runGit(fx.project.path, 'rev-parse', 'HEAD').trim()).toBe(commitSha);
+  const mergedHead = runGit(fx.project.path, 'rev-parse', 'HEAD').trim();
+  expect(mergedHead).not.toBe(commitSha);
+  expect(() => runGit(fx.project.path, 'merge-base', '--is-ancestor', commitSha, mergedHead)).not.toThrow();
+  expect(runGit(fx.project.path, 'rev-list', '--parents', '-n', '1', mergedHead).trim().split(' ')).toHaveLength(3);
   expect(runGit(origin, 'rev-parse', 'refs/heads/main').trim()).toBe(baseRevision);
+
+  const secondAgentId = 'remote-published-agent-two';
+  const secondSessionId = 'owner-session-remote-two';
+  fx.addPublishedAgent({ id: secondAgentId, name: 'Remote Worker Two', accountId: OWNER, deviceId: OWNER_DEVICE, projectId: PROJECT,
+    sessionId: secondSessionId, provider: 'codex', model: 'gpt-6-codex', state: 'idle' });
+  await fx.incoming('teamgroup.consent', { sharedProjectId: SHARED, agentIds: [REMOTE_AGENT, secondAgentId], permissionLevel: 'full-access',
+    settingsVersion: 2, disclaimerVersion: TEAM_CONSENT_DISCLAIMER_VERSION, state: 'granted', at: new Date().toISOString() });
+  await fx.host.addAgentToGroup(group.group.id, { agentId: secondAgentId, handle: 'worker-two' });
+  const secondGroup = fx.group()!;
+  const secondWorker = secondGroup.members.find((member) => member.sessionId !== worker.sessionId && member.role === 'worker')!;
+  const secondTaskId = 'task-two-diverging-branch';
+  const secondDeliveryId = 'team-branch-review-delivery-two';
+  const secondRequestId = 'team-branch-review-request-two';
+  const secondRunId = 'host-branch-run-two';
+  fx.store.insertTask({ id: secondTaskId, projectId: PROJECT, title: 'Add another scoped output', description: '',
+    acceptanceCriteria: 'The second output exists.', sessionId: secondWorker.sessionId, dependsOn: [], status: 'review' });
+  secondGroup.deliveries.push({ id: secondDeliveryId, groupId: secondGroup.group.id, requestId: secondRequestId,
+    messageId: 'review-message-two', memberId: secondWorker.id, status: 'running', runId: secondRunId, hop: 0, error: null,
+    createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), kind: 'assignment' });
+  secondGroup.assignments.push({ id: 'team-branch-review-assignment-two', groupId: secondGroup.group.id, requestId: secondRequestId,
+    fromMemberId: orchestrator.id, toMemberId: secondWorker.id, taskId: secondTaskId, deliveryId: secondDeliveryId,
+    scope: ['src/features/another.ts'], createdAt: new Date().toISOString() });
+  const secondUserMessage = fx.store.insertMessage({ sessionId: secondWorker.sessionId, role: 'user', content: 'Add another output', runId: secondRunId, kind: 'group-delivery' });
+  fx.store.insertRun({ id: secondRunId, sessionId: secondWorker.sessionId, userMessageId: secondUserMessage.id, provider: 'codex',
+    model: 'gpt-6-codex', startedAt: new Date().toISOString() });
+  fx.host.start({ session: fx.store.getSession(secondWorker.sessionId)!, runId: secondRunId, content: 'Add another output', options: { groupDeliveryId: secondDeliveryId },
+    context: { groupId: secondGroup.group.id, memberId: secondWorker.id, requestId: secondRequestId, deliveryId: secondDeliveryId, hop: 0, instructions: 'Team instructions' } });
+  await waitFor(() => fx.outgoing.some((entry) => entry.kind === 'teamgroup.delivery' && (entry.payload as { deliveryId?: string }).deliveryId === secondDeliveryId));
+
+  const secondOwnerRoot = tmpDir('mingle-team-owner-two-'); paths.push(secondOwnerRoot);
+  const secondOwnerClone = path.join(secondOwnerRoot, 'repo');
+  execFileSync('git', ['clone', '-q', origin, secondOwnerClone]);
+  const secondBranch = teamAgentBranch(secondWorker.handle);
+  runGit(secondOwnerClone, 'switch', '-c', secondBranch);
+  mkdirSync(path.join(secondOwnerClone, 'src/features'), { recursive: true });
+  writeFileSync(path.join(secondOwnerClone, 'src/features/another.ts'), 'export const another = true;\n');
+  runGit(secondOwnerClone, 'add', '--', 'src/features/another.ts');
+  runGit(secondOwnerClone, '-c', 'user.name=Owner test', '-c', 'user.email=owner-test@example.invalid', 'commit', '-m', 'Second scoped worker result');
+  const secondCommitSha = runGit(secondOwnerClone, 'rev-parse', 'HEAD').trim();
+  runGit(secondOwnerClone, 'push', 'origin', `${secondBranch}:${secondBranch}`);
+
+  await fx.incoming('teamgroup.delivery.status', { sharedProjectId: SHARED, deliveryId: secondDeliveryId, agentId: secondAgentId,
+    status: 'completed', runId: 'owner-branch-run-two', finalText: 'Added the second output.', artifacts: [],
+    pushedBranch: { name: secondBranch, commitSha: secondCommitSha, baseCommitSha: baseRevision }, at: new Date().toISOString() });
+  const secondContext = { groupId: secondGroup.group.id, memberId: orchestrator.id, requestId: secondRequestId,
+    deliveryId: secondDeliveryId, hop: 1, instructions: 'Review the second result' };
+  expect(() => runGit(fx.project.path, 'merge-base', '--is-ancestor', commitSha, secondCommitSha)).toThrow();
+  expect(() => runGit(fx.project.path, 'merge-base', '--is-ancestor', secondCommitSha, commitSha)).toThrow();
+  const secondAccepted = await fx.host.acceptTask(secondContext, fx.local.id,
+    { taskId: secondTaskId, verificationSummary: 'The second diff is correct and checks passed.' });
+  expect(secondAccepted).toMatchObject({ acceptedBy: 'orchestrator', taskId: secondTaskId, merged: true });
+  const finalHead = runGit(fx.project.path, 'rev-parse', 'HEAD').trim();
+  expect(() => runGit(fx.project.path, 'merge-base', '--is-ancestor', commitSha, finalHead)).not.toThrow();
+  expect(() => runGit(fx.project.path, 'merge-base', '--is-ancestor', secondCommitSha, finalHead)).not.toThrow();
+  expect(runGit(fx.project.path, 'rev-list', '--parents', '-n', '1', finalHead).trim().split(' ')).toHaveLength(3);
+});
+
+it('queues one review wake for a remote worker request but not when the completing member is the orchestrator', async () => {
+  const completeDirectRequest = async (fx: ReturnType<typeof fixture>, remoteIsOrchestrator: boolean) => {
+    const group = await addRemoteToSession(fx);
+    const worker = group.members.find((member) => member.sessionId.startsWith('proxy_'))!;
+    if (remoteIsOrchestrator) {
+      worker.role = 'orchestrator';
+      group.group.orchestratorMemberId = worker.id;
+    }
+    const deliveryId = `direct-completion-${randomUUID()}`;
+    const requestId = `direct-request-${randomUUID()}`;
+    const runId = `direct-run-${randomUUID()}`;
+    const ownerRunId = `owner-${runId}`;
+    group.deliveries.push({ id: deliveryId, groupId: group.group.id, requestId, messageId: `message-${deliveryId}`, memberId: worker.id,
+      status: 'running', runId, hop: 0, error: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), kind: 'request' });
+    const userMessage = fx.store.insertMessage({ sessionId: worker.sessionId, role: 'user', content: 'Please implement this directly.', runId, kind: 'group-delivery' });
+    fx.store.insertRun({ id: runId, sessionId: worker.sessionId, userMessageId: userMessage.id, provider: worker.sessionId.startsWith('proxy_') ? 'codex' : 'claude',
+      model: 'test-model', startedAt: new Date().toISOString() });
+    fx.host.start({ session: fx.store.getSession(worker.sessionId)!, runId, content: 'Please implement this directly.', options: { groupDeliveryId: deliveryId },
+      context: { groupId: group.group.id, memberId: worker.id, requestId, deliveryId, hop: 0, instructions: 'Team instructions' } });
+    await waitFor(() => fx.outgoing.some((entry) => entry.kind === 'teamgroup.delivery' && (entry.payload as { deliveryId?: string }).deliveryId === deliveryId));
+    await fx.incoming('teamgroup.delivery.status', { sharedProjectId: SHARED, deliveryId, agentId: REMOTE_AGENT, status: 'completed',
+      runId: ownerRunId, finalText: 'Completed the direct request.', artifacts: [],
+      branchPushFailure: 'The shared project has no origin remote.', at: new Date().toISOString() });
+    return { group, worker, deliveryId, ownerRunId };
+  };
+
+  const fx = fixture();
+  const completed = await completeDirectRequest(fx, false);
+  expect(fx.remoteCompletionNotices).toHaveLength(1);
+  expect(fx.remoteCompletionNotices[0]).toMatchObject({ groupId: completed.group.group.id, deliveryId: completed.deliveryId });
+  expect(fx.remoteCompletionNotices[0]!.content).toContain(`@${completed.worker.handle}`);
+  expect(fx.remoteCompletionNotices[0]!.content).toContain(`origin/${teamAgentBranch(completed.worker.handle)}`);
+  expect(fx.remoteCompletionNotices[0]!.content).toContain('Local review ref: unavailable');
+  expect(fx.remoteCompletionNotices[0]!.content).toContain(`Integration worktree: ${fx.project.path}`);
+  expect(fx.remoteCompletionNotices[0]!.content).toContain('Supervised: ask the human before pushing');
+  await fx.incoming('teamgroup.delivery.status', { sharedProjectId: SHARED, deliveryId: completed.deliveryId, agentId: REMOTE_AGENT,
+    status: 'completed', runId: completed.ownerRunId,
+    finalText: 'Completed the direct request.', artifacts: [],
+    branchPushFailure: 'The shared project has no origin remote.', at: new Date().toISOString() });
+  expect(fx.remoteCompletionNotices).toHaveLength(1);
+
+  const orchestratorFx = fixture();
+  await completeDirectRequest(orchestratorFx, true);
+  expect(orchestratorFx.remoteCompletionNotices).toEqual([]);
 });
 
 it('releases sender ordering after persisting completion before waiting on a retrying artifact import', async () => {

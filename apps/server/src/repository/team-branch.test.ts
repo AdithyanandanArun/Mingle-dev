@@ -42,6 +42,42 @@ it('pushes only the dedicated mingle branch to origin without changing main or c
   expect(runGit(origin, 'tag', '--list').trim()).toBe('');
 });
 
+it('pushes the permanent agent branch repeatedly using fast-forward updates', async () => {
+  const repo = makeRepo(); roots.push(repo);
+  const { origin, base } = bareOrigin(repo);
+  const branch = teamAgentBranch('sam');
+  runGit(repo, 'switch', '-c', branch);
+  runGit(repo, 'config', 'user.name', 'Worker');
+  runGit(repo, 'config', 'user.email', 'worker@example.test');
+  runGit(repo, 'commit', '--allow-empty', '-m', 'first turn');
+  const first = runGit(repo, 'rev-parse', 'HEAD').trim();
+  await pushTeamCompletionBranch({ worktreePath: repo, branch, expectedHead: first });
+
+  runGit(repo, 'commit', '--allow-empty', '-m', 'second turn');
+  const second = runGit(repo, 'rev-parse', 'HEAD').trim();
+  expect(await pushTeamCompletionBranch({ worktreePath: repo, branch, expectedHead: second }))
+    .toEqual({ branch, commitSha: second });
+  expect(runGit(origin, 'rev-parse', `refs/heads/${branch}`).trim()).toBe(second);
+  expect(runGit(origin, 'rev-parse', 'refs/heads/main').trim()).toBe(base);
+});
+
+it('refuses to push the permanent agent branch when origin names it as the default branch', async () => {
+  const repo = makeRepo(); roots.push(repo);
+  const { origin, base } = bareOrigin(repo);
+  const branch = teamAgentBranch('sam');
+  runGit(origin, 'update-ref', `refs/heads/${branch}`, base);
+  runGit(origin, 'symbolic-ref', 'HEAD', `refs/heads/${branch}`);
+  runGit(repo, 'switch', '-c', branch);
+  runGit(repo, 'config', 'user.name', 'Worker');
+  runGit(repo, 'config', 'user.email', 'worker@example.test');
+  runGit(repo, 'commit', '--allow-empty', '-m', 'worker result');
+  const head = runGit(repo, 'rev-parse', 'HEAD').trim();
+
+  await expect(pushTeamCompletionBranch({ worktreePath: repo, branch, expectedHead: head }))
+    .rejects.toThrow('origin’s default branch');
+  expect(runGit(origin, 'rev-parse', `refs/heads/${branch}`).trim()).toBe(base);
+});
+
 it('reports missing origin instead of pretending a worker branch was published', async () => {
   const repo = makeRepo(); roots.push(repo);
   const branch = teamCompletionBranch('sam', 'task-1', 'delivery-1');

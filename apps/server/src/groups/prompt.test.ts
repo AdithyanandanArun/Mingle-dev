@@ -1,5 +1,5 @@
 import { expect, it } from 'vitest';
-import { assignmentText, buildInstructions, type InstructionData } from './prompt.ts';
+import { assignmentText, buildInstructions, LIMITS, type InstructionData } from './prompt.ts';
 
 const worker: InstructionData = {
   title: 'Shared project', mode: 'orchestrated',
@@ -32,14 +32,26 @@ it('keeps clarification message deliveries reply-only without granting task stat
   expect(instructions).not.toContain('Assignment assignment-1 (task task-1)');
 });
 
-it('tells cross-device workers that Mingle publishes only their scoped completion branch', () => {
+it('tells cross-device workers to use their permanent branch and permits a direct push to only that branch', () => {
   const instructions = buildInstructions({ ...worker, crossDeviceWorker: true });
-  expect(instructions).toContain('Mingle commits your remaining in-scope changes');
-  expect(instructions).toContain('dedicated `mingle/<your-handle>/<task-or-delivery>` branch on origin');
-  expect(instructions).toContain('resulting branch, full commit SHA');
-  expect(instructions).toContain('never report absolute paths from your device');
-  expect(instructions).toContain('Do not push manually, push to a default/protected branch, force-push');
+  expect(instructions).toContain('permanent branch `mingle/owner/work`');
+  expect(instructions).toContain('git add and git commit');
+  expect(instructions).toContain('Mingle automatically pushes this branch to origin when your turn ends');
+  expect(instructions).toContain('git push origin HEAD:mingle/owner/work');
+  expect(instructions).toContain('git pull --no-rebase origin <integration-branch supplied by the host>');
+  expect(instructions).toContain('never absolute paths from your device');
+  expect(instructions).toContain('Never tell the human that you cannot commit or push');
+  expect(instructions).not.toContain('Do not push manually');
   expect(instructions).not.toContain('never push or publish without explicit human authorization');
+});
+
+it('allows reply-only remote workers to synchronize and publish only their branch when asked', () => {
+  const instructions = buildInstructions({ ...worker, crossDeviceWorker: true, deliveryKind: 'message', integrationBranch: 'main' });
+  expect(instructions).toContain('reply-only message delivery');
+  expect(instructions).toContain('If the sender asks, you may still git pull, commit or push only on your own permanent branch `mingle/owner/work`');
+  expect(instructions).toContain('Do not edit files');
+  expect(instructions).toContain('Git synchronization or publication');
+  expect(instructions).not.toContain('Assignment assignment-1');
 });
 
 it('yields for pending worker integration and waits for the durable result-review wake', () => {
@@ -52,4 +64,26 @@ it('yields for pending worker integration and waits for the durable result-revie
   expect(instructions).toContain('inspect the exact host-fetched review ref');
   expect(instructions).toContain('never answer Pending or wait for a human prompt after completion has arrived');
   expect(instructions).toContain('call team_accept');
+});
+
+it('gives team planners branch-aware integration guidance and keeps non-team groups conservative', () => {
+  const team = { ...worker, self: { ...worker.self, role: 'orchestrator' as const }, canAssign: true, deliveryKind: 'request' as const,
+    assignment: null, teamPermissionLevel: 'full-access' as const, integrationBranch: 'main',
+    roster: [...worker.roster, { handle: 'owner', role: 'worker' as const, provider: 'codex', model: 'model', state: 'running', you: false, branch: 'mingle/owner/work' }] };
+  const fullAccess = buildInstructions(team);
+  expect(fullAccess).toContain('origin/mingle/owner/work');
+  expect(fullAccess).toContain('git fetch origin');
+  expect(fullAccess).toContain('git push origin main');
+  expect(fullAccess).toContain('never force');
+  expect(fullAccess).toContain('Never push to a worker branch');
+  expect(fullAccess).toContain('git pull --no-rebase origin main');
+  expect(fullAccess).toContain('do not check origin for its work');
+  expect(fullAccess.length).toBeLessThanOrEqual(LIMITS.instructions);
+
+  const supervised = buildInstructions({ ...team, teamPermissionLevel: 'supervised' });
+  expect(supervised).toContain('ask the human before pushing the integration branch');
+  expect(supervised).not.toContain('push the integration branch normally');
+
+  const nonTeam = buildInstructions({ ...team, teamPermissionLevel: null });
+  expect(nonTeam).toContain('Never push or publish, or modify the human-selected checkout, without explicit human authorization');
 });

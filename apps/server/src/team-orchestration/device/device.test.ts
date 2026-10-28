@@ -146,6 +146,9 @@ async function fixture(): Promise<Fixture> {
   const root = sharedRoot;
   const repo = sharedRepo;
   const worktree = sharedWorktree;
+  const permanentBranch = 'mingle/worker/work';
+  runGit(repo, 'worktree', 'prune', '--expire', 'now');
+  if (runGit(repo, 'branch', '--list', permanentBranch).trim()) runGit(repo, 'branch', '-D', permanentBranch);
   const worktreeRoot = mkdtempSync(path.join(os.tmpdir(), 'mingle-team-delivery-data-'));
   roots.push(worktreeRoot);
   const store = new Store(openDatabase(':memory:'));
@@ -477,7 +480,7 @@ describe('owner-device team orchestration', () => {
     expect(deliveryWorktree.startsWith(f.worktreeRoot)).toBe(true);
     expect(runGit(deliveryWorktree, 'rev-parse', 'HEAD').trim()).toBe(f.exportCalls[0].revision);
     expect(f.store.db.prepare('SELECT worktree_path,branch FROM mingle_team_device_deliveries WHERE delivery_id=?').get(payload.deliveryId))
-      .toMatchObject({ worktree_path: deliveryWorktree, branch: expect.stringMatching(/^mingle\/worker\//) });
+      .toMatchObject({ worktree_path: deliveryWorktree, branch: 'mingle/worker/work' });
     expect(f.exportCalls[0]).toMatchObject({ toDeviceId: HOST_DEVICE, deliveryId: payload.deliveryId, sourceWorktreePath: deliveryWorktree });
     expect(f.chatReplies).toHaveLength(2);
     expect(new Set(f.chatReplies.map((args) => args[4])).size).toBe(1);
@@ -495,7 +498,37 @@ describe('owner-device team orchestration', () => {
     expect(f.runtime.startCount).toBe(2);
   });
 
-  it('pushes completion to its dedicated worker branch on origin without moving main', async () => {
+  it('reuses the same worktree and permanent branch across deliveries and starts the next turn at the prior commit', async () => {
+    const f = await fixture();
+    await sendStructure(f);
+    await f.setConsent();
+    const first = deliveryPayload({ deliveryId: `delivery-${randomUUID()}` });
+    await f.deliver(first);
+    await waitFor(() => f.sent.some((message) => message.payload?.deliveryId === first.deliveryId && message.payload?.status === 'completed'));
+    const firstRow = f.store.db.prepare('SELECT worktree_path,branch FROM mingle_team_device_deliveries WHERE delivery_id=?')
+      .get(first.deliveryId) as { worktree_path: string; branch: string };
+    const firstHead = runGit(firstRow.worktree_path, 'rev-parse', 'HEAD').trim();
+    let secondTurnSawFirstCommit = false;
+    f.runtime.onStart = (options) => {
+      if (options.worktree.path !== firstRow.worktree_path) return;
+      try { runGit(options.worktree.path, 'cat-file', '-e', `${firstHead}^{commit}`); secondTurnSawFirstCommit = true; }
+      catch { secondTurnSawFirstCommit = false; }
+    };
+
+    const second = deliveryPayload({ deliveryId: `delivery-${randomUUID()}` });
+    await f.deliver(second);
+    await waitFor(() => f.sent.some((message) => message.payload?.deliveryId === second.deliveryId && message.payload?.status === 'completed'));
+    const secondRow = f.store.db.prepare('SELECT worktree_path,branch,base_revision FROM mingle_team_device_deliveries WHERE delivery_id=?')
+      .get(second.deliveryId) as { worktree_path: string; branch: string; base_revision: string };
+    const secondHead = runGit(secondRow.worktree_path, 'rev-parse', 'HEAD').trim();
+
+    expect(secondTurnSawFirstCommit).toBe(true);
+    expect(secondRow).toEqual({ worktree_path: firstRow.worktree_path, branch: 'mingle/worker/work', base_revision: firstHead });
+    expect(() => runGit(secondRow.worktree_path, 'merge-base', '--is-ancestor', firstHead, secondHead)).not.toThrow();
+    expect(f.runtime.startCount).toBe(2);
+  });
+
+  it('pushes completion to the permanent worker branch on origin without exporting duplicate artifacts', async () => {
     const f = await fixture();
     const originRoot = mkdtempSync(path.join(os.tmpdir(), 'mingle-worker-origin-'));
     roots.push(originRoot);
@@ -504,6 +537,8 @@ describe('owner-device team orchestration', () => {
     execFileSync('git', ['init', '-q', '--bare', '--initial-branch=main', origin]);
     runGit(f.repo, 'remote', 'add', 'origin', origin);
     try {
+      runGit(f.repo, 'config', 'user.name', 'Owner');
+      runGit(f.repo, 'config', 'user.email', 'owner@example.test');
       runGit(f.repo, 'push', 'origin', 'main');
       const base = runGit(origin, 'rev-parse', 'refs/heads/main').trim();
       await sendStructure(f);
@@ -515,12 +550,13 @@ describe('owner-device team orchestration', () => {
 
       const completed = f.sent.find((message) => message.kind === 'teamgroup.delivery.status'
         && message.payload.deliveryId === payload.deliveryId && message.payload.status === 'completed')!.payload;
-      expect(completed.pushedBranch).toEqual(expect.objectContaining({ name: expect.stringMatching(/^mingle\/worker\/task-worker-finish-/), commitSha: expect.any(String) }));
+      expect(completed.pushedBranch).toEqual(expect.objectContaining({ name: 'mingle/worker/work', commitSha: expect.any(String), baseCommitSha: base }));
       expect(completed.branchPushFailure).toBeUndefined();
       expect(runGit(origin, 'rev-parse', 'refs/heads/main').trim()).toBe(base);
       expect(runGit(origin, 'rev-parse', `refs/heads/${completed.pushedBranch.name}`).trim()).toBe(completed.pushedBranch.commitSha);
       expect(runGit(origin, 'tag', '--list').trim()).toBe('');
-      expect(completed.artifacts).toHaveLength(1);
+      expect(completed.artifacts).toEqual([]);
+      expect(f.exportCalls).toHaveLength(0);
     } finally {
       runGit(f.repo, 'remote', 'remove', 'origin');
     }
@@ -542,6 +578,156 @@ describe('owner-device team orchestration', () => {
     expect(completed.finalText).toBe('Final result: safe output');
     expect(completed.artifacts).toHaveLength(1);
     expect(f.exportCalls).toHaveLength(1);
+  });
+
+  it('pushes earlier unpushed commits when the next completed turn makes no new commit', async () => {
+    const f = await fixture();
+    await sendStructure(f);
+    await f.setConsent();
+    const first = deliveryPayload({ deliveryId: `delivery-${randomUUID()}` });
+    await f.deliver(first);
+    await waitFor(() => f.sent.some((message) => message.payload?.deliveryId === first.deliveryId && message.payload?.status === 'completed'));
+    const firstRow = f.store.db.prepare('SELECT worktree_path FROM mingle_team_device_deliveries WHERE delivery_id=?')
+      .get(first.deliveryId) as { worktree_path: string };
+    const unpushedHead = runGit(firstRow.worktree_path, 'rev-parse', 'HEAD').trim();
+    expect(f.sent.find((message) => message.payload?.deliveryId === first.deliveryId && message.payload?.status === 'completed')?.payload.branchPushFailure)
+      .toContain('no origin remote');
+
+    const originRoot = mkdtempSync(path.join(os.tmpdir(), 'mingle-later-origin-'));
+    roots.push(originRoot);
+    const origin = path.join(originRoot, 'origin.git');
+    mkdirSync(origin);
+    execFileSync('git', ['init', '-q', '--bare', '--initial-branch=main', origin]);
+    runGit(f.repo, 'remote', 'add', 'origin', origin);
+    try {
+      runGit(f.repo, 'config', 'user.name', 'Owner');
+      runGit(f.repo, 'config', 'user.email', 'owner@example.test');
+      runGit(f.repo, 'push', 'origin', 'main');
+      f.runtime.writeDefaultArtifact = false;
+      f.runtime.commitChanges = false;
+      const second = deliveryPayload({ deliveryId: `delivery-${randomUUID()}` });
+      await f.deliver(second);
+      await waitFor(() => f.sent.some((message) => message.payload?.deliveryId === second.deliveryId && message.payload?.status === 'completed'));
+      const completed = f.sent.find((message) => message.payload?.deliveryId === second.deliveryId && message.payload?.status === 'completed')!.payload;
+
+      expect(completed.pushedBranch).toEqual({ name: 'mingle/worker/work', commitSha: unpushedHead, baseCommitSha: unpushedHead });
+      expect(completed.branchPushFailure).toBeUndefined();
+      expect(completed.artifacts).toEqual([]);
+      expect(runGit(origin, 'rev-parse', 'refs/heads/mingle/worker/work').trim()).toBe(unpushedHead);
+      expect(f.exportCalls).toHaveLength(1);
+    } finally {
+      runGit(f.repo, 'remote', 'remove', 'origin');
+    }
+  });
+
+  it('merges a clean host integration update into the persistent worker branch before the next turn', async () => {
+    const f = await fixture();
+    const originRoot = mkdtempSync(path.join(os.tmpdir(), 'mingle-integration-origin-'));
+    roots.push(originRoot);
+    const origin = path.join(originRoot, 'origin.git');
+    mkdirSync(origin);
+    execFileSync('git', ['init', '-q', '--bare', '--initial-branch=main', origin]);
+    runGit(f.repo, 'remote', 'add', 'origin', origin);
+    try {
+      runGit(f.repo, 'config', 'user.name', 'Owner');
+      runGit(f.repo, 'config', 'user.email', 'owner@example.test');
+      runGit(f.repo, 'push', 'origin', 'main');
+      await sendStructure(f);
+      await f.setConsent();
+      const base = runGit(f.repo, 'rev-parse', 'HEAD').trim();
+      const first = deliveryPayload({ deliveryId: `delivery-${randomUUID()}`, baseRevision: base, integrationBranch: 'main' });
+      await f.deliver(first);
+      await waitFor(() => f.sent.some((message) => message.payload?.deliveryId === first.deliveryId && message.payload?.status === 'completed'));
+      const firstRow = f.store.db.prepare('SELECT worktree_path FROM mingle_team_device_deliveries WHERE delivery_id=?')
+        .get(first.deliveryId) as { worktree_path: string };
+      const firstHead = runGit(firstRow.worktree_path, 'rev-parse', 'HEAD').trim();
+
+      writeFileSync(path.join(f.repo, 'host-integration.txt'), 'host change\n');
+      runGit(f.repo, 'add', '--', 'host-integration.txt');
+      runGit(f.repo, 'commit', '-m', 'Host integration change');
+      const hostHead = runGit(f.repo, 'rev-parse', 'HEAD').trim();
+      runGit(f.repo, 'push', 'origin', 'main');
+      let secondStartHead = '';
+      f.runtime.onStart = (options) => {
+        secondStartHead = runGit(options.worktree.path, 'rev-parse', 'HEAD').trim();
+      };
+
+      const second = deliveryPayload({ deliveryId: `delivery-${randomUUID()}`, baseRevision: hostHead, integrationBranch: 'main' });
+      await f.deliver(second);
+      await waitFor(() => f.sent.some((message) => message.payload?.deliveryId === second.deliveryId && message.payload?.status === 'completed'));
+      const row = f.store.db.prepare('SELECT worktree_path,base_revision FROM mingle_team_device_deliveries WHERE delivery_id=?')
+        .get(second.deliveryId) as { worktree_path: string; base_revision: string };
+      const requestJson = f.store.db.prepare('SELECT request_json FROM mingle_team_device_deliveries WHERE delivery_id=?')
+        .get(second.deliveryId) as { request_json: string };
+      const secondPrompt = f.store.listMessages(f.store.listSessions(f.projectId)[0]!.id, { limit: 50 })
+        .filter((message) => message.role === 'user' && message.kind === 'team-delivery').at(-1)?.content ?? '';
+
+      expect(JSON.parse(requestJson.request_json)).toMatchObject({ baseRevision: hostHead, integrationBranch: 'main' });
+      expect(secondPrompt).not.toContain('could not merge the latest integration commit');
+      expect(secondStartHead).not.toBe(firstHead);
+      expect(() => runGit(row.worktree_path, 'merge-base', '--is-ancestor', hostHead, secondStartHead)).not.toThrow();
+      expect(readFileSync(path.join(row.worktree_path, 'host-integration.txt'), 'utf8')).toBe('host change\n');
+      expect(() => runGit(row.worktree_path, 'merge-base', '--is-ancestor', firstHead, secondStartHead)).not.toThrow();
+      expect(row.base_revision).toBe(secondStartHead);
+    } finally {
+      runGit(f.repo, 'remote', 'remove', 'origin');
+    }
+  });
+
+  it('aborts a conflicting integration merge and tells the worker how to pull and resolve it', async () => {
+    const f = await fixture();
+    writeFileSync(path.join(f.repo, 'conflict.txt'), 'base\n');
+    runGit(f.repo, 'add', '--', 'conflict.txt');
+    runGit(f.repo, 'commit', '-m', 'Add merge fixture');
+    const originRoot = mkdtempSync(path.join(os.tmpdir(), 'mingle-conflict-origin-'));
+    roots.push(originRoot);
+    const origin = path.join(originRoot, 'origin.git');
+    mkdirSync(origin);
+    execFileSync('git', ['init', '-q', '--bare', '--initial-branch=main', origin]);
+    runGit(f.repo, 'remote', 'add', 'origin', origin);
+    try {
+      runGit(f.repo, 'push', 'origin', 'main');
+      await sendStructure(f);
+      await f.setConsent();
+      const base = runGit(f.repo, 'rev-parse', 'HEAD').trim();
+      const first = deliveryPayload({ deliveryId: `delivery-${randomUUID()}`, baseRevision: base, integrationBranch: 'main' });
+      await f.deliver(first);
+      await waitFor(() => f.sent.some((message) => message.payload?.deliveryId === first.deliveryId && message.payload?.status === 'completed'));
+      const firstRow = f.store.db.prepare('SELECT worktree_path FROM mingle_team_device_deliveries WHERE delivery_id=?')
+        .get(first.deliveryId) as { worktree_path: string };
+      writeFileSync(path.join(firstRow.worktree_path, 'conflict.txt'), 'worker change\n');
+      runGit(firstRow.worktree_path, 'add', '--', 'conflict.txt');
+      runGit(firstRow.worktree_path, 'commit', '-m', 'Worker conflict change');
+      const workerHead = runGit(firstRow.worktree_path, 'rev-parse', 'HEAD').trim();
+
+      writeFileSync(path.join(f.repo, 'conflict.txt'), 'host change\n');
+      runGit(f.repo, 'add', '--', 'conflict.txt');
+      runGit(f.repo, 'commit', '-m', 'Host conflicting change');
+      const hostHead = runGit(f.repo, 'rev-parse', 'HEAD').trim();
+      runGit(f.repo, 'push', 'origin', 'main');
+      let secondStartHead = '';
+      let secondStartClean = false;
+      f.runtime.onStart = (options) => {
+        secondStartHead = runGit(options.worktree.path, 'rev-parse', 'HEAD').trim();
+        secondStartClean = runGit(options.worktree.path, 'status', '--porcelain=v1').trim() === '';
+      };
+
+      const second = deliveryPayload({ deliveryId: `delivery-${randomUUID()}`, baseRevision: hostHead, integrationBranch: 'main' });
+      await f.deliver(second);
+      await waitFor(() => f.sent.some((message) => message.payload?.deliveryId === second.deliveryId && message.payload?.status === 'completed'));
+      const completed = f.sent.find((message) => message.payload?.deliveryId === second.deliveryId && message.payload?.status === 'completed')!.payload;
+      const secondRunId = completed.runId;
+      const requestMessage = f.store.listMessages(f.store.listSessions(f.projectId)[0]!.id, { limit: 50 })
+        .find((message) => message.runId === secondRunId && message.role === 'user')!;
+
+      expect(secondStartHead).toBe(workerHead);
+      expect(secondStartClean).toBe(true);
+      expect(requestMessage.content).toContain('could not merge the latest integration commit');
+      expect(requestMessage.content).toContain('git pull --no-rebase origin main');
+      expect(completed.finalText).not.toContain('unmerged paths');
+    } finally {
+      runGit(f.repo, 'remote', 'remove', 'origin');
+    }
   });
 
   it('snapshots uncommitted provider files into a clean artifact commit while excluding secrets and ignored paths', async () => {
