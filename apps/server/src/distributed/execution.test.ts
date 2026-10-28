@@ -342,6 +342,23 @@ describe('RemoteExecutionService', () => {
     expect(rosters()).toHaveLength(beforeResume + 1);
   });
 
+  it('publishes an explicit roster change immediately even during an unacknowledged-send backoff', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const start = Date.parse('2026-10-26T06:00:00Z');
+    vi.setSystemTime(new Date(start));
+    const owner = createFixture({ deviceId: DEVICE_B, peerId: DEVICE_A, ownerId: OWNER_B, projectId: 'explicit_publish_b', sessionId: 'explicit_publish_b', sessionName: 'Owner', provider: 'codex' });
+    await owner.service.bindProject({ teamId: TEAM, sharedProjectId: SHARED_PROJECT, localProjectId: 'explicit_publish_b' });
+    await owner.service.publishAgents({ teamId: TEAM, sharedProjectId: SHARED_PROJECT, sessionIds: ['explicit_publish_b'] });
+    const rosters = () => owner.transport.sent.filter((entry) => entry.kind === 'execution.agents');
+    expect(rosters()).toHaveLength(1);
+
+    // A lost acknowledgement starts a 15-second backoff, but an explicit publication must not wait for it.
+    vi.setSystemTime(new Date(start + 11_000));
+    await owner.service.publishAgents({ teamId: TEAM, sharedProjectId: SHARED_PROJECT, sessionIds: [] });
+    expect(rosters()).toHaveLength(2);
+    expect(rosters().at(-1)?.payload).toMatchObject({ version: 2, agents: [] });
+  });
+
   it('publishes a full-access session without changing its saved policy', async () => {
     const destination = createFixture({ deviceId: DEVICE_B, peerId: DEVICE_A, ownerId: OWNER_B, projectId: 'project_full_publish', sessionId: 'session_full_publish', sessionName: 'Full access', provider: 'claude' });
     destination.db.prepare("UPDATE sessions SET policy = 'full-access' WHERE id = 'session_full_publish'").run();

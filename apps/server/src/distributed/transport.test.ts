@@ -1197,6 +1197,28 @@ describe('TransportService authenticated mailbox', () => {
     }
   });
 
+  it('coalesces rosters by their authenticated payload version rather than idempotency metadata', async () => {
+    const { first, second, b } = await pairedServices();
+    const shared = '11111111-2222-4333-8444-777777777777';
+    const delivered: number[] = [];
+    try {
+      // The outer envelope metadata is signed, but the sender controls it independently of its payload.
+      // A mismatched high key version must not hide the legitimate newer roster.
+      await first.send({ teamId, toDeviceId: b.id, kind: 'execution.agents', payload: { sharedProjectId: shared, version: 1 },
+        idempotencyKey: `agents:${shared}:99:${b.id}:1` });
+      await first.send({ teamId, toDeviceId: b.id, kind: 'execution.agents', payload: { sharedProjectId: shared, version: 2 },
+        idempotencyKey: `agents:${shared}:2:${b.id}:1` });
+      await second.sync();
+      const unsubscribe = second.onMessage((message) => { delivered.push((message.payload as { version: number }).version); });
+      await second.sync();
+      unsubscribe();
+      expect(delivered).toEqual([2]);
+    } finally {
+      await first.close();
+      await second.close();
+    }
+  });
+
   it('keeps older rosters queued when the newest copy fails to deliver', async () => {
     const { first, second, b } = await pairedServices();
     const shared = '11111111-2222-4333-8444-666666666666';

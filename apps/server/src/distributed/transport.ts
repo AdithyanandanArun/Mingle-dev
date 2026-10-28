@@ -1153,15 +1153,16 @@ export class TransportService {
    * execution service would ignore as stale) without per-message cloud verification.
    */
   private async deliverNewestRoster(accountId: string, row: LocalEnvelopeRow): Promise<void> {
-    const current = rosterKeyVersion(row);
+    const current = this.rosterPayloadVersion(accountId, row);
     if (!current) return;
     const group = (this.db.prepare(`SELECT * FROM mingle_transport_inbox WHERE account_id = ? AND team_id = ? AND to_device_id = ?
       AND from_device_id = ? AND kind = 'execution.agents' AND status = 'pending' AND idempotency_key LIKE ?`)
       .all(accountId, row.team_id, row.to_device_id, row.from_device_id, `agents:${current.sharedProjectId}:%`) as unknown as LocalEnvelopeRow[])
-      .map((candidate) => ({ candidate, version: rosterKeyVersion(candidate)?.version ?? 0 }))
-      .filter((entry) => entry.version > 0);
+      .map((candidate) => ({ candidate, version: this.rosterPayloadVersion(accountId, candidate) }))
+      .filter((entry): entry is { candidate: LocalEnvelopeRow; version: { sharedProjectId: string; version: number } } =>
+        entry.version?.sharedProjectId === current.sharedProjectId);
     if (group.length < 2) return;
-    const newest = group.reduce((best, entry) => entry.version > best.version ? entry : best);
+    const newest = group.reduce((best, entry) => entry.version.version > best.version.version ? entry : best);
     await this.deliverInboxRow(accountId, newest.candidate, false);
     const handled = this.db.prepare(`SELECT status FROM mingle_transport_inbox WHERE account_id = ? AND team_id = ? AND id = ?`)
       .get(accountId, row.team_id, newest.candidate.id) as { status: string } | undefined;
@@ -1169,7 +1170,30 @@ export class TransportService {
     const supersede = this.db.prepare(`UPDATE mingle_transport_inbox SET status = 'handled', attempts = attempts + 1, next_attempt_at = 0,
       error = 'Superseded by a newer roster from the same device.' WHERE account_id = ? AND team_id = ? AND id = ? AND status = 'pending'`);
     for (const entry of group) {
-      if (entry.candidate.id !== newest.candidate.id && entry.version <= newest.version) supersede.run(accountId, row.team_id, entry.candidate.id);
+      if (entry.candidate.id !== newest.candidate.id && entry.version.version <= newest.version.version) {
+        supersede.run(accountId, row.team_id, entry.candidate.id);
+      }
+    }
+  }
+
+  /** Read the actual roster watermark only after verifying the encrypted, signed envelope. */
+  private rosterPayloadVersion(accountId: string, row: LocalEnvelopeRow): { sharedProjectId: string; version: number } | null {
+    if (row.kind !== 'execution.agents') return null;
+    try {
+      const envelope = JSON.parse(row.envelope_json) as SignedEnvelope;
+      if (envelope.id !== row.id || envelope.kind !== row.kind || envelope.idempotencyKey !== row.idempotency_key) return null;
+      this.validateEnvelope(envelope, row.team_id, row.from_device_id, row.to_device_id);
+      const sender = this.deviceCacheRow(accountId, row.team_id, row.from_device_id);
+      if (!sender || sender.revoked_at) return null;
+      const payload = openEnvelope({ envelope, recipient: this.loadKeys(accountId),
+        senderSigningPublicKey: sender.signing_public_key, senderEncryptionPublicKey: sender.encryption_public_key });
+      if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return null;
+      const value = payload as Record<string, unknown>;
+      if (typeof value.sharedProjectId !== 'string' || value.sharedProjectId.length < 1 || value.sharedProjectId.length > 100 ||
+        !Number.isSafeInteger(value.version) || Number(value.version) < 1) return null;
+      return { sharedProjectId: value.sharedProjectId, version: Number(value.version) };
+    } catch {
+      return null;
     }
   }
 
@@ -1679,15 +1703,6 @@ function isUuid(value: string): boolean {
  * next send wait for a cloud refresh after every settings or consent change. Unknown peers and
  * senders still force an authoritative refresh on their own.
  */
-/** Roster idempotency keys are `agents:<sharedProjectId>:<version>:<peer>:<attempt>`; see the execution service. */
-function rosterKeyVersion(row: Pick<LocalEnvelopeRow, 'kind' | 'idempotency_key'>): { sharedProjectId: string; version: number } | null {
-  if (row.kind !== 'execution.agents') return null;
-  const match = /^agents:([^:]{1,100}):([1-9][0-9]{0,15}):/.exec(row.idempotency_key);
-  if (!match) return null;
-  const version = Number(match[2]);
-  return Number.isSafeInteger(version) ? { sharedProjectId: match[1]!, version } : null;
-}
-
 function messageInvalidatesTeamTrust(kind: string): boolean {
   return /(?:^|[.-])(?:members?|membership|devices?)(?:$|[.-])/i.test(kind);
 }

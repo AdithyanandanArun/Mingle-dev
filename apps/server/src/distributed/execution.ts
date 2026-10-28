@@ -597,7 +597,7 @@ export class RemoteExecutionService {
       this.run(`UPDATE mingle_remote_agents SET revoked_at = ? WHERE team_id = ? AND shared_project_id = ? AND device_id = ? AND owner_id = ? AND revoked_at IS NULL
         AND session_id NOT IN (${parsed.sessionIds.map(() => '?').join(',')})`, at, parsed.teamId, parsed.sharedProjectId, identity.deviceId, identity.ownerId, ...parsed.sessionIds);
       const version = this.nextRosterVersion(identity, parsed.sharedProjectId, at);
-      await this.sendRosterToLinkedPeers(null, identity, parsed.sharedProjectId, version, at, outgoing);
+      await this.sendRosterToLinkedPeers(null, identity, parsed.sharedProjectId, version, at, outgoing, true);
       this.recordEvent(identity, parsed.sharedProjectId, 'agents.published', `Published ${outgoing.length} explicit local agent session(s).`, { agentIds: outgoing.map((agent) => agent.id) });
       this.options.changed();
       this.rosterChanged(identity.teamId, parsed.sharedProjectId);
@@ -616,15 +616,20 @@ export class RemoteExecutionService {
       const at = nowIso();
       const agents: RemoteAgent[] = [];
       let changed = false;
+      let publicationChanged = false;
       for (const row of rows) {
         let session: Session;
         try { session = this.localSession(String(row.session_id)); }
         catch {
-          changed = this.run('UPDATE mingle_remote_agents SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL', at, String(row.id)) > 0 || changed;
+          const revoked = this.run('UPDATE mingle_remote_agents SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL', at, String(row.id)) > 0;
+          changed = revoked || changed;
+          publicationChanged = revoked || publicationChanged;
           continue;
         }
         if (session.projectId !== binding.localProjectId || !EXECUTABLE_PROVIDERS.has(session.provider)) {
-          changed = this.run('UPDATE mingle_remote_agents SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL', at, String(row.id)) > 0 || changed;
+          const revoked = this.run('UPDATE mingle_remote_agents SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL', at, String(row.id)) > 0;
+          changed = revoked || changed;
+          publicationChanged = revoked || publicationChanged;
           continue;
         }
         const active = this.options.runtime.isActive(session.id) || ['running', 'waiting'].includes(session.status);
@@ -635,6 +640,7 @@ export class RemoteExecutionService {
         const digest = configDigest(session);
         const profileChanged = row.name !== name || row.provider !== session.provider || row.model !== model || row.policy !== session.policy ||
           row.config_digest !== digest || row.presence !== presence || Number(row.presence_known) !== 1 || row.active_group_id !== groupId;
+        if (profileChanged) publicationChanged = true;
         // The metadata timer runs every 30 seconds. Renew an unchanged observation before
         // peers' two-minute freshness window expires, without probing provider quota.
         const presenceDue = !freshIso(row.presence_observed_at, 60_000);
@@ -664,7 +670,7 @@ export class RemoteExecutionService {
           AND revoked_at IS NULL ORDER BY published_at`, parsed.teamId, parsed.sharedProjectId, identity.deviceId, identity.ownerId)
           .map((row) => this.agentFromRow(row));
         await this.sendRosterToLinkedPeers(client, identity, parsed.sharedProjectId, Number(versionRow.version),
-          String(versionRow.generated_at), current);
+          String(versionRow.generated_at), current, publicationChanged);
       }
       return agents;
     });
@@ -679,7 +685,7 @@ export class RemoteExecutionService {
   }
 
   private async sendRosterToLinkedPeers(client: AuthenticatedClient | null, identity: Identity, sharedProjectId: string,
-    version: number, generatedAt: string, agents: RemoteAgent[]): Promise<void> {
+    version: number, generatedAt: string, agents: RemoteAgent[], force = false): Promise<void> {
     const snapshot = await this.options.transport.snapshot(identity.teamId);
     const peers = snapshot.devices.filter((device) => device.id !== identity.deviceId && device.teamId === identity.teamId
       && device.linked && device.revokedAt === null);
@@ -694,11 +700,11 @@ export class RemoteExecutionService {
       const unacknowledgedSends = unacknowledged ? Math.max(1, Number(state?.attempts ?? 0)) : 0;
       if (Number.isFinite(lastSentAt)) {
         const elapsed = Date.now() - lastSentAt;
-        if (sentVersion === version && elapsed < ROSTER_RETRY_MS) continue;
+        if (!force && sentVersion === version && elapsed < ROSTER_RETRY_MS) continue;
         // Presence heartbeats bump the version every minute. Each one is a durable mailbox envelope, so an
         // offline peer would otherwise return to hundreds of queued rosters. Back off until it acknowledges;
         // the next send always carries the latest full roster.
-        if (unacknowledged && elapsed >= ROSTER_ACK_GRACE_MS
+        if (!force && unacknowledged && elapsed >= ROSTER_ACK_GRACE_MS
           && elapsed < Math.min(ROSTER_MAX_BACKOFF_MS, ROSTER_RETRY_MS * 2 ** Math.min(10, unacknowledgedSends - 1))) continue;
       }
       if (client) await this.assertLinkedDevices(client, identity.teamId, identity.deviceId, peer.id);
