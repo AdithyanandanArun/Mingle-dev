@@ -119,7 +119,7 @@ export class TeamChatService {
     this.groupViewTimers.clear();
     this.sharedGroupSnapshotProvider = provider;
     this.unsubscribeGroupViews = this.options.store.subscribe((event) => {
-      if (!event?.projectId || !/^(?:group\.|task\.|session\.run\.)/.test(event.type)) return;
+      if (!event?.projectId || !/^(?:group\.|task\.|session\.run\.|approval\.)/.test(event.type)) return;
       this.scheduleGroupView(event.projectId);
     });
   }

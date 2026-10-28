@@ -291,6 +291,35 @@ it('preserves request-level failed/interrupted outcomes even when recorded deliv
   } finally { await host.close(); }
 });
 
+it('describes active work and approvals plainly, then reserves finalizing for an open request with no active turn', async () => {
+  const host = node({ projectId: HOST_PROJECT, accountId: HOST_ACCOUNT, deviceId: HOST_DEVICE, role: 'host' });
+  try {
+    const snapshot = sharedGroup(host);
+    snapshot.requests[0]!.status = 'active';
+    snapshot.deliveries[0]!.status = 'running';
+    host.store.insertSession({ id: 'private-worker', projectId: HOST_PROJECT, name: 'Example worker', provider: 'claude', model: 'example-model', effort: 'high', policy: 'supervised', isolated: true, worktreePath: '/home/example/worker', branch: 'example-worker-branch' });
+    host.store.updateTask('example-shared-task', { status: 'running' });
+
+    const running = projectGroupView(snapshot, host.store, 1).result;
+    expect(running).toMatchObject({ status: 'in-progress', title: 'In progress', summary: 'barista is working on 1 task.' });
+    expect(running?.facts).toContain('1 task still open');
+    expect(running?.summary).not.toContain('Recorded turns have ended');
+
+    const approval = host.store.insertApproval({ sessionId: 'private-worker', tool: 'Bash', description: 'Example approval', input: {} });
+    expect(projectGroupView(snapshot, host.store, 2).result).toMatchObject({
+      status: 'in-progress', title: 'Waiting for approval', summary: "Waiting for the team lead's approval.",
+    });
+    host.store.resolveApproval(approval.id, 'approved', 'Example decision');
+
+    snapshot.deliveries[0]!.status = 'completed';
+    host.store.updateTask('example-shared-task', { status: 'review' });
+    expect(projectGroupView(snapshot, host.store, 3).result).toMatchObject({
+      status: 'in-progress', title: 'Finalizing request',
+      summary: "Wrapping up — the agents have finished; waiting for the team lead's orchestrator to close the request.",
+    });
+  } finally { await host.close(); }
+});
+
 it('preserves full Cowork routing and recipient metadata for the maximum 64-member group', async () => {
   const host = node({ projectId: HOST_PROJECT, accountId: HOST_ACCOUNT, deviceId: HOST_DEVICE, role: 'host' });
   try {

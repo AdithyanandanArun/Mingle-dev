@@ -1,5 +1,5 @@
 import { useMemo } from 'react';
-import type { GroupSnapshot, Message, Session, SessionRun, Task } from '@mingle/contracts';
+import type { Approval, GroupSnapshot, Message, Session, SessionRun, Task } from '@mingle/contracts';
 import { cx } from '../../lib/format';
 import {
   CHANGE_STATUS_LABEL, buildGroupResultModel, reportPreview, type GroupResultStatus, type ResultAgent, type ResultLead, type ResultReport,
@@ -105,10 +105,10 @@ function AgentRow({ agent }: { agent: ResultAgent }) {
   );
 }
 
-export function GroupResultSummary({ snapshot, sessions, messages, runs, tasks }: {
-  snapshot: GroupSnapshot; sessions: readonly Session[]; messages: readonly Message[]; runs: readonly SessionRun[]; tasks: readonly Task[];
+export function GroupResultSummary({ snapshot, sessions, messages, runs, tasks, approvals = [] }: {
+  snapshot: GroupSnapshot; sessions: readonly Session[]; messages: readonly Message[]; runs: readonly SessionRun[]; tasks: readonly Task[]; approvals?: readonly Approval[];
 }) {
-  const model = useMemo(() => buildGroupResultModel({ snapshot, sessions, messages, runs, tasks }), [snapshot, sessions, messages, runs, tasks]);
+  const model = useMemo(() => buildGroupResultModel({ snapshot, sessions, messages, runs, tasks, approvals }), [snapshot, sessions, messages, runs, tasks, approvals]);
   if (!model) return null;
   const compact = model.active && model.status !== 'paused';
   const meta = [

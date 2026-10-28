@@ -41,7 +41,20 @@ function resultFor(snapshot: GroupSnapshot, store: Store): TeamChatGroupView['re
   const assignments = snapshot.assignments.filter((item) => item.requestId === request.id);
   const tasks = assignments.map((assignment) => store.getTask(assignment.taskId))
     .filter((task): task is Task => Boolean(task && task.projectId === snapshot.group.projectId));
-  const active = deliveries.some((item) => item.status === 'queued' || item.status === 'running');
+  const activeDeliveries = deliveries.filter((item) => item.status === 'queued' || item.status === 'running');
+  const runningDeliveries = activeDeliveries.filter((item) => item.status === 'running');
+  const active = activeDeliveries.length > 0;
+  const activeMemberIds = new Set(runningDeliveries.map((delivery) => delivery.memberId));
+  const awaitingApproval = snapshot.members.some((member) => activeMemberIds.has(member.id) && store.pendingApprovals(member.sessionId).length > 0);
+  const runningDeliveryIds = new Set(runningDeliveries.map((delivery) => delivery.id));
+  const queuedDeliveries = activeDeliveries.filter((delivery) => delivery.status === 'queued');
+  const queuedDeliveryIds = new Set(queuedDeliveries.map((delivery) => delivery.id));
+  const runningTaskIds = new Set(assignments.filter((assignment) => runningDeliveryIds.has(assignment.deliveryId)).map((assignment) => assignment.taskId));
+  const queuedTaskIds = new Set(assignments.filter((assignment) => queuedDeliveryIds.has(assignment.deliveryId)).map((assignment) => assignment.taskId));
+  const handlesFor = (rows: typeof activeDeliveries) => [...new Set(rows.flatMap((delivery) => {
+    const member = snapshot.members.find((candidate) => candidate.id === delivery.memberId);
+    return member ? [member.handle] : [];
+  }))];
   const failed = deliveries.some((item) => item.status === 'failed');
   const stopped = deliveries.some((item) => item.status === 'interrupted' || item.status === 'cancelled');
   const requestState = request.status as string;
@@ -72,8 +85,28 @@ function resultFor(snapshot: GroupSnapshot, store: Store): TeamChatGroupView['re
     status = 'stopped'; title = 'Stopped before finishing'; summary = 'A shared group turn was interrupted or cancelled.';
   } else if (requestState === 'paused' || (snapshot.group.paused && requestState === 'active')) {
     status = 'paused'; title = 'Paused'; summary = 'New group work is paused. Active work and queued work may remain.';
-  } else if (active || requestState === 'active') {
-    status = 'in-progress'; title = 'Finalizing request'; summary = 'Recorded turns have ended, but the group request is still active.';
+  } else if (awaitingApproval) {
+    status = 'in-progress'; title = 'Waiting for approval'; summary = 'Waiting for the team lead\'s approval.';
+  } else if (active) {
+    status = 'in-progress'; title = 'In progress';
+    const work = runningDeliveries.length ? (() => {
+      const handles = handlesFor(runningDeliveries);
+      const count = runningTaskIds.size || runningDeliveries.length;
+      const unit = runningTaskIds.size ? 'task' : 'turn';
+      const subject = handles.length ? handles.join(', ') : 'The team';
+      return `${subject} ${handles.length > 1 ? 'are' : 'is'} working on ${count} ${unit}${count === 1 ? '' : 's'}.`;
+    })() : '';
+    const queued = queuedDeliveries.length ? (() => {
+      const handles = handlesFor(queuedDeliveries);
+      const count = queuedTaskIds.size || queuedDeliveries.length;
+      const unit = queuedTaskIds.size ? 'task' : 'turn';
+      const subject = handles.length ? handles.join(', ') : 'The team';
+      return `${subject} ${handles.length > 1 ? 'have' : 'has'} ${count} ${unit}${count === 1 ? '' : 's'} queued.`;
+    })() : '';
+    summary = [work, queued].filter(Boolean).join(' ');
+  } else if (requestState === 'active') {
+    status = 'in-progress'; title = 'Finalizing request';
+    summary = 'Wrapping up — the agents have finished; waiting for the team lead\'s orchestrator to close the request.';
   } else if (blocked) {
     status = 'blocked'; title = 'Blocked'; summary = 'At least one assigned task is blocked.';
   } else if (unfinished) {
@@ -90,8 +123,10 @@ function resultFor(snapshot: GroupSnapshot, store: Store): TeamChatGroupView['re
 
   const taskCounts = new Map<string, number>();
   for (const task of tasks) taskCounts.set(task.status, (taskCounts.get(task.status) ?? 0) + 1);
+  const openTaskCount = new Set(tasks.filter((task) => task.status !== 'done').map((task) => task.id)).size;
   const facts = [
     assignments.length ? `${assignments.length} assigned task${assignments.length === 1 ? '' : 's'}` : null,
+    openTaskCount ? `${openTaskCount} task${openTaskCount === 1 ? '' : 's'} still open` : null,
     taskCounts.get('review') ? `${taskCounts.get('review')} need review` : null,
     taskCounts.get('done') ? `${taskCounts.get('done')} accepted` : null,
     changedPaths.length ? `${changedPaths.length} changed path${changedPaths.length === 1 ? '' : 's'} reported` : null,

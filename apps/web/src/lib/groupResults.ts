@@ -1,5 +1,5 @@
 import type {
-  GroupDelivery, GroupMember, GroupMessage, GroupRequest, GroupSnapshot, Message, Provider, RunChangedFile, Session, SessionRun, Task, TaskStatus,
+  Approval, GroupDelivery, GroupMember, GroupMessage, GroupRequest, GroupSnapshot, Message, Provider, RunChangedFile, Session, SessionRun, Task, TaskStatus,
 } from '@mingle/contracts';
 
 /**
@@ -7,7 +7,7 @@ import type {
  * deliveries, assignments, runs and tasks; prose is never parsed to infer outcomes, tests or integration.
  */
 export interface GroupResultInput {
-  snapshot: GroupSnapshot; sessions: readonly Session[]; messages: readonly Message[]; runs: readonly SessionRun[]; tasks: readonly Task[];
+  snapshot: GroupSnapshot; sessions: readonly Session[]; messages: readonly Message[]; runs: readonly SessionRun[]; tasks: readonly Task[]; approvals?: readonly Approval[];
 }
 
 export type GroupResultStatus =
@@ -191,7 +191,7 @@ function recoveredAttemptIds(
 }
 
 /** Returns null when the group has no human request yet, so nothing earlier can be mistaken for a result. */
-export function buildGroupResultModel({ snapshot, sessions, messages, runs, tasks }: GroupResultInput): GroupResultModel | null {
+export function buildGroupResultModel({ snapshot, sessions, messages, runs, tasks, approvals = [] }: GroupResultInput): GroupResultModel | null {
   const { group } = snapshot;
   const message = latestUserMessage(snapshot);
   if (!message) return null;
@@ -236,6 +236,18 @@ export function buildGroupResultModel({ snapshot, sessions, messages, runs, task
   const activeTurns = Math.max(activeDeliveries.length, runningRuns.length);
   const active = activeTurns > 0;
   const queuedTurns = outcomeDeliveries.filter((delivery) => delivery.status === 'queued').length;
+  const awaitingApproval = activeDeliveries.some((delivery) => delivery.status === 'running'
+    && approvals.some((approval) => approval.status === 'pending' && approval.sessionId === memberById.get(delivery.memberId)?.sessionId));
+  const runningDeliveries = activeDeliveries.filter((delivery) => delivery.status === 'running');
+  const queuedDeliveries = activeDeliveries.filter((delivery) => delivery.status === 'queued');
+  const runningDeliveryIds = new Set(runningDeliveries.map((delivery) => delivery.id));
+  const queuedDeliveryIds = new Set(queuedDeliveries.map((delivery) => delivery.id));
+  const runningTaskCount = unique(assignments.filter((assignment) => runningDeliveryIds.has(assignment.deliveryId)).map((assignment) => assignment.taskId)).length;
+  const queuedTaskCount = unique(assignments.filter((assignment) => queuedDeliveryIds.has(assignment.deliveryId)).map((assignment) => assignment.taskId)).length;
+  const handlesFor = (rows: typeof activeDeliveries) => unique(rows.flatMap((delivery) => {
+    const member = memberById.get(delivery.memberId);
+    return member ? [member.handle] : [];
+  }));
 
   const plannerId = request.plannerMemberId;
   const participantIds = new Set<string>([plannerId]);
@@ -385,23 +397,42 @@ export function buildGroupResultModel({ snapshot, sessions, messages, runs, task
     ].filter(Boolean);
     summary = parts.length ? `No new work starts while paused; ${parts.join(', ')}.` : 'No new work starts while paused. Results may be incomplete.';
   } else if (active) {
-    status = 'in-progress'; title = 'In progress';
-    summary = `${plural(activeTurns, 'turn')} running or queued. What follows is partial until they finish.`;
+    status = 'in-progress';
+    if (awaitingApproval) {
+      title = 'Waiting for approval'; summary = 'Waiting for the team lead\'s approval.';
+    } else {
+      title = 'In progress';
+      const work = runningDeliveries.length ? (() => {
+        const handles = handlesFor(runningDeliveries);
+        const count = runningTaskCount || runningDeliveries.length;
+        const unit = runningTaskCount ? 'task' : 'turn';
+        const subject = handles.length ? handles.join(', ') : 'The team';
+        return `${subject} ${handles.length > 1 ? 'are' : 'is'} working on ${plural(count, unit)}.`;
+      })() : '';
+      const queued = queuedDeliveries.length ? (() => {
+        const handles = handlesFor(queuedDeliveries);
+        const count = queuedTaskCount || queuedDeliveries.length;
+        const unit = queuedTaskCount ? 'task' : 'turn';
+        const subject = handles.length ? handles.join(', ') : 'The team';
+        return `${subject} ${handles.length > 1 ? 'have' : 'has'} ${plural(count, unit)} queued.`;
+      })() : '';
+      summary = [work, queued].filter(Boolean).join(' ') || `${plural(activeTurns, 'turn')} still running.`;
+    }
   } else if (failed) {
     status = 'failed'; title = 'A turn failed';
     summary = 'A request turn failed. See the agent details for the recorded error.';
   } else if (stopped) {
     status = 'stopped'; title = 'Stopped before finishing';
     summary = 'A request turn was interrupted or cancelled. Task statuses and reports are shown below.';
+  } else if (request.status === 'active') {
+    status = 'finalizing'; title = 'Finalizing request';
+    summary = 'Wrapping up — the agents have finished; waiting for the team lead\'s orchestrator to close the request.';
   } else if (blocked) {
     status = 'blocked'; title = 'Blocked';
     summary = `${plural(blocked, 'task')} reported as blocked.`;
   } else if (unfinished) {
     status = 'follow-up'; title = 'Follow-up needed';
     summary = `${plural(unfinished, 'assigned task')} still ${unfinished === 1 ? 'needs' : 'need'} follow-up.`;
-  } else if (request.status === 'active') {
-    status = 'finalizing'; title = 'Finalizing request';
-    summary = 'All turns have ended, but the request is not recorded as completed yet.';
   } else if (missingTasks || (!deliveries.length && request.status === 'completed')) {
     status = 'unknown'; title = 'Outcome unavailable';
     summary = missingTasks ? 'Some assigned task records are unavailable, so their state is unknown.' : 'No turns are recorded for this completed request.';
@@ -418,9 +449,11 @@ export function buildGroupResultModel({ snapshot, sessions, messages, runs, task
   }
   if (paused && request.status === 'completed' && !detail) detail = pauseReason ? `Group is paused · ${pauseReason}` : 'Group is paused.';
 
+  const openTaskCount = allTasks.filter((task) => task.status !== null && task.status !== 'done').length;
   const facts = [
     agents.length || lead ? plural(unique([...agents.map((agent) => agent.memberId), ...(lead ? [lead.memberId] : [])]).length, 'agent') : null,
     allTasks.length ? plural(allTasks.length, 'task') : null,
+    openTaskCount ? `${plural(openTaskCount, 'task')} still open` : null,
     recoveredDeliveries.size ? `${plural(recoveredDeliveries.size, 'recovery attempt')}` : null,
     inReview ? `${inReview} need review` : null,
     count('done') ? `${count('done')} accepted` : null,
