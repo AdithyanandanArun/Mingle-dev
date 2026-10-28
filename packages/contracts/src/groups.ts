@@ -88,6 +88,8 @@ export interface GroupAssignment {
   id: string; groupId: string; requestId: string; fromMemberId: string; toMemberId: string;
   taskId: string; deliveryId: string; scope: string[]; createdAt: string;
   acceptanceProvenance?: 'explicit' | 'derived'; milestones?: import('./resilience').GroupMilestone[];
+  /** Present after a full-access orchestrator verifies and accepts this assignment. */
+  acceptedBy?: 'orchestrator'; verificationSummary?: string;
 }
 export interface GroupSnapshot {
   group: ConversationGroup; members: GroupMember[]; messages: GroupMessage[];
@@ -111,3 +113,9 @@ export const TeamArtifactSchema = z.object({
   note: z.string().max(4000).default(''), taskId: z.string().min(1).max(100).optional(),
 }).strict();
 export const TeamStatusSchema = z.object({ taskId: z.string().min(1).max(100), status: z.enum(['running','blocked','review']), note: z.string().max(4000).default('') }).strict();
+
+/** Explicit verification evidence required when a full-access orchestrator accepts a reviewed task. */
+export const TeamAcceptTaskSchema = z.object({
+  taskId: z.string().trim().min(1).max(100), verificationSummary: z.string().trim().min(8).max(4_000),
+}).strict();
+export type TeamAcceptTask = z.infer<typeof TeamAcceptTaskSchema>;

@@ -1,6 +1,7 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { DatabaseSync } from 'node:sqlite';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -278,7 +279,7 @@ async function fixture(): Promise<Fixture> {
 function deliveryPayload(overrides: Record<string, unknown> = {}) {
   return {
     sharedProjectId: SHARED, deliveryId: `delivery-${randomUUID()}`, groupId: 'group-1', requestId: `request-${randomUUID()}`,
-    agentId: AGENT_ID, role: 'worker', kind: 'request', content: 'Implement the scoped task.', hop: 0,
+    agentId: AGENT_ID, workerHandle: 'worker', role: 'worker', kind: 'request', content: 'Implement the scoped task.', hop: 0,
     permissionLevel: 'supervised', settingsVersion: 1, integrationDeviceId: HOST_DEVICE, issuedAt: new Date().toISOString(),
     ...overrides,
   };
@@ -465,7 +466,7 @@ describe('owner-device team orchestration', () => {
     expect(f.sent.some((message) => message.payload?.status === 'accepted')).toBe(true);
     expect(f.sent.some((message) => message.payload?.status === 'running')).toBe(true);
     const completed = f.sent.find((message) => message.payload?.status === 'completed' && message.payload.deliveryId === payload.deliveryId)?.payload;
-    expect(completed).toMatchObject({ finalText: 'Final result: safe output', artifacts: [{ transferId: 'transfer-1' }] });
+    expect(completed).toMatchObject({ finalText: expect.stringContaining('Final result: safe output'), artifacts: [{ transferId: 'transfer-1' }] });
     expect(f.exportCalls).toHaveLength(1);
     const deliveryWorktree = f.runtime.optionsByRun.get(completed.runId)?.worktree?.path;
     expect(deliveryWorktree).toEqual(expect.any(String));
@@ -473,7 +474,7 @@ describe('owner-device team orchestration', () => {
     expect(deliveryWorktree.startsWith(f.worktreeRoot)).toBe(true);
     expect(runGit(deliveryWorktree, 'rev-parse', 'HEAD').trim()).toBe(f.exportCalls[0].revision);
     expect(f.store.db.prepare('SELECT worktree_path,branch FROM mingle_team_device_deliveries WHERE delivery_id=?').get(payload.deliveryId))
-      .toMatchObject({ worktree_path: deliveryWorktree, branch: expect.stringMatching(/^mingle\/team-agent\//) });
+      .toMatchObject({ worktree_path: deliveryWorktree, branch: expect.stringMatching(/^mingle\/worker\//) });
     expect(f.exportCalls[0]).toMatchObject({ toDeviceId: HOST_DEVICE, deliveryId: payload.deliveryId, sourceWorktreePath: deliveryWorktree });
     expect(f.chatReplies).toHaveLength(2);
     expect(new Set(f.chatReplies.map((args) => args[4])).size).toBe(1);
@@ -489,6 +490,55 @@ describe('owner-device team orchestration', () => {
     expect(savedLegacy.agent_id).toBe(AGENT_ID);
     expect(JSON.parse(savedLegacy.request_json).agentId).toBe(AGENT_ID);
     expect(f.runtime.startCount).toBe(2);
+  });
+
+  it('pushes completion to its dedicated worker branch on origin without moving main', async () => {
+    const f = await fixture();
+    const originRoot = mkdtempSync(path.join(os.tmpdir(), 'mingle-worker-origin-'));
+    roots.push(originRoot);
+    const origin = path.join(originRoot, 'origin.git');
+    mkdirSync(origin);
+    execFileSync('git', ['init', '-q', '--bare', '--initial-branch=main', origin]);
+    runGit(f.repo, 'remote', 'add', 'origin', origin);
+    try {
+      runGit(f.repo, 'push', 'origin', 'main');
+      const base = runGit(origin, 'rev-parse', 'refs/heads/main').trim();
+      await sendStructure(f);
+      await f.setConsent();
+      const payload = deliveryPayload({ deliveryId: `delivery-${randomUUID()}`, taskId: 'task-worker-finish' });
+      await f.deliver(payload);
+      await waitFor(() => f.sent.some((message) => message.kind === 'teamgroup.delivery.status'
+        && message.payload.deliveryId === payload.deliveryId && message.payload.status === 'completed'));
+
+      const completed = f.sent.find((message) => message.kind === 'teamgroup.delivery.status'
+        && message.payload.deliveryId === payload.deliveryId && message.payload.status === 'completed')!.payload;
+      expect(completed.pushedBranch).toEqual(expect.objectContaining({ name: expect.stringMatching(/^mingle\/worker\/task-worker-finish-/), commitSha: expect.any(String) }));
+      expect(completed.branchPushFailure).toBeUndefined();
+      expect(runGit(origin, 'rev-parse', 'refs/heads/main').trim()).toBe(base);
+      expect(runGit(origin, 'rev-parse', `refs/heads/${completed.pushedBranch.name}`).trim()).toBe(completed.pushedBranch.commitSha);
+      expect(runGit(origin, 'tag', '--list').trim()).toBe('');
+      expect(completed.artifacts).toHaveLength(1);
+    } finally {
+      runGit(f.repo, 'remote', 'remove', 'origin');
+    }
+  });
+
+  it('reports an origin push failure and preserves the committed-artifact fallback', async () => {
+    const f = await fixture();
+    await sendStructure(f);
+    await f.setConsent();
+    const payload = deliveryPayload({ deliveryId: `delivery-${randomUUID()}` });
+    await f.deliver(payload);
+    await waitFor(() => f.sent.some((message) => message.kind === 'teamgroup.delivery.status'
+      && message.payload.deliveryId === payload.deliveryId && message.payload.status === 'completed'));
+
+    const completed = f.sent.find((message) => message.kind === 'teamgroup.delivery.status'
+      && message.payload.deliveryId === payload.deliveryId && message.payload.status === 'completed')!.payload;
+    expect(completed.pushedBranch).toBeUndefined();
+    expect(completed.branchPushFailure).toContain('no origin remote');
+    expect(completed.finalText).toBe('Final result: safe output');
+    expect(completed.artifacts).toHaveLength(1);
+    expect(f.exportCalls).toHaveLength(1);
   });
 
   it('snapshots uncommitted provider files into a clean artifact commit while excluding secrets and ignored paths', async () => {
@@ -755,7 +805,7 @@ describe('owner-device team orchestration', () => {
       .get(result.deliveryId) as { terminal_status_json: string };
     const savedPayload = JSON.parse(saved.terminal_status_json);
     expect(savedPayload).toMatchObject({ deliveryId: result.deliveryId, status: 'completed', runId: expect.any(String),
-      finalText: 'Final result: safe output', artifacts: [{ transferId: 'transfer-1' }] });
+      finalText: expect.stringContaining('Final result: safe output'), artifacts: [{ transferId: 'transfer-1' }] });
     await f.restartSide();
     await waitFor(() => f.sent.some((message) => message.kind === 'teamgroup.delivery.status'
       && message.payload.deliveryId === result.deliveryId && message.payload.status === 'completed'));

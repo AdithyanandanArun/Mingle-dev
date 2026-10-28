@@ -61,6 +61,7 @@ export function createTeamOrchestration(options: TeamOrchestrationOptions): {
     publishLocalAgents: (input) => options.distributed.execution.publishAgents(input),
   });
   host.setTeamChat(options.teamChat);
+  options.teamMcp.setAcceptanceHandler?.((context, sessionId, input) => host.acceptTask(context, sessionId, input));
   return {
     host,
     deviceSide,

@@ -1,4 +1,4 @@
-import type { AuthenticatedTransportMessage, TeamConsent, TeamStructurePayload, Session } from '@mingle/contracts';
+import type { AuthenticatedTransportMessage, TeamAcceptTask, TeamConsent, TeamStructurePayload, GroupRunContext, Session } from '@mingle/contracts';
 import type { ProjectCollaborationSnapshot } from '../../../../packages/contracts/src/project-collaboration.ts';
 import type { SessionRuntime, StartOptions } from '../runtime.ts';
 import type { Store } from '../store.ts';
@@ -58,6 +58,7 @@ export interface TeamOrchestrationGroups {
   sendTeamMessage(groupId: string, input: { content: string; recipients?: string[]; clientMessageId: string }): string[];
   contextForRun(sessionId: string, runId: string): import('@mingle/contracts').GroupRunContext | undefined;
   onRunFinished(sessionId: string, runId: string, outcome: 'completed' | 'failed' | 'interrupted'): void;
+  acceptTask(context: GroupRunContext, input: TeamAcceptTask): unknown;
   setTeamDispatchGuard(guard: (sessionId: string, groupId: string) => Promise<boolean>): void;
   setTeamRunFinishedHook(hook: (input: { sessionId: string; runId: string; outcome: 'completed' | 'failed' | 'interrupted'; groupId: string; deliveryId: string }) => void): void;
   holdTeamMember(sessionId: string, reason: string): void;
@@ -98,6 +99,7 @@ export interface TeamMcpProxy {
   create(runId: string, session: Session, signal: AbortSignal, context: import('@mingle/contracts').GroupRunContext): import('@mingle/contracts').TeamMcpConnection;
   revoke(runId: string): void;
   callRemote(runId: string, sessionId: string, tool: string, args: Record<string, unknown>): Promise<unknown>;
+  setAcceptanceHandler?(handler: (context: GroupRunContext, sessionId: string, input: TeamAcceptTask) => Promise<unknown>): void;
 }
 
 export interface TeamChatOrchestrationMessage {

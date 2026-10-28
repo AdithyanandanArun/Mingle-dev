@@ -54,6 +54,18 @@ describe('device team MCP proxy', () => {
     expect(result.content as any[]).toEqual([{ type: 'text', text: JSON.stringify({ task: 'queued' }) }]);
   });
 
+  it('forwards full-access task acceptance evidence to the host as a typed team tool call', async () => {
+    const { client, calls } = await connect(500, true);
+    const result = await client.callTool({ name: 'team_accept', arguments: {
+      taskId: 'task-1', verificationSummary: 'Tests passed and the diff was inspected.',
+    } });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({ payload: { tool: 'team_accept', args: {
+      taskId: 'task-1', verificationSummary: 'Tests passed and the diff was inspected.',
+    } } });
+    expect(result.isError).toBeFalsy();
+  });
+
   it('returns a bounded error to the agent when the host tool result times out', async () => {
     const { client, calls } = await connect(20, false);
     const result = await client.callTool({ name: 'team_inbox', arguments: {} });

@@ -28,6 +28,7 @@ import { git, trimmed } from '../../repository/git-run.ts';
 import { TeamMcpProxy } from './mcp-proxy.ts';
 import { createCommit } from '../../repository/commit.ts';
 import { signingConfigured } from '../../repository/inspect.ts';
+import { pushTeamCompletionBranch, teamCompletionBranch } from '../../repository/team-branch.ts';
 import { isDeniedName, normalizeRelative } from '../../paths.ts';
 import { normalizeScopes, safeArtifactPath, scopesOverlap } from '../../groups/routing.ts';
 
@@ -904,7 +905,8 @@ export function createDeviceSide(deps: DeviceSideDeps): {
     const directory = path.join(await realpath(deliveryWorktreeRoot), createHash('sha256').update(shared.sharedProjectId).digest('hex').slice(0, 20));
     await mkdir(directory, { recursive: true, mode: 0o700 });
     const worktreePath = path.join(directory, createHash('sha256').update(payload.deliveryId).digest('hex').slice(0, 24));
-    const branch = `mingle/team-agent/${createHash('sha256').update(payload.deliveryId).digest('hex').slice(0, 20)}`;
+    const branch = teamCompletionBranch(payload.workerHandle ?? `agent-${createHash('sha256').update(payload.agentId).digest('hex').slice(0, 8)}`,
+      payload.taskId ?? payload.deliveryId, payload.deliveryId);
     db.prepare(`UPDATE mingle_team_device_deliveries SET worktree_path=?,branch=?,base_revision=?,updated_at=? WHERE delivery_id=? AND status='accepted'`)
       .run(worktreePath, branch, baseRevision, ISO(), payload.deliveryId);
     await git(projectRoot, ['worktree', 'add', '-b', branch, worktreePath, baseRevision]);
@@ -1041,12 +1043,15 @@ export function createDeviceSide(deps: DeviceSideDeps): {
     return parsedTransfer;
   }
 
-  async function exportCommits(activeDelivery: ActiveDelivery): Promise<Array<{ revision: string; transferId?: string; taskId?: string; ref?: string }>> {
-    if (activeDelivery.controller.signal.aborted) return [];
+  async function exportCommits(activeDelivery: ActiveDelivery): Promise<{
+    artifacts: Array<{ revision: string; transferId?: string; taskId?: string; ref?: string }>;
+    pushable: boolean; head: string | null;
+  }> {
+    if (activeDelivery.controller.signal.aborted) return { artifacts: [], pushable: false, head: null };
     await commitEligibleChanges(activeDelivery);
-    if (activeDelivery.controller.signal.aborted) return [];
+    if (activeDelivery.controller.signal.aborted) return { artifacts: [], pushable: false, head: null };
     const head = trimmed(await git(activeDelivery.worktreePath, ['rev-parse', '--verify', 'HEAD']));
-    if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(head) || head === activeDelivery.baseRevision) return [];
+    if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(head) || head === activeDelivery.baseRevision) return { artifacts: [], pushable: false, head: null };
     const args = activeDelivery.baseRevision
       ? ['rev-list', '--reverse', '--max-count=30', `${activeDelivery.baseRevision}..${head}`]
       : ['rev-list', '--reverse', '--max-count=30', head];
@@ -1063,7 +1068,7 @@ export function createDeviceSide(deps: DeviceSideDeps): {
       activeDelivery.artifactFailures.push(note);
       activeDelivery.entries.push(TeamAgentActivityEntrySchema.parse({ id: randomUUID(), runId: activeDelivery.runId,
         at: ISO(), kind: 'error', text: note }));
-      return [];
+      return { artifacts: [], pushable: false, head };
     }
     const artifacts: Array<{ revision: string; transferId?: string; taskId?: string; ref?: string }> = [];
     for (const revision of revisions) {
@@ -1082,7 +1087,7 @@ export function createDeviceSide(deps: DeviceSideDeps): {
           at: ISO(), kind: 'error', text: safeText(`Artifact transfer could not be prepared: ${errorMessage(error)}`, 8_000) }));
       }
     }
-    return artifacts;
+    return { artifacts, pushable: true, head };
   }
 
   async function executeDelivery(payload: TeamDeliveryPayload, shared: SharedBinding, sessionId: string): Promise<void> {
@@ -1168,7 +1173,21 @@ export function createDeviceSide(deps: DeviceSideDeps): {
         const initialFinalText = safeText(deps.store.listMessages(sessionId, { limit: 2000 })
           .filter((message) => message.runId === runId && message.role === 'assistant' && message.kind !== 'streaming')
           .map((message) => message.content).join('\n\n').trim(), 50_000);
-        const artifacts = await exportCommits(live);
+        const exported = await exportCommits(live);
+        const artifacts = exported.artifacts;
+        let pushedBranch: { name: string; commitSha: string } | undefined;
+        let branchPushFailure: string | undefined;
+        if (exported.pushable && exported.head && live.branch) {
+          try {
+            const pushed = await pushTeamCompletionBranch({ worktreePath: live.worktreePath, branch: live.branch, expectedHead: exported.head, signal: live.controller.signal });
+            pushedBranch = { name: pushed.branch, commitSha: pushed.commitSha };
+            live.entries.push(TeamAgentActivityEntrySchema.parse({ id: randomUUID(), runId: live.runId, at: ISO(), kind: 'artifact',
+              text: `Pushed scoped completion branch ${pushed.branch} to origin at ${pushed.commitSha}.` }));
+          } catch (error) {
+            branchPushFailure = safeText(`Could not push completion branch ${live.branch}: ${errorMessage(error)}`, 2_000);
+            live.entries.push(TeamAgentActivityEntrySchema.parse({ id: randomUUID(), runId: live.runId, at: ISO(), kind: 'error', text: branchPushFailure }));
+          }
+        }
         if (live.controller.signal.aborted) {
           await sendInterruptedDelivery(live, 'Team sharing was interrupted before terminal artifacts were delivered.');
           return;
@@ -1177,7 +1196,8 @@ export function createDeviceSide(deps: DeviceSideDeps): {
           ? `\n\nArtifact preparation/transfer issues:\n${live.artifactFailures.map((failure) => `- ${failure}`).join('\n')}` : '';
         const finalText = safeText(`${initialFinalText}${artifactIssues}`, 50_000);
         const completedPayload = TeamDeliveryStatusPayloadSchema.parse({ sharedProjectId: shared.sharedProjectId,
-          deliveryId: payload.deliveryId, agentId: payload.agentId, status: 'completed', runId, finalText, artifacts, at: ISO() });
+          deliveryId: payload.deliveryId, agentId: payload.agentId, status: 'completed', runId, finalText, artifacts,
+          ...(pushedBranch ? { pushedBranch } : {}), ...(branchPushFailure ? { branchPushFailure } : {}), at: ISO() });
         const completed = db.prepare(`UPDATE mingle_team_device_deliveries
           SET status='completed',run_id=?,error=NULL,terminal_status_json=?,updated_at=?
           WHERE delivery_id=? AND status IN ('accepted','running','awaiting-approval')`)

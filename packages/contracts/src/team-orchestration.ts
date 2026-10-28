@@ -20,12 +20,13 @@ export const TeamPermissionLevelSchema = z.enum(['supervised', 'full-access']);
 export type TeamPermissionLevel = z.infer<typeof TeamPermissionLevelSchema>;
 
 /** Bump when the disclaimer text changes; old consents then require re-acceptance. */
-export const TEAM_CONSENT_DISCLAIMER_VERSION = '2026-10-24.1';
+export const TEAM_CONSENT_DISCLAIMER_VERSION = '2026-10-28.1';
 export const TEAM_CONSENT_DISCLAIMER =
   'The team lead and admins of this project will have access to the agents you add. '
   + 'By joining, you give them sandboxed access to those agents: they can send your agents work, '
-  + 'and that work runs on this device with your provider account, in an isolated copy of the repository, '
-  + 'without pushing. You can pause your agents or leave the team at any time.';
+  + 'and that work runs on this device with your provider account, in an isolated copy of the repository. '
+  + 'When an assignment finishes, Mingle automatically attempts to push its scoped changes to a dedicated branch on the shared project’s origin remote, using this device’s Git credentials. '
+  + 'It never pushes to a default branch or force-pushes. You can pause your agents or leave the team at any time.';
 
 export const TeamOrchestrationSettingsSchema = z.object({
   /** When on, untagged team-chat messages go to the orchestrator agent. When off, only @mentions start agents. */
@@ -242,6 +243,8 @@ export type TeamArtifactRef = z.infer<typeof TeamArtifactRefSchema>;
 
 export const TeamDeliveryPayloadSchema = z.object({
   sharedProjectId: Uuid, deliveryId: Id, groupId: Id, requestId: Id, agentId: Id,
+  /** Host-validated stable handle, used only to name the owner's isolated completion branch. */
+  workerHandle: AgentHandleSchema.optional(),
   role: TeamAgentRoleSchema, kind: z.enum(['request', 'assignment', 'message', 'result']),
   /** Full prompt for the agent turn, built by the host (instructions + content). Bounded. */
   content: z.string().min(1).max(100_000),
@@ -269,6 +272,13 @@ export const TeamDeliveryStatusPayloadSchema = z.object({
   /** Final assistant text for completed runs; scrubbed and bounded. */
   finalText: z.string().max(50_000).optional(),
   artifacts: z.array(TeamArtifactRefSchema).max(30).default([]),
+  /** Owner-device branch pushed to origin for host review; only the dedicated team namespace is accepted. */
+  pushedBranch: z.object({
+    name: z.string().min(1).max(240).regex(/^mingle\/[a-z][a-z0-9_-]{1,31}\/[a-z0-9][a-z0-9-]{0,79}$/),
+    commitSha: z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i),
+  }).strict().optional(),
+  /** Explicit owner-device push failure; host may use the existing encrypted artifact transfer instead. */
+  branchPushFailure: z.string().trim().min(1).max(2_000).optional(),
   failure: ProviderFailureSchema.optional(),
   /** Why the owner device refused, e.g. consent missing, needs re-consent, paused. */
   rejection: z.enum(['no-consent', 'needs-reconsent', 'paused', 'agent-unavailable', 'busy', 'invalid']).optional(),
@@ -285,8 +295,8 @@ export type TeamDeliveryHeartbeatPayload = z.infer<typeof TeamDeliveryHeartbeatP
 
 export const TeamToolCallPayloadSchema = z.object({
   sharedProjectId: Uuid, deliveryId: Id, callId: Id, agentId: Id,
-  tool: z.enum(['team_members', 'team_inbox', 'team_assign', 'team_message', 'team_artifact', 'team_status']),
-  /** Arguments are validated on the host with the existing TeamAssign/TeamMessage/TeamArtifact/TeamStatus schemas. */
+  tool: z.enum(['team_members', 'team_inbox', 'team_assign', 'team_message', 'team_artifact', 'team_status', 'team_accept']),
+  /** Arguments are validated on the host with the matching team assignment, message, artifact, status, or acceptance schema. */
   args: z.record(z.string(), z.unknown()),
 }).strict();
 export const TeamToolResultPayloadSchema = z.object({

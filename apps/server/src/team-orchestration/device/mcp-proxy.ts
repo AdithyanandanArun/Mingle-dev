@@ -4,7 +4,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { z } from 'zod';
 import {
-  TeamArtifactSchema, TeamAssignSchema, TeamMessageSchema, TeamStatusSchema,
+  TeamAcceptTaskSchema, TeamArtifactSchema, TeamAssignSchema, TeamMessageSchema, TeamStatusSchema,
   TeamArtifactRefSchema, TeamToolCallPayloadSchema, TeamToolResultPayloadSchema,
 } from '@mingle/contracts';
 import type { TeamArtifactRef, TeamMcpConnection } from '@mingle/contracts';
@@ -127,7 +127,7 @@ export class TeamMcpProxy {
   }
 
   private async call(binding: ProxyBinding, signal: AbortSignal,
-    tool: 'team_members' | 'team_inbox' | 'team_assign' | 'team_message' | 'team_artifact' | 'team_status', args: Record<string, unknown>): Promise<unknown> {
+    tool: ProxyTool, args: Record<string, unknown>): Promise<unknown> {
     this.assertCallLive(binding, signal);
     let forwardedArgs = args;
     if (tool === 'team_artifact' && binding.prepareArtifact) {
@@ -196,6 +196,8 @@ export class TeamMcpProxy {
     register('team_message', TeamMessageSchema.shape, 'Send a targeted message through the team lead.', (input) => TeamMessageSchema.parse(input) as unknown as Record<string, unknown>);
     register('team_artifact', TeamArtifactSchema.shape, 'Offer a committed artifact through the team lead.', (input) => TeamArtifactSchema.parse(input) as unknown as Record<string, unknown>);
     register('team_status', TeamStatusSchema.shape, 'Report progress for a task through the team lead.', (input) => TeamStatusSchema.parse(input) as unknown as Record<string, unknown>);
+    register('team_accept', TeamAcceptTaskSchema.shape, 'Accept a reviewed worker task only after inspecting its changes and verifying it. Requires full-access team permission and a verification summary; supervised teams must leave acceptance to the human.',
+      (input) => TeamAcceptTaskSchema.parse(input) as unknown as Record<string, unknown>);
     return server;
   }
 
@@ -241,7 +243,7 @@ export class TeamMcpProxy {
   }
 }
 
-type ProxyTool = 'team_members' | 'team_inbox' | 'team_assign' | 'team_message' | 'team_artifact' | 'team_status';
+type ProxyTool = 'team_members' | 'team_inbox' | 'team_assign' | 'team_message' | 'team_artifact' | 'team_status' | 'team_accept';
 function emptyArgs(input: unknown): Record<string, unknown> {
   if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).length) throw new Error('This tool accepts no arguments.');
   return {};
