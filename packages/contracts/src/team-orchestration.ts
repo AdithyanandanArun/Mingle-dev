@@ -7,7 +7,7 @@ import { AgentHandleSchema, GroupModeSchema } from './groups';
  * Cross-device team orchestration. See docs/team-orchestration.md.
  *
  * One device (the team lead's, called the host) brokers all agent work for a shared project.
- * Agents stay on their owner's device and run there in sandboxed (isolated worktree, no push) sessions.
+ * Agents stay on their owner's device, reuse one sandboxed worktree/branch per agent, and publish that branch to origin.
  * Owners consent once when joining; the consent covers a permission level and a set of their agents.
  */
 
@@ -246,7 +246,7 @@ export type TeamArtifactRef = z.infer<typeof TeamArtifactRefSchema>;
 
 export const TeamDeliveryPayloadSchema = z.object({
   sharedProjectId: Uuid, deliveryId: Id, groupId: Id, requestId: Id, agentId: Id,
-  /** Host-validated stable handle, used only to name the owner's isolated completion branch. */
+  /** Host-validated stable handle, used to name the owner's permanent agent branch. */
   workerHandle: AgentHandleSchema.optional(),
   role: TeamAgentRoleSchema, kind: z.enum(['request', 'assignment', 'message', 'result']),
   /** Full prompt for the agent turn, built by the host (instructions + content). Bounded. */
@@ -281,6 +281,7 @@ export const TeamDeliveryStatusPayloadSchema = z.object({
   pushedBranch: z.object({
     name: z.string().min(1).max(240).regex(/^mingle\/[a-z][a-z0-9_-]{1,31}\/[a-z0-9][a-z0-9-]{0,79}$/),
     commitSha: z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i),
+    /** HEAD at the start of this worker turn; lets the host validate only this turn's scoped changes. */
     baseCommitSha: z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i).optional(),
   }).strict().optional(),
   /** Explicit owner-device push failure; host may use the existing encrypted artifact transfer instead. */
