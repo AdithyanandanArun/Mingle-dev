@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { GitSyncService } from './git-sync.ts';
+import { RetryableTransportDeliveryError } from './transport.ts';
 import { envelope, importRunGit, makeOwner, setGitIdentity, type OwnerFixture } from './git-test-utils.ts';
 import { fingerprintRepository } from './git-common.ts';
 
@@ -109,6 +110,71 @@ describe('GitSyncService', () => {
       .resolves.toMatchObject({ beforeRevision: originalDestinationHead, revision: sourceHead, integrated: true });
     expect(readFileSync(path.join(destination.root, 'team-output.txt'), 'utf8')).toBe('committed team output\n');
     expect(importRunGit(destination.root, ['rev-parse', 'HEAD']).trim()).toBe(sourceHead);
+  });
+
+  it('retries a team artifact chunk that beats its offer and completes after the offer is recorded', async () => {
+    const { source, destination } = prepareClones();
+    writeFileSync(path.join(source.root, 'early-chunk.txt'), 'ordered artifact content\n');
+    importRunGit(source.root, ['add', 'early-chunk.txt']);
+    importRunGit(source.root, ['commit', '-q', '-m', 'ordered artifact']);
+    const pair = await bindPair(source, destination);
+    const revision = importRunGit(source.root, ['rev-parse', 'HEAD']).trim();
+    const artifact = await pair.sourceService.exportTeamArtifact({ teamId: pair.teamId, sharedProjectId: pair.sharedProjectId,
+      sourceWorktreePath: source.root, revision, toDeviceId: destination.deviceFor(pair.teamId), deliveryId: 'delivery-early-chunk' });
+    const messages = source.messages.filter((message) => message.kind.startsWith('git.team-artifact.'));
+    const offer = messages.find((message) => message.kind === 'git.team-artifact.offer')!;
+    const chunks = messages.filter((message) => message.kind === 'git.team-artifact.chunk');
+    const early = chunks[0]!;
+
+    await expect(pair.destinationService.onEnvelope(envelope({ teamId: pair.teamId, fromDeviceId: source.deviceFor(pair.teamId),
+      toDeviceId: destination.deviceFor(pair.teamId), kind: early.kind, payload: early.payload })))
+      .rejects.toBeInstanceOf(RetryableTransportDeliveryError);
+    await pair.destinationService.onEnvelope(envelope({ teamId: pair.teamId, fromDeviceId: source.deviceFor(pair.teamId),
+      toDeviceId: destination.deviceFor(pair.teamId), kind: offer.kind, payload: offer.payload }));
+    for (const chunk of chunks) {
+      await pair.destinationService.onEnvelope(envelope({ teamId: pair.teamId, fromDeviceId: source.deviceFor(pair.teamId),
+        toDeviceId: destination.deviceFor(pair.teamId), kind: chunk.kind, payload: chunk.payload }));
+    }
+    const imported = await pair.destinationService.importTeamArtifact({ teamId: pair.teamId, sharedProjectId: pair.sharedProjectId,
+      deliveryId: 'delivery-early-chunk', artifact, sourceDeviceId: source.deviceFor(pair.teamId) });
+    expect(imported.ref).toBe(artifact.ref);
+    expect(importRunGit(destination.root, ['rev-parse', imported.ref!]).trim()).toBe(revision);
+  });
+
+  it('requests a bounded resend for a stuck receiving artifact and completes the transfer', async () => {
+    const { source, destination } = prepareClones();
+    writeFileSync(path.join(source.root, 'recover-artifact.txt'), 'recoverable artifact content\n');
+    importRunGit(source.root, ['add', 'recover-artifact.txt']);
+    importRunGit(source.root, ['commit', '-q', '-m', 'recoverable artifact']);
+    const pair = await bindPair(source, destination);
+    const revision = importRunGit(source.root, ['rev-parse', 'HEAD']).trim();
+    const artifact = await pair.sourceService.exportTeamArtifact({ teamId: pair.teamId, sharedProjectId: pair.sharedProjectId,
+      sourceWorktreePath: source.root, revision, toDeviceId: destination.deviceFor(pair.teamId), deliveryId: 'delivery-stuck-artifact' });
+    const transferId = artifact.transferId!;
+    const original = source.messages.filter((message) => message.kind.startsWith('git.team-artifact.'));
+    const offer = original.find((message) => message.kind === 'git.team-artifact.offer')!;
+    await pair.destinationService.onEnvelope(envelope({ teamId: pair.teamId, fromDeviceId: source.deviceFor(pair.teamId),
+      toDeviceId: destination.deviceFor(pair.teamId), kind: offer.kind, payload: offer.payload }));
+    destination.db.prepare(`UPDATE mingle_git_team_artifacts SET updated_at=? WHERE transfer_id=?`)
+      .run(new Date(Date.now() - 60_000).toISOString(), transferId);
+
+    await pair.destinationService.recoverIncompleteTeamArtifacts(pair.teamId, destination.userId);
+    const request = destination.messages.find((message) => message.kind === 'git.team-artifact.retry')!;
+    expect(request.payload).toMatchObject({ transferId, mode: 'resend', attempt: 1 });
+    expect(destination.db.prepare('SELECT resend_attempts,status FROM mingle_git_team_artifacts WHERE transfer_id=?')
+      .get(transferId)).toEqual({ resend_attempts: 1, status: 'receiving' });
+    await pair.sourceService.onEnvelope(envelope({ teamId: pair.teamId, fromDeviceId: destination.deviceFor(pair.teamId),
+      toDeviceId: source.deviceFor(pair.teamId), kind: request.kind, payload: request.payload }));
+    const resend = source.messages.slice(original.length).filter((message) => message.kind.startsWith('git.team-artifact.'));
+    expect(resend.map((message) => message.kind)).toContain('git.team-artifact.chunk');
+    for (const message of resend) {
+      await pair.destinationService.onEnvelope(envelope({ teamId: pair.teamId, fromDeviceId: source.deviceFor(pair.teamId),
+        toDeviceId: destination.deviceFor(pair.teamId), kind: message.kind, payload: message.payload }));
+    }
+    const imported = await pair.destinationService.importTeamArtifact({ teamId: pair.teamId, sharedProjectId: pair.sharedProjectId,
+      deliveryId: 'delivery-stuck-artifact', artifact, sourceDeviceId: source.deviceFor(pair.teamId) });
+    expect(imported.ref).toBe(artifact.ref);
+    expect(importRunGit(destination.root, ['rev-parse', imported.ref!]).trim()).toBe(revision);
   });
 
   it('cancels an in-flight MCP artifact after interruption and removes receiver chunks that cannot be completed', async () => {
@@ -377,6 +443,9 @@ describe('GitSyncService', () => {
     await pair.destinationService.onEnvelope(envelope({ teamId: pair.teamId, fromDeviceId: source.deviceFor(pair.teamId),
       toDeviceId: destination.deviceFor(pair.teamId), kind: offer.kind, payload: offer.payload }));
     const firstChunk = messages.find((item) => item.kind === 'git.team-artifact.chunk')!;
+    await expect(pair.destinationService.onEnvelope(envelope({ teamId: pair.teamId, fromDeviceId: 'forged-device',
+      toDeviceId: destination.deviceFor(pair.teamId), kind: firstChunk.kind, payload: firstChunk.payload })))
+      .rejects.toThrow(/does not match its authenticated offer sender/i);
     const altered = Buffer.from((firstChunk.payload as { data: string }).data, 'base64');
     altered[0] = altered[0]! ^ 0xff;
     await pair.destinationService.onEnvelope(envelope({ teamId: pair.teamId, fromDeviceId: source.deviceFor(pair.teamId),

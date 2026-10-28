@@ -13,6 +13,7 @@ import type { DistributedDeviceEnvelope, GitIntegrationRequestInput, GitRequestS
 import { conflict, errorMessage, nowIso } from '../util.ts';
 import { redactSecrets } from '../providers/common.ts';
 import { isDeniedName } from '../paths.ts';
+import { RetryableTransportDeliveryError } from './transport.ts';
 import {
   bindProject, BUNDLE_CHUNK_BYTES, currentUser, dbOf,
   ensureCommonTables, fingerprintRepository, insertAudit, MAX_BUNDLE_BYTES, parseJson, resolveProjectBinding,
@@ -24,6 +25,11 @@ const TABLE = 'mingle_git_requests';
 const AUDIT = 'mingle_git_audit';
 const TEAM_ARTIFACT_TABLE = 'mingle_git_team_artifacts';
 const TEAM_ARTIFACT_CHUNK_TABLE = 'mingle_git_team_artifact_chunks';
+const TEAM_ARTIFACT_RECOVERY_INTERVAL_MS = 15_000;
+const TEAM_ARTIFACT_RECOVERY_STALE_MS = 15_000;
+const TEAM_ARTIFACT_RECOVERY_RETRY_MS = 30_000;
+const TEAM_ARTIFACT_RECOVERY_MAX_ATTEMPTS = 3;
+const TEAM_ARTIFACT_RECOVERY_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const TeamArtifactOfferSchema = z.object({
   transferId: z.string().regex(/^[0-9a-f]{64}$/), sharedProjectId: z.string().trim().min(1).max(200),
   deliveryId: z.string().trim().min(1).max(100), revision: z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i),
@@ -37,7 +43,10 @@ const TeamArtifactChunkSchema = z.object({
   transferId: z.string().regex(/^[0-9a-f]{64}$/), index: z.number().int().min(0).max(127),
   chunkCount: z.number().int().positive().max(128), data: z.string().min(1).max(350_000),
 }).strict();
-const TeamArtifactRetrySchema = z.object({ transferId: z.string().regex(/^[0-9a-f]{64}$/) }).strict();
+const TeamArtifactRetrySchema = z.object({
+  transferId: z.string().regex(/^[0-9a-f]{64}$/), mode: z.enum(['root-history', 'resend']).optional(),
+  attempt: z.number().int().min(1).max(TEAM_ARTIFACT_RECOVERY_MAX_ATTEMPTS).optional(),
+}).strict();
 const TeamArtifactRetryResultSchema = z.object({ transferId: z.string().regex(/^[0-9a-f]{64}$/), error: z.string().min(1).max(500) }).strict();
 type TeamArtifactOffer = z.infer<typeof TeamArtifactOfferSchema>;
 type TeamArtifactRef = z.infer<typeof TeamArtifactRefSchema>;
@@ -52,6 +61,7 @@ type TeamArtifactRow = {
   transfer_id: string; team_id: string; shared_project_id: string; delivery_id: string; source_device_id: string;
   peer_device_id: string; direction: 'incoming' | 'outgoing'; owner_id: string; status: string; offer_json: string;
   bundle_blob: Uint8Array | null; ref_name: string | null; retry_error: string | null; created_at: string; updated_at: string;
+  resend_attempts: number; last_resend_at: string | null;
 };
 interface GitRequestRow {
   id: string; team_id: string; shared_project_id: string; owner_id: string; peer_device_id: string;
@@ -100,6 +110,8 @@ export interface GitSyncServiceOptions extends DistributedServiceOptions {}
 /** Local-owner-controlled bundle handoff and explicitly approved repository integration. */
 export class GitSyncService {
   private readonly db: DatabaseSync;
+  private teamArtifactRecoveryTimer: NodeJS.Timeout | null = null;
+  private teamArtifactRecoveryWork: Promise<void> | null = null;
   constructor(private readonly options: GitSyncServiceOptions) {
     this.db = dbOf(options.store);
     ensureCommonTables(this.db);
@@ -143,7 +155,14 @@ export class GitSyncService {
     if (!teamArtifactColumns.some((column) => column.name === 'retry_error')) {
       this.db.exec(`ALTER TABLE ${TEAM_ARTIFACT_TABLE} ADD COLUMN retry_error TEXT`);
     }
+    if (!teamArtifactColumns.some((column) => column.name === 'resend_attempts')) {
+      this.db.exec(`ALTER TABLE ${TEAM_ARTIFACT_TABLE} ADD COLUMN resend_attempts INTEGER NOT NULL DEFAULT 0`);
+    }
+    if (!teamArtifactColumns.some((column) => column.name === 'last_resend_at')) {
+      this.db.exec(`ALTER TABLE ${TEAM_ARTIFACT_TABLE} ADD COLUMN last_resend_at TEXT`);
+    }
     this.recoverDispatched();
+    this.scheduleTeamArtifactRecovery();
   }
 
   private recoverDispatched(): void {
@@ -154,11 +173,107 @@ export class GitSyncService {
     }
   }
 
+  private scheduleTeamArtifactRecovery(ownerId?: string): void {
+    if (this.teamArtifactRecoveryTimer || this.teamArtifactRecoveryWork) return;
+    try {
+      const pending = this.db.prepare(`SELECT 1 AS found FROM ${TEAM_ARTIFACT_TABLE}
+        WHERE direction='incoming' AND status='receiving'${ownerId ? ' AND owner_id=?' : ''} LIMIT 1`)
+        .get(...(ownerId ? [ownerId] : []));
+      if (!pending) return;
+    } catch { return; }
+    this.teamArtifactRecoveryTimer = setTimeout(() => {
+      this.teamArtifactRecoveryTimer = null;
+      void this.recoverIncompleteTeamArtifacts().catch(() => undefined);
+    }, TEAM_ARTIFACT_RECOVERY_INTERVAL_MS);
+    this.teamArtifactRecoveryTimer.unref();
+  }
+
+  /** Ask a sender to resend missing chunks for stale, still-live incoming artifacts. */
+  async recoverIncompleteTeamArtifacts(teamId?: string, ownerId?: string): Promise<void> {
+    if (this.teamArtifactRecoveryWork) return this.teamArtifactRecoveryWork;
+    let recoveryOwnerId = ownerId ?? null;
+    const work = (async () => {
+      const owner = ownerId ?? (await currentUser(this.options.account)).id;
+      recoveryOwnerId = owner;
+      const rows = this.db.prepare(`SELECT * FROM ${TEAM_ARTIFACT_TABLE}
+        WHERE direction='incoming' AND status='receiving' AND owner_id=?${teamId ? ' AND team_id=?' : ''}
+        ORDER BY created_at LIMIT 100`).all(...(teamId ? [owner, teamId] : [owner])) as TeamArtifactRow[];
+      const now = Date.now();
+      for (const row of rows) {
+        let offer: TeamArtifactOffer;
+        try { offer = TeamArtifactOfferSchema.parse(parseJson<unknown>(row.offer_json, 'team artifact offer')); }
+        catch {
+          this.db.prepare(`UPDATE ${TEAM_ARTIFACT_TABLE} SET status='failed',retry_error=?,updated_at=? WHERE transfer_id=? AND status='receiving'`)
+            .run('The stored team artifact offer is invalid; resend recovery cannot continue.', nowIso(), row.transfer_id);
+          this.options.changed?.();
+          continue;
+        }
+        const count = this.db.prepare(`SELECT COUNT(*) AS count FROM ${TEAM_ARTIFACT_CHUNK_TABLE} WHERE transfer_id=?`)
+          .get(row.transfer_id) as { count: number };
+        if (Number(count.count) >= offer.chunkCount) continue;
+        const createdAt = Date.parse(row.created_at);
+        const lastActivityAt = Date.parse(row.updated_at);
+        const lastResendAt = row.last_resend_at ? Date.parse(row.last_resend_at) : Number.NaN;
+        if (!Number.isFinite(createdAt) || !Number.isFinite(lastActivityAt)) continue;
+        if (now - createdAt >= TEAM_ARTIFACT_RECOVERY_MAX_AGE_MS) {
+          this.db.prepare(`UPDATE ${TEAM_ARTIFACT_TABLE} SET status='failed',retry_error=?,updated_at=? WHERE transfer_id=? AND status='receiving'`)
+            .run('The incomplete team artifact exceeded its bounded resend recovery window.', nowIso(), row.transfer_id);
+          this.options.changed?.();
+          continue;
+        }
+        if (row.resend_attempts >= TEAM_ARTIFACT_RECOVERY_MAX_ATTEMPTS) {
+          if (!Number.isFinite(lastResendAt) || now - lastResendAt >= TEAM_ARTIFACT_RECOVERY_RETRY_MS) {
+            this.db.prepare(`UPDATE ${TEAM_ARTIFACT_TABLE} SET status='failed',retry_error=?,updated_at=? WHERE transfer_id=? AND status='receiving'`)
+              .run('The sender did not complete the bounded resend of missing team artifact chunks.', nowIso(), row.transfer_id);
+            this.options.changed?.();
+          }
+          continue;
+        }
+        const nextAttempt = row.resend_attempts + 1;
+        const dueAt = Number.isFinite(lastResendAt) ? lastResendAt + TEAM_ARTIFACT_RECOVERY_RETRY_MS : lastActivityAt + TEAM_ARTIFACT_RECOVERY_STALE_MS;
+        if (now < dueAt) continue;
+        try {
+          await this.options.authorizeTeam({ teamId: row.team_id, peerDeviceId: row.source_device_id });
+          await this.authorizeTeamArtifact({ teamId: row.team_id, sharedProjectId: row.shared_project_id,
+            deliveryId: row.delivery_id, peerDeviceId: row.source_device_id, direction: 'import', purpose: offer.purpose, stage: 'bundle',
+            transferId: row.transfer_id, revision: offer.revision, path: offer.path, taskId: offer.taskId });
+        } catch (error) {
+          const message = `Team artifact resend authorization failed: ${redactSecrets(errorMessage(error))}`.slice(0, 500);
+          this.db.prepare(`UPDATE ${TEAM_ARTIFACT_TABLE} SET status='failed',retry_error=?,updated_at=? WHERE transfer_id=? AND status='receiving'`)
+            .run(message, nowIso(), row.transfer_id);
+          this.options.changed?.();
+          continue;
+        }
+        const at = nowIso();
+        const claimed = this.db.prepare(`UPDATE ${TEAM_ARTIFACT_TABLE} SET resend_attempts=?,last_resend_at=?,updated_at=?
+          WHERE transfer_id=? AND status='receiving' AND resend_attempts=?`)
+          .run(nextAttempt, at, at, row.transfer_id, row.resend_attempts);
+        if (Number(claimed.changes) !== 1) continue;
+        try {
+          await this.options.transport.send({ teamId: row.team_id, toDeviceId: row.source_device_id, kind: 'git.team-artifact.retry',
+            payload: { transferId: row.transfer_id, mode: 'resend', attempt: nextAttempt },
+            idempotencyKey: `team-artifact:${row.transfer_id}:resend:${nextAttempt}` });
+          this.db.prepare(`UPDATE ${TEAM_ARTIFACT_TABLE} SET retry_error=NULL WHERE transfer_id=? AND status='receiving'`).run(row.transfer_id);
+        } catch (error) {
+          const message = `Could not request missing team artifact chunks: ${redactSecrets(errorMessage(error))}`.slice(0, 500);
+          this.db.prepare(`UPDATE ${TEAM_ARTIFACT_TABLE} SET retry_error=? WHERE transfer_id=? AND status='receiving'`).run(message, row.transfer_id);
+        }
+        this.options.changed?.();
+      }
+    })().finally(() => {
+      this.teamArtifactRecoveryWork = null;
+      if (recoveryOwnerId) this.scheduleTeamArtifactRecovery(recoveryOwnerId);
+    });
+    this.teamArtifactRecoveryWork = work;
+    return work;
+  }
+
   async bindProject(input: unknown) { return bindProject(this.options, this.db, input); }
 
   async snapshot(teamId?: string): Promise<GitSyncSnapshotType> {
     const owner = await currentUser(this.options.account);
     if (teamId) await this.options.authorizeTeam({ teamId });
+    void this.recoverIncompleteTeamArtifacts(teamId, owner.id).catch(() => undefined);
     const scopeRows = this.db.prepare(`SELECT team_id,peer_device_id FROM ${TABLE} WHERE owner_id=?${teamId ? ' AND team_id=?' : ''}`)
       .all(...(teamId ? [owner.id, teamId] : [owner.id])) as Array<{ team_id: string; peer_device_id: string }>;
     const bindingScopes = this.db.prepare(`SELECT DISTINCT team_id FROM mingle_distributed_project_bindings WHERE owner_id=?${teamId ? ' AND team_id=?' : ''}`)
@@ -546,13 +661,14 @@ export class GitSyncService {
   }
 
   private async sendTeamArtifactBundle(input: { teamId: string; sharedProjectId: string; deliveryId: string; toDeviceId: string;
-    bundle: Buffer; offer: TeamArtifactOffer; signal?: AbortSignal }): Promise<void> {
+    bundle: Buffer; offer: TeamArtifactOffer; signal?: AbortSignal; resendAttempt?: number }): Promise<void> {
     assertArtifactTransferLive(input.signal);
     await this.authorizeTeamArtifact({ teamId: input.teamId, sharedProjectId: input.sharedProjectId,
       deliveryId: input.deliveryId, peerDeviceId: input.toDeviceId, direction: 'export', purpose: input.offer.purpose, stage: 'bundle' });
     assertArtifactTransferLive(input.signal);
+    const resendSuffix = input.resendAttempt ? `:resend:${input.resendAttempt}` : '';
     await this.options.transport.send({ teamId: input.teamId, toDeviceId: input.toDeviceId, kind: 'git.team-artifact.offer',
-      payload: input.offer, idempotencyKey: `team-artifact:${input.offer.transferId}:${input.offer.baseRevision ? 'offer' : 'offer:root'}` });
+      payload: input.offer, idempotencyKey: `team-artifact:${input.offer.transferId}:${input.offer.baseRevision ? 'offer' : 'offer:root'}${resendSuffix}` });
     assertArtifactTransferLive(input.signal);
     for (let index = 0; index < input.offer.chunkCount; index++) {
       await this.authorizeTeamArtifact({ teamId: input.teamId, sharedProjectId: input.sharedProjectId,
@@ -561,15 +677,42 @@ export class GitSyncService {
       const chunk = input.bundle.subarray(index * BUNDLE_CHUNK_BYTES, Math.min(input.bundle.length, (index + 1) * BUNDLE_CHUNK_BYTES));
       await this.options.transport.send({ teamId: input.teamId, toDeviceId: input.toDeviceId, kind: 'git.team-artifact.chunk',
         payload: { transferId: input.offer.transferId, index, chunkCount: input.offer.chunkCount, data: chunk.toString('base64') },
-        idempotencyKey: `team-artifact:${input.offer.transferId}:${input.offer.baseRevision ? '' : 'root:'}chunk:${index}` });
+        idempotencyKey: `team-artifact:${input.offer.transferId}:${input.offer.baseRevision ? '' : 'root:'}chunk:${index}${resendSuffix}` });
       assertArtifactTransferLive(input.signal);
     }
   }
 
   private async receiveTeamArtifactRetry(envelope: DistributedDeviceEnvelope, ownerId: string): Promise<void> {
     const parsed = TeamArtifactRetrySchema.safeParse(envelope.payload);
-    if (!parsed.success) throw conflict('Malformed team artifact prerequisite retry request.');
+    if (!parsed.success) throw conflict('Malformed team artifact retry request.');
     const row = this.teamArtifactRow(parsed.data.transferId);
+    if (parsed.data.mode === 'resend') {
+      if (!row || row.direction !== 'outgoing' || row.team_id !== envelope.teamId || row.owner_id !== ownerId
+        || row.peer_device_id !== envelope.fromDeviceId || row.status !== 'sent') {
+        throw conflict('The team artifact resend does not match a completed outgoing transfer.');
+      }
+      const prior = TeamArtifactOfferSchema.parse(parseJson<unknown>(row.offer_json, 'team artifact offer'));
+      await this.authorizeTeamArtifact({ teamId: row.team_id, sharedProjectId: row.shared_project_id, deliveryId: row.delivery_id,
+        peerDeviceId: row.peer_device_id, direction: 'export', purpose: prior.purpose, stage: 'bundle', transferId: row.transfer_id,
+        revision: prior.revision, path: prior.path, taskId: prior.taskId });
+      const bundle = Buffer.from(row.bundle_blob ?? []);
+      if (bundle.length !== prior.bundleSizeBytes || createHash('sha256').update(bundle).digest('hex') !== prior.bundleSha256) {
+        throw conflict('The saved team artifact bundle no longer matches its authenticated offer.');
+      }
+      const claimed = this.db.prepare(`UPDATE ${TEAM_ARTIFACT_TABLE} SET status='resending',updated_at=? WHERE transfer_id=? AND status='sent'`)
+        .run(nowIso(), row.transfer_id);
+      if (Number(claimed.changes) !== 1) return;
+      try {
+        await this.sendTeamArtifactBundle({ teamId: row.team_id, sharedProjectId: row.shared_project_id,
+          deliveryId: row.delivery_id, toDeviceId: row.peer_device_id, bundle, offer: prior,
+          resendAttempt: parsed.data.attempt ?? 1 });
+      } finally {
+        this.db.prepare(`UPDATE ${TEAM_ARTIFACT_TABLE} SET status='sent',updated_at=? WHERE transfer_id=? AND status='resending'`)
+          .run(nowIso(), row.transfer_id);
+        this.options.changed?.();
+      }
+      return;
+    }
     if (!row || row.direction !== 'outgoing' || row.team_id !== envelope.teamId || row.owner_id !== ownerId
       || row.peer_device_id !== envelope.fromDeviceId || row.status !== 'sent') throw conflict('The team artifact retry does not match a completed outgoing transfer.');
     const prior = TeamArtifactOfferSchema.parse(parseJson<unknown>(row.offer_json, 'team artifact offer'));
@@ -851,8 +994,10 @@ export class GitSyncService {
       }
       if (existing.status === 'retrying' && prior.baseRevision && !offer.baseRevision) {
         this.db.prepare(`DELETE FROM ${TEAM_ARTIFACT_CHUNK_TABLE} WHERE transfer_id=?`).run(offer.transferId);
-        this.db.prepare(`UPDATE ${TEAM_ARTIFACT_TABLE} SET status='receiving',offer_json=?,bundle_blob=NULL,retry_error=NULL,updated_at=?
+        this.db.prepare(`UPDATE ${TEAM_ARTIFACT_TABLE} SET status='receiving',offer_json=?,bundle_blob=NULL,retry_error=NULL,
+          updated_at=?,resend_attempts=0,last_resend_at=NULL
           WHERE transfer_id=? AND status='retrying'`).run(JSON.stringify(offer), nowIso(), offer.transferId);
+        this.scheduleTeamArtifactRecovery(ownerId);
         this.options.changed?.();
         return;
       }
@@ -864,6 +1009,7 @@ export class GitSyncService {
       direction,owner_id,status,offer_json,bundle_blob,ref_name,created_at,updated_at) VALUES(?,?,?,?,?,?,'incoming',?,'receiving',?,NULL,NULL,?,?)`)
       .run(offer.transferId, envelope.teamId, offer.sharedProjectId, offer.deliveryId, envelope.fromDeviceId,
         this.localDeviceId(envelope.teamId), ownerId, JSON.stringify(offer), at, at);
+    this.scheduleTeamArtifactRecovery(ownerId);
     this.options.changed?.();
   }
 
@@ -872,7 +1018,9 @@ export class GitSyncService {
     if (!parsed.success) throw new Error('Malformed team artifact chunk.');
     const chunk = parsed.data;
     const row = this.teamArtifactRow(chunk.transferId);
-    if (!row || row.direction !== 'incoming' || row.owner_id !== ownerId || row.source_device_id !== envelope.fromDeviceId) throw conflict('Team artifact chunk has no matching authenticated offer.');
+    if (!row) throw new RetryableTransportDeliveryError('Team artifact chunk has no matching authenticated offer yet; it will be retried.');
+    if (row.direction !== 'incoming' || row.owner_id !== ownerId || row.source_device_id !== envelope.fromDeviceId
+      || row.team_id !== envelope.teamId) throw conflict('Team artifact chunk does not match its authenticated offer sender.');
     const offer = TeamArtifactOfferSchema.parse(parseJson<unknown>(row.offer_json, 'team artifact offer'));
     const authority = { teamId: row.team_id, sharedProjectId: row.shared_project_id,
       deliveryId: row.delivery_id, peerDeviceId: envelope.fromDeviceId, direction: 'import', purpose: offer.purpose, stage: 'bundle',
@@ -898,6 +1046,7 @@ export class GitSyncService {
     if (row.status !== 'receiving') throw conflict('The team artifact transfer is no longer receiving chunks.');
     await this.authorizeTeamArtifact(authority);
     this.db.prepare(`INSERT INTO ${TEAM_ARTIFACT_CHUNK_TABLE}(transfer_id,chunk_index,data) VALUES(?,?,?)`).run(chunk.transferId, chunk.index, bytes);
+    this.db.prepare(`UPDATE ${TEAM_ARTIFACT_TABLE} SET updated_at=? WHERE transfer_id=? AND status='receiving'`).run(nowIso(), chunk.transferId);
     const chunks = this.db.prepare(`SELECT chunk_index,data FROM ${TEAM_ARTIFACT_CHUNK_TABLE} WHERE transfer_id=? ORDER BY chunk_index`)
       .all(chunk.transferId) as Array<{ chunk_index: number; data: Uint8Array }>;
     if (chunks.length !== offer.chunkCount) { this.options.changed?.(); return; }
