@@ -32,6 +32,8 @@ const ALLOWED_CLOCK_SKEW_MS = 2 * 60 * 1000;
 // Realtime broadcast requests have a tighter operational ceiling than encrypted mailbox payloads.
 const MAX_REALTIME_ENVELOPE_BYTES = 64 * 1024;
 const TEAM_CACHE_REFRESH_TTL_MS = 5_000;
+const SEND_CHANNEL_IDLE_TTL_MS = 5 * 60 * 1_000;
+const MAX_SEND_CHANNELS = 128;
 const REALTIME_TOPIC_LABEL = 'mingle-team-device-envelope-v1';
 
 /** The account bridge is deliberately structural so transport can be built before AccountService is integrated. */
@@ -85,7 +87,29 @@ interface StoredKeyFile {
 
 interface WakeSubscription {
   client: SupabaseClient;
+  topic: string;
   channel: ReturnType<SupabaseClient['channel']>;
+  status: string | null;
+}
+
+interface SendChannelTarget {
+  accountId: string;
+  teamId: string;
+  deviceId: string;
+}
+
+interface SendChannel {
+  client: SupabaseClient;
+  topic: string;
+  channel: ReturnType<SupabaseClient['channel']>;
+  /** A same-topic receiver channel is borrowed and must never be removed by the send cache. */
+  sharedReceive: boolean;
+  subscribed: boolean;
+  removing: boolean;
+  lastUsedAt: number;
+  idleGeneration: number;
+  idleTimer: NodeJS.Timeout | null;
+  targets: Map<string, SendChannelTarget>;
 }
 
 interface TeamSyncState {
@@ -113,11 +137,14 @@ export class TransportService {
   private readonly teamSyncs = new Map<string, TeamSyncState>();
   private readonly teamRefreshes = new Map<string, Promise<void>>();
   private readonly teamCacheRefreshedAt = new Map<string, number>();
+  private readonly teamTrustEpochs = new Map<string, number>();
   private readonly teamActiveMembers = new Map<string, Set<string>>();
   private readonly outboxSyncs = new Map<string, Promise<void>>();
   private readonly fastDeliveryPromises = new Set<Promise<void>>();
   private timer: NodeJS.Timeout | null = null;
   private readonly wakeSubscriptions = new Map<string, WakeSubscription>();
+  private readonly sendChannels = new Map<SupabaseClient, Map<string, SendChannel>>();
+  private activeClient: SupabaseClient | null = null;
   private readonly wakeRetryTimers = new Map<string, NodeJS.Timeout>();
   private readonly wakeRetryAttempts = new Map<string, number>();
   private readonly pendingWakeDeviceIds = new Set<string>();
@@ -267,13 +294,18 @@ export class TransportService {
           WHERE account_id = ? AND team_id = ? AND from_device_id = ? AND status = 'queued'`)
           .run(user.id, request.teamId, request.deviceId);
         await this.query<unknown>(client.from('mingle_device_links').delete().eq('team_id', request.teamId).eq('device_id', request.deviceId), 'Device trust links could not be removed.');
+        this.evictSendChannelsForTeam(user.id, request.teamId);
+        const subscription = this.wakeSubscriptions.get(`${user.id}:${request.deviceId}`);
+        if (subscription) this.removeWakeSubscription(`${user.id}:${request.deviceId}`, subscription);
       } else {
         const own = this.requireLocalDevice(user.id, request.teamId);
         await this.query<unknown>(client.from('mingle_device_links').delete().eq('team_id', request.teamId)
           .eq('device_id', own.device_id).eq('peer_device_id', request.deviceId), 'The peer device link could not be revoked.');
         this.db.prepare('DELETE FROM mingle_transport_links_cache WHERE account_id = ? AND team_id = ? AND device_id = ? AND peer_device_id = ?')
           .run(user.id, request.teamId, own.device_id, request.deviceId);
+        this.evictSendChannelsForTarget(user.id, request.teamId, request.deviceId);
       }
+      this.invalidateTeamTrust(request.teamId);
       this.lastError = null;
     });
   }
@@ -367,6 +399,35 @@ export class TransportService {
     return () => this.handlers.delete(handler);
   }
 
+  /** Marks the local trust snapshot stale and immediately starts an authenticated roster refresh. */
+  invalidateTeamTrust(teamId: string): void {
+    if (this.closed || !teamId) return;
+    const accountId = this.currentAccountId();
+    if (!accountId) return;
+    const locals = this.localDevices(accountId).filter((device) => device.team_id === teamId);
+    for (const local of locals) {
+      const key = this.teamCacheKey(accountId, teamId, local.device_id);
+      this.teamTrustEpochs.set(key, (this.teamTrustEpochs.get(key) ?? 0) + 1);
+      this.teamCacheRefreshedAt.delete(key);
+    }
+    if (locals.length === 0) return;
+    void this.withAccount(async (client, user) => {
+      if (user.id !== accountId) return;
+      const local = this.localDevices(user.id).find((device) => device.team_id === teamId && device.registered === 1);
+      if (!local) return;
+      const key = this.teamCacheKey(user.id, teamId, local.device_id);
+      // If a refresh began before the invalidation signal, let it finish and then require
+      // a fresh read. Its earlier snapshot is not authoritative for the new roster version.
+      const inFlight = this.teamRefreshes.get(key);
+      if (inFlight) await inFlight.catch(() => undefined);
+      if (this.closed || this.currentAccountId() !== user.id) return;
+      await this.refreshTeamCoalesced(client, user.id, teamId, local.device_id);
+    }, false).catch(() => {
+      // Preserve the mailbox fallback if the immediate authority refresh is temporarily unavailable.
+      this.scheduleRetrySync(this.now() + Math.max(1, this.retryBaseMs));
+    });
+  }
+
   /** Pulls all teams registered by the active account, refreshes trust/presence, then drains durable inbox work. */
   sync(): Promise<void> {
     if (this.closed) return Promise.resolve();
@@ -437,22 +498,30 @@ export class TransportService {
       ...this.fastDeliveryPromises,
       this.deliveryPromise,
     ]);
-    await Promise.allSettled([...this.wakeSubscriptions.values()].map(({ client, channel }) => client.removeChannel(channel)));
+    const sendRemovals = this.clearSendChannels();
+    const wakeSubscriptions = [...this.wakeSubscriptions.values()];
     this.wakeSubscriptions.clear();
+    await Promise.allSettled([
+      ...sendRemovals,
+      ...wakeSubscriptions.map(({ client, channel }) => client.removeChannel(channel).then(() => undefined)),
+    ]);
     this.teamSyncs.clear();
     this.teamRefreshes.clear();
     this.teamCacheRefreshedAt.clear();
+    this.teamTrustEpochs.clear();
     this.teamActiveMembers.clear();
     this.outboxSyncs.clear();
     this.wakeRetryAttempts.clear();
     this.pendingWakeDeviceIds.clear();
     this.handlers.clear();
     this.keyCache.clear();
+    this.activeClient = null;
   }
 
   private async runSync(): Promise<void> {
     const accountId = this.currentAccountId();
     if (!accountId) {
+      if (this.activeAccountId) this.resetRealtimeClientState();
       // Preserve the authenticated error/status path while signed out or during account changes.
       await this.withAccount(async () => undefined, false);
       return;
@@ -513,6 +582,7 @@ export class TransportService {
   private startTeamSyncPass(key: string, state: TeamSyncState, accountId: string, local: LocalDeviceRow): void {
     const pass = this.syncTeamInbox(accountId, local).then(() => true).catch(() => {
       this.recordFailure('A team mailbox could not be synchronized.');
+      this.scheduleRetrySync(this.now() + Math.max(1, this.retryBaseMs));
       return false;
     });
     state.promise = pass;
@@ -576,6 +646,8 @@ export class TransportService {
   }
 
   private async refreshTeam(client: SupabaseClient, accountId: string, teamId: string, deviceId: string): Promise<void> {
+    const cacheKey = this.teamCacheKey(accountId, teamId, deviceId);
+    const trustEpoch = this.teamTrustEpochs.get(cacheKey) ?? 0;
     const [heartbeat, devices, links, members] = await Promise.all([
       this.query<CloudDeviceRow | null>(client.from('mingle_devices')
         .update({ last_seen_at: this.isoNow() }).eq('team_id', teamId).eq('id', deviceId).eq('owner_id', accountId)
@@ -590,6 +662,10 @@ export class TransportService {
       this.db.prepare(`UPDATE mingle_transport_outbox SET status = 'expired', error = 'Sender device is no longer active.'
         WHERE account_id = ? AND team_id = ? AND from_device_id = ? AND status = 'queued'`)
         .run(accountId, teamId, deviceId);
+      this.teamCacheRefreshedAt.delete(cacheKey);
+      const subscription = this.wakeSubscriptions.get(`${accountId}:${deviceId}`);
+      if (subscription) this.removeWakeSubscription(`${accountId}:${deviceId}`, subscription);
+      this.evictSendChannelsForTeam(accountId, teamId);
       throw new HttpError(403, 'The local device is no longer active.');
     }
     const rows = (devices ?? []).map((row) => ({ ...row }));
@@ -606,7 +682,9 @@ export class TransportService {
     } catch (error) { this.db.exec('ROLLBACK'); throw error; }
     this.cacheDevice(accountId, heartbeat);
     this.teamActiveMembers.set(`${accountId}:${teamId}`, new Set((members ?? []).map((member) => member.user_id)));
-    this.teamCacheRefreshedAt.set(this.teamCacheKey(accountId, teamId, deviceId), this.now());
+    if ((this.teamTrustEpochs.get(cacheKey) ?? 0) === trustEpoch) this.teamCacheRefreshedAt.set(cacheKey, this.now());
+    else this.teamCacheRefreshedAt.delete(cacheKey);
+    this.pruneSendChannelsForTeam(accountId, teamId);
   }
 
   private refreshTeamCoalesced(client: SupabaseClient, accountId: string, teamId: string, deviceId: string): Promise<void> {
@@ -710,6 +788,179 @@ export class TransportService {
     return `${REALTIME_TOPIC_LABEL}:${topic}`;
   }
 
+  private getOrCreateSendChannel(
+    client: SupabaseClient, accountId: string, teamId: string, recipientDeviceId: string, fingerprint: string,
+  ): SendChannel | null {
+    if (this.closed) return null;
+    const topic = this.realtimeChannelName(fingerprint);
+    let channels = this.sendChannels.get(client);
+    const cached = channels?.get(topic);
+    const targetKey = `${accountId}:${teamId}:${recipientDeviceId}`;
+    if (cached && !cached.removing) {
+      cached.targets.set(targetKey, { accountId, teamId, deviceId: recipientDeviceId });
+      this.touchSendChannel(cached);
+      return cached;
+    }
+
+    const receiver = [...this.wakeSubscriptions.values()].find((subscription) => subscription.client === client && subscription.topic === topic);
+    let channel: ReturnType<SupabaseClient['channel']>;
+    try {
+      // supabase-js returns the same channel object for an existing topic on this client.
+      // Reuse a tracked receiver directly so send-cache cleanup can never tear it down.
+      channel = receiver?.channel ?? client.channel(topic, { config: { broadcast: { ack: false } } });
+    } catch { return null; }
+    const entry: SendChannel = {
+      client, topic, channel, sharedReceive: receiver?.channel === channel,
+      subscribed: receiver?.status === 'SUBSCRIBED', removing: false, lastUsedAt: this.now(),
+      idleGeneration: 0, idleTimer: null,
+      targets: new Map([[targetKey, { accountId, teamId, deviceId: recipientDeviceId }]]),
+    };
+    if (!channels) {
+      channels = new Map();
+      this.sendChannels.set(client, channels);
+    }
+    channels.set(topic, entry);
+    this.touchSendChannel(entry);
+    if (!entry.sharedReceive) {
+      try {
+        // Deliberately add no event handlers: a send-only subscription receives no app messages.
+        channel.subscribe((status) => this.handleSendChannelStatus(entry, status));
+      } catch {
+        entry.subscribed = false;
+      }
+    }
+    this.enforceSendChannelLimit();
+    return entry;
+  }
+
+  private handleSendChannelStatus(entry: SendChannel, status: string): void {
+    if (entry.removing || this.sendChannels.get(entry.client)?.get(entry.topic) !== entry) return;
+    if (status === 'SUBSCRIBED') {
+      entry.subscribed = true;
+      return;
+    }
+    entry.subscribed = false;
+    if (status === 'CLOSED') void this.disposeSendChannel(entry);
+  }
+
+  private touchSendChannel(entry: SendChannel): void {
+    entry.lastUsedAt = this.now();
+    entry.idleGeneration += 1;
+    const generation = entry.idleGeneration;
+    if (entry.idleTimer) clearTimeout(entry.idleTimer);
+    entry.idleTimer = setTimeout(() => {
+      if (entry.idleGeneration === generation) void this.disposeSendChannel(entry);
+    }, SEND_CHANNEL_IDLE_TTL_MS);
+    entry.idleTimer.unref();
+  }
+
+  private enforceSendChannelLimit(): void {
+    const entries = [...this.sendChannels.values()].flatMap((channels) => [...channels.values()]);
+    entries.sort((left, right) => left.lastUsedAt - right.lastUsedAt);
+    while (entries.length > MAX_SEND_CHANNELS) {
+      const oldest = entries.shift();
+      if (oldest) void this.disposeSendChannel(oldest);
+    }
+  }
+
+  private disposeSendChannel(entry: SendChannel, removeOwnedChannel = true): Promise<void> {
+    if (entry.removing) return Promise.resolve();
+    entry.removing = true;
+    entry.subscribed = false;
+    entry.idleGeneration += 1;
+    if (entry.idleTimer) clearTimeout(entry.idleTimer);
+    entry.idleTimer = null;
+    const channels = this.sendChannels.get(entry.client);
+    if (channels?.get(entry.topic) === entry) channels.delete(entry.topic);
+    if (channels?.size === 0) this.sendChannels.delete(entry.client);
+    if (entry.sharedReceive || !removeOwnedChannel) return Promise.resolve();
+    try {
+      // Remove the cache entry before removeChannel: CLOSED can be reported synchronously
+      // through the subscribe callback. The `removing` guard makes that callback inert.
+      return Promise.resolve(entry.client.removeChannel(entry.channel)).then(() => undefined, () => undefined);
+    } catch { return Promise.resolve(); }
+  }
+
+  private clearSendChannels(): Promise<void>[] {
+    return [...this.sendChannels.values()].flatMap((channels) => [...channels.values()])
+      .map((entry) => this.disposeSendChannel(entry));
+  }
+
+  private clearSendChannelsForClient(client: SupabaseClient): void {
+    const channels = this.sendChannels.get(client);
+    if (!channels) return;
+    for (const entry of [...channels.values()]) void this.disposeSendChannel(entry);
+  }
+
+  private removeSendChannelEntriesForChannel(client: SupabaseClient, channel: ReturnType<SupabaseClient['channel']>): void {
+    const channels = this.sendChannels.get(client);
+    if (!channels) return;
+    for (const entry of [...channels.values()]) {
+      if (entry.channel === channel) void this.disposeSendChannel(entry, false);
+    }
+  }
+
+  private isWakeChannelSubscribed(client: SupabaseClient, channel: ReturnType<SupabaseClient['channel']>): boolean {
+    return [...this.wakeSubscriptions.values()].some((subscription) =>
+      subscription.client === client && subscription.channel === channel && subscription.status === 'SUBSCRIBED');
+  }
+
+  private evictSendChannelsForTarget(accountId: string, teamId: string, deviceId: string): void {
+    for (const channels of this.sendChannels.values()) {
+      for (const entry of [...channels.values()]) {
+        for (const [key, target] of entry.targets) {
+          if (target.accountId === accountId && target.teamId === teamId && target.deviceId === deviceId) entry.targets.delete(key);
+        }
+        if (entry.targets.size === 0) void this.disposeSendChannel(entry);
+      }
+    }
+  }
+
+  private evictSendChannelsForTeam(accountId: string, teamId: string): void {
+    for (const channels of this.sendChannels.values()) {
+      for (const entry of [...channels.values()]) {
+        for (const [key, target] of entry.targets) {
+          if (target.accountId === accountId && target.teamId === teamId) entry.targets.delete(key);
+        }
+        if (entry.targets.size === 0) void this.disposeSendChannel(entry);
+      }
+    }
+  }
+
+  private pruneSendChannelsForTeam(accountId: string, teamId: string): void {
+    const activeMembers = this.teamActiveMembers.get(`${accountId}:${teamId}`);
+    const localDevice = this.localDevices(accountId).find((device) => device.team_id === teamId && device.registered === 1);
+    for (const channels of this.sendChannels.values()) {
+      for (const entry of [...channels.values()]) {
+        for (const [key, target] of entry.targets) {
+          if (target.accountId !== accountId || target.teamId !== teamId) continue;
+          const device = this.deviceCacheRow(accountId, teamId, target.deviceId);
+          if (!device || device.revoked_at || !activeMembers?.has(device.owner_id) || !localDevice ||
+            !this.hasTrustedPeerCache(accountId, teamId, localDevice.device_id, target.deviceId)) entry.targets.delete(key);
+        }
+        if (entry.targets.size === 0) void this.disposeSendChannel(entry);
+      }
+    }
+  }
+
+  private removeWakeSubscriptionsForClient(client: SupabaseClient): void {
+    for (const [key, subscription] of [...this.wakeSubscriptions]) {
+      if (subscription.client === client) this.removeWakeSubscription(key, subscription);
+    }
+  }
+
+  private resetRealtimeClientState(): void {
+    if (this.activeAccountId) this.keyCache.delete(this.activeAccountId);
+    this.clearSendChannels();
+    for (const [key, subscription] of [...this.wakeSubscriptions]) this.removeWakeSubscription(key, subscription);
+    for (const timer of this.wakeRetryTimers.values()) clearTimeout(timer);
+    this.wakeRetryTimers.clear();
+    this.wakeRetryAttempts.clear();
+    this.pendingWakeDeviceIds.clear();
+    this.activeClient = null;
+    this.activeAccountId = null;
+  }
+
   /** A public Realtime topic is derived from recipient key material visible only to team members. */
   private ensureWakeSubscription(client: SupabaseClient, accountId: string, teamId: string, deviceId: string): void {
     if (typeof client.channel !== 'function') return;
@@ -722,10 +973,11 @@ export class TransportService {
       this.scheduleWakeRetry(key, accountId, deviceId);
       return;
     }
+    const topic = this.realtimeChannelName(own.fingerprint);
     let channel: ReturnType<SupabaseClient['channel']> | null = null;
     try {
-      channel = client.channel(this.realtimeChannelName(own.fingerprint), { config: { broadcast: { ack: false } } });
-      const subscription = { client, channel };
+      channel = client.channel(topic, { config: { broadcast: { ack: false } } });
+      const subscription: WakeSubscription = { client, topic, channel, status: null };
       this.wakeSubscriptions.set(key, subscription);
       channel.on('broadcast', { event: 'wake' }, () => {
         this.wakeSync(deviceId);
@@ -735,6 +987,7 @@ export class TransportService {
       });
       channel.subscribe((status) => {
         if (this.wakeSubscriptions.get(key)?.channel !== channel || this.closed) return;
+        subscription.status = status;
         if (status === 'SUBSCRIBED') {
           this.wakeRetryAttempts.delete(key);
           // Catch up after initial join/rejoin so a send during connection setup is not
@@ -747,7 +1000,7 @@ export class TransportService {
       });
     } catch {
       if (channel && this.wakeSubscriptions.get(key)?.channel === channel) {
-        this.removeWakeSubscription(key, { client, channel });
+        this.removeWakeSubscription(key, { client, topic, channel, status: null });
       }
       // Realtime is an optional accelerator. Continue polling while retrying the join.
       this.scheduleWakeRetry(key, accountId, deviceId);
@@ -756,6 +1009,7 @@ export class TransportService {
 
   private removeWakeSubscription(key: string, subscription: WakeSubscription): void {
     if (this.wakeSubscriptions.get(key)?.channel === subscription.channel) this.wakeSubscriptions.delete(key);
+    this.removeSendChannelEntriesForChannel(subscription.client, subscription.channel);
     void subscription.client.removeChannel(subscription.channel).catch(() => undefined);
   }
 
@@ -790,31 +1044,37 @@ export class TransportService {
   }
 
   private broadcastWake(client: SupabaseClient, accountId: string, teamId: string, deviceId: string): void {
-    // One REST request, without joining the channel: subscribing and removing a channel per message
-    // re-entered removeChannel through the CLOSED status callback and overflowed the stack.
     const recipient = this.deviceCacheRow(accountId, teamId, deviceId);
     if (!recipient || recipient.revoked_at || typeof recipient.fingerprint !== 'string') return;
-    void this.sendRealtime(client, recipient.fingerprint, 'wake', {}).catch(() => undefined);
+    void this.sendRealtime(client, accountId, teamId, deviceId, recipient.fingerprint, 'wake', {}).catch(() => undefined);
   }
 
   private broadcastEnvelope(client: SupabaseClient, accountId: string, teamId: string, envelope: SignedEnvelope): Promise<boolean> {
     const recipient = this.deviceCacheRow(accountId, teamId, envelope.toDeviceId);
     if (!recipient || recipient.revoked_at || typeof recipient.fingerprint !== 'string') return Promise.resolve(false);
-    return this.sendRealtime(client, recipient.fingerprint, 'envelope', envelope);
+    return this.sendRealtime(client, accountId, teamId, envelope.toDeviceId, recipient.fingerprint, 'envelope', envelope);
   }
 
-  private async sendRealtime(client: SupabaseClient, fingerprint: string, event: string, payload: unknown): Promise<boolean> {
+  private async sendRealtime(
+    client: SupabaseClient, accountId: string, teamId: string, recipientDeviceId: string,
+    fingerprint: string, event: string, payload: unknown,
+  ): Promise<boolean> {
     if (typeof client.channel !== 'function') return false;
-    let channel: ReturnType<SupabaseClient['channel']> | null = null;
+    const entry = this.getOrCreateSendChannel(client, accountId, teamId, recipientDeviceId, fingerprint);
+    if (!entry) return false;
+    const subscribed = entry.sharedReceive
+      ? this.isWakeChannelSubscribed(client, entry.channel)
+      : entry.subscribed;
+    if (subscribed && typeof entry.channel.send === 'function') {
+      try {
+        const status = await entry.channel.send({ type: 'broadcast', event, payload });
+        if (status === 'ok') return true;
+      } catch { /* A failed websocket push falls back to the stateless REST endpoint. */ }
+    }
     try {
-      channel = client.channel(this.realtimeChannelName(fingerprint), { config: { broadcast: { ack: false } } });
-      // httpSend uses the Realtime REST endpoint without a per-message join/subscription.
-      return (await channel.httpSend(event, payload)).success;
+      return (await entry.channel.httpSend(event, payload)).success;
     } catch {
-      // A missing or unavailable Realtime transport silently falls back to mailbox polling.
       return false;
-    } finally {
-      if (channel) void client.removeChannel(channel).catch(() => undefined);
     }
   }
 
@@ -1016,6 +1276,7 @@ export class TransportService {
         WHERE account_id = ? AND team_id = ? AND id = ? AND status = 'pending' AND next_attempt_at <= ?`)
         .run(accountId, row.team_id, row.id, this.now());
       if (claim.changes !== 1) return;
+      if (messageInvalidatesTeamTrust(message.kind)) this.invalidateTeamTrust(row.team_id);
       for (const handler of this.handlers) await this.handlerScope.run(true, () => handler(message));
       this.db.prepare(`UPDATE mingle_transport_inbox SET status = 'handled', attempts = attempts + 1, next_attempt_at = 0, error = NULL WHERE account_id = ? AND team_id = ? AND id = ? AND status = 'dispatching'`)
         .run(accountId, row.team_id, row.id);
@@ -1118,8 +1379,16 @@ export class TransportService {
     const before = notify ? this.changeSignature() : null;
     return this.options.account.withAuthenticatedClient(async (client, user) => {
       if (!user?.id || user.is_anonymous) throw new HttpError(401, 'A verified Mingle account is required for distributed devices.');
-      if (this.activeAccountId && this.activeAccountId !== user.id) this.keyCache.delete(this.activeAccountId);
+      if (this.activeAccountId && this.activeAccountId !== user.id) {
+        this.keyCache.delete(this.activeAccountId);
+        this.resetRealtimeClientState();
+      } else if (this.activeClient && this.activeClient !== client) {
+        const previousClient = this.activeClient;
+        this.clearSendChannelsForClient(previousClient);
+        this.removeWakeSubscriptionsForClient(previousClient);
+      }
       this.activeAccountId = user.id;
+      this.activeClient = client;
       const keys = this.loadKeys(user.id);
       try {
         const result = await work(client, user, keys);
@@ -1351,6 +1620,11 @@ export class TransportService {
 
 function isUuid(value: string): boolean {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+}
+
+function messageInvalidatesTeamTrust(kind: string): boolean {
+  if (kind === 'execution.agents' || kind === 'teamgroup.structure' || kind.startsWith('project-collaboration.')) return true;
+  return /(?:^|[.-])(?:roster|members?|membership|structure|devices?)(?:$|[.-])/i.test(kind);
 }
 
 function parseRealtimeEnvelope(value: unknown): SignedEnvelope | null {

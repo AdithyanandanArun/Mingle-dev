@@ -27,8 +27,9 @@ The account bridge contract is `withAuthenticatedClient(callback: (client: Supab
 - `revoke({teamId, deviceId}): Promise<void>` revokes a device owned by the active account, or removes this device's pin to a peer. Cloud row-level security remains authoritative for member/device revocation; every pending inbox dispatch refreshes current membership, device state and trust links before invoking a handler.
 - `send({teamId, toDeviceId, kind, payload, idempotencyKey}): Promise<string>` validates, encrypts and durably inserts the envelope in the local outbox before attempting the cloud write. A repeated key with the same local payload returns the original envelope ID; using it for a different payload rejects with HTTP 409.
 - `onMessage(handler): () => void` subscribes to authenticated `{id, teamId, fromDeviceId, toDeviceId, kind, payload}` messages. Register one routing handler for the transport and route each `kind` to services that independently validate their authority. Handlers are async-capable; a known handler failure remains durable and is retried with bounded exponential backoff.
+- `invalidateTeamTrust(teamId): void` marks the current device's team-trust snapshot stale and starts an authenticated roster/device/link refresh. The next live envelope is deferred until freshness is restored; mailbox polling remains the recovery path if refresh fails. Roster/structure/device-change deliveries and local device/link revocation invoke this automatically.
 - `sync(): Promise<void>` refreshes authenticated device/trust state, flushes due outbox entries, receives and acknowledges relay rows after local persistence, and dispatches pending inbox work. Concurrent calls coalesce.
-- `close(): Promise<void>` stops the timer, waits for an in-flight sync and clears in-memory key objects and handlers. Local key and mailbox records remain available for restart.
+- `close(): Promise<void>` stops the timer, waits for in-flight sync and handler work, removes owned send/receive Realtime channels and clears in-memory key objects and handlers. Local key and mailbox records remain available for restart.
 
 ## Data and wire protocol
 

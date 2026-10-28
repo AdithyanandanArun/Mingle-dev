@@ -49,6 +49,10 @@ class MailboxCloud {
   realtimeRttMs = 0;
   realtimeRequests = 0;
   failRealtimeSends = 0;
+  failChannelSends = 0;
+  failMemberRosterReads = 0;
+  channelSendCalls = 0;
+  readonly channelRemovals = new Map<string, number>();
   readonly inboxPullsByUserTeam = new Map<string, number>();
   lastWakePublishedAt = 0;
   failEnvelopeWrites = 0;
@@ -58,6 +62,7 @@ class MailboxCloud {
   private readonly wakeListeners = new Map<string, Set<(payload: unknown) => void>>();
   private readonly clients = new Map<string, SupabaseClient>();
   private heartbeatBlock: { teamId: string; entered: () => void; enteredPromise: Promise<void>; releasePromise: Promise<void>; release: () => void } | null = null;
+  private memberRosterBlock: { teamId: string; entered: () => void; enteredPromise: Promise<void>; releasePromise: Promise<void>; release: () => void } | null = null;
   constructor(private readonly realtime = false) {}
   failWakeSubscriptions(user: string, count: number): void { this.failedWakeSubscriptions.set(user, count); }
   blockNextHeartbeat(teamId: string): { entered: Promise<void>; release: () => void } {
@@ -66,6 +71,14 @@ class MailboxCloud {
     const enteredPromise = new Promise<void>((resolve) => { entered = resolve; });
     const releasePromise = new Promise<void>((resolve) => { release = resolve; });
     this.heartbeatBlock = { teamId, entered, enteredPromise, releasePromise, release };
+    return { entered: enteredPromise, release };
+  }
+  blockNextMemberRoster(teamId: string): { entered: Promise<void>; release: () => void } {
+    let entered!: () => void;
+    let release!: () => void;
+    const enteredPromise = new Promise<void>((resolve) => { entered = resolve; });
+    const releasePromise = new Promise<void>((resolve) => { release = resolve; });
+    this.memberRosterBlock = { teamId, entered, enteredPromise, releasePromise, release };
     return { entered: enteredPromise, release };
   }
   private active(user: string, team: string): boolean { return this.members.get(team)?.has(user) ?? false; }
@@ -86,11 +99,24 @@ class MailboxCloud {
       this.clients.set(user, client);
       return client;
     }
+    const channelsByTopic = new Map<string, { channel: any; listeners: Map<string, (payload: unknown) => void>; subscribed: boolean;
+      callback: ((status: string) => void) | null; subscribedListeners: Map<string, Set<(payload: unknown) => void>> }>();
     const client = {
       from: (table: string) => new MailboxQuery(this, user, table),
       channel: (name: string) => {
+        const existing = channelsByTopic.get(name);
+        if (existing) return existing.channel;
         const cloud = this;
         const listeners = new Map<string, (payload: unknown) => void>();
+        const state = { channel: null as any, listeners, subscribed: false, callback: null as ((status: string) => void) | null,
+          subscribedListeners: new Map<string, Set<(payload: unknown) => void>>() };
+        const deliver = (event: string, payload: unknown) => {
+          cloud.wakes.push({ channel: name, event, payload: structuredClone(payload) });
+          cloud.lastWakePublishedAt = performance.now();
+          queueMicrotask(() => {
+            for (const callback of [...(cloud.wakeListeners.get(`${name}:${event}`) ?? [])]) callback(payload);
+          });
+        };
         const channel: any = {
           on(_type: string, filter: { event: string }, callback: (payload: unknown) => void) {
             listeners.set(filter.event, (payload) => callback({ payload }));
@@ -98,31 +124,25 @@ class MailboxCloud {
           },
           subscribe(callback?: (status: string) => void) {
             cloud.wakeSubscribeAttempts.set(user, (cloud.wakeSubscribeAttempts.get(user) ?? 0) + 1);
+            state.callback = callback ?? null;
             const failures = cloud.failedWakeSubscriptions.get(user) ?? 0;
             if (failures > 0) {
               cloud.failedWakeSubscriptions.set(user, failures - 1);
-              channel.unsubscribe = async () => { callback?.('CLOSED'); return 'ok'; };
-              callback?.('TIMED_OUT');
+              queueMicrotask(() => callback?.('TIMED_OUT'));
               return channel;
             }
-            const subscribedListeners = new Map<string, Set<(payload: unknown) => void>>();
-            for (const [event, listener] of listeners) {
-              const key = `${name}:${event}`;
-              let eventListeners = cloud.wakeListeners.get(key);
-              if (!eventListeners) { eventListeners = new Set(); cloud.wakeListeners.set(key, eventListeners); }
-              eventListeners.add(listener);
-              subscribedListeners.set(key, eventListeners);
-            }
-            // Like realtime-js, unsubscribing reports CLOSED back through the subscribe callback.
-            channel.unsubscribe = async () => {
-              for (const [key, eventListeners] of subscribedListeners) {
-                for (const listener of listeners.values()) eventListeners.delete(listener);
-                if (!eventListeners.size) cloud.wakeListeners.delete(key);
+            queueMicrotask(() => {
+              if (state.channel !== channel || !channelsByTopic.has(name)) return;
+              state.subscribed = true;
+              for (const [event, listener] of listeners) {
+                const key = `${name}:${event}`;
+                let eventListeners = cloud.wakeListeners.get(key);
+                if (!eventListeners) { eventListeners = new Set(); cloud.wakeListeners.set(key, eventListeners); }
+                eventListeners.add(listener);
+                state.subscribedListeners.set(key, eventListeners);
               }
-              callback?.('CLOSED');
-              return 'ok';
-            };
-            callback?.('SUBSCRIBED');
+              callback?.('SUBSCRIBED');
+            });
             return channel;
           },
           async httpSend(event: string, payload: unknown) {
@@ -132,18 +152,34 @@ class MailboxCloud {
               cloud.failRealtimeSends--;
               return { success: false, status: 503, error: 'simulated Realtime failure' };
             }
-            await channel.send({ event, payload });
+            deliver(event, payload);
             return { success: true };
           },
-          async send(message: { event: string; payload: unknown }) {
-            cloud.wakes.push({ channel: name, event: message.event, payload: structuredClone(message.payload) });
-            cloud.lastWakePublishedAt = performance.now();
-            queueMicrotask(() => {
-              for (const deliver of [...(cloud.wakeListeners.get(`${name}:${message.event}`) ?? [])]) deliver(message.payload);
-            });
+          async send(message: { type: string; event: string; payload: unknown }) {
+            cloud.channelSendCalls++;
+            if (message.type !== 'broadcast' || !state.subscribed) return 'error';
+            if (cloud.failChannelSends > 0) {
+              cloud.failChannelSends--;
+              return 'error';
+            }
+            deliver(message.event, message.payload);
+            return 'ok';
+          },
+          async unsubscribe() {
+            state.subscribed = false;
+            for (const [key, eventListeners] of state.subscribedListeners) {
+              for (const listener of listeners.values()) eventListeners.delete(listener);
+              if (!eventListeners.size) cloud.wakeListeners.delete(key);
+            }
+            state.subscribedListeners.clear();
+            if (channelsByTopic.get(name)?.channel === channel) channelsByTopic.delete(name);
+            cloud.channelRemovals.set(`${user}:${name}`, (cloud.channelRemovals.get(`${user}:${name}`) ?? 0) + 1);
+            state.callback?.('CLOSED');
             return 'ok';
           },
         };
+        state.channel = channel;
+        channelsByTopic.set(name, state);
         return channel;
       },
       removeChannel: async (channel: any) => channel.unsubscribe?.() ?? 'ok',
@@ -162,6 +198,16 @@ class MailboxCloud {
       this.heartbeatBlock = null;
       blocked.entered();
       await blocked.releasePromise;
+    }
+    const memberBlock = this.memberRosterBlock;
+    if (memberBlock && table === 'mingle_members' && action === 'select' && memberBlock.teamId === teamFilter) {
+      this.memberRosterBlock = null;
+      memberBlock.entered();
+      await memberBlock.releasePromise;
+    }
+    if (table === 'mingle_members' && action === 'select' && this.failMemberRosterReads > 0) {
+      this.failMemberRosterReads--;
+      return { data: null, error: { code: '503', message: 'simulated roster refresh failure' } };
     }
     const rows = this.table(table);
     const inboxTeamId = filters.find(([, column]) => column === 'team_id')?.[2];
@@ -411,6 +457,131 @@ it('delivers a small encrypted envelope on a fingerprint-derived Realtime topic'
   }
 });
 
+it('reuses one subscribed recipient channel across sends and uses REST only before the join completes', async () => {
+  const cloud = new MailboxCloud(true);
+  const { first, second, b } = await pairedServices(cloud);
+  const received: string[] = [];
+  const unsubscribe = second.onMessage((message) => { received.push(message.id); });
+  try {
+    await second.sync();
+    const subscribeAttemptsBefore = cloud.wakeSubscribeAttempts.get(userA) ?? 0;
+    const restCallsBefore = cloud.realtimeRequests;
+    const ids: string[] = [];
+    for (let index = 0; index < 4; index += 1) {
+      ids.push(await first.send({ teamId, toDeviceId: b.id, kind: 'collaboration.message',
+        payload: { index }, idempotencyKey: `persistent-send-${index}` }));
+    }
+    await vi.waitFor(() => expect(received).toEqual(ids), { timeout: 1_000 });
+    expect(cloud.wakeSubscribeAttempts.get(userA)).toBe(subscribeAttemptsBefore + 1);
+    expect(cloud.realtimeRequests - restCallsBefore).toBe(1);
+    expect(cloud.channelSendCalls).toBe(3);
+  } finally {
+    unsubscribe();
+    await first.close();
+    await second.close();
+  }
+});
+
+it('borrows an existing same-topic receiver subscription without replacing or removing it', async () => {
+  const cloud = new MailboxCloud(true);
+  const first = service(cloud, userA);
+  try {
+    const own = await first.register({ teamId, name: 'Receiver and sender' });
+    await first.sync();
+    await vi.waitFor(() => expect((first as unknown as { wakeSubscriptions: Map<string, { status: string | null }> })
+      .wakeSubscriptions.get(`${userA}:${own.id}`)?.status).toBe('SUBSCRIBED'));
+    const client = cloud.client(userA);
+    const attempts = cloud.wakeSubscribeAttempts.get(userA);
+    const privateTransport = first as unknown as {
+      sendRealtime: (client: SupabaseClient, accountId: string, teamId: string, deviceId: string, fingerprint: string, event: string, payload: unknown) => Promise<boolean>;
+      sendChannels: Map<SupabaseClient, Map<string, { sharedReceive: boolean }>>;
+      realtimeChannelName: (fingerprint: string) => string;
+    };
+    expect(await privateTransport.sendRealtime(client, userA, teamId, own.id, own.fingerprint, 'wake', {})).toBe(true);
+    expect(await privateTransport.sendRealtime(client, userA, teamId, own.id, own.fingerprint, 'wake', {})).toBe(true);
+    const topic = privateTransport.realtimeChannelName(own.fingerprint);
+    expect(privateTransport.sendChannels.get(client)?.get(topic)?.sharedReceive).toBe(true);
+    expect(cloud.wakeSubscribeAttempts.get(userA)).toBe(attempts);
+    expect(cloud.channelRemovals.get(`${userA}:${topic}`) ?? 0).toBe(0);
+    expect((first as unknown as { wakeSubscriptions: Map<string, unknown> }).wakeSubscriptions.has(`${userA}:${own.id}`)).toBe(true);
+  } finally { await first.close(); }
+});
+
+it('evicts an idle send channel and does not recurse when CLOSED is reported during removal', async () => {
+  const cloud = new MailboxCloud(true);
+  const { first, b } = await pairedServices(cloud);
+  vi.useFakeTimers();
+  try {
+    await first.send({ teamId, toDeviceId: b.id, kind: 'collaboration.message', payload: { text: 'idle' }, idempotencyKey: 'idle-eviction' });
+    const topic = cloud.wakes.find((wake) => wake.event === 'envelope')!.channel;
+    await vi.advanceTimersByTimeAsync(5 * 60 * 1_000 + 1);
+    expect(cloud.channelRemovals.get(`${userA}:${topic}`)).toBe(1);
+    expect((first as unknown as { sendChannels: Map<SupabaseClient, Map<string, unknown>> }).sendChannels.get(cloud.client(userA))?.size ?? 0).toBe(0);
+  } finally {
+    vi.useRealTimers();
+    await first.close();
+  }
+});
+
+it('removes active send channels on close', async () => {
+  const cloud = new MailboxCloud(true);
+  const { first, second, b } = await pairedServices(cloud);
+  try {
+    await first.send({ teamId, toDeviceId: b.id, kind: 'collaboration.message', payload: { text: 'close' }, idempotencyKey: 'close-send-channel' });
+    const topic = cloud.wakes.find((wake) => wake.event === 'envelope')!.channel;
+    await first.close();
+    expect(cloud.channelRemovals.get(`${userA}:${topic}`)).toBe(1);
+    expect((first as unknown as { sendChannels: Map<SupabaseClient, Map<string, unknown>> }).sendChannels.get(cloud.client(userA))?.size ?? 0).toBe(0);
+  } finally {
+    await first.close();
+    await second.close();
+  }
+});
+
+it('falls back to httpSend when a subscribed websocket send fails', async () => {
+  const cloud = new MailboxCloud(true);
+  const { first, second, b } = await pairedServices(cloud);
+  const received: string[] = [];
+  const unsubscribe = second.onMessage((message) => { received.push(message.id); });
+  try {
+    await second.sync();
+    const firstId = await first.send({ teamId, toDeviceId: b.id, kind: 'collaboration.message', payload: { n: 1 }, idempotencyKey: 'prime-websocket' });
+    await vi.waitFor(() => expect(received).toEqual([firstId]), { timeout: 1_000 });
+    const before = cloud.realtimeRequests;
+    cloud.failChannelSends = 1;
+    const secondId = await first.send({ teamId, toDeviceId: b.id, kind: 'collaboration.message', payload: { n: 2 }, idempotencyKey: 'websocket-send-failure' });
+    await vi.waitFor(() => expect(received).toEqual([firstId, secondId]), { timeout: 1_000 });
+    expect(cloud.realtimeRequests).toBe(before + 1);
+  } finally {
+    unsubscribe();
+    await first.close();
+    await second.close();
+  }
+});
+
+it('delivers from the durable mailbox when both websocket and REST realtime sends fail', async () => {
+  const cloud = new MailboxCloud(true);
+  const { first, second, b } = await pairedServices(cloud);
+  const received: string[] = [];
+  const unsubscribe = second.onMessage((message) => { received.push(message.id); });
+  try {
+    await second.sync();
+    const primeId = await first.send({ teamId, toDeviceId: b.id, kind: 'collaboration.message', payload: { n: 1 }, idempotencyKey: 'prime-mailbox-fallback' });
+    await vi.waitFor(() => expect(received).toEqual([primeId]), { timeout: 1_000 });
+    const realtimeStart = cloud.wakes.length;
+    cloud.failChannelSends = 1;
+    cloud.failRealtimeSends = 1;
+    const id = await first.send({ teamId, toDeviceId: b.id, kind: 'collaboration.message', payload: { n: 2 }, idempotencyKey: 'both-realtime-paths-fail' });
+    await vi.waitFor(() => expect(received).toEqual([primeId, id]), { timeout: 1_000 });
+    expect(cloud.wakes.slice(realtimeStart).map(({ event }) => event)).toEqual(['wake']);
+    expect(first.snapshot(teamId).outbox.find((entry) => entry.id === id)).toMatchObject({ status: 'delivered' });
+  } finally {
+    unsubscribe();
+    await first.close();
+    await second.close();
+  }
+});
+
 it('does not dispatch twice when the mailbox copy arrives after the live envelope', async () => {
   const cloud = new MailboxCloud(true);
   const { first, second, b } = await pairedServices(cloud);
@@ -472,6 +643,86 @@ it('rejects a signed live envelope when the refreshed team member cache excludes
     expect(received).toEqual([]);
     expect(cloud.envelopes).toHaveLength(0);
     expect(first.snapshot(teamId).outbox.find((entry) => entry.id === id)).toMatchObject({ status: 'queued' });
+  } finally {
+    unsubscribe();
+    await first.close();
+    await second.close();
+  }
+});
+
+it('invalidates stale trust immediately and defers a just-revoked peer realtime envelope until refresh', async () => {
+  const cloud = new MailboxCloud(true);
+  const { first, second, b } = await pairedServices(cloud);
+  const received: string[] = [];
+  let releaseBlocked: (() => void) | null = null;
+  const unsubscribe = second.onMessage((message) => { received.push(message.id); });
+  try {
+    await second.sync();
+    const blocked = cloud.blockNextMemberRoster(teamId);
+    releaseBlocked = blocked.release;
+    second.invalidateTeamTrust(teamId);
+    await blocked.entered;
+    expect((second as unknown as { teamCacheRefreshedAt: Map<string, number> }).teamCacheRefreshedAt.has(`${userB}:${teamId}:${b.id}`)).toBe(false);
+    cloud.members.get(teamId)!.delete(userA);
+
+    // Sender A still has its short-lived local view. Its mailbox insert is denied, but its
+    // signed Realtime envelope must be deferred by B while the invalidation refresh is in flight.
+    await first.send({ teamId, toDeviceId: b.id, kind: 'collaboration.message', payload: { text: 'revoked during refresh' }, idempotencyKey: 'trust-invalidation-live' });
+    expect(received).toEqual([]);
+    blocked.release();
+    releaseBlocked = null;
+    await second.sync();
+    expect(received).toEqual([]);
+    expect(cloud.envelopes).toHaveLength(0);
+    expect((second as unknown as { teamActiveMembers: Map<string, Set<string>> }).teamActiveMembers.get(`${userB}:${teamId}`)?.has(userA)).toBe(false);
+  } finally {
+    releaseBlocked?.();
+    unsubscribe();
+    await first.close();
+    await second.close();
+  }
+});
+
+it('uses the durable mailbox after a trust invalidation refresh fails', async () => {
+  const cloud = new MailboxCloud(true);
+  const { first, second, b } = await pairedServices(cloud);
+  const received: string[] = [];
+  let releaseBlocked: (() => void) | null = null;
+  const unsubscribe = second.onMessage((message) => { received.push(message.id); });
+  try {
+    await second.sync();
+    const blocked = cloud.blockNextMemberRoster(teamId);
+    releaseBlocked = blocked.release;
+    second.invalidateTeamTrust(teamId);
+    await blocked.entered;
+    cloud.failMemberRosterReads = 1;
+    const id = await first.send({ teamId, toDeviceId: b.id, kind: 'collaboration.message', payload: { text: 'mailbox after refresh failure' }, idempotencyKey: 'trust-refresh-mailbox-fallback' });
+    expect(received).toEqual([]);
+    expect(cloud.envelopes).toHaveLength(1);
+    blocked.release();
+    releaseBlocked = null;
+    await second.sync();
+    await vi.waitFor(() => expect(received).toEqual([id]), { timeout: 1_000 });
+    expect(cloud.envelopes).toHaveLength(0);
+  } finally {
+    releaseBlocked?.();
+    unsubscribe();
+    await first.close();
+    await second.close();
+  }
+});
+
+it.each(['execution.agents', 'teamgroup.structure'])('automatically invalidates team trust after delivered %s messages', async (kind) => {
+  const cloud = new MailboxCloud(true);
+  const { first, second, b } = await pairedServices(cloud);
+  const received: string[] = [];
+  const unsubscribe = second.onMessage((message) => { received.push(message.kind); });
+  try {
+    await second.sync();
+    const previousQueries = cloud.postgrestRequestsByUser.get(userB) ?? 0;
+    await first.send({ teamId, toDeviceId: b.id, kind, payload: { version: 2 }, idempotencyKey: `trust-invalidation-${kind}` });
+    await vi.waitFor(() => expect(received).toContain(kind), { timeout: 1_000 });
+    await vi.waitFor(() => expect(cloud.postgrestRequestsByUser.get(userB) ?? 0).toBeGreaterThan(previousQueries), { timeout: 1_000 });
   } finally {
     unsubscribe();
     await first.close();

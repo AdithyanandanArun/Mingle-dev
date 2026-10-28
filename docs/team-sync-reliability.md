@@ -130,9 +130,10 @@ cancel the automatic sharing of the selected session.
 
 `project-collaboration-two-app.acceptance.test.ts` exercises two real HTTP
 applications, separate local databases and Git folders, actual PostgreSQL policies,
-and encrypted/signed mailbox messages. Its optional Realtime fixture delivers only
-empty wake hints, with a simulated 25 ms delay. The rename regression requires the
-host's saved remote roster to update within one second without a manual sync.
+and encrypted/signed mailbox messages. Its optional Realtime fixture delivers empty
+wake hints and sealed live envelopes over subscribed channels, with a simulated
+25 ms delay. The rename regression requires the host's saved remote roster to update
+within one second without a manual sync.
 The polling-only case retains lost-acknowledgement replay coverage.
 
 The final integrated server suite passed 54 test files: 419 tests passed and one was
@@ -175,9 +176,15 @@ guarantee for arbitrary internet connections.
 
 For an online recipient with a fresh local trust cache, `TransportService` persists
 the sealed envelope to the sender's SQLite outbox, then starts the cloud mailbox
-insert and a Supabase Realtime `httpSend` concurrently. The Realtime payload is the
-same signed `SignedEnvelope` object used to form the mailbox row; its payload remains
-end-to-end encrypted. A recipient accepts this fast path only when the envelope
+insert and a Supabase Realtime broadcast concurrently. The sender reuses a joined
+channel for each recipient topic and authenticated Supabase client; a channel is
+removed after five minutes idle, when its target is revoked or leaves the team, when
+the account/client changes, or when the cache exceeds 128 channels. First use or a
+channel that is not yet subscribed falls back to `httpSend` without waiting for the
+join. A websocket send that does not return `ok` also falls back to `httpSend`; failed
+Realtime paths leave the durable mailbox write as the delivery guarantee. The
+Realtime payload is the same signed `SignedEnvelope` object used to form the mailbox
+row; its payload remains end-to-end encrypted. A recipient accepts this fast path only when the envelope
 route and expiry are valid, the sender is in the local device roster, both device
 owners remain in the cached active-member roster, both devices are unrevoked, their
 current public-key fingerprints match, and both cached pins are mutual. It verifies
@@ -193,9 +200,12 @@ cached peer link do not wait for a roster refresh; an expired cache refreshes in
 background. A missing or invalid cached peer uses the existing refresh-before-send
 path. Receivers with a stale cache, or without the sender in their roster, use the
 normal authenticated mailbox sync instead of trusting the broadcast. That sync
-refreshes roster and links before delivery. A revocation, unlink or membership change
-can remain in a still-fresh live cache until its next refresh (at most five seconds);
-the durable mailbox continues to enforce current cloud RLS.
+refreshes roster and links before delivery. `invalidateTeamTrust(teamId)` marks the
+team cache stale and starts an authoritative refresh immediately. Delivered
+`execution.agents` roster messages, `teamgroup.structure`, collaboration membership,
+roster, structure and device-change messages, and local device/link revocation invoke
+the invalidation path. If refresh fails, the Realtime copy is deferred; the sealed
+mailbox copy remains available for a later authenticated refresh and retry.
 
 Public Realtime broadcast topics are a SHA-256 derivation of a fixed protocol label
 and the recipient's registered device fingerprint. Team members can read that
@@ -216,7 +226,10 @@ distributed payload limit. Larger envelopes skip the payload broadcast and retai
 the mailbox plus empty wake behavior. Failed Realtime sends also trigger the empty
 wake; if Realtime is absent, mailbox polling remains the recovery path. An online
 device with a successful fast path persists locally before acknowledging cloud
-storage, preserving durability across a mailbox/publish race.
+storage, preserving durability across a mailbox/publish race. A transport send
+channel reuses an existing same-topic receiver channel when Supabase returns it for
+the same client; the send cache binds no extra event handlers and never removes the
+receiver's subscription.
 
 `scripts/measure-team-latency.mjs --from-url URL --from-project ID --to-url URL
 --to-project ID` sends ten unique team-chat probes and reports p50/p90 time until
