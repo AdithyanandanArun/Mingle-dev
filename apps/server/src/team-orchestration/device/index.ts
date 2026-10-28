@@ -383,6 +383,9 @@ export function createDeviceSide(deps: DeviceSideDeps): {
     if (!selected) throw new HttpError(404, 'This device has not accepted team consent for the project.');
     const previous = parseConsent(JSON.parse(selected.consent_json));
     const consent: TeamConsent = { ...previous, state: parsed.state as TeamConsentState, updatedAt: nextConsentAt(previous) };
+    // Resolve the host binding before recording the structure event: that event invalidates the
+    // collaboration read model, and resolving afterwards would wait on an authoritative cloud read.
+    const hostBinding = await binding(projectId).catch(() => null);
     saveConsent(consent);
     recordStructureUpdated(consent.sharedProjectId, 'Team consent updated');
     if (consent.state === 'paused' || consent.state === 'revoked') {
@@ -416,9 +419,8 @@ export function createDeviceSide(deps: DeviceSideDeps): {
       disclaimerVersion: consent.disclaimerVersion, state: consent.state, at: consent.updatedAt });
     let hostSync: 'sent' | 'failed' = 'sent';
     try {
-      const shared = await binding(projectId);
-      if (shared.sharedProjectId !== consent.sharedProjectId || shared.teamId !== consent.teamId
-        || !await sendToHost(shared, 'teamgroup.consent', payload, `team-consent:${consent.accountId}:${consent.deviceId}:${consent.updatedAt}`)) hostSync = 'failed';
+      if (!hostBinding || hostBinding.sharedProjectId !== consent.sharedProjectId || hostBinding.teamId !== consent.teamId
+        || !await sendToHost(hostBinding, 'teamgroup.consent', payload, `team-consent:${consent.accountId}:${consent.deviceId}:${consent.updatedAt}`)) hostSync = 'failed';
     }
     catch { hostSync = 'failed'; }
     return { ...consent, hostSync };
