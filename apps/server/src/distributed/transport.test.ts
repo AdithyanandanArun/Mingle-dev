@@ -6,7 +6,7 @@ import type { SupabaseClient, User } from '@supabase/supabase-js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { HttpError } from '../util.ts';
 import { fingerprintForPublicKeys, generateDeviceKeyMaterial, openEnvelope, sealEnvelope } from './crypto.ts';
-import { TransportService } from './transport.ts';
+import { RetryableTransportDeliveryError, TransportService } from './transport.ts';
 
 const teamId = '737a46b3-42ac-4f5e-9f69-5bf451e4c1a2';
 const secondTeamId = '837a46b3-42ac-4f5e-9f69-5bf451e4c1a2';
@@ -430,6 +430,70 @@ it('lets a message handler request a sync without deadlocking the sync that deli
     unsubscribe();
     await first.close();
     await second.close();
+  }
+});
+
+it('orders Realtime and mailbox handler work per sender while unrelated senders proceed and handlers can send', async () => {
+  const cloud = new MailboxCloud(true);
+  const { first, second, a, b } = await pairedServices(cloud);
+  cloud.members.get(teamId)!.add(userOutside);
+  const third = service(cloud, userOutside);
+  const c = await third.register({ teamId, name: 'Tablet' });
+  await third.link({ teamId, deviceId: b.id, fingerprint: b.fingerprint });
+  await second.link({ teamId, deviceId: c.id, fingerprint: c.fingerprint });
+  await second.sync();
+  await third.sync();
+
+  let releaseFirst!: () => void;
+  let markFirstEntered!: () => void;
+  const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
+  const firstEntered = new Promise<void>((resolve) => { markFirstEntered = resolve; });
+  const started: string[] = [];
+  const completed: string[] = [];
+  let firstFinished = false;
+  let secondStartedAfterFirstFinished = false;
+  const unsubscribeSecond = second.onMessage(async (message) => {
+    const text = (message.payload as { text?: string }).text;
+    if (text === 'first') {
+      started.push('first');
+      markFirstEntered();
+      await firstGate;
+      await second.send({ teamId, toDeviceId: a.id, kind: 'collaboration.message', payload: { text: 'reply' }, idempotencyKey: 'ordered-handler-reply' });
+      completed.push('first');
+      firstFinished = true;
+    } else if (message.fromDeviceId === c.id) {
+      started.push('unrelated');
+      await second.sync();
+      completed.push('unrelated');
+    } else {
+      started.push('second');
+      secondStartedAfterFirstFinished = firstFinished;
+      completed.push('second');
+    }
+  });
+  const unsubscribeFirst = first.onMessage((message) => {
+    if ((message.payload as { text?: string }).text === 'reply') completed.push('reply');
+  });
+  try {
+    await first.send({ teamId, toDeviceId: b.id, kind: 'collaboration.message', payload: { text: 'first' }, idempotencyKey: 'ordered-first' });
+    await firstEntered;
+    await first.send({ teamId, toDeviceId: b.id, kind: 'collaboration.message', payload: { text: 'second' }, idempotencyKey: 'ordered-second' });
+    await third.send({ teamId, toDeviceId: b.id, kind: 'collaboration.message', payload: { text: 'independent sender' }, idempotencyKey: 'ordered-independent' });
+    await vi.waitFor(() => expect(completed).toContain('unrelated'), { timeout: 1_000 });
+    expect(started).toEqual(['first', 'unrelated']);
+    expect(completed).not.toContain('second');
+
+    releaseFirst();
+    await vi.waitFor(() => expect(completed).toEqual(expect.arrayContaining(['first', 'second', 'reply'])), { timeout: 1_000 });
+    expect(started.indexOf('second')).toBeGreaterThan(started.indexOf('first'));
+    expect(secondStartedAfterFirstFinished).toBe(true);
+  } finally {
+    releaseFirst();
+    unsubscribeSecond();
+    unsubscribeFirst();
+    await first.close();
+    await second.close();
+    await third.close();
   }
 });
 
@@ -1059,18 +1123,40 @@ describe('TransportService authenticated mailbox', () => {
       await second.sync();
       const unsubscribe = second.onMessage(async () => {
         calls += 1;
-        if (calls === 1) throw new Error('retry me');
+        if (calls === 1) throw new RetryableTransportDeliveryError('Team artifact chunk has no matching authenticated offer yet.');
       });
       await second.sync();
       expect(calls).toBe(1);
       const db = (second as unknown as { db: DatabaseSync }).db;
-      expect(db.prepare('SELECT status, attempts FROM mingle_transport_inbox').get()).toMatchObject({ status: 'pending', attempts: 1 });
+      expect(db.prepare('SELECT status, attempts, error FROM mingle_transport_inbox').get()).toMatchObject({
+        status: 'pending', attempts: 1, error: 'Team artifact chunk has no matching authenticated offer yet.',
+      });
       clock += 200;
       await second.sync();
       await second.sync();
       unsubscribe();
       expect(calls).toBe(2);
       expect(db.prepare('SELECT status, attempts FROM mingle_transport_inbox').get()).toMatchObject({ status: 'handled', attempts: 2 });
+    } finally {
+      await first.close();
+      await second.close();
+    }
+  });
+
+  it('permanently rejects handler authorization conflicts with the sanitized actual error', async () => {
+    const { first, second, b } = await pairedServices();
+    try {
+      await first.send({ teamId, toDeviceId: b.id, kind: 'git.team-artifact.chunk', payload: { transferId: 'x' }, idempotencyKey: 'handler-rejected-reason' });
+      await second.sync();
+      const unsubscribe = second.onMessage(() => {
+        throw new HttpError(409, 'Team artifact chunk has no matching authenticated offer.');
+      });
+      await second.sync();
+      unsubscribe();
+      const db = (second as unknown as { db: DatabaseSync }).db;
+      expect(db.prepare('SELECT status, attempts, error FROM mingle_transport_inbox').get()).toMatchObject({
+        status: 'rejected', attempts: 1, error: 'Team artifact chunk has no matching authenticated offer.',
+      });
     } finally {
       await first.close();
       await second.close();

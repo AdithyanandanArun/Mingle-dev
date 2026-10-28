@@ -12,7 +12,7 @@ import {
   type TransportSnapshot, type TransportStatus,
 } from '../../../../packages/contracts/src/devices.ts';
 import type { DatabaseSync } from 'node:sqlite';
-import { HttpError } from '../util.ts';
+import { errorMessage, HttpError, redactSecrets } from '../util.ts';
 import {
   canonicalJson, fingerprintForPublicKeys, generateDeviceKeyMaterial, MAX_DISTRIBUTED_PAYLOAD_BYTES,
   openEnvelope, restoreDeviceKeyMaterial, sealEnvelope, signDevicePayload,
@@ -57,6 +57,14 @@ export interface TransportServiceOptions {
 }
 
 export type TransportMessageHandler = (message: AuthenticatedTransportMessage) => void | Promise<void>;
+
+/** A handler can use this when an authenticated message depends on earlier sender work not yet persisted. */
+export class RetryableTransportDeliveryError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'RetryableTransportDeliveryError';
+  }
+}
 
 interface CloudError { code?: string; message?: string }
 interface CloudResult<T> { data: T | null; error: CloudError | null }
@@ -133,8 +141,10 @@ export class TransportService {
   /** Marks work started by an inbound message handler, which runs inside the current sync. */
   private readonly handlerScope = new AsyncLocalStorage<true>();
   private syncAgain = false;
-  /** Handler delivery is serialized per team so one team's mailbox backlog never delays another team. */
+  /** Mailbox scans are serialized per team so one team's backlog never delays another team. */
   private readonly deliveryChains = new Map<string, Promise<void>>();
+  /** Both mailbox and Realtime deliveries share sender-scoped handler ordering. */
+  private readonly senderDeliveryChains = new Map<string, Promise<void>>();
   private readonly teamSyncs = new Map<string, TeamSyncState>();
   private readonly teamRefreshes = new Map<string, Promise<void>>();
   private readonly teamCacheRefreshedAt = new Map<string, number>();
@@ -512,6 +522,7 @@ export class TransportService {
       ...this.outboxSyncs.values(),
       ...this.fastDeliveryPromises,
       ...this.deliveryChains.values(),
+      ...this.senderDeliveryChains.values(),
     ]);
     const sendRemovals = this.clearSendChannels();
     const wakeSubscriptions = [...this.wakeSubscriptions.values()];
@@ -1142,7 +1153,7 @@ export class TransportService {
       const current = this.db.prepare(`SELECT status FROM mingle_transport_inbox WHERE account_id = ? AND team_id = ? AND id = ?`)
         .get(accountId, row.team_id, row.id) as { status: string } | undefined;
       if (current?.status !== 'pending') continue;
-      await this.deliverInboxRow(accountId, row, false);
+      await this.enqueueInboxDelivery(accountId, row, false);
     }
   }
 
@@ -1163,7 +1174,7 @@ export class TransportService {
         entry.version?.sharedProjectId === current.sharedProjectId);
     if (group.length < 2) return;
     const newest = group.reduce((best, entry) => entry.version.version > best.version.version ? entry : best);
-    await this.deliverInboxRow(accountId, newest.candidate, false);
+    await this.enqueueInboxDelivery(accountId, newest.candidate, false);
     const handled = this.db.prepare(`SELECT status FROM mingle_transport_inbox WHERE account_id = ? AND team_id = ? AND id = ?`)
       .get(accountId, row.team_id, newest.candidate.id) as { status: string } | undefined;
     if (handled?.status !== 'handled') return;
@@ -1234,7 +1245,7 @@ export class TransportService {
     const row = this.db.prepare('SELECT * FROM mingle_transport_inbox WHERE account_id = ? AND team_id = ? AND id = ?')
       .get(accountId, teamId, envelope.id) as LocalEnvelopeRow | undefined;
     if (!row) return;
-    const delivery = this.deliverInboxRow(accountId, row, true).finally(() => {
+    const delivery = this.enqueueInboxDelivery(accountId, row, true).finally(() => {
       this.notifyIfChanged(before);
       this.fastDeliveryPromises.delete(delivery);
     });
@@ -1289,6 +1300,16 @@ export class TransportService {
         } catch { /* Mailbox polling remains authoritative if the background acknowledgement fails. */ }
       }
     })();
+  }
+
+  private enqueueInboxDelivery(accountId: string, row: LocalEnvelopeRow, cacheOnly: boolean): Promise<void> {
+    const key = `${accountId}:${row.team_id}:${row.from_device_id}`;
+    const delivery = (this.senderDeliveryChains.get(key) ?? Promise.resolve())
+      .then(() => this.deliverInboxRow(accountId, row, cacheOnly));
+    const settled = delivery.catch(() => undefined);
+    this.senderDeliveryChains.set(key, settled);
+    void settled.then(() => { if (this.senderDeliveryChains.get(key) === settled) this.senderDeliveryChains.delete(key); });
+    return delivery;
   }
 
   private async deliverInboxRow(accountId: string, row: LocalEnvelopeRow, cacheOnly: boolean): Promise<void> {
@@ -1356,15 +1377,19 @@ export class TransportService {
       this.db.prepare(`UPDATE mingle_transport_inbox SET status = 'handled', attempts = attempts + 1, next_attempt_at = 0, error = NULL WHERE account_id = ? AND team_id = ? AND id = ? AND status = 'dispatching'`)
         .run(accountId, row.team_id, row.id);
     } catch (error) {
-      const rejected = (error instanceof Error && ['device-revoked', 'link-revoked'].includes(error.message)) ||
-        (error instanceof HttpError && [401, 403, 404, 409].includes(error.status));
+      const trustFailure = error instanceof Error && ['device-revoked', 'link-revoked'].includes(error.message);
+      const permanent = !(error instanceof RetryableTransportDeliveryError) && (trustFailure ||
+        (error instanceof HttpError && [401, 403, 404, 409].includes(error.status)));
       const attempts = row.attempts + 1;
       const retry = Math.min(MAX_RETRY_MS, this.retryBaseMs * (2 ** Math.min(20, attempts - 1)));
-      const reason = rejected ? 'Current account membership, sender device, or mutual trust is no longer active.' : 'Message authentication or handler delivery failed.';
+      const actualReason = redactSecrets(errorMessage(error)).replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 500)
+        || 'Handler delivery failed.';
+      const reason = trustFailure ? 'Current account membership, sender device, or mutual trust is no longer active.' : actualReason;
+      const retryAt = Math.min(this.now() + retry, Date.parse(row.expires_at));
       this.db.prepare(`UPDATE mingle_transport_inbox SET status = ?, attempts = ?, next_attempt_at = ?, error = ? WHERE account_id = ? AND team_id = ? AND id = ? AND status IN ('pending','dispatching')`)
-        .run(rejected ? 'rejected' : 'pending', attempts, rejected ? 0 : this.now() + retry, reason, accountId, row.team_id, row.id);
-      if (!rejected) this.lastError = reason;
-      if (!rejected) this.scheduleRetrySync(this.now() + retry);
+        .run(permanent ? 'rejected' : 'pending', attempts, permanent ? 0 : retryAt, reason, accountId, row.team_id, row.id);
+      if (!permanent) this.lastError = reason;
+      if (!permanent) this.scheduleRetrySync(retryAt);
     }
   }
 
