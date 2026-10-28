@@ -10,10 +10,19 @@ function slug(value: string, max: number): string {
   return value.normalize('NFKD').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, max).replace(/-+$/g, '');
 }
 
+function workerSlug(handle: string): string {
+  const worker = slug(handle, 32).replace(/-+/g, '-') || 'agent';
+  return (/^[a-z]/.test(worker) ? worker : `agent-${worker}`).slice(0, 32);
+}
+
+/** Permanent branch shared by every delivery for one cross-device worker. */
+export function teamAgentBranch(handle: string): string {
+  return `mingle/${workerSlug(handle)}/work`;
+}
+
 /** Unique reserved ref for one worker delivery; never derives a push destination from model text. */
 export function teamCompletionBranch(handle: string, taskOrDeliveryId: string, deliveryId: string): string {
-  const worker = slug(handle, 32).replace(/-+/g, '-') || 'agent';
-  const safeWorker = /^[a-z]/.test(worker) ? worker : `agent-${worker}`;
+  const safeWorker = workerSlug(handle);
   const task = slug(taskOrDeliveryId, 60) || 'delivery';
   const suffix = createHash('sha256').update(deliveryId).digest('hex').slice(0, 10);
   return `mingle/${safeWorker.slice(0, 32)}/${task.slice(0, 60)}-${suffix}`;

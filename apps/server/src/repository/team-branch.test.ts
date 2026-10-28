@@ -3,7 +3,7 @@ import { mkdirSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import { afterEach, expect, it } from 'vitest';
 import { makeRepo, runGit, tmpDir } from '../test-utils.ts';
-import { fetchTeamCompletionBranch, pushTeamCompletionBranch, teamCompletionBranch } from './team-branch.ts';
+import { fetchTeamCompletionBranch, pushTeamCompletionBranch, teamAgentBranch, teamCompletionBranch } from './team-branch.ts';
 
 const roots: string[] = [];
 afterEach(() => { while (roots.length) rmSync(roots.pop()!, { recursive: true, force: true }); });
@@ -17,6 +17,12 @@ function bareOrigin(repo: string): { root: string; origin: string; base: string 
   runGit(repo, 'push', '-u', 'origin', 'main');
   return { root, origin, base: runGit(repo, 'rev-parse', 'HEAD').trim() };
 }
+
+it('names one permanent team branch per worker with the reserved branch format', () => {
+  expect(teamAgentBranch('sam')).toBe('mingle/sam/work');
+  expect(teamAgentBranch('4 René / Test')).toBe('mingle/agent-4-rene-test/work');
+  expect(teamAgentBranch('A'.repeat(80))).toMatch(/^mingle\/[a-z][a-z0-9_-]{1,31}\/work$/);
+});
 
 it('pushes only the dedicated mingle branch to origin without changing main or creating tags', async () => {
   const repo = makeRepo(); roots.push(repo);
