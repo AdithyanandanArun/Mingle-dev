@@ -80,7 +80,7 @@ Electron uses OS-protected key material and authenticated encrypted account stor
 
 Team setup now shares the conversation open when Teammates is launched, automatically on invite. Standalone sessions use their existing agent as orchestrator; existing groups keep their lead and members. The setup panel keeps only the permission choice. The API validates all active local providers before publication and preserves the canonical shared group. See [current-session sharing acceptance](docs/current-session-sharing-acceptance.md).
 
-The source is version **0.0.5**, adding animated first-launch onboarding, the provider-rail model picker, and workspace/team UI polish. See [UI acceptance](docs/ui-polish-acceptance.md) for checks and fixture boundaries. The published download release remains **0.0.4** until a newer release is published. Linux/Windows packaging stages Electron, a checksum-pinned official Node runtime, the web UI and backend. Provider tools remain separate. Package creation and publication are distinct actions.
+The source is version **0.0.6**. It includes the 0.0.5 animated first-launch onboarding, provider-rail model picker and workspace/team UI polish (see [UI acceptance](docs/ui-polish-acceptance.md)), plus cross-device team synchronization repairs and realtime delivery (see [team sync reliability](docs/team-sync-reliability.md)). Version 0.0.5 was never published as a download; 0.0.6 is the release after **0.0.4**. Linux/Windows packaging stages Electron, a checksum-pinned official Node runtime, the web UI and backend. Provider tools remain separate. Package creation and publication are distinct actions.
 
 | Check | Recorded result and evidence |
 | --- | --- |

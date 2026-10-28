@@ -12,7 +12,7 @@ Download a package from [GitHub releases](https://github.com/AdithyanandanArun/M
 
 Launch **Mingle** from the application menu. Desktop packages include Electron, Node, the local server and the UI. Coding-provider tools and accounts are configured separately. Signing in to a Mingle account is optional for local development sessions.
 
-Source version **0.0.5** adds a welcome tour with optional Mingle sign-in and local provider guidance. It remembers completion on the device; replay it in **Settings → General → Replay welcome**. Invitation links take priority over the tour.
+Since version **0.0.5**, Mingle includes a welcome tour with optional Mingle sign-in and local provider guidance. It remembers completion on the device; replay it in **Settings → General → Replay welcome**. Invitation links take priority over the tour.
 
 ## Set up a source checkout
 
