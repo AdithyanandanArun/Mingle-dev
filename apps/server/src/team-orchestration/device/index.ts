@@ -1,6 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdir } from 'node:fs/promises';
-import { realpath } from 'node:fs/promises';
+import { lstat, mkdir, realpath, rename } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
@@ -28,7 +27,7 @@ import { git, trimmed } from '../../repository/git-run.ts';
 import { TeamMcpProxy } from './mcp-proxy.ts';
 import { createCommit } from '../../repository/commit.ts';
 import { signingConfigured } from '../../repository/inspect.ts';
-import { pushTeamCompletionBranch, teamCompletionBranch } from '../../repository/team-branch.ts';
+import { fetchTeamAgentBranch, pushTeamCompletionBranch, teamAgentBranch } from '../../repository/team-branch.ts';
 import { isDeniedName, normalizeRelative } from '../../paths.ts';
 import { normalizeScopes, safeArtifactPath, scopesOverlap } from '../../groups/routing.ts';
 
@@ -67,7 +66,7 @@ interface ActiveDelivery {
   projectId: string;
   sessionId: string;
   runId: string;
-  baseRevision: string | null;
+  turnBase: string;
   worktreePath: string;
   branch: string | null;
   scope: string[] | null;
@@ -118,6 +117,13 @@ function pathInAssignmentScope(file: string, scope: string[] | null): boolean {
   });
 }
 
+function safeIntegrationBranch(value: unknown): string | null {
+  if (typeof value !== 'string' || value.length > 200 || !/^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(value)
+    || value.includes('..') || value.includes('//') || value.includes('@{') || value.endsWith('/')
+    || value.split('/').some((part) => !part || part === '.' || part === '..' || part.endsWith('.lock'))) return null;
+  return value;
+}
+
 async function committedPaths(worktreePath: string, baseRevision: string | null, head: string): Promise<string[]> {
   const range = baseRevision ? `${baseRevision}..${head}` : head;
   const count = Number(trimmed(await git(worktreePath, ['rev-list', '--count', range], { maxBuffer: 4096 })));
@@ -139,6 +145,7 @@ export function createDeviceSide(deps: DeviceSideDeps): {
 } {
   const db: DatabaseSync = deps.store.db;
   const active = new Map<string, ActiveDelivery>();
+  const agentQueues = new Map<string, Promise<void>>();
   const cancelled = new Set<string>();
   const work = new Set<Promise<unknown>>();
   const runWaiters = new Set<() => void>();
@@ -896,12 +903,19 @@ export function createDeviceSide(deps: DeviceSideDeps): {
         deliveryId: payload.deliveryId, agentId: payload.agentId, status: 'rejected', rejection: 'invalid' });
       return;
     }
-    void track(executeDelivery(payload, validation.shared, validation.sessionId));
+    const queueKey = `${payload.sharedProjectId}:${payload.agentId}`;
+    const previous = agentQueues.get(queueKey) ?? Promise.resolve();
+    const execution = previous.catch(() => undefined).then(() => executeDelivery(payload, validation.shared, validation.sessionId));
+    agentQueues.set(queueKey, execution);
+    void execution.finally(() => { if (agentQueues.get(queueKey) === execution) agentQueues.delete(queueKey); }).catch(() => undefined);
+    void track(execution);
     await sendStatus(envelope.teamId, envelope.fromDeviceId, { sharedProjectId: payload.sharedProjectId,
       deliveryId: payload.deliveryId, agentId: payload.agentId, status: 'accepted' });
   }
 
-  async function isolatedWorktree(shared: SharedBinding, payload: TeamDeliveryPayload, sessionId: string): Promise<{ path: string; branch: string | null; baseRevision: string | null }> {
+  async function isolatedWorktree(shared: SharedBinding, payload: TeamDeliveryPayload, sessionId: string): Promise<{
+    path: string; branch: string; turnBase: string; integrationNote: string | null;
+  }> {
     const session = deps.store.getSession(sessionId);
     const project = deps.store.getProject(shared.projectId);
     if (!session || !project) throw new HttpError(409, 'The local agent session or project is no longer available.');
@@ -913,10 +927,6 @@ export function createDeviceSide(deps: DeviceSideDeps): {
       const object = await git(session.worktreePath, ['cat-file', '-e', `${artifact.revision}^{commit}`], { allowFailure: true, maxBuffer: 4096 });
       if (object.code !== 0) throw new HttpError(409, 'An input artifact revision has not been imported into this device’s local Git objects.');
     }
-    if (baseRevision) {
-      const exists = await git(projectRoot, ['cat-file', '-e', `${baseRevision}^{commit}`], { allowFailure: true, maxBuffer: 4096 });
-      if (exists.code !== 0) throw new HttpError(409, 'The delivery base revision is not present in the owner-selected local project repository.');
-    }
     if (session.isolated) {
       const worktreePath = await realpath(session.worktreePath);
       if (worktreePath === projectRoot) throw new HttpError(409, 'The shared agent session points at the project’s main checkout and cannot run remotely.');
@@ -927,15 +937,93 @@ export function createDeviceSide(deps: DeviceSideDeps): {
     if (!baseRevision) baseRevision = trimmed(await git(projectRoot, ['rev-parse', '--verify', 'HEAD']));
     const deliveryWorktreeRoot = deps.deliveryWorktreeRoot ?? path.join(os.homedir(), '.mingle', 'team-worktrees');
     await mkdir(deliveryWorktreeRoot, { recursive: true, mode: 0o700 });
-    const directory = path.join(await realpath(deliveryWorktreeRoot), createHash('sha256').update(shared.sharedProjectId).digest('hex').slice(0, 20));
+    const root = await realpath(deliveryWorktreeRoot);
+    const directory = path.join(root, createHash('sha256').update(shared.sharedProjectId).digest('hex').slice(0, 20));
     await mkdir(directory, { recursive: true, mode: 0o700 });
-    const worktreePath = path.join(directory, createHash('sha256').update(payload.deliveryId).digest('hex').slice(0, 24));
-    const branch = teamCompletionBranch(payload.workerHandle ?? `agent-${createHash('sha256').update(payload.agentId).digest('hex').slice(0, 8)}`,
-      payload.taskId ?? payload.deliveryId, payload.deliveryId);
+    const canonicalDirectory = await realpath(directory);
+    if (!canonicalDirectory.startsWith(`${root}${path.sep}`)) throw new HttpError(409, 'The owner-device team worktree directory escaped its private root.');
+    const worktreePath = path.join(canonicalDirectory, createHash('sha256').update(payload.agentId).digest('hex').slice(0, 24));
+    const handle = payload.workerHandle ?? `agent-${createHash('sha256').update(payload.agentId).digest('hex').slice(0, 8)}`;
+    const branch = teamAgentBranch(handle);
+    const integrationBranch = safeIntegrationBranch((payload as TeamDeliveryPayload & { integrationBranch?: string }).integrationBranch);
+
+    const pathState = await lstat(worktreePath).then((entry) => ({ exists: true, directory: entry.isDirectory() && !entry.isSymbolicLink() }))
+      .catch(() => ({ exists: false, directory: false }));
+    let reused = false;
+    if (pathState.exists && pathState.directory) {
+      const existingTop = await git(worktreePath, ['rev-parse', '--show-toplevel'], { allowFailure: true });
+      const existingBranch = await git(worktreePath, ['symbolic-ref', '--quiet', '--short', 'HEAD'], { allowFailure: true });
+      const existingCommon = await git(worktreePath, ['rev-parse', '--path-format=absolute', '--git-common-dir'], { allowFailure: true });
+      const expectedCommon = trimmed(await git(projectRoot, ['rev-parse', '--path-format=absolute', '--git-common-dir']));
+      if (existingTop.code === 0 && existingBranch.code === 0 && existingCommon.code === 0
+        && path.resolve(existingTop.stdout.trim()) === path.resolve(worktreePath)
+        && path.resolve(existingCommon.stdout.trim()) === path.resolve(expectedCommon)
+        && existingBranch.stdout.trim() === branch) {
+        reused = true;
+      } else {
+        // Preserve an unrecognized or broken directory for recovery rather than deleting any work.
+        const preservedPath = `${worktreePath}.stale-${randomUUID()}`;
+        await rename(worktreePath, preservedPath);
+        await git(projectRoot, ['worktree', 'prune', '--expire', 'now'], { allowFailure: true });
+      }
+    } else if (pathState.exists) {
+      const preservedPath = `${worktreePath}.stale-${randomUUID()}`;
+      await rename(worktreePath, preservedPath);
+      await git(projectRoot, ['worktree', 'prune', '--expire', 'now'], { allowFailure: true });
+    } else {
+      await git(projectRoot, ['worktree', 'prune', '--expire', 'now'], { allowFailure: true });
+    }
+
+    if (!reused) {
+      const branchExists = (await git(projectRoot, ['show-ref', '--verify', '--quiet', `refs/heads/${branch}`], { allowFailure: true })).code === 0;
+      let remoteBranch: string | null = null;
+      if (!branchExists) remoteBranch = await fetchTeamAgentBranch({ worktreePath: projectRoot, branch });
+      if (!baseRevision) baseRevision = trimmed(await git(projectRoot, ['rev-parse', '--verify', 'HEAD']));
+      if (!branchExists && !remoteBranch && baseRevision) {
+        const baseExists = await git(projectRoot, ['cat-file', '-e', `${baseRevision}^{commit}`], { allowFailure: true, maxBuffer: 4096 });
+        if (baseExists.code !== 0 && integrationBranch) {
+          await git(projectRoot, ['fetch', '--no-tags', 'origin', integrationBranch], { network: true, allowFailure: true, timeoutMs: 120_000 });
+        }
+        const verifiedBase = await git(projectRoot, ['cat-file', '-e', `${baseRevision}^{commit}`], { allowFailure: true, maxBuffer: 4096 });
+        if (verifiedBase.code !== 0) throw new HttpError(409, 'The delivery base revision is not available in the owner-selected project repository.');
+      }
+      if (branchExists) {
+        await git(projectRoot, ['worktree', 'add', worktreePath, branch]);
+      } else if (remoteBranch) {
+        await git(projectRoot, ['worktree', 'add', '-b', branch, worktreePath, `refs/remotes/origin/${branch}`]);
+      } else {
+        if (!baseRevision) throw new HttpError(409, 'The owner-selected project has no commit for the worker branch.');
+        await git(projectRoot, ['worktree', 'add', '-b', branch, worktreePath, baseRevision]);
+      }
+    }
+
+    let integrationNote: string | null = null;
+    if (baseRevision && integrationBranch) {
+      const head = trimmed(await git(worktreePath, ['rev-parse', '--verify', 'HEAD']));
+      const isAncestor = await git(worktreePath, ['merge-base', '--is-ancestor', baseRevision, head], { allowFailure: true });
+      if (isAncestor.code !== 0) {
+        await git(worktreePath, ['fetch', '--no-tags', 'origin', integrationBranch], { network: true, allowFailure: true, timeoutMs: 120_000 });
+        const available = await git(worktreePath, ['cat-file', '-e', `${baseRevision}^{commit}`], { allowFailure: true, maxBuffer: 4096 });
+        if (available.code !== 0) {
+          integrationNote = `Mingle could not update from origin/${integrationBranch}: host integration commit ${baseRevision} is not available locally. The host may not have pushed it yet; continue on your existing branch.`;
+        } else {
+          const dirty = await git(worktreePath, ['status', '--porcelain=v1', '--untracked-files=all'], { maxBuffer: 8 * 1024 * 1024 });
+          if (dirty.stdout.trim()) {
+            integrationNote = `Mingle could not merge origin/${integrationBranch} because this worker worktree has uncommitted changes. Keep them and merge the integration branch manually when ready.`;
+          } else {
+            const merged = await git(worktreePath, ['merge', '--no-edit', baseRevision], { allowFailure: true, timeoutMs: 120_000 });
+            if (merged.code !== 0) {
+              await git(worktreePath, ['merge', '--abort'], { allowFailure: true });
+              integrationNote = `Mingle could not merge the latest integration commit from origin/${integrationBranch} automatically. Run git pull --no-rebase origin ${integrationBranch} and resolve the conflicts before continuing.`;
+            }
+          }
+        }
+      }
+    }
+    const turnBase = trimmed(await git(worktreePath, ['rev-parse', '--verify', 'HEAD']));
     db.prepare(`UPDATE mingle_team_device_deliveries SET worktree_path=?,branch=?,base_revision=?,updated_at=? WHERE delivery_id=? AND status='accepted'`)
-      .run(worktreePath, branch, baseRevision, ISO(), payload.deliveryId);
-    await git(projectRoot, ['worktree', 'add', '-b', branch, worktreePath, baseRevision]);
-    return { path: worktreePath, branch, baseRevision };
+      .run(worktreePath, branch, turnBase, ISO(), payload.deliveryId);
+    return { path: worktreePath, branch, turnBase, integrationNote };
   }
 
   async function commitEligibleChanges(activeDelivery: ActiveDelivery): Promise<void> {
@@ -1030,7 +1118,7 @@ export function createDeviceSide(deps: DeviceSideDeps): {
     if (scope && !pathInAssignmentScope(pathValue, scope)) throw new HttpError(403, 'The artifact path is outside this delivery’s assigned scope.');
     if (pathValue.split('/').some(isDeniedName)) throw new HttpError(403, 'Protected files cannot be published as team artifacts.');
     if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(input.revision)) throw new HttpError(400, 'A team artifact must name a full committed revision.');
-    const changedPaths = await committedPaths(live.worktreePath, live.baseRevision, input.revision);
+    const changedPaths = await committedPaths(live.worktreePath, live.turnBase, input.revision);
     if (!changedPaths.includes(pathValue)) throw new HttpError(409, `${pathValue} is not a committed change in this delivery revision.`);
     const outOfScope = changedPaths.filter((file) => pathInAssignmentScope(file, scope) === false || file.split('/').some(isDeniedName));
     if (outOfScope.length) throw new HttpError(403, 'The artifact commit contains protected or out-of-scope changes and cannot be transferred.');
@@ -1047,7 +1135,7 @@ export function createDeviceSide(deps: DeviceSideDeps): {
     }
     const transferred = await deps.distributed.git.exportTeamArtifact({ teamId: activeDelivery.teamId,
       sharedProjectId: persisted.sharedProjectId, sourceWorktreePath: live.worktreePath, revision: input.revision,
-      ...(live.baseRevision ? { baseRevision: live.baseRevision } : {}), toDeviceId: persisted.integrationDeviceId,
+      baseRevision: live.turnBase, toDeviceId: persisted.integrationDeviceId,
       deliveryId: persisted.deliveryId, ...(expectedTaskId ? { taskId: expectedTaskId } : {}), path: pathValue,
       purpose: 'mcp', signal });
     const afterTransfer = db.prepare(`SELECT request_json,status,run_id,session_id FROM mingle_team_device_deliveries WHERE delivery_id=?`)
@@ -1076,12 +1164,10 @@ export function createDeviceSide(deps: DeviceSideDeps): {
     await commitEligibleChanges(activeDelivery);
     if (activeDelivery.controller.signal.aborted) return { artifacts: [], pushable: false, head: null };
     const head = trimmed(await git(activeDelivery.worktreePath, ['rev-parse', '--verify', 'HEAD']));
-    if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(head) || head === activeDelivery.baseRevision) return { artifacts: [], pushable: false, head: null };
-    const args = activeDelivery.baseRevision
-      ? ['rev-list', '--reverse', '--max-count=30', `${activeDelivery.baseRevision}..${head}`]
-      : ['rev-list', '--reverse', '--max-count=30', head];
+    if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(head) || head === activeDelivery.turnBase) return { artifacts: [], pushable: false, head: null };
+    const args = ['rev-list', '--reverse', '--max-count=30', `${activeDelivery.turnBase}..${head}`];
     const revisions = trimmed(await git(activeDelivery.worktreePath, args)).split(/\s+/).filter((id) => /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(id));
-    const changes = await committedPaths(activeDelivery.worktreePath, activeDelivery.baseRevision, head);
+    const changes = await committedPaths(activeDelivery.worktreePath, activeDelivery.turnBase, head);
     const protectedPaths = changes.filter((file) => file.split('/').some(isDeniedName));
     const outOfScopePaths = changes.filter((file) => !pathInAssignmentScope(file, activeDelivery.scope));
     if (protectedPaths.length || outOfScopePaths.length) {
@@ -1100,7 +1186,7 @@ export function createDeviceSide(deps: DeviceSideDeps): {
       try {
         const artifact = await deps.distributed.git.exportTeamArtifact({ teamId: activeDelivery.teamId,
           sharedProjectId: activeDelivery.payload.sharedProjectId, toDeviceId: activeDelivery.payload.integrationDeviceId,
-          deliveryId: activeDelivery.payload.deliveryId, revision, baseRevision: activeDelivery.baseRevision ?? undefined,
+          deliveryId: activeDelivery.payload.deliveryId, revision, baseRevision: activeDelivery.turnBase,
           sourceWorktreePath: activeDelivery.worktreePath, taskId: activeDelivery.payload.taskId,
           purpose: 'terminal', signal: activeDelivery.controller.signal });
         artifacts.push(artifact);
@@ -1119,6 +1205,7 @@ export function createDeviceSide(deps: DeviceSideDeps): {
     let runId: string | null = null;
     let live: ActiveDelivery | null = null;
     try {
+      if (!isAcceptedDelivery(payload.deliveryId) || cancelled.has(payload.deliveryId)) return;
       const ownDeviceId = deps.transport.snapshot(shared.teamId).deviceId;
       const localAgent = shared.agents.find((candidate) => candidate.id === payload.agentId && candidate.deviceId === ownDeviceId)
         ?? shared.agents.find((candidate) => candidate.sessionId === payload.agentId && candidate.deviceId === ownDeviceId);
@@ -1156,14 +1243,15 @@ export function createDeviceSide(deps: DeviceSideDeps): {
       // settings and the owner's consent both permit it.
       const runPolicy = 'supervised' as const;
       const controller = new AbortController();
+      const deliveryContent = isolated.integrationNote ? `${payload.content}\n\n${isolated.integrationNote}` : payload.content;
       const requestEntry = TeamAgentActivityEntrySchema.parse({ id: randomUUID(), runId: null, at: ISO(), kind: 'request',
-        text: safeText(payload.content, 8_000) });
+        text: safeText(deliveryContent, 8_000) });
       try {
-        runId = deps.runtime.start(sessionId, payload.content, {
+        runId = deps.runtime.start(sessionId, deliveryContent, {
           teamRun: true, teamMcp: proxyConnection, runPolicy,
           worktree: { path: isolated.path, branch: isolated.branch ?? '' },
           taskId: payload.taskId,
-          userMessage: { content: payload.content, kind: 'team-delivery' },
+          userMessage: { content: deliveryContent, kind: 'team-delivery' },
           onActivity: (event) => { if (live) pushActivity(live, event); },
           onApproval: (approval) => { if (live) void track(mirrorApproval(live!, approval)); },
           onApprovalDecision: (approval, decision) => {
@@ -1176,15 +1264,17 @@ export function createDeviceSide(deps: DeviceSideDeps): {
         throw error;
       }
       live = { payload, teamId: shared.teamId, projectId: shared.projectId, sessionId, runId,
-        baseRevision: isolated.baseRevision, worktreePath: isolated.path, branch: isolated.branch,
+        turnBase: isolated.turnBase, worktreePath: isolated.path, branch: isolated.branch,
         scope: payload.scope ? normalizeScopes(payload.scope) : null,
         entries: [requestEntry], text: '', activityState: 'working', activityWaiters: [],
         timer: null, heartbeatTimer: null, heartbeatSequence: 0, controller, artifactFailures: [] };
       active.set(payload.deliveryId, live);
+      if (isolated.integrationNote) live.entries.push(TeamAgentActivityEntrySchema.parse({ id: randomUUID(), runId,
+        at: ISO(), kind: 'status', text: isolated.integrationNote }));
       live.heartbeatTimer = setInterval(() => { void track(sendHeartbeat(live!)); }, Math.max(1, deps.heartbeatIntervalMs ?? 15_000));
       live.heartbeatTimer.unref();
       db.prepare(`UPDATE mingle_team_device_deliveries SET status='running',run_id=?,worktree_path=?,branch=?,base_revision=?,updated_at=? WHERE delivery_id=? AND status='accepted'`)
-        .run(runId, isolated.path, isolated.branch, isolated.baseRevision, ISO(), payload.deliveryId);
+        .run(runId, isolated.path, isolated.branch, isolated.turnBase, ISO(), payload.deliveryId);
       await sendStatus(shared.teamId, (await hostDeviceId(shared))!, { sharedProjectId: shared.sharedProjectId,
         deliveryId: payload.deliveryId, agentId: payload.agentId, status: 'running', runId });
       void sendActivity(live, 'working').catch(() => undefined);

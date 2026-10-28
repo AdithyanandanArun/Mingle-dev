@@ -28,6 +28,25 @@ export function teamCompletionBranch(handle: string, taskOrDeliveryId: string, d
   return `mingle/${safeWorker.slice(0, 32)}/${task.slice(0, 60)}-${suffix}`;
 }
 
+/** Best-effort refresh of one worker's stable branch into the local origin-tracking namespace. */
+export async function fetchTeamAgentBranch(input: {
+  worktreePath: string; branch: string; signal?: AbortSignal;
+}): Promise<string | null> {
+  const { worktreePath, branch, signal } = input;
+  if (!TEAM_BRANCH.test(branch)) throw new Error('The team agent branch is invalid.');
+  try { await assertOriginSafe(worktreePath, 'fetch', signal); }
+  catch { return null; }
+  await git(worktreePath,
+    ['fetch', '--no-tags', '--no-recurse-submodules', 'origin', `refs/heads/${branch}:refs/remotes/origin/${branch}`],
+    { network: true, allowFailure: true, signal, timeoutMs: 120_000 });
+  const tracked = await git(worktreePath,
+    ['rev-parse', '--verify', '--quiet', `refs/remotes/origin/${branch}^{commit}`], { allowFailure: true, signal });
+  if (tracked.code !== 0) return null;
+  // A failed fetch may simply mean the network is offline. An existing tracking ref remains a
+  // usable fallback, but never expose remote stderr (which can contain credentials or URLs).
+  return tracked.stdout.trim();
+}
+
 async function assertOriginSafe(top: string, action: 'push' | 'fetch', signal?: AbortSignal): Promise<void> {
   const available = await remotes(top, signal);
   const origin = available.find((remote) => remote.name === 'origin');
