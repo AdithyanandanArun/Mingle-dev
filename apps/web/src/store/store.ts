@@ -66,6 +66,38 @@ const loadPersisted = (): Persisted => {
 };
 const persisted = loadPersisted();
 
+export function createRefreshScheduler(refresh: () => void, getLastRefreshAt: () => number = () => Number.NEGATIVE_INFINITY) {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let lastScheduledRefreshAt = Number.NEGATIVE_INFINITY;
+  const intervalMs = 1_000;
+  const debounceMs = 160;
+  const run = () => {
+    timer = undefined;
+    const now = Date.now();
+    const lastRefreshAt = Math.max(lastScheduledRefreshAt, getLastRefreshAt());
+    const remaining = intervalMs - (now - lastRefreshAt);
+    if (remaining > 0) {
+      timer = setTimeout(run, remaining);
+      return;
+    }
+    lastScheduledRefreshAt = now;
+    refresh();
+  };
+  return {
+    schedule() {
+      if (timer) clearTimeout(timer);
+      const now = Date.now();
+      const lastRefreshAt = Math.max(lastScheduledRefreshAt, getLastRefreshAt());
+      const untilNextAllowed = intervalMs - (now - lastRefreshAt);
+      timer = setTimeout(run, Math.max(debounceMs, untilNextAllowed));
+    },
+    cancel() {
+      if (timer) clearTimeout(timer);
+      timer = undefined;
+    },
+  };
+}
+
 interface MingleState {
   boot: Bootstrap | null;
   bootError: string | null;
@@ -257,10 +289,9 @@ function pruneStreams(streams: Record<string, StreamEntry>, boot: Bootstrap): Re
 
 let socket: WebSocket | null = null;
 let retryTimer: number | undefined;
-let refreshTimer: number | undefined;
-let refreshFirstQueuedAt = 0;
 let inflight: Promise<void> | null = null;
 let dirty = false;
+let cancelScheduledRefresh: () => void = () => undefined;
 let toastSeq = 1;
 let pendingInput = '';
 let pendingResize: { cols: number; rows: number } | null = null;
@@ -277,6 +308,9 @@ const send = (event: ClientEvent): boolean => {
 
 export const useMingle = create<MingleState>((set, get) => {
   let lastBootstrapText: string | null = null;
+  let lastBootstrapStartedAt = Number.NEGATIVE_INFINITY;
+  const refreshScheduler = createRefreshScheduler(() => { void get().refreshNow(); }, () => lastBootstrapStartedAt);
+  cancelScheduledRefresh = refreshScheduler.cancel;
   const savePersisted = (): void => {
     const s = get();
     const data: Persisted = {
@@ -296,17 +330,7 @@ export const useMingle = create<MingleState>((set, get) => {
     savePersisted();
   };
 
-  const scheduleRefresh = (): void => {
-    const now = Date.now();
-    if (!refreshTimer) refreshFirstQueuedAt = now;
-    window.clearTimeout(refreshTimer);
-    // Debounce bursts of state.changed, but never starve the UI during a long stream.
-    const wait = Math.max(0, Math.min(180, 1200 - (now - refreshFirstQueuedAt)));
-    refreshTimer = window.setTimeout(() => {
-      refreshTimer = undefined;
-      void get().refreshNow();
-    }, wait);
-  };
+  const scheduleRefresh = (): void => refreshScheduler.schedule();
 
   const markTerminalLost = (): void => {
     const t = get().terminal;
@@ -340,6 +364,10 @@ export const useMingle = create<MingleState>((set, get) => {
       }
       case 'state.changed': {
         const incoming = ev.event;
+        if (incoming?.type === 'team.agent.activity.updated') {
+          window.dispatchEvent(new CustomEvent('mingle:team-activity-updated', { detail: incoming.payload }));
+          break;
+        }
         const boot = get().boot;
         if (incoming && boot && !boot.events.some((e) => e.id === incoming.id)) {
           set({ boot: { ...boot, events: [...boot.events, incoming] } });
@@ -541,6 +569,7 @@ export const useMingle = create<MingleState>((set, get) => {
         dirty = true;
         return inflight;
       }
+      lastBootstrapStartedAt = Date.now();
       inflight = (async () => {
         do {
           dirty = false;
@@ -823,7 +852,7 @@ function handleVisibility(): void {
 if (import.meta.hot) {
   import.meta.hot.dispose(() => {
     window.clearTimeout(retryTimer);
-    window.clearTimeout(refreshTimer);
+    cancelScheduledRefresh();
     window.removeEventListener('online', handleOnline);
     document.removeEventListener('visibilitychange', handleVisibility);
     if (socket) { socket.onclose = null; socket.close(); socket = null; }

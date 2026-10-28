@@ -237,13 +237,18 @@ export function AgentActivityDrawer({ projectId, agent, onClose }: { projectId: 
     const interval = window.setInterval(() => {
       if (document.visibilityState === 'visible') void refresh(controller.signal);
     }, live ? 2_500 : 12_000);
-    const stateChange = () => { if (document.visibilityState === 'visible') void refresh(controller.signal); };
+    const activityChange = (event: Event) => {
+      const detail = (event as CustomEvent<{ projectId?: string; agentId?: string }>).detail;
+      if (detail?.projectId === projectId && detail.agentId === agent.agentId && document.visibilityState === 'visible') {
+        void refresh(controller.signal);
+      }
+    };
     const visibility = () => { if (document.visibilityState === 'visible') void refresh(controller.signal); };
-    window.addEventListener('mingle:state-changed', stateChange);
+    window.addEventListener('mingle:team-activity-updated', activityChange);
     document.addEventListener('visibilitychange', visibility);
     return () => {
       controller.abort(); window.clearInterval(interval);
-      window.removeEventListener('mingle:state-changed', stateChange);
+      window.removeEventListener('mingle:team-activity-updated', activityChange);
       document.removeEventListener('visibilitychange', visibility);
     };
   }, [agent.agentId, live, local, projectId, refresh]);

@@ -7,6 +7,31 @@ let useMingle: typeof import('./store').useMingle | undefined;
 afterEach(() => {
   bootstrap.mockReset();
   useMingle?.setState({ boot: null, bootError: null, bootLoading: true, staleError: null });
+  vi.useRealTimers();
+});
+
+it('coalesces refresh bursts and enforces a one-second floor between scheduled bootstraps', async () => {
+  vi.useFakeTimers();
+  const { createRefreshScheduler } = await import('./store');
+  const refresh = vi.fn();
+  let lastStartedAt = Number.NEGATIVE_INFINITY;
+  const scheduler = createRefreshScheduler(() => { lastStartedAt = Date.now(); refresh(); }, () => lastStartedAt);
+  try {
+    for (let index = 0; index < 10; index++) scheduler.schedule();
+    await vi.advanceTimersByTimeAsync(159);
+    expect(refresh).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(refresh).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(100);
+    for (let index = 0; index < 10; index++) scheduler.schedule();
+    await vi.advanceTimersByTimeAsync(899);
+    expect(refresh).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(refresh).toHaveBeenCalledTimes(2);
+  } finally {
+    scheduler.cancel();
+  }
 });
 
 it('keeps one bootstrap in flight, makes one trailing fetch, and skips an unchanged state update', async () => {

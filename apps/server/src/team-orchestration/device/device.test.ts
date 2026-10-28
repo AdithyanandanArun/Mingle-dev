@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
@@ -30,6 +30,7 @@ interface Sent { teamId: string; toDeviceId: string; kind: string; payload: any;
 interface Fixture {
   store: Store; side: ReturnType<typeof createDeviceSide>; routes: Array<{ method: string; path: string; handler: (ctx: any) => unknown }>;
   projectId: string; root: string; repo: string; worktree: string; worktreeRoot: string; sent: Sent[]; roster: any[]; handler: ((envelope: any) => Promise<void>) | null;
+  hubEvents: unknown[];
   runtime: FakeRuntime; exportCalls: any[]; importCalls: any[]; executionOrder: string[]; chatReplies: any[]; members: any[];
   collaborationRefreshCount(): number; revokeDevice(deviceId: string): void;
   authenticatedCalls(): number;
@@ -242,16 +243,18 @@ async function fixture(): Promise<Fixture> {
     chatReplies.push(args); return { id: `chat-${chatReplies.length}` };
   } };
   const routes: Fixture['routes'] = [];
+  const hubEvents: unknown[] = [];
   let side!: ReturnType<typeof createDeviceSide>;
   const startSide = () => {
     side = createDeviceSide({ store, runtime: runtime as any, transport, account, distributed, collaboration, teamChat: teamChat as any,
+      hub: { broadcast: (event) => hubEvents.push(event) },
       deliveryWorktreeRoot: worktreeRoot,
       activityThrottleMs: 15, toolTimeoutMs: 30, heartbeatIntervalMs: 15, terminalStatusRetryMs: 15 });
     side.routes((method, route, routeHandler) => routes.push({ method, path: route, handler: routeHandler }));
   };
   startSide();
   const result: Fixture = {
-    store, get side() { return side; }, routes, projectId: project.id, root, repo, worktree, worktreeRoot, sent, roster, get handler() { return handler; }, runtime, exportCalls, importCalls, executionOrder, chatReplies, members,
+    store, get side() { return side; }, routes, projectId: project.id, root, repo, worktree, worktreeRoot, sent, roster, hubEvents, get handler() { return handler; }, runtime, exportCalls, importCalls, executionOrder, chatReplies, members,
     collaborationRefreshCount: () => collaborationRefreshes,
     authenticatedCalls: () => authenticatedCalls,
     setFreshCollaborationSnapshot(nextMembers, nextAgents, nextOwner) {
@@ -990,6 +993,28 @@ describe('owner-device team orchestration', () => {
     const remote = await callRoute(f, 'GET', '/api/projects/:projectId/team-agents/:agentId/activity',
       { projectId: f.projectId, agentId: remoteAgent.id });
     expect(remote).toMatchObject({ local: false, entries: [expect.objectContaining({ id: 'entry_remote_1', text: 'Remote answer' })] });
+  });
+
+  it('persists activity bursts without generic store touches and emits a coalesced scoped notification', async () => {
+    const f = await fixture();
+    const remoteAgent = { id: 'agent_remote', name: 'Remote', accountId: OTHER, deviceId: OTHER_DEVICE,
+      sessionId: 'remote-session', provider: 'claude', model: 'claude-sonnet-5-5', state: 'idle' };
+    f.roster.push(remoteAgent);
+    const touch = vi.spyOn(f.store, 'touch');
+    for (let index = 0; index < 10; index++) {
+      await f.handler?.({ id: randomUUID(), teamId: TEAM, fromDeviceId: OTHER_DEVICE, toDeviceId: OWN_DEVICE, kind: 'teamgroup.activity', payload: {
+        sharedProjectId: SHARED, agentId: remoteAgent.id, state: 'working', runId: 'run_remote_burst', entries: [
+          { id: `entry_remote_burst_${index}`, runId: 'run_remote_burst', at: new Date(Date.now() + index).toISOString(), kind: 'tool', text: `Tool ${index}` },
+        ],
+      } });
+    }
+
+    expect(touch).not.toHaveBeenCalled();
+    expect(f.hubEvents).toHaveLength(1);
+    expect(f.hubEvents[0]).toMatchObject({ type: 'state.changed', event: {
+      type: 'team.agent.activity.updated', projectId: f.projectId, payload: { sharedProjectId: SHARED, agentId: remoteAgent.id },
+    } });
+    expect(f.store.db.prepare('SELECT COUNT(*) AS n FROM mingle_team_device_activity WHERE agent_id=?').get(remoteAgent.id)).toEqual({ n: 10 });
   });
 
   it('refreshes before rejecting an activity author removed by a structure notification', async () => {

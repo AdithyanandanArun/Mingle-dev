@@ -143,6 +143,8 @@ export function createDeviceSide(deps: DeviceSideDeps): {
   const work = new Set<Promise<unknown>>();
   const runWaiters = new Set<() => void>();
   const lastActivitySentAt = new Map<string, number>();
+  const lastActivityNotificationAt = new Map<string, number>();
+  const activityNotificationTimers = new Map<string, NodeJS.Timeout>();
   const terminalStatusRetries = new Map<string, NodeJS.Timeout>();
   const hostDecisions = new Set<string>();
   let closed = false;
@@ -152,6 +154,28 @@ export function createDeviceSide(deps: DeviceSideDeps): {
   function changed(): void {
     deps.store.touch();
     deps.changed?.();
+  }
+
+  function notifyActivityUpdated(projectId: string, sharedProjectId: string, agentId: string): void {
+    if (!deps.hub) return;
+    const key = `${sharedProjectId}:${agentId}`;
+    const intervalMs = 1_000;
+    const publish = () => {
+      activityNotificationTimers.delete(key);
+      if (closed) return;
+      lastActivityNotificationAt.set(key, Date.now());
+      deps.hub?.broadcast({ type: 'state.changed', event: {
+        id: 0, projectId, sessionId: null, type: 'team.agent.activity.updated',
+        summary: 'Team agent activity updated', payload: { projectId, sharedProjectId, agentId }, createdAt: ISO(),
+      } });
+    };
+    const remaining = intervalMs - (Date.now() - (lastActivityNotificationAt.get(key) ?? 0));
+    if (remaining <= 0) { publish(); return; }
+    if (!activityNotificationTimers.has(key)) {
+      const timer = setTimeout(publish, remaining);
+      timer.unref();
+      activityNotificationTimers.set(key, timer);
+    }
   }
 
   function recordStructureUpdated(sharedProjectId: string, summary: string, teamSession?: TeamStructurePayload['teamSession'] | null): void {
@@ -472,7 +496,7 @@ export function createDeviceSide(deps: DeviceSideDeps): {
     return null;
   }
 
-  function saveActivity(sharedProjectId: string, agentId: string, senderDeviceId: string, runId: string | null, entries: TeamAgentActivityEntry[]): void {
+  function saveActivity(projectId: string, sharedProjectId: string, agentId: string, senderDeviceId: string, runId: string | null, entries: TeamAgentActivityEntry[]): void {
     const insert = db.prepare(`INSERT OR IGNORE INTO mingle_team_device_activity
       (shared_project_id,agent_id,sender_device_id,entry_id,run_id,at,entry_json) VALUES(?,?,?,?,?,?,?)`);
     let changedRows = 0;
@@ -480,7 +504,7 @@ export function createDeviceSide(deps: DeviceSideDeps): {
     const excess = db.prepare(`SELECT seq FROM mingle_team_device_activity WHERE shared_project_id=? AND agent_id=? ORDER BY seq DESC LIMIT -1 OFFSET ?`)
       .all(sharedProjectId, agentId, MAX_MIRRORED_ENTRIES) as Array<{ seq: number }>;
     if (excess.length) changedRows += Number(db.prepare(`DELETE FROM mingle_team_device_activity WHERE seq IN (${excess.map(() => '?').join(',')})`).run(...excess.map((row) => row.seq)).changes);
-    if (changedRows > 0) changed();
+    if (changedRows > 0) notifyActivityUpdated(projectId, sharedProjectId, agentId);
   }
 
   async function receiveActivity(envelope: AuthenticatedEnvelope): Promise<void> {
@@ -506,7 +530,7 @@ export function createDeviceSide(deps: DeviceSideDeps): {
       const safe = TeamAgentActivityEntrySchema.safeParse({ ...entry, text: safeText(entry.text, 8_000), ...(entry.toolName ? { toolName: safeText(entry.toolName, 120) } : {}) });
       return safe.success ? [safe.data] : [];
     });
-    saveActivity(parsed.data.sharedProjectId, rosterAgent.id, envelope.fromDeviceId, parsed.data.runId, safeEntries);
+    saveActivity(shared.projectId, parsed.data.sharedProjectId, rosterAgent.id, envelope.fromDeviceId, parsed.data.runId, safeEntries);
   }
 
   async function teamActivity(projectId: string, agentId: string, before?: string): Promise<TeamAgentActivity> {
@@ -610,7 +634,8 @@ export function createDeviceSide(deps: DeviceSideDeps): {
       at: ISO(), kind: 'status', status: state, text: `Agent state: ${state}` }));
     const payload = TeamActivityPayloadSchema.parse({ sharedProjectId: activeDelivery.payload.sharedProjectId,
       agentId: activeDelivery.payload.agentId, state, runId: activeDelivery.runId, entries });
-    saveActivity(payload.sharedProjectId, payload.agentId, deps.transport.snapshot(activeDelivery.teamId).deviceId ?? '', payload.runId, entries);
+    saveActivity(activeDelivery.projectId, payload.sharedProjectId, payload.agentId,
+      deps.transport.snapshot(activeDelivery.teamId).deviceId ?? '', payload.runId, entries);
     const snapshot = deps.transport.snapshot(activeDelivery.teamId);
     const peers = snapshot.devices.filter((device) => device.id !== snapshot.deviceId && !device.revokedAt
       && snapshot.links.some((link) => link.deviceId === snapshot.deviceId && link.peerDeviceId === device.id && link.mutual));
@@ -1420,6 +1445,8 @@ export function createDeviceSide(deps: DeviceSideDeps): {
     }
     for (const timer of terminalStatusRetries.values()) clearTimeout(timer);
     terminalStatusRetries.clear();
+    for (const timer of activityNotificationTimers.values()) clearTimeout(timer);
+    activityNotificationTimers.clear();
     await Promise.allSettled([...work]);
     await proxy.close();
   }
