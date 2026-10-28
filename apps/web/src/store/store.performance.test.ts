@@ -6,7 +6,10 @@ vi.mock('../lib/api', () => ({ api: { bootstrap }, errorMessage: (error: unknown
 let useMingle: typeof import('./store').useMingle | undefined;
 afterEach(() => {
   bootstrap.mockReset();
-  useMingle?.setState({ boot: null, bootError: null, bootLoading: true, staleError: null });
+  useMingle?.setState({
+    boot: null, bootError: null, bootLoading: true, staleError: null,
+    activeProjectId: null, sessionByProject: {}, selectedTeamSessionByProject: {}, teamSessionsByProject: {},
+  });
   vi.useRealTimers();
 });
 
@@ -66,4 +69,44 @@ it('keeps one bootstrap in flight, makes one trailing fetch, and skips an unchan
   } finally {
     unsubscribe();
   }
+});
+
+it('preserves a selected remote team session across a bootstrap refresh', async () => {
+  vi.stubGlobal('BroadcastChannel', undefined);
+  const store = await import('./store');
+  useMingle = store.useMingle;
+  const projectId = 'remote-team-project';
+  const remoteSessionId = 'remote-team-session';
+  const groupId = 'remote-team-group';
+  const at = '2026-10-28T12:00:00.000Z';
+  const payload = {
+    projects: [{ id: projectId, name: 'Example shared project', path: '/example/shared', createdAt: at, isExample: false }],
+    sessions: [{
+      id: 'local-session', projectId, name: 'Local session', provider: 'codex', model: 'gpt-5-codex', effort: 'medium',
+      status: 'idle', policy: 'supervised', isolated: false, worktreePath: '/example/shared', branch: null,
+      providerSessionId: null, createdAt: at, updatedAt: at, error: null, inputTokens: 0, outputTokens: 0,
+      costUsd: null, pinned: false, unread: false,
+    }],
+    messages: [], tasks: [], events: [], approvals: [], plans: [], questions: [], providers: [], settings: {},
+    version: 'remote-selection-test', runs: [], toolCalls: [],
+  };
+  bootstrap.mockResolvedValueOnce(payload);
+  store.useMingle.setState({
+    activeProjectId: projectId,
+    sessionByProject: { [projectId]: remoteSessionId },
+    selectedTeamSessionByProject: {},
+    teamSessionsByProject: { [projectId]: {
+      teamSession: { groupId, sessionId: remoteSessionId, title: 'Shared conversation' }, hostIsThisDevice: false,
+    } },
+  });
+
+  await store.useMingle.getState().refreshNow();
+
+  expect(store.useMingle.getState().sessionByProject[projectId]).toBe(remoteSessionId);
+
+  store.useMingle.setState({
+    activeProjectId: null, teamSessionsByProject: {}, selectedTeamSessionByProject: { [projectId]: remoteSessionId },
+  });
+  store.useMingle.getState().selectProject(projectId);
+  expect(store.useMingle.getState().sessionByProject[projectId]).toBe(remoteSessionId);
 });

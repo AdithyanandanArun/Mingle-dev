@@ -244,7 +244,7 @@ function reconcileBootstrap(prev: Bootstrap | null, next: Bootstrap): Bootstrap 
 }
 
 /** Choose valid selections without disturbing choices that are still valid. */
-function resolveSelection(s: Pick<MingleState, 'activeProjectId' | 'sessionByProject'>, boot: Bootstrap): Pick<MingleState, 'activeProjectId' | 'sessionByProject'> {
+function resolveSelection(s: Pick<MingleState, 'activeProjectId' | 'sessionByProject' | 'teamSessionsByProject' | 'selectedTeamSessionByProject'>, boot: Bootstrap): Pick<MingleState, 'activeProjectId' | 'sessionByProject'> {
   let projectId = s.activeProjectId;
   if (!projectId || !boot.projects.some((p) => p.id === projectId)) {
     projectId = (boot.projects.find((p) => p.isExample) ?? boot.projects[0])?.id ?? null;
@@ -257,6 +257,9 @@ function resolveSelection(s: Pick<MingleState, 'activeProjectId' | 'sessionByPro
     const sessions = boot.sessions.filter((x) => x.projectId === p.id && !children.has(x.id));
     const cur = map[p.id];
     if (cur && sessions.some((x) => x.id === cur)) continue;
+    const teamInfo = s.teamSessionsByProject[p.id];
+    const isKnownRemoteTeamSession = Boolean(teamInfo && !teamInfo.hostIsThisDevice && teamInfo.teamSession?.sessionId === cur);
+    if (cur && (isKnownRemoteTeamSession || s.selectedTeamSessionByProject[p.id] === cur)) continue;
     const group = findGroupForSession(boot.groups, cur);
     const anchor = group && sessions.find((x) => x.id === group.group.anchorSessionId);
     if (anchor) { map[p.id] = anchor.id; changed = true; continue; }
@@ -649,9 +652,13 @@ export const useMingle = create<MingleState>((set, get) => {
       const sessions = boot.sessions.filter((s) => s.projectId === id && !children.has(s.id));
       const remembered = sessionByProject[id];
       const teamInfo = teamSessionsByProject[id];
-      const remoteTeamSessionId = teamInfo && !teamInfo.hostIsThisDevice && teamInfo.teamSession
-        && (teamSessionAutoSelectByProject[id] || teamInfo.teamSession.sessionId === selectedTeamSessionByProject[id])
-        ? teamInfo.teamSession.sessionId : null;
+      const rememberedRemoteTeamSessionId = remembered && selectedTeamSessionByProject[id] === remembered ? remembered : null;
+      let remoteTeamSessionId = rememberedRemoteTeamSessionId;
+      if (teamInfo) {
+        remoteTeamSessionId = !teamInfo.hostIsThisDevice && teamInfo.teamSession
+          && (teamSessionAutoSelectByProject[id] || teamInfo.teamSession.sessionId === selectedTeamSessionByProject[id])
+          ? teamInfo.teamSession.sessionId : null;
+      }
       const pick = sessions.find((s) => s.id === remembered) ?? sessions[0];
       const nextSelectedTeam = remoteTeamSessionId
         ? { ...selectedTeamSessionByProject, [id]: remoteTeamSessionId }
