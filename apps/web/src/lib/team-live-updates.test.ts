@@ -37,6 +37,21 @@ it('debounces same-project updates and ignores unrelated projects', async () => 
   }
 });
 
+it('coalesces a burst of chat updates into one refresh', async () => {
+  vi.useFakeTimers();
+  const target = new EventTarget();
+  const refresh = vi.fn();
+  const unsubscribe = subscribeToTeamUpdates('project-a', refresh, { target, kinds: ['chat'], debounceMs: 80 });
+  try {
+    for (let index = 0; index < 100; index++) dispatchTeamUpdate({ type: 'team.chat.updated', projectId: 'project-a' }, target);
+    expect(refresh).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(80);
+    expect(refresh).toHaveBeenCalledTimes(1);
+  } finally {
+    unsubscribe();
+  }
+});
+
 it('refreshes during continuous updates and cancels a pending refresh on unsubscribe', async () => {
   vi.useFakeTimers();
   const target = new EventTarget();

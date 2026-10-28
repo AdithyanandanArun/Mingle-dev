@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { ArrowUp, AtSign, Loader2, X } from 'lucide-react';
 import { TeamAgentStateSchema, type Session, type TeamChatAgent, type TeamChatGroupView, type TeamChatMessage, type TeamSessionRef, type TeamStructureMember, type TeamStructureSnapshot } from '@mingle/contracts';
 import { useMingle } from '../../store/store';
@@ -14,6 +14,7 @@ import { Popover } from '../git/Popover';
 import { GitBar } from '../git/GitBar';
 import { subscribeToTeamUpdates } from '../../lib/team-live-updates';
 import { useTeamStructure } from '../../lib/team-structure-context';
+import { reconcileTeamChatSnapshot } from '../../lib/team-snapshots';
 import './team-session.css';
 import './team-session-premium.css';
 
@@ -58,7 +59,7 @@ function mergeTeamSessionTimeline(messages: readonly TeamChatMessage[], groupVie
   });
 }
 
-function TeamMessage({ message, teamSession, agents, members }: {
+const TeamMessage = memo(function TeamMessage({ message, teamSession, agents, members }: {
   message: TeamChatMessage; teamSession: TeamSessionRef; agents: readonly TeamChatAgent[]; members: readonly TeamStructureMember[];
 }) {
   if (message.author.kind === 'system') return null;
@@ -93,7 +94,7 @@ function TeamMessage({ message, teamSession, agents, members }: {
     <MessageRow m={display} provider={author.provider} speaker={speaker} />
     {message.runState ? <div className={cx('team-session__message-state', message.runState === 'failed' && 'is-failed')}>{RUN_STATE_LABEL[message.runState]}</div> : null}
   </div>;
-}
+});
 
 const MODE_NAME: Record<TeamChatGroupView['group']['mode'], string> = {
   cowork: 'Cowork', orchestrated: 'Orchestrated', 'current-leads': 'Current agent leads',
@@ -106,7 +107,7 @@ const RESULT_STATE: Record<NonNullable<TeamChatGroupView['result']>['status'], s
   blocked: 'Blocked', 'follow-up': 'Follow-up needed', review: 'Ready for review', accepted: 'Accepted', responded: 'Responded', unknown: 'Outcome unavailable',
 };
 
-function SharedGroupEntry({ entry, view, members, agents }: {
+const SharedGroupEntry = memo(function SharedGroupEntry({ entry, view, members, agents }: {
   entry: TeamChatGroupView['messages'][number]; view: TeamChatGroupView;
   members: readonly TeamStructureMember[]; agents: readonly TeamChatAgent[];
 }) {
@@ -150,7 +151,7 @@ function SharedGroupEntry({ entry, view, members, agents }: {
       {deliveries.length ? <SharedDeliveryStates deliveries={deliveries} /> : null}{time}
     </div>
   </article>;
-}
+});
 
 function SharedDeliveryStates({ deliveries }: { deliveries: TeamChatGroupView['deliveries'] }) {
   return <ul className="deliveries" aria-label="Shared delivery status">
@@ -161,7 +162,7 @@ function SharedDeliveryStates({ deliveries }: { deliveries: TeamChatGroupView['d
   </ul>;
 }
 
-function SharedGroupResult({ result }: { result: NonNullable<TeamChatGroupView['result']> }) {
+const SharedGroupResult = memo(function SharedGroupResult({ result }: { result: NonNullable<TeamChatGroupView['result']> }) {
   return <section className={`team-session__result is-${result.status}`} aria-label="Latest shared group result">
     <div className="team-session__result-head"><strong>{result.title}</strong><span>{RESULT_STATE[result.status]}</span></div>
     <p>{result.summary}</p>
@@ -169,7 +170,7 @@ function SharedGroupResult({ result }: { result: NonNullable<TeamChatGroupView['
     {result.changedPaths.length ? <details><summary>Changed relative paths ({result.changedPaths.length})</summary><ul>{result.changedPaths.map((path) => <li key={path}><code>{path}</code></li>)}</ul></details> : null}
     <small>Task state and changed paths are shared records. A completed turn does not mean the work was accepted.</small>
   </section>;
-}
+});
 
 function TeamSessionComposer({ projectId, sessionId, agents, structure, groupView, onMessage, onSent }: {
   projectId: string; sessionId: string; agents: readonly TeamChatAgent[]; structure: TeamStructureSnapshot | null;
@@ -357,13 +358,7 @@ export function TeamSessionView({ projectId, teamSession, structure }: {
         }
         return;
       }
-      setSnapshot((current) => {
-        if (!current || current.project.sharedProjectId !== latest.project.sharedProjectId) return latest;
-        const rows = new Map(latest.messages.map((message) => [message.id, message]));
-        for (const message of current.messages) if (!rows.has(message.id)) rows.set(message.id, message);
-        const messages = [...rows.values()].sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id)).slice(-200);
-        return { ...latest, messages, hasMore: current.hasMore || latest.hasMore, nextBefore: latest.nextBefore ?? current.nextBefore };
-      });
+      setSnapshot((current) => reconcileTeamChatSnapshot(current, latest));
       setError(null);
     } finally {
       if (refreshInFlight.current === requestId) {
@@ -382,7 +377,7 @@ export function TeamSessionView({ projectId, teamSession, structure }: {
     void refresh(controller.signal).catch((cause) => { if (!controller.signal.aborted) setError(errorMessage(cause)); }).finally(() => { if (!controller.signal.aborted) setLoading(false); });
     const unsubscribe = subscribeToTeamUpdates(projectId, () => {
       void refresh(controller.signal).catch((cause) => { if (!controller.signal.aborted) setError(errorMessage(cause)); });
-    }, { kinds: ['chat'] });
+    }, { kinds: ['chat'], debounceMs: 200 });
     const timer = window.setInterval(() => { if (document.visibilityState === 'visible') void refresh(controller.signal).catch(() => undefined); }, 60_000);
     const visibility = () => { if (document.visibilityState === 'visible') void refresh(controller.signal).catch(() => undefined); };
     document.addEventListener('visibilitychange', visibility);

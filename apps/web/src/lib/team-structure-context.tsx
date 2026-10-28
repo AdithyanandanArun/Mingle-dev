@@ -3,6 +3,7 @@ import type { TeamStructureSnapshot } from '@mingle/contracts';
 import { api, errorMessage } from './api';
 import { teamSessionsApi } from './team-sessions';
 import { subscribeToTeamUpdates } from './team-live-updates';
+import { retainTeamStructureSnapshot } from './team-snapshots';
 import { useMingle } from '../store/store';
 
 interface TeamStructureContextValue {
@@ -45,7 +46,7 @@ export function TeamStructureProvider({ projectId, children }: { projectId: stri
   const acceptStructure = (id: string, latest: TeamStructureSnapshot, accountId: string | null, binding: { teamId: string; sharedProjectId: string }) => {
     if (latest.projectId !== id || latest.teamId !== binding.teamId || latest.sharedProjectId !== binding.sharedProjectId
       || useMingle.getState().activeProjectId !== id) return false;
-    setSnapshot(latest);
+    setSnapshot((previous) => retainTeamStructureSnapshot(previous?.projectId === id ? previous : null, latest));
     bindingRef.current = { projectId: id, teamId: binding.teamId, sharedProjectId: binding.sharedProjectId };
     setError(null);
     setErrorProjectId(null);
