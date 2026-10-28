@@ -11,6 +11,7 @@ import type { TeamStructureChange, TeamStructureMember, TeamStructureSnapshot } 
 import { useMingle, useProject } from '../store/store';
 import { Button, EmptyState, InlineError, Modal, ProviderMark, Spinner } from '../components/ui';
 import { cx } from '../lib/format';
+import { teamConsentStatusLabel } from '../lib/team-consent';
 import { TeamStructureApiError, teamStructureApi } from './team-structure/api';
 import { buildTeamStructureGraph, TEAM_NODE_HEIGHT, TEAM_NODE_WIDTH, type TeamFlowNode, type TeamNodeData } from './team-structure/layout';
 import '../styles/team-structure.css';
@@ -21,9 +22,6 @@ interface PendingPromotion { member: TeamStructureMember; previousRole: RoleChan
 const STATE_LABEL: Record<TeamStructureMember['state'], string> = {
   idle: 'Idle', queued: 'Queued', working: 'Working', 'awaiting-approval': 'Awaiting approval',
   'quota-exhausted': 'Quota exhausted', offline: 'Offline', paused: 'Paused', failed: 'Failed',
-};
-const CONSENT_LABEL: Record<TeamStructureMember['consent'], string> = {
-  granted: 'Consent granted', 'needs-reconsent': 'Re-consent needed', paused: 'Consent paused', revoked: 'Consent revoked',
 };
 const REASON_LABEL: Record<TeamStructureSnapshot['leaderHistory'][number]['reason'], string> = {
   manual: 'Manual handover', 'fallback-quota': 'Quota fallback', 'fallback-offline': 'Offline fallback', restored: 'Leader restored', removed: 'Leader removed',
@@ -90,7 +88,7 @@ function MemberCard({ data, selected = false }: { data: TeamNodeData; selected?:
         <span className="team-card__role">{currentRoleLabel}</span>
       </div>
       {member.currentTask ? <p className="team-card__task" title={member.currentTask}>{member.currentTask}</p> : null}
-      {member.consent !== 'granted' ? <span className={cx('team-consent', `team-consent--${member.consent}`)}><ShieldCheck size={11} />{CONSENT_LABEL[member.consent]}</span> : null}
+      {member.consent !== 'granted' ? <span className={cx('team-consent', `team-consent--${member.consent}`)}><ShieldCheck size={11} />{teamConsentStatusLabel(member.consent, member.ownerDisplayName, member.local)}</span> : null}
       {menuOpen && data.canEdit ? <div className="nodrag team-card__menu" role="group" aria-label={`Actions for @${member.handle}`}>
         {member.role !== 'orchestrator' ? <button type="button" onClick={() => { setMenuOpen(false); data.onPromote?.(member); }}><Crown size={13} /> Promote to leader</button> : null}
         {member.role !== 'worker' && (member.role !== 'orchestrator' || data.needsLeader) ? <button type="button" onClick={() => { setMenuOpen(false); data.onRoleChange?.(member, 'worker'); }}><GitFork size={13} /> Move to workers</button> : null}

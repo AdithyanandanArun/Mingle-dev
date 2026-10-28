@@ -80,6 +80,7 @@
 .team-consent-banner__copy strong { color: var(--fg-0); font-size: var(--text-xs); font-weight: 600; }
 .team-consent-banner__copy small { color: var(--fg-2); font-size: var(--text-2xs); line-height: 1.45; }
 .team-consent-banner > .btn { flex: none; }
+.team-consent-banner__copy > .btn { justify-self: start; margin-top: 3px; }
 .team-consent-banner--error { color: var(--warn); font-size: var(--text-xs); }
 .team-consent-banner--error span { flex: 1; }
 

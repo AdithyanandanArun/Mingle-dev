@@ -5,6 +5,8 @@ import { Button } from '../../ui';
 import { TeamOrchestrationApiError, teamOrchestrationApi } from './api';
 import { TeamConsentSheet } from './TeamConsentSheet';
 import { useTeamStructure } from '../../../lib/team-structure-context';
+import { buildTeamReconsentInput, reshareTeamConsent, TEAM_RECONSENT_EXPLANATION } from '../../../lib/team-consent';
+import { TeamReconsentPrompt } from './TeamReconsentPrompt';
 import { sharedAgentCountLabel } from './team-consent-flow';
 import './team-orchestration-settings.css';
 
@@ -49,18 +51,37 @@ export function TeamConsentBanner({ projectId }: { projectId: string }) {
 
   const consent = snapshot.myConsent;
   const needsConsent = !consent || consent.state === 'needs-reconsent';
+  const reconsentAvailable = consent?.state === 'needs-reconsent' && Boolean(buildTeamReconsentInput(snapshot));
   const openSheet = () => setSheetOpen(true);
   const permissionLevel = snapshot.settings?.permissionLevel ?? consent?.permissionLevel ?? 'supervised';
   const level = permissionLevel === 'supervised' ? 'Supervised' : 'Full access';
+  const reshare = async () => {
+    if (busy || !snapshot || consent?.state !== 'needs-reconsent') return;
+    setBusy(true);
+    setError('');
+    try {
+      await reshareTeamConsent(projectId, snapshot, teamOrchestrationApi.acceptConsent);
+      await refresh();
+    } catch (cause) {
+      if (cause instanceof TeamOrchestrationApiError && cause.status === 409) {
+        await refresh().catch(() => null);
+        setError('Team settings changed. Refresh and re-share the latest consent.');
+      } else setError(cause instanceof Error ? cause.message : 'Could not re-share agent consent.');
+    } finally { setBusy(false); }
+  };
 
   return <>
     <section className={`team-consent-banner${needsConsent ? ' is-action-needed' : ''}`} aria-label="Team agent sharing status">
       <span className="team-consent-banner__icon">{needsConsent ? <AlertTriangle size={15} /> : <ShieldCheck size={15} />}</span>
       <div className="team-consent-banner__copy">
         <strong>{needsConsent ? consent?.state === 'needs-reconsent' ? 'Your agents need renewed consent' : 'Share your agents with the team' : consent?.state === 'revoked' ? 'Agent sharing is revoked' : sharedAgentCountLabel(consent.agentIds.length, consent.state === 'paused' ? 'paused' : 'shared', level)}</strong>
-        {error ? <small role="alert">{error}</small> : consent?.state === 'needs-reconsent' ? <small>The group permission level or consent terms changed. Review and agree again before new work is delivered.</small> : needsConsent ? <small>Choose which local agents teammates may send work to. Sharing is optional and revocable.</small> : null}
+        {error ? <small role="alert">{error}</small> : null}
+        {consent?.state === 'needs-reconsent' && reconsentAvailable
+          ? <TeamReconsentPrompt busy={busy} onReshare={() => void reshare()} />
+          : consent?.state === 'needs-reconsent' ? <small>{TEAM_RECONSENT_EXPLANATION}</small>
+            : needsConsent ? <small>Choose which local agents teammates may send work to. Sharing is optional and revocable.</small> : null}
       </div>
-      {needsConsent || consent?.state === 'revoked' ? <Button size="sm" variant="primary" disabled={busy} onClick={openSheet}>{consent?.state === 'needs-reconsent' ? 'Review consent' : consent?.state === 'revoked' ? 'Share agents again' : 'Choose agents'}</Button>
+      {needsConsent || consent?.state === 'revoked' ? consent?.state === 'needs-reconsent' && reconsentAvailable ? null : <Button size="sm" variant="primary" disabled={busy} onClick={openSheet}>{consent?.state === 'needs-reconsent' ? 'Review consent' : consent?.state === 'revoked' ? 'Share agents again' : 'Choose agents'}</Button>
         : consent.state === 'paused' ? <Button size="sm" disabled={busy} busy={busy} onClick={() => void changeConsent('granted')}><Play size={13} />Resume</Button>
           : <Button size="sm" disabled={busy} busy={busy} onClick={() => void changeConsent('paused')}><Pause size={13} />Pause my agents</Button>}
       {consent && consent.state !== 'revoked' ? <Button size="sm" variant="ghost" disabled={busy} aria-label="Leave and revoke shared agent access" onClick={() => void changeConsent('revoked')}><UserRoundMinus size={13} />Leave (revoke)</Button> : null}

@@ -4,6 +4,7 @@ import { configSummary, ROLE_LABEL } from '../../lib/groups';
 import { memberPresence } from '../../lib/groupPresence';
 import { formatElapsed } from '../../lib/activity';
 import { teamAgentDisplayName, teamAgentMetadata } from '../../lib/team-agent-display';
+import { teamConsentStatusLabel } from '../../lib/team-consent';
 import { useMingle } from '../../store/store';
 import { AgentIdentity } from './AgentIdentity';
 import { AgentActivityDrawer, type ActivityAgent } from '../team-orchestration/activity/AgentActivityDrawer';
@@ -81,7 +82,8 @@ function PresenceRow({
 
 function TeamPresenceRow({ member, state = member.state, onOpen }: { member: TeamStructureMember; state?: TeamAgentState; onOpen: (agent: ActivityAgent) => void }) {
   const displayName = teamAgentDisplayName(member.name, member.ownerDisplayName, member.provider);
-  const stateLabel = state === 'paused' && !member.local ? 'Paused by owner' : TEAM_STATE_LABEL[state];
+  const stateLabel = member.consent === 'needs-reconsent' ? teamConsentStatusLabel(member.consent, member.ownerDisplayName, member.local)
+    : state === 'paused' && !member.local ? 'Paused by owner' : TEAM_STATE_LABEL[state];
   const open = () => onOpen({
     agentId: member.agentId, handle: member.handle, name: displayName, provider: member.provider, model: member.model,
     local: member.local, ownerDisplayName: member.ownerDisplayName, deviceName: member.deviceName, role: member.role,
