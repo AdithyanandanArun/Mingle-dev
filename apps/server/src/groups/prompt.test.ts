@@ -73,6 +73,8 @@ it('gives team planners branch-aware integration guidance and keeps non-team gro
   const fullAccess = buildInstructions(team);
   expect(fullAccess).toContain('origin/mingle/owner/work');
   expect(fullAccess).toContain('git fetch origin');
+  expect(fullAccess).toContain('Mingle merges and pushes the integration branch normally');
+  expect(fullAccess).toContain('Do not push again after team_accept');
   expect(fullAccess).toContain('git push origin main');
   expect(fullAccess).toContain('never force');
   expect(fullAccess).toContain('Never push to a worker branch');
@@ -86,4 +88,16 @@ it('gives team planners branch-aware integration guidance and keeps non-team gro
 
   const nonTeam = buildInstructions({ ...team, teamPermissionLevel: null });
   expect(nonTeam).toContain('Never push or publish, or modify the human-selected checkout, without explicit human authorization');
+});
+
+it('uses autonomous acceptance and a worker branch commit for full-access local groups only', () => {
+  const lead = buildInstructions({ ...worker, self: { ...worker.self, role: 'orchestrator' }, canAssign: true,
+    deliveryKind: 'request', assignment: null, fullAccessGroup: true });
+  expect(lead).toContain('use team_accept with a verification summary');
+  expect(lead).toContain('Mingle merges accepted worker branches into the group integration worktree');
+  expect(lead).not.toContain('a human reviews task results before they are marked done');
+
+  const assigned = assignmentText({ id: 'assignment-local', taskId: 'task-local', from: 'lead', to: 'owner', title: 'Build the page',
+    objective: 'Create the static page.', acceptance: 'The page exists.', scope: ['index.html'], request: 'Build the page.', dependsOn: [], inputs: [], fullAccessLocal: true });
+  expect(assigned).toContain('commit your scoped changes before recording Review');
 });
