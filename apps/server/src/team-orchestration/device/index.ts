@@ -236,7 +236,18 @@ export function createDeviceSide(deps: DeviceSideDeps): {
       ? db.prepare(`SELECT consent_json FROM mingle_team_device_consents WHERE shared_project_id=? AND account_id=? ORDER BY updated_at DESC LIMIT 1`).get(sharedProjectId, accountId) as { consent_json: string } | undefined
       : undefined;
     if (!row) return null;
-    try { return parseConsent(JSON.parse(row.consent_json)); } catch { return null; }
+    try {
+      const consent = parseConsent(JSON.parse(row.consent_json));
+      const structure = latestStructure(sharedProjectId);
+      const disclaimerChanged = consent.disclaimerVersion !== TEAM_CONSENT_DISCLAIMER_VERSION;
+      const permissionRaised = Boolean(structure && permissionRank(structure.settings.permissionLevel) > permissionRank(consent.permissionLevel));
+      if (consent.state === 'granted' && (disclaimerChanged || permissionRaised)) {
+        const downgraded = { ...consent, state: 'needs-reconsent' as const, updatedAt: nextConsentAt(consent) };
+        saveConsent(downgraded);
+        return downgraded;
+      }
+      return consent;
+    } catch { return null; }
   }
 
   function parseConsent(input: unknown): TeamConsent {

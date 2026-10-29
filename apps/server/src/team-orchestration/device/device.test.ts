@@ -362,6 +362,21 @@ describe('owner-device team orchestration', () => {
     expect(f.side.localConsent(SHARED)).toMatchObject({ state: 'granted', permissionLevel: 'full-access', settingsVersion: 7 });
   });
 
+  it('downgrades stale stored consent immediately without waiting for a host structure message', async () => {
+    const f = await fixture();
+    await f.setConsent('full-access', 1);
+    const row = f.store.db.prepare('SELECT consent_json FROM mingle_team_device_consents WHERE shared_project_id=? AND account_id=?')
+      .get(SHARED, ACCOUNT) as { consent_json: string };
+    const stale = { ...JSON.parse(row.consent_json), disclaimerVersion: 'old-disclaimer' };
+    f.store.db.prepare('UPDATE mingle_team_device_consents SET consent_json=? WHERE shared_project_id=? AND account_id=?')
+      .run(JSON.stringify(stale), SHARED, ACCOUNT);
+
+    expect(f.side.localConsent(SHARED)?.state).toBe('needs-reconsent');
+    const saved = f.store.db.prepare('SELECT consent_json FROM mingle_team_device_consents WHERE shared_project_id=? AND account_id=?')
+      .get(SHARED, ACCOUNT) as { consent_json: string };
+    expect(JSON.parse(saved.consent_json).state).toBe('needs-reconsent');
+  });
+
   it('accepts internally extended hops only when both the host and owner consent grant Full access', async () => {
     const f = await fixture();
     await sendStructure(f, structure(1, 'full-access'));
