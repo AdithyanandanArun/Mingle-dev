@@ -2672,7 +2672,8 @@ ${task ? `Task ${task.id}: ${task.title}\nAcceptance: ${task.acceptanceCriteria}
         if (settings.success) {
           teamPermissionLevel = settings.data.permissionLevel;
           const anchor = this.store.getSession(group.anchorSessionId);
-          if (anchor?.branch && isSafeBranchName(anchor.branch)) integrationBranch = anchor.branch;
+          if (settings.data.integrationTarget && isSafeBranchName(settings.data.integrationTarget)) integrationBranch = settings.data.integrationTarget;
+          else if (anchor?.branch && isSafeBranchName(anchor.branch)) integrationBranch = anchor.branch;
         }
       }
     } catch { /* Non-team groups, older databases and malformed settings retain conservative guidance. */ }

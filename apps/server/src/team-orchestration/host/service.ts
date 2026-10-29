@@ -260,6 +260,8 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
       let mergedRef: string | undefined;
       let integrationWorktree: string | null = null;
       let integrationBranch: string | null = null;
+      let integrationSourceBranch: string | null = null;
+      const integrationTarget = this.settings(latestHost).integrationTarget;
       let integrationHead: string | null = null;
       if (review?.review_ref && review.branch && review.commit_sha) {
         const workspace = this.groupWorkspace(group.group.id);
@@ -302,7 +304,28 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
           }
           merged = true;
         }
-        integrationBranch = branchResult.stdout.trim();
+        integrationSourceBranch = branchResult.stdout.trim();
+        integrationBranch = integrationTarget;
+        const fetchedTarget = await git(workspace.worktreePath, ['fetch', '--no-tags', '--no-recurse-submodules', 'origin',
+          `refs/heads/${integrationTarget}:refs/remotes/origin/${integrationTarget}`], { network: true, allowFailure: true, timeoutMs: 120_000 });
+        if (fetchedTarget.code !== 0) throw new HttpError(409, `Could not fetch origin/${integrationTarget}; accepted work was not published. ${safeRemoteText(fetchedTarget.stderr.trim()).slice(0, 500)}`);
+        const targetRef = `refs/remotes/origin/${integrationTarget}`;
+        const remoteHead = (await git(workspace.worktreePath, ['rev-parse', '--verify', `${targetRef}^{commit}`])).stdout.trim();
+        const targetIsAncestor = await git(workspace.worktreePath, ['merge-base', '--is-ancestor', remoteHead, 'HEAD'], { allowFailure: true });
+        if (targetIsAncestor.code !== 0) {
+          const ownerSnapshot = await this.options.collaboration.snapshot(host.local_project_id);
+          const owner = ownerSnapshot.members.find((member) => member.accountId === host.owner_account_id);
+          let identity: string[];
+          try { identity = await identityArgs(workspace.worktreePath, { name: owner?.displayName, email: owner?.email }); }
+          catch (error) { throw new HttpError(409, error instanceof Error ? error.message : 'Set your Git name and email (git config --global user.name/user.email), then retry.'); }
+          const synchronized = await git(workspace.worktreePath, [...identity, '-c', 'commit.gpgSign=false', 'merge', '--no-edit', targetRef], { allowFailure: true, timeoutMs: 120_000 });
+          if (synchronized.code !== 0) {
+            const unresolved = await git(workspace.worktreePath, ['diff', '--name-only', '--diff-filter=U'], { allowFailure: true });
+            await git(workspace.worktreePath, ['merge', '--abort'], { allowFailure: true });
+            if (unresolved.code === 0 && unresolved.stdout.trim()) throw new HttpError(409, `origin/${integrationTarget} conflicts with the accepted integration. Resolve it in ${workspace.worktreePath} before retrying team_accept.`);
+            throw new HttpError(409, `Could not merge origin/${integrationTarget}: ${safeRemoteText(synchronized.stderr.trim()).slice(0, 500)}`);
+          }
+        }
         integrationHead = (await git(workspace.worktreePath, ['rev-parse', '--verify', 'HEAD'])).stdout.trim();
         mergedRef = review.review_ref;
         this.hostRows.prepare(`UPDATE mingle_team_host_review_branches SET merged_at=COALESCE(merged_at,?) WHERE delivery_id=?`)
@@ -321,7 +344,8 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
       let pushFailure: string | undefined;
       if (integrationWorktree && integrationBranch && integrationHead) {
         try {
-          pushed = await pushTeamIntegrationBranch({ worktreePath: integrationWorktree, branch: integrationBranch, expectedHead: integrationHead });
+          pushed = await pushTeamIntegrationBranch({ worktreePath: integrationWorktree, branch: integrationBranch,
+            sourceBranch: integrationSourceBranch ?? integrationBranch, destinationBranch: integrationBranch, expectedHead: integrationHead });
         } catch (error) {
           pushFailure = safeRemoteText(error instanceof Error ? error.message : 'The integration branch push failed.').slice(0, 1_500);
         }
@@ -958,10 +982,9 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
         this.options.groups.createTeamGroup({ id: groupId, projectId, title: session.name, mode: 'orchestrated',
           orchestratorSessionId: session.id, members: [{ sessionId: session.id, handle, role: 'orchestrator', held: false }] });
       }
-      if (row) this.saveHostProject(context, groupId, settings, row);
-      else this.saveHostProject(context, groupId, settings, null);
       this.markLowerConsentsForReconsent(context, prior?.permissionLevel ?? 'supervised', settings);
     });
+    await this.saveHostProject(context, groupId, settings, row ?? null);
     row = this.readHost(context.project.teamId, context.project.sharedProjectId)!;
     if (!row || row.group_id !== groupId) throw new HttpError(500, 'The team session could not be saved.');
     await this.reconcileConsentedTeamAgents(context, row);
@@ -1031,7 +1054,7 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
             { sessionId: anchor.id, handle: localMemberHandle, role: 'orchestrator', held: false },
             { sessionId: remoteMember.sessionId, handle: remoteHandle, role: 'worker', held: false },
           ] });
-        this.saveHostProject(context, groupId, settings, currentRow ?? null);
+        await this.saveHostProject(context, groupId, settings, currentRow ?? null);
       } else {
         if (!groupId || !groupSnapshot) throw new HttpError(404, 'Group not found.');
         groupSnapshot = await this.attachAgentToExistingGroup(context, groupSnapshot, currentRow ?? null, agent, consentRow, input.handle);
@@ -1096,7 +1119,7 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
     this.hostRows.prepare(`UPDATE mingle_team_proxy_sessions SET handle=? WHERE team_id=? AND shared_project_id=? AND agent_id=?`)
       .run(remoteHandle, teamId, sharedProjectId, agent.id);
     const updated = await this.options.groups.addTeamMember(groupId, { sessionId: remoteMember.sessionId, handle: remoteHandle });
-    this.saveHostProject(context, groupId, settings, currentRow);
+      await this.saveHostProject(context, groupId, settings, currentRow);
     this.syncTeamRoster(context, groupId, settings);
     return updated;
   }
@@ -1135,7 +1158,19 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
     return handle;
   }
 
-  private saveHostProject(context: ProjectContext, groupId: string, settings: TeamOrchestrationSettings, prior: HostRow | null): void {
+  private async saveHostProject(context: ProjectContext, groupId: string, settings: TeamOrchestrationSettings, prior: HostRow | null): Promise<void> {
+    const priorHasTarget = prior ? typeof (safeJson(prior.settings_json, {}) as Record<string, unknown>).integrationTarget === 'string' : false;
+    if (!priorHasTarget) {
+      const projectPath = this.options.store.getProject(context.localProjectId)?.path;
+      if (projectPath) {
+        const remote = await git(projectPath, ['ls-remote', '--symref', 'origin', 'HEAD'], { network: true, allowFailure: true, timeoutMs: 15_000 });
+        const advertised = /^ref: refs\/heads\/(\S+)\s+HEAD$/m.exec(remote.stdout)?.[1];
+        const tracking = await git(projectPath, ['symbolic-ref', '--quiet', '--short', 'refs/remotes/origin/HEAD'], { allowFailure: true });
+        const candidate = advertised ?? (tracking.code === 0 ? tracking.stdout.trim().replace(/^origin\//, '') : 'main');
+        const checked = await git(projectPath, ['check-ref-format', `refs/heads/${candidate}`], { allowFailure: true });
+        settings = TeamOrchestrationSettingsSchema.parse({ ...settings, integrationTarget: checked.code === 0 ? candidate : 'main' });
+      }
+    }
     const at = settings.updatedAt;
     if (prior) {
       const result = this.hostRows.prepare(`UPDATE mingle_team_host_projects SET group_id=?,settings_json=?,updated_at=? WHERE team_id=? AND shared_project_id=? AND group_id=?`)
@@ -1354,7 +1389,7 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
   }
 
   private async updateLocked(projectId: string, rawInput: unknown): Promise<TeamStructureSnapshot> {
-    const input = TeamOrchestrationSettingsSchema.pick({ leaderOrchestration: true, permissionLevel: true }).partial()
+    const input = TeamOrchestrationSettingsSchema.pick({ leaderOrchestration: true, permissionLevel: true, integrationTarget: true }).partial()
       .extend({ fallbackAgentIds: TeamOrchestrationSettingsSchema.shape.fallbackAgentIds.optional(), expectedVersion: TeamOrchestrationSettingsSchema.shape.version }).strict().parse(rawInput);
     const { context, row } = await this.loadContextForHost(projectId);
     const group = this.groupOrNull(row.group_id);
@@ -2616,13 +2651,12 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
     const workspace = this.groupWorkspace(delivery.group_id);
     const settings = this.readHost(delivery.team_id, delivery.shared_project_id);
     const permissionLevel = settings ? this.settings(settings).permissionLevel : null;
-    let integrationBranch: string | null = null;
+    let integrationBranch: string | null = settings ? this.settings(settings).integrationTarget : null;
     if (workspace) {
       try {
-        const result = await git(workspace.worktreePath, ['symbolic-ref', '--quiet', '--short', 'HEAD'], { allowFailure: true });
-        const candidate = result.code === 0 ? result.stdout.trim() : '';
-        const ref = candidate ? await git(workspace.worktreePath, ['check-ref-format', `refs/heads/${candidate}`], { allowFailure: true }) : null;
-        if (candidate && ref?.code === 0 && isSafeGitBranchName(candidate)) integrationBranch = candidate;
+        const target = integrationBranch ?? '';
+        const ref = target ? await git(workspace.worktreePath, ['check-ref-format', `refs/heads/${target}`], { allowFailure: true }) : null;
+        if (ref?.code !== 0) integrationBranch = null;
       } catch { /* The notification still explains the available review ref and worktree. */ }
     }
     const branch = intent.pushedBranch?.name ?? teamAgentBranch(worker.handle);

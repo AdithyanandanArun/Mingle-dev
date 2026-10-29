@@ -57,6 +57,19 @@ it('pushes the current integration branch normally, including a user-authorized 
   expect(expectedHead).not.toBe(base);
 });
 
+it('publishes a checked integration worktree branch to a separately named target', async () => {
+  const repo = makeRepo(); roots.push(repo);
+  const { origin } = bareOrigin(repo);
+  const sourceBranch = runGit(repo, 'branch', '--show-current').trim();
+  runGit(repo, 'config', 'user.name', 'Host integration');
+  runGit(repo, 'config', 'user.email', 'host-integration@example.test');
+  runGit(repo, 'commit', '--allow-empty', '-m', 'accepted work');
+  const expectedHead = runGit(repo, 'rev-parse', 'HEAD').trim();
+  expect(await pushTeamIntegrationBranch({ worktreePath: repo, branch: 'main', sourceBranch, destinationBranch: 'main', expectedHead }))
+    .toEqual({ branch: 'main', commitSha: expectedHead });
+  expect(runGit(origin, 'rev-parse', 'refs/heads/main').trim()).toBe(expectedHead);
+});
+
 it('pushes the permanent agent branch repeatedly using fast-forward updates', async () => {
   const repo = makeRepo(); roots.push(repo);
   const { origin, base } = bareOrigin(repo);

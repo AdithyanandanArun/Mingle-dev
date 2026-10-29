@@ -35,6 +35,8 @@ export const TeamOrchestrationSettingsSchema = z.object({
   /** When on, untagged team-chat messages go to the orchestrator agent. When off, only @mentions start agents. */
   leaderOrchestration: z.boolean(),
   permissionLevel: TeamPermissionLevelSchema,
+  /** Origin branch that receives accepted team integration. */
+  integrationTarget: SafeGitBranchNameSchema.default('main'),
   /** Roster agent id of the current orchestrator; null when none is assigned (work pauses). */
   orchestratorAgentId: Id.nullable(),
   /** Ordered fallback leaders tried automatically when the orchestrator is quota-exhausted or offline. */
@@ -50,6 +52,7 @@ export type TeamOrchestrationSettings = z.infer<typeof TeamOrchestrationSettings
 export const UpdateTeamOrchestrationSchema = z.object({
   leaderOrchestration: z.boolean().optional(),
   permissionLevel: TeamPermissionLevelSchema.optional(),
+  integrationTarget: SafeGitBranchNameSchema.optional(),
   fallbackAgentIds: z.array(Id).max(4).optional(),
   expectedVersion: z.number().int().min(1),
 }).strict();

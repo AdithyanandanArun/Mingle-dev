@@ -301,7 +301,7 @@ async function callRoute(f: Fixture, method: string, routePath: string, params: 
 function structure(version: number, permissionLevel: 'supervised' | 'full-access' = 'supervised'): TeamStructurePayload {
   return {
     sharedProjectId: SHARED,
-    settings: { leaderOrchestration: true, permissionLevel, orchestratorAgentId: AGENT_ID, fallbackAgentIds: [], version,
+    settings: { leaderOrchestration: true, permissionLevel, integrationTarget: 'main', orchestratorAgentId: AGENT_ID, fallbackAgentIds: [], version,
       updatedAt: new Date().toISOString(), updatedByAccountId: LEAD },
     disclaimerVersion: TEAM_CONSENT_DISCLAIMER_VERSION,
     members: [{ agentId: AGENT_ID, handle: 'worker', role: 'worker', fallbackRank: null, ownerAccountId: ACCOUNT, deviceId: OWN_DEVICE, state: 'idle', currentTask: null }],

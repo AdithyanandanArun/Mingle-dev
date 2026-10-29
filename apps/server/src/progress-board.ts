@@ -264,7 +264,15 @@ export async function buildProgressBoard(input: {
   const reviews = latestReviewRows(store, group);
   const anchor = sessions.get(group.members.find((member) => member.sessionId === group.group.anchorSessionId)?.id ?? '');
   const integrationPath = anchor?.worktreePath ?? store.getProject(group.group.projectId)?.path ?? '';
-  const integrationBranch = integrationPath ? await branchAt(integrationPath) : null;
+  let integrationBranch = integrationPath ? await branchAt(integrationPath) : null;
+  try {
+    const team = store.db.prepare(`SELECT settings_json FROM mingle_team_host_projects WHERE group_id=? AND group_id!=''`)
+      .get(group.group.id) as { settings_json: string } | undefined;
+    if (team) {
+      const settings = JSON.parse(team.settings_json) as { integrationTarget?: unknown };
+      if (typeof settings.integrationTarget === 'string' && settings.integrationTarget) integrationBranch = settings.integrationTarget;
+    }
+  } catch { /* Local groups and older installations use the checked-out integration branch. */ }
   const integrationHead = integrationPath ? await commitAt(integrationPath, 'HEAD') : null;
   const lastPush = latestPush(store, group);
   const healthByMemberId = new Map((input.memberHealth ?? []).map((health) => [health.memberId, health]));

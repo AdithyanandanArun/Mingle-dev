@@ -20,6 +20,7 @@ export function TeamOrchestrationSettings({ projectId, currentSession, onShared,
   const boot = useMingle((state) => state.boot);
   const [snapshot, setSnapshot] = useState<TeamStructureSnapshot | null>(null);
   const [permissionLevel, setPermissionLevel] = useState<TeamPermissionLevel>(() => policyPermissionLevel(currentSession?.policy));
+  const [integrationTarget, setIntegrationTarget] = useState('main');
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
@@ -63,6 +64,7 @@ export function TeamOrchestrationSettings({ projectId, currentSession, onShared,
       if (!canApply(sequence, signal)) return;
       setSnapshot(next);
       setPermissionLevel(next.settings?.permissionLevel ?? policyPermissionLevel(currentSession?.policy));
+      setIntegrationTarget(next.settings?.integrationTarget ?? 'main');
     } catch (cause) {
       if (canApply(sequence, signal)) setError(cause instanceof Error ? cause.message : 'Could not load team settings.');
     } finally {
@@ -119,6 +121,7 @@ export function TeamOrchestrationSettings({ projectId, currentSession, onShared,
         if (!snapshot.settings) throw new Error('Team settings are unavailable. Refresh before changing the permission level.');
         const update: UpdateTeamOrchestration = {
           permissionLevel,
+          integrationTarget,
           expectedVersion: snapshot.settings.version,
         };
         await teamOrchestrationApi.updateSettings(projectId, update);
@@ -194,6 +197,10 @@ export function TeamOrchestrationSettings({ projectId, currentSession, onShared,
               ? 'Full access allows file and command actions after owner consent. Owners who already consented to Full access keep sharing; other owners must renew consent. The session policy is updated to match.'
               : 'Supervised asks owners to approve file or command actions. Sharing can be paused or revoked at any time.'}</p>
           </div>
+          <label className="team-orch-settings__field"><strong>Integration target branch</strong>
+            <input value={integrationTarget} onChange={(event) => { setIntegrationTarget(event.target.value); setSaved(null); }} maxLength={200} />
+            <p>Accepted work is pushed to origin/{integrationTarget || 'main'} after it is merged locally.</p>
+          </label>
         </fieldset> : snapshot.settings ? <p className="team-orch-settings__summary"><Users size={14} /> Team permission: {snapshot.settings.permissionLevel === 'supervised' ? 'Supervised' : 'Full access'}</p> : null}
       </div>
       {canEdit ? <div className="team-orch-settings__actions"><Button variant="primary" size="sm" disabled={saving || loading || !projectIsActive || !hasSessionForProject || (!hasCanonicalSession && (!shareEligibility.allowed || currentSession?.projectId !== projectId))} busy={saving} onClick={() => void save()}>{hasCanonicalSession ? 'Save permission level' : 'Share current session'}</Button></div> : null}
