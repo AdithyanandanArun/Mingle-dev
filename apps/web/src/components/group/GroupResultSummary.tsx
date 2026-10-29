@@ -48,7 +48,7 @@ function LeadReport({ lead }: { lead: ResultLead }) {
   );
 }
 
-function AgentRow({ agent }: { agent: ResultAgent }) {
+function AgentRow({ agent, orchestratorStillWorking }: { agent: ResultAgent; orchestratorStillWorking: boolean }) {
   const { workspace } = agent;
   const written = agent.reports.filter((report) => report.text !== null);
   const preview = written.length ? written[written.length - 1]!.text! : null;
@@ -62,7 +62,9 @@ function AgentRow({ agent }: { agent: ResultAgent }) {
       {agent.tasks.length ? (
         <ul className="group-result__tasks" aria-label="Assigned tasks">
           {agent.tasks.map((task) => (
-            <li key={task.id}><span className="group-result__task-title">{task.title}</span><span className="group-result__task-status">{task.label}</span>
+            <li key={task.id}><span className="group-result__task-title">{task.title}</span><span className="group-result__task-status">
+              {orchestratorStillWorking && task.status === 'review' && !task.acceptedBy ? 'Awaiting orchestrator verification' : task.label}
+            </span>
               {task.verificationSummary ? <small className="group-result__task-verification">Verification · {task.verificationSummary}</small> : null}
             </li>
           ))}
@@ -112,6 +114,16 @@ export function GroupResultSummary({ snapshot, sessions, messages, runs, tasks, 
 }) {
   const model = useMemo(() => buildGroupResultModel({ snapshot, sessions, messages, runs, tasks, approvals }), [snapshot, sessions, messages, runs, tasks, approvals]);
   if (!model) return null;
+  const fullAccess = snapshot.group.teamPermissionLevel === undefined
+    ? snapshot.group.autonomy?.mode === 'extended'
+    : snapshot.group.teamPermissionLevel === 'full-access';
+  const waitingForApproval = model.title === 'Waiting for approval';
+  const orchestratorStillWorking = fullAccess && !waitingForApproval && !['paused', 'failed', 'stopped', 'blocked'].includes(model.status)
+    && (model.active || model.status === 'finalizing');
+  const title = orchestratorStillWorking ? 'Working autonomously' : model.title;
+  const summary = orchestratorStillWorking
+    ? model.status === 'finalizing' ? 'Workers have finished; Mingle is reviewing results and preparing the final report.' : `Mingle is coordinating and reviewing this request. ${model.summary}`
+    : model.summary;
   const compact = model.active && model.status !== 'paused';
   const meta = [
     ...model.facts,
@@ -123,8 +135,8 @@ export function GroupResultSummary({ snapshot, sessions, messages, runs, tasks, 
         <span className="group-result__label">Team result</span>
         {!compact && model.requestExcerpt ? <p className="group-result__request" title={model.requestExcerpt}>{model.requestExcerpt}</p> : null}
         <div aria-live="polite" aria-atomic="true">
-          <h3 className="group-result__title">{model.title}</h3>
-          <p className="group-result__summary">{model.summary}</p>
+          <h3 className="group-result__title">{title}</h3>
+          <p className="group-result__summary">{summary}</p>
           {model.detail ? <p className="group-result__detail">{model.detail}</p> : null}
         </div>
         {!compact && meta.length ? <p className="group-result__meta">{meta.join(' · ')}</p> : null}
@@ -133,7 +145,7 @@ export function GroupResultSummary({ snapshot, sessions, messages, runs, tasks, 
       {!compact && model.lead ? <LeadReport lead={model.lead} /> : null}
       {!compact && model.agents.length ? (
         <ul className="group-result__agents" aria-label="Participating agents">
-          {model.agents.map((agent) => <AgentRow key={agent.memberId} agent={agent} />)}
+          {model.agents.map((agent) => <AgentRow key={agent.memberId} agent={agent} orchestratorStillWorking={orchestratorStillWorking} />)}
         </ul>
       ) : null}
       {!compact ? <p className="group-result__caveat">{model.caveat}</p> : null}
