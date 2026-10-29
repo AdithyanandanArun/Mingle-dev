@@ -777,7 +777,7 @@ describe('durable resilience API', () => {
     const failed = await waitFor(() => {
       const snapshot = t.app.groups.get(groupId);
       const row = snapshot.deliveries.find((delivery) => delivery.memberId === source.id && delivery.status === 'failed');
-      return row && t.app.runtime.activeCount() === 0 ? row : undefined;
+      return row && snapshot.group.recoveryState?.status === 'paused' && t.app.runtime.activeCount() === 0 ? row : undefined;
     }, 4000, 'uncertain worker quota failure and provider cleanup');
 
     const snapshot = t.app.groups.get(groupId);
