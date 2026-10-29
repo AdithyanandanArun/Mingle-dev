@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { git } from './git-run.ts';
+import { identityArgs, type GitIdentity } from './identity.ts';
 import { isMirrorRemote, remotes } from './inspect.ts';
 import { parseRemoteUrl } from './remote.ts';
 
@@ -65,6 +66,35 @@ export async function fetchTeamIntegrationBranch(input: {
   const fetched = await git(worktreePath, ['fetch', '--no-tags', '--no-recurse-submodules', 'origin', branch],
     { network: true, allowFailure: true, signal, timeoutMs: 120_000 });
   return fetched.code === 0;
+}
+
+/** Merge origin/<target> into the current integration worktree branch when it has advanced. */
+export async function mergeTeamIntegrationTarget(input: {
+  worktreePath: string; targetBranch: string; identity?: GitIdentity; signal?: AbortSignal;
+}): Promise<boolean> {
+  const { worktreePath, targetBranch, identity, signal } = input;
+  if (!SAFE_BRANCH.test(targetBranch) || targetBranch.includes('..') || targetBranch.includes('//') || targetBranch.includes('@{')
+    || targetBranch.endsWith('/') || targetBranch.split('/').some((part) => !part || part === '.' || part === '..' || part.endsWith('.lock'))) {
+    throw new Error('The integration target branch is invalid.');
+  }
+  const format = await git(worktreePath, ['check-ref-format', `refs/heads/${targetBranch}`], { allowFailure: true, signal });
+  if (format.code !== 0) throw new Error('The integration target branch is invalid.');
+  await assertOriginSafe(worktreePath, 'fetch', signal);
+  const trackingRef = `refs/remotes/origin/${targetBranch}`;
+  const fetched = await git(worktreePath, ['fetch', '--no-tags', '--no-recurse-submodules', 'origin', `refs/heads/${targetBranch}:${trackingRef}`],
+    { network: true, allowFailure: true, signal, timeoutMs: 120_000 });
+  if (fetched.code !== 0) throw new Error(`Could not fetch origin/${targetBranch}; accepted work was not published.`);
+  const remoteHead = await git(worktreePath, ['rev-parse', '--verify', `${trackingRef}^{commit}`], { signal });
+  const alreadyIncluded = await git(worktreePath, ['merge-base', '--is-ancestor', remoteHead.stdout.trim(), 'HEAD'], { allowFailure: true, signal });
+  if (alreadyIncluded.code === 0) return false;
+  const identityArgsList = await identityArgs(worktreePath, identity);
+  const merged = await git(worktreePath, [...identityArgsList, '-c', 'commit.gpgSign=false', 'merge', '--no-edit', trackingRef],
+    { allowFailure: true, signal, timeoutMs: 120_000 });
+  if (merged.code === 0) return true;
+  const unresolved = await git(worktreePath, ['diff', '--name-only', '--diff-filter=U'], { allowFailure: true, signal });
+  await git(worktreePath, ['merge', '--abort'], { allowFailure: true, signal });
+  if (unresolved.code === 0 && unresolved.stdout.trim()) throw new Error(`origin/${targetBranch} conflicts with the accepted integration.`);
+  throw new Error(`Could not merge origin/${targetBranch}.`);
 }
 
 async function assertOriginSafe(top: string, action: 'push' | 'fetch', signal?: AbortSignal): Promise<void> {

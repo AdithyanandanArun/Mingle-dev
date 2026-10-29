@@ -29,7 +29,7 @@ import type { ProjectCollaborationSnapshot } from '../../../../../packages/contr
 import { KeyedLock } from '../../repository/lock.ts';
 import { normalizeScopes, safeArtifactPath } from '../../groups/routing.ts';
 import { isDeniedName } from '../../paths.ts';
-import { fetchTeamCompletionBranch, pushTeamIntegrationBranch, teamAgentBranch } from '../../repository/team-branch.ts';
+import { fetchTeamCompletionBranch, mergeTeamIntegrationTarget, pushTeamIntegrationBranch, teamAgentBranch } from '../../repository/team-branch.ts';
 import { identityArgs } from '../../repository/identity.ts';
 
 type Row = Record<string, unknown>;
@@ -306,25 +306,14 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
         }
         integrationSourceBranch = branchResult.stdout.trim();
         integrationBranch = integrationTarget;
-        const fetchedTarget = await git(workspace.worktreePath, ['fetch', '--no-tags', '--no-recurse-submodules', 'origin',
-          `refs/heads/${integrationTarget}:refs/remotes/origin/${integrationTarget}`], { network: true, allowFailure: true, timeoutMs: 120_000 });
-        if (fetchedTarget.code !== 0) throw new HttpError(409, `Could not fetch origin/${integrationTarget}; accepted work was not published. ${safeRemoteText(fetchedTarget.stderr.trim()).slice(0, 500)}`);
-        const targetRef = `refs/remotes/origin/${integrationTarget}`;
-        const remoteHead = (await git(workspace.worktreePath, ['rev-parse', '--verify', `${targetRef}^{commit}`])).stdout.trim();
-        const targetIsAncestor = await git(workspace.worktreePath, ['merge-base', '--is-ancestor', remoteHead, 'HEAD'], { allowFailure: true });
-        if (targetIsAncestor.code !== 0) {
-          const ownerSnapshot = await this.options.collaboration.snapshot(host.local_project_id);
-          const owner = ownerSnapshot.members.find((member) => member.accountId === host.owner_account_id);
-          let identity: string[];
-          try { identity = await identityArgs(workspace.worktreePath, { name: owner?.displayName, email: owner?.email }); }
-          catch (error) { throw new HttpError(409, error instanceof Error ? error.message : 'Set your Git name and email (git config --global user.name/user.email), then retry.'); }
-          const synchronized = await git(workspace.worktreePath, [...identity, '-c', 'commit.gpgSign=false', 'merge', '--no-edit', targetRef], { allowFailure: true, timeoutMs: 120_000 });
-          if (synchronized.code !== 0) {
-            const unresolved = await git(workspace.worktreePath, ['diff', '--name-only', '--diff-filter=U'], { allowFailure: true });
-            await git(workspace.worktreePath, ['merge', '--abort'], { allowFailure: true });
-            if (unresolved.code === 0 && unresolved.stdout.trim()) throw new HttpError(409, `origin/${integrationTarget} conflicts with the accepted integration. Resolve it in ${workspace.worktreePath} before retrying team_accept.`);
-            throw new HttpError(409, `Could not merge origin/${integrationTarget}: ${safeRemoteText(synchronized.stderr.trim()).slice(0, 500)}`);
-          }
+        const ownerSnapshot = await this.options.collaboration.snapshot(host.local_project_id);
+        const owner = ownerSnapshot.members.find((member) => member.accountId === host.owner_account_id);
+        try {
+          await mergeTeamIntegrationTarget({ worktreePath: workspace.worktreePath, targetBranch: integrationTarget,
+            identity: { name: owner?.displayName, email: owner?.email } });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : 'Could not reconcile the integration target.';
+          throw new HttpError(409, `${message} Resolve the target issue in ${workspace.worktreePath} before retrying team_accept.`);
         }
         integrationHead = (await git(workspace.worktreePath, ['rev-parse', '--verify', 'HEAD'])).stdout.trim();
         mergedRef = review.review_ref;

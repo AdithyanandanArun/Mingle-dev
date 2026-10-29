@@ -1,9 +1,9 @@
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, rmSync } from 'node:fs';
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { afterEach, expect, it } from 'vitest';
 import { makeRepo, runGit, tmpDir } from '../test-utils.ts';
-import { fetchTeamCompletionBranch, pushTeamCompletionBranch, pushTeamIntegrationBranch, teamAgentBranch, teamCompletionBranch } from './team-branch.ts';
+import { fetchTeamCompletionBranch, mergeTeamIntegrationTarget, pushTeamCompletionBranch, pushTeamIntegrationBranch, teamAgentBranch, teamCompletionBranch } from './team-branch.ts';
 
 const roots: string[] = [];
 afterEach(() => { while (roots.length) rmSync(roots.pop()!, { recursive: true, force: true }); });
@@ -68,6 +68,53 @@ it('publishes a checked integration worktree branch to a separately named target
   expect(await pushTeamIntegrationBranch({ worktreePath: repo, branch: 'main', sourceBranch, destinationBranch: 'main', expectedHead }))
     .toEqual({ branch: 'main', commitSha: expectedHead });
   expect(runGit(origin, 'rev-parse', 'refs/heads/main').trim()).toBe(expectedHead);
+});
+
+it('merges an advance on origin main before publishing accepted integration', async () => {
+  const repo = makeRepo(); roots.push(repo);
+  const { origin } = bareOrigin(repo);
+  const otherRoot = tmpDir('mingle-team-target-advance-'); roots.push(otherRoot);
+  const other = path.join(otherRoot, 'repo');
+  execFileSync('git', ['clone', '-q', origin, other]);
+  writeFileSync(path.join(other, 'concurrent.txt'), 'remote update\n');
+  runGit(other, 'add', '--', 'concurrent.txt');
+  runGit(other, 'commit', '-m', 'Concurrent origin update');
+  const remoteHead = runGit(other, 'rev-parse', 'HEAD').trim();
+  runGit(other, 'push', 'origin', 'main');
+  writeFileSync(path.join(repo, 'accepted.txt'), 'accepted work\n');
+  runGit(repo, 'add', '--', 'accepted.txt');
+  runGit(repo, 'commit', '-m', 'Accepted work');
+
+  expect(await mergeTeamIntegrationTarget({ worktreePath: repo, targetBranch: 'main', identity: { name: 'Host', email: 'host@example.test' } })).toBe(true);
+  const head = runGit(repo, 'rev-parse', 'HEAD').trim();
+  expect(() => runGit(repo, 'merge-base', '--is-ancestor', remoteHead, head)).not.toThrow();
+  expect(runGit(repo, 'show', `${head}:concurrent.txt`).trim()).toBe('remote update');
+  expect(runGit(repo, 'show', `${head}:accepted.txt`).trim()).toBe('accepted work');
+  await pushTeamIntegrationBranch({ worktreePath: repo, branch: 'main', expectedHead: head });
+  expect(runGit(origin, 'rev-parse', 'refs/heads/main').trim()).toBe(head);
+});
+
+it('aborts a target conflict and leaves origin unchanged', async () => {
+  const repo = makeRepo({ 'shared.txt': 'base\n' }); roots.push(repo);
+  const { origin } = bareOrigin(repo);
+  const otherRoot = tmpDir('mingle-team-target-conflict-'); roots.push(otherRoot);
+  const other = path.join(otherRoot, 'repo');
+  execFileSync('git', ['clone', '-q', origin, other]);
+  writeFileSync(path.join(other, 'shared.txt'), 'remote version\n');
+  runGit(other, 'add', '--', 'shared.txt');
+  runGit(other, 'commit', '-m', 'Concurrent origin edit');
+  const remoteHead = runGit(other, 'rev-parse', 'HEAD').trim();
+  runGit(other, 'push', 'origin', 'main');
+  writeFileSync(path.join(repo, 'shared.txt'), 'accepted version\n');
+  runGit(repo, 'add', '--', 'shared.txt');
+  runGit(repo, 'commit', '-m', 'Accepted edit');
+  const localHead = runGit(repo, 'rev-parse', 'HEAD').trim();
+
+  await expect(mergeTeamIntegrationTarget({ worktreePath: repo, targetBranch: 'main', identity: { name: 'Host', email: 'host@example.test' } }))
+    .rejects.toThrow(/origin\/main conflicts/);
+  expect(runGit(repo, 'rev-parse', 'HEAD').trim()).toBe(localHead);
+  expect(runGit(origin, 'rev-parse', 'refs/heads/main').trim()).toBe(remoteHead);
+  expect(runGit(repo, 'status', '--porcelain').trim()).toBe('');
 });
 
 it('pushes the permanent agent branch repeatedly using fast-forward updates', async () => {
