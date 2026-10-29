@@ -1,0 +1,51 @@
+.status-bar {
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--line-soft);
+  border-bottom: 0;
+  border-radius: var(--radius-md, 12px) var(--radius-md, 12px) 0 0;
+  background: var(--bg-surface);
+  color: var(--fg-1);
+  animation: fade-up var(--motion-ui, 180ms) var(--ease-out, ease-out) both;
+}
+
+.status-bar__row { display: flex; align-items: stretch; min-width: 0; min-height: 34px; }
+.status-bar__toggle, .status-bar__message { display: flex; align-items: center; gap: 8px; min-width: 0; flex: 1; padding: 0 9px 0 11px; }
+.status-bar__toggle { border: 0; background: transparent; color: inherit; text-align: left; cursor: pointer; }
+.status-bar__toggle:hover { background: var(--bg-hover); }
+.status-bar__toggle:focus-visible, .status-bar__stop:focus-visible { outline: 2px solid var(--blue); outline-offset: -2px; }
+.status-bar__dot { flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
+.status-bar__dot.is-running { animation: pulse 1.2s ease-in-out infinite; }
+.status-bar__primary { min-width: 0; max-width: 46%; overflow: hidden; color: var(--fg-0); font-size: var(--text-xs, 12px); font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.status-bar__secondary { min-width: 0; overflow: hidden; color: var(--fg-3); font-size: var(--text-2xs, 10px); text-overflow: ellipsis; white-space: nowrap; }
+.status-bar__chevron { flex: none; margin-left: auto; color: var(--fg-3); transition: transform var(--motion-fast, 120ms) var(--ease-standard, ease); }
+.status-bar.is-expanded .status-bar__chevron { transform: rotate(180deg); }
+.status-bar__stop { flex: none; padding: 0 12px; border: 0; border-left: 1px solid var(--line-soft); background: transparent; color: var(--fg-2); font: inherit; font-size: var(--text-xs, 12px); cursor: pointer; }
+.status-bar__stop:hover { color: var(--fg-0); background: var(--bg-hover); }
+.status-bar__steps { display: grid; gap: 1px; max-height: 220px; overflow: auto; margin: 0; padding: 5px 8px 8px; border-top: 1px solid var(--line-soft); list-style: none; animation: fade-up var(--motion-ui, 180ms) var(--ease-out, ease-out) both; }
+.status-bar__step { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 5px 5px; color: var(--fg-3); font-size: var(--text-xs, 12px); }
+.status-bar__step svg { flex: none; }
+.status-bar__step.is-in_progress { color: var(--accent); }
+.status-bar__step.is-done { color: var(--fg-3); }
+.status-bar__step.is-blocked { color: var(--err); }
+.status-bar__step-title { min-width: 0; overflow: hidden; color: var(--fg-1); text-overflow: ellipsis; white-space: nowrap; }
+.status-bar__step-state { flex: none; margin-left: auto; color: var(--fg-3); font-size: var(--text-2xs, 10px); }
+.status-bar__step.is-in_progress .status-bar__step-state { color: var(--accent); }
+.status-bar__step.is-blocked .status-bar__step-state { color: var(--err); }
+.status-bar + .composer { border-top-left-radius: 0; border-top-right-radius: 0; border-top-width: 0; }
+
+.group-composer-dock { display: flex; flex: none; flex-direction: column; align-items: center; min-width: 0; }
+.group-composer-dock > .composer-wrap.group-status-wrap { padding-bottom: 0; }
+.group-composer-dock > .composer-wrap.group-status-wrap + .composer-wrap { padding-top: 0; }
+
+@media (prefers-reduced-motion: reduce) {
+  .status-bar, .status-bar__steps { animation: none; }
+  .status-bar__dot.is-running { animation: none; }
+  .status-bar__chevron { transition: none; }
+}
+
+@media (max-width: 640px) {
+  .status-bar__toggle, .status-bar__message { gap: 6px; padding-inline: 8px; }
+  .status-bar__primary { max-width: 52%; }
+  .status-bar__stop { padding-inline: 9px; }
+}

@@ -1,6 +1,6 @@
 import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { ArrowDown, ArrowRight, FolderPlus } from 'lucide-react';
-import type { GroupDelivery, GroupSnapshot, Message, ProviderInfo, Session, SessionPlan, SessionRun, Task, ToolCall, UserQuestion } from '@mingle/contracts';
+import type { GroupDelivery, GroupSnapshot, Message, ProviderInfo, Session, SessionPlan, SessionRun, Task, ToolCall, UserQuestion, WorkspaceEvent } from '@mingle/contracts';
 import { useMingle, useProject } from '../../store/store';
 import { clockTime, cx } from '../../lib/format';
 import { DELIVERY_LABEL, activeMembers } from '../../lib/groups';
@@ -21,6 +21,9 @@ import { AttachmentHistory } from '../AttachmentHistory';
 import { appendContextReference, ContextReferenceChips } from '../MessageContextControls';
 import { GroupRemoteActivity } from '../distributed/GroupRemoteActivity';
 import { useTeamStructure } from '../../lib/team-structure-context';
+import { StatusBar } from '../status-bar/StatusBar';
+import { deriveStatusBarState } from '../status-bar/deriveStatusBarState';
+import { stopGroup } from '../../lib/groupActions';
 
 const NO_SESSIONS: Session[] = [];
 const NO_MESSAGES: Message[] = [];
@@ -30,6 +33,7 @@ const NO_PROVIDERS: ProviderInfo[] = [];
 const NO_TASKS: Task[] = [];
 const NO_PLANS: SessionPlan[] = [];
 const NO_QUESTIONS: UserQuestion[] = [];
+const NO_EVENTS: WorkspaceEvent[] = [];
 
 /** Start a long final report at its outcome, rather than hiding it above the viewport. */
 function latestPosition(scroller: HTMLDivElement): number {
@@ -152,6 +156,7 @@ export function GroupConversation({ snapshot }: { snapshot: GroupSnapshot }) {
   const allCalls = useMingle((s) => s.boot?.toolCalls ?? NO_CALLS);
   const allPlans = useMingle((s) => s.boot?.plans ?? NO_PLANS);
   const allQuestions = useMingle((s) => s.boot?.questions ?? NO_QUESTIONS);
+  const allEvents = useMingle((s) => s.boot?.events ?? NO_EVENTS);
   const approvals = useMingle((s) => s.boot?.approvals);
   const providers = useMingle((s) => s.boot?.providers ?? NO_PROVIDERS);
   const connection = useMingle((s) => s.connection);
@@ -178,6 +183,20 @@ export function GroupConversation({ snapshot }: { snapshot: GroupSnapshot }) {
   const calls = useMemo(() => toolCallsByRun(allCalls, sessionIds), [allCalls, sessionIds]);
   const activeSessionIds = useMemo(() => new Set(members.map((member) => member.sessionId)), [members]);
   const pending = useMemo(() => (approvals ?? []).filter((approval) => approval.status === 'pending' && activeSessionIds.has(approval.sessionId)), [approvals, activeSessionIds]);
+  const coordinatorMember = members.find((member) => member.id === snapshot.group.orchestratorMemberId)
+    ?? [...snapshot.requests].reverse().map((request) => members.find((member) => member.id === request.plannerMemberId)).find((member): member is NonNullable<typeof member> => Boolean(member))
+    ?? members.find((member) => member.sessionId === snapshot.group.anchorSessionId);
+  const coordinatorSession = coordinatorMember ? sessions.find((candidate) => candidate.id === coordinatorMember.sessionId) : anchor;
+  const coordinatorRuns = useMemo(() => allRuns.filter((run) => run.sessionId === coordinatorSession?.id), [allRuns, coordinatorSession?.id]);
+  const coordinatorCalls = useMemo(() => allCalls.filter((call) => call.sessionId === coordinatorSession?.id), [allCalls, coordinatorSession?.id]);
+  const waitingAgents = useMemo(() => members.filter((member) => member.id !== coordinatorMember?.id).flatMap((member) => {
+    const session = sessions.find((candidate) => candidate.id === member.sessionId);
+    return session && (session.status === 'running' || session.status === 'waiting') ? [{ name: `@${member.handle}`, running: true }] : [];
+  }), [members, coordinatorMember?.id, sessions]);
+  const statusBarState = useMemo(() => coordinatorSession ? deriveStatusBarState({
+    session: coordinatorSession, runs: coordinatorRuns, toolCalls: coordinatorCalls, tasks, events: allEvents,
+    approvals: approvals ?? [], questions: allQuestions, waitingAgents,
+  }) : null, [coordinatorSession, coordinatorRuns, coordinatorCalls, tasks, allEvents, approvals, allQuestions, waitingAgents]);
 
   const scroller = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
@@ -312,7 +331,10 @@ export function GroupConversation({ snapshot }: { snapshot: GroupSnapshot }) {
         </button>
       ) : null}
       </div>
-      <GroupComposer key={snapshot.group.id} snapshot={snapshot} anchor={anchor} onOpenMembers={() => useMingle.getState().setGroupMembersOpen(snapshot.group.id)} footer={<GitBar project={project} session={anchor} />} />
+      <div className="group-composer-dock">
+        {statusBarState ? <div className="composer-wrap group-status-wrap"><StatusBar state={statusBarState} onStop={() => stopGroup(snapshot)} /></div> : null}
+        <GroupComposer key={snapshot.group.id} snapshot={snapshot} anchor={anchor} onOpenMembers={() => useMingle.getState().setGroupMembersOpen(snapshot.group.id)} footer={<GitBar project={project} session={anchor} />} />
+      </div>
       </section>
       <AgentPresenceRail snapshot={snapshot} members={members} sessions={sessions} runs={allRuns} approvals={approvals ?? []} connection={connection} providers={providers} hidden={contextOpen}
         teamMembers={teamStructure.snapshot?.projectId === project.id ? teamStructure.snapshot.members : []} projectId={project.id} />

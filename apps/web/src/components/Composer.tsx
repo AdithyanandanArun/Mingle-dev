@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useId, useRef, useState } from 'react';
+import type { ReactNode } from 'react';
 import { ArrowUp, FilePlus2, Square } from 'lucide-react';
 import type { AttachmentRef, ProviderModel, Session } from '@mingle/contracts';
 import { useMingle } from '../store/store';
@@ -24,7 +25,7 @@ const removeSkillMarker = (text: string, name: string) => text.replace(new RegEx
 const localCommandNames = ['new', 'stop', 'settings', 'model', 'effort', 'permissions', 'tier', 'skills', 'usage', 'import', 'status', 'diff', 'compact', 'help'];
 const reservedCommands = new Set(localCommandNames);
 
-export function Composer({ session }: { session: Session }) {
+export function Composer({ session, statusBar }: { session: Session; statusBar?: ReactNode }) {
   const draft = useMingle((s) => s.drafts[session.id] ?? '');
   const contextRefs = useMingle((s) => s.contextDrafts[session.id] ?? EMPTY_CONTEXT_REFS);
   const connection = useMingle((s) => s.connection);
@@ -456,6 +457,7 @@ export function Composer({ session }: { session: Session }) {
         {canRetryFailedMessage ? <>{' '}<button type="button" className="link-btn" onClick={() => void retryFailedMessage()} disabled={disabled}>Retry with {PROVIDER_NAME[session.provider]}</button></> : null}
         {providerFailure && session.provider !== providerFailure.provider && failedMessage?.attachments?.length ? <span>Reattach the failed message’s files before retrying.</span> : null}
       </div> : null}
+      {statusBar}
       <div className={cx('composer', blocker && 'is-blocked')}>
         <label htmlFor={`composer-${session.id}`} className="sr-only">Message {session.name}</label>
         <ContextReferenceChips refs={contextRefs} disabled={sending || updating} onRemove={(index) => useMingle.getState().setContextDraft(session.id, contextRefs.filter((_, i) => i !== index))} />

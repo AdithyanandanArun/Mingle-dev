@@ -1,6 +1,6 @@
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { ArrowDown, FolderPlus } from 'lucide-react';
-import type { Session, SessionPlan, SessionRun, ToolCall, UserQuestion } from '@mingle/contracts';
+import type { Approval, Session, SessionPlan, SessionRun, Task, ToolCall, UserQuestion, WorkspaceEvent } from '@mingle/contracts';
 import { useMingle, useProject, useActiveSession, useActiveGroup } from '../store/store';
 import type { DisplayMessage } from '../lib/conversation';
 import { Button, EmptyState, MingleGlyph, PROVIDER_NAME } from './ui';
@@ -18,11 +18,17 @@ import { deriveSubagents } from '../lib/subagents';
 import { SubagentChatView } from './subagents/SubagentChatView';
 import { SubagentRail } from './subagents/SubagentRail';
 import { SubagentTranscriptLinks } from './subagents/SubagentTranscriptLinks';
+import { StatusBar } from './status-bar/StatusBar';
+import { deriveStatusBarState } from './status-bar/deriveStatusBarState';
+import { api, errorMessage } from '../lib/api';
 
 const EMPTY_RUNS: SessionRun[] = [];
 const EMPTY_TOOL_CALLS: ToolCall[] = [];
 const EMPTY_PLANS: SessionPlan[] = [];
 const EMPTY_QUESTIONS: UserQuestion[] = [];
+const EMPTY_TASKS: Task[] = [];
+const EMPTY_EVENTS: WorkspaceEvent[] = [];
+const EMPTY_APPROVALS: Approval[] = [];
 
 function useSessionMessages(session: Session | undefined): DisplayMessage[] {
   const all = useMingle((s) => s.boot?.messages);
@@ -81,6 +87,9 @@ function SingleSessionPane() {
   const subagents = useMemo(() => session ? deriveSubagents(sessionToolCalls, session.provider, session.model) : [], [sessionToolCalls, session?.provider, session?.model]);
   const allPlans = useMingle((s) => s.boot?.plans ?? EMPTY_PLANS);
   const allQuestions = useMingle((s) => s.boot?.questions ?? EMPTY_QUESTIONS);
+  const allTasks = useMingle((s) => s.boot?.tasks ?? EMPTY_TASKS);
+  const allEvents = useMingle((s) => s.boot?.events ?? EMPTY_EVENTS);
+  const allApprovals = useMingle((s) => s.boot?.approvals ?? EMPTY_APPROVALS);
   const toolCallsByRun = useMemo(() => {
     const grouped = new Map<string, ToolCall[]>();
     for (const call of allToolCalls) {
@@ -119,6 +128,14 @@ function SingleSessionPane() {
   }, [runs, messages, messageIds]);
   const approvals = useMingle((s) => s.boot?.approvals);
   const pending = useMemo(() => (approvals ?? []).filter((a) => a.sessionId === session?.id && a.status === 'pending'), [approvals, session?.id]);
+  const statusBarState = useMemo(() => session ? deriveStatusBarState({
+    session, runs, toolCalls: sessionToolCalls, tasks: allTasks, events: allEvents, approvals: allApprovals, questions: allQuestions,
+  }) : null, [session, runs, sessionToolCalls, allTasks, allEvents, allApprovals, allQuestions]);
+  const stopStatusRun = useCallback(async () => {
+    if (!session) return;
+    try { await api.interrupt(session.id); await useMingle.getState().refreshNow(); }
+    catch (cause) { useMingle.getState().toast('error', errorMessage(cause)); }
+  }, [session]);
   const plans = useMemo(() => {
     const rows = allPlans.filter((plan) => plan.sessionId === session?.id);
     const completed = rows.filter((plan) => plan.status === 'completed').at(-1);
@@ -239,7 +256,7 @@ function SingleSessionPane() {
       ) : null}
       </div>
       <SubagentRail subagents={subagents} provider={session.provider} onOpen={setSelectedSubagentId} />
-      <Composer key={session.id} session={session} />
+      <Composer key={session.id} session={session} statusBar={<StatusBar state={statusBarState} onStop={stopStatusRun} />} />
       </>}
     </div>
   );

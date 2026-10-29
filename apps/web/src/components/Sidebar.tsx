@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { Activity, ArrowDownToLine, ChevronsUpDown, FolderOpen, FolderPlus, FolderMinus, Kanban, LayoutPanelLeft, MoreHorizontal, Network, Search, Settings, SquarePen, Loader2, Pin, Users } from 'lucide-react';
+import { Activity, ArrowDownToLine, ChevronsUpDown, FolderOpen, FolderPlus, FolderMinus, LayoutPanelLeft, MoreHorizontal, Network, Search, Settings, SquarePen, Loader2, Pin, Users } from 'lucide-react';
 import type { Project, Session } from '@mingle/contracts';
 import { useMingle, useProject, type View } from '../store/store';
 import { copyText } from '../lib/clipboard';
@@ -12,8 +12,8 @@ import { RemoveProjectDialog } from './RemoveProjectDialog';
 import { useRetainedPresence } from '../lib/motion';
 import { useTeamStructure } from '../lib/team-structure-context';
 
-const VIEWS: { view: View; label: string; icon: typeof Kanban }[] = [
-  { view: 'tasks', label: 'Tasks', icon: Kanban }, { view: 'activity', label: 'Activity', icon: Activity }, { view: 'map', label: 'Agent map', icon: Network }, { view: 'team-structure', label: 'Team structure', icon: Network },
+const VIEWS: { view: View; label: string; icon: typeof Activity }[] = [
+  { view: 'activity', label: 'Activity', icon: Activity }, { view: 'map', label: 'Agent map', icon: Network }, { view: 'team-structure', label: 'Team structure', icon: Network },
 ];
 const GROUPS: { id: string; label: string; match: (session: Session) => boolean }[] = [
   { id: 'pinned', label: 'Pinned', match: (session) => session.pinned },
