@@ -87,6 +87,7 @@ describe('claude adapter', () => {
       { type: 'stream_event', session_id: 'sess-1', parent_tool_use_id: 'task-1', event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'Auth lives in ' } } },
       { type: 'stream_event', session_id: 'sess-1', parent_tool_use_id: 'task-1', event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'the session service.' } } },
       { type: 'assistant', session_id: 'sess-1', parent_tool_use_id: 'task-1', message: { id: 'child-message', content: [{ type: 'text', text: 'Auth lives in the session service.' }] } },
+      { type: 'assistant', session_id: 'sess-1', parent_tool_use_id: 'task-1', message: { content: [{ type: 'text', text: 'One additional detail.' }] } },
       success({ result: '' }),
     ]);
 
@@ -96,6 +97,7 @@ describe('claude adapter', () => {
     expect(run.events.filter((event) => event.type === 'subagent.text')).toEqual([
       { type: 'subagent.text', parentId: 'task-1', messageId: 'child-message', text: 'Auth lives in ' },
       { type: 'subagent.text', parentId: 'task-1', messageId: 'child-message', text: 'the session service.' },
+      { type: 'subagent.text', parentId: 'task-1', messageId: 'message-1', text: 'One additional detail.' },
     ]);
   });
 

@@ -32,7 +32,7 @@ export function SubagentRail({
       observer?.disconnect();
       window.removeEventListener('resize', update);
     };
-  }, [expandAtWidth]);
+  }, [expandAtWidth, subagents.length]);
 
   useEffect(() => {
     if (subagents.length === 0) preference.current = null;
@@ -60,7 +60,7 @@ export function SubagentRail({
           return <li key={subagent.id} className={`agent-presence__row is-${subagent.status}`}>
             <button type="button" className="agent-presence__open" aria-label={`Open @${subagent.handle} subagent chat, ${status}`} onClick={() => onOpen(subagent.id)}>
               <div className="agent-presence__identity" title={subagent.label}>
-                <AgentIdentity handle={subagent.handle} identityKey={subagent.parentCall.sessionId} provider={provider} />
+                <AgentIdentity handle={subagent.handle} identityKey={subagent.id} provider={provider} />
               </div>
               <span className="agent-presence__state">
                 {subagent.status === 'running' ? <LoaderCircle size={12} className="single-subagents__spinner" aria-hidden="true" /> : null}

@@ -76,6 +76,7 @@ export class ClaudeMessageMapper {
   private readonly taskToToolUse = new Map<string, string>();
   private readonly taskStates = new Map<string, { status: ToolActivity['status']; summary?: string; durationMs?: number }>();
   private readonly planTasks = new Map<string, ProviderTaskPlan['steps'][number]>();
+  private subagentMessageSequence = 0;
   private emittedText = false;
   private textBlockOpen = false;
   private lastAssistantError: string | null = null;
@@ -102,9 +103,9 @@ export class ClaudeMessageMapper {
     this.emit({ type: 'text', text: separator + delta });
   }
 
-  private subagentText(parentId: string, messageId: string | undefined, text: string, blockIndex = 0): void {
+  private subagentText(parentId: string, messageId: string | undefined, text: string): void {
     if (!text) return;
-    this.emit({ type: 'subagent.text', parentId, messageId: messageId ?? `message-${blockIndex}`, text });
+    this.emit({ type: 'subagent.text', parentId, messageId: messageId ?? `message-${++this.subagentMessageSequence}`, text });
   }
 
   private toolActivity(id: string, name: string, input: string, parentId: string | null, status: ToolActivity['status'], output?: string, durationMs?: number, summaryOverride?: string, details?: { cwd?: string; exitCode?: number; processId?: string }): void {
@@ -274,10 +275,10 @@ export class ClaudeMessageMapper {
     }
     const id = str(inner.id);
     const streamed = id !== undefined && this.streamedMessages.has(JSON.stringify([parentId, id]));
-    for (const [blockIndex, block] of inner.content.entries()) {
+    for (const block of inner.content) {
       if (!isRecord(block)) continue;
       if (block.type === 'text' && typeof block.text === 'string' && !streamed) {
-        if (parentId) this.subagentText(parentId, id, block.text, blockIndex);
+        if (parentId) this.subagentText(parentId, id, block.text);
         else {
           this.textBlockOpen = false;
           this.text(block.text);

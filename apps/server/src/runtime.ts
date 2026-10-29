@@ -840,11 +840,12 @@ export class SessionRuntime {
     if (!buffer || !isSubagentLaunch(run.provider, buffer.call) || !text) return;
     const safeText = redactSecrets(text);
     if (!safeText) return;
+    const safeMessageId = truncate(messageId, 200);
     const messages = buffer.call.subagentMessages ?? (buffer.call.subagentMessages = []);
-    let message = messages.find((entry) => entry.id === messageId);
+    let message = messages.find((entry) => entry.id === safeMessageId);
     if (!message) {
       if (messages.length >= MAX_SUBAGENT_MESSAGES) return;
-      message = { id: truncate(messageId, 200), content: '', createdAt: nowIso() };
+      message = { id: safeMessageId, content: '', createdAt: nowIso() };
       messages.push(message);
     }
     const currentTotal = messages.reduce((total, entry) => total + entry.content.length, 0);

@@ -129,7 +129,7 @@ export function SubagentChatView({
     <header className="single-subagent-view__head">
       <button ref={backButton} type="button" className="single-subagent-view__back" onClick={onBack}><ArrowLeft size={14} aria-hidden="true" /> Back to conversation</button>
       <div className="single-subagent-view__title">
-        <AgentIdentity handle={subagent.handle} identityKey={parentCall.sessionId} provider={provider} />
+        <AgentIdentity handle={subagent.handle} identityKey={subagent.id} provider={provider} />
         <span className={cx('single-subagent-view__status', `is-${subagent.status}`)}>
           {subagent.status === 'running' ? <LoaderCircle size={13} className="single-subagents__spinner" aria-hidden="true" /> : null}{status}
         </span>
