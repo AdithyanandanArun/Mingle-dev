@@ -14,6 +14,15 @@
 .status-bar__toggle { border: 0; background: transparent; color: inherit; text-align: left; cursor: pointer; }
 .status-bar__toggle:hover { background: var(--bg-hover); }
 .status-bar__toggle:focus-visible, .status-bar__stop:focus-visible { outline: 2px solid var(--blue); outline-offset: -2px; }
+.status-bar__task-icon { flex: none; color: var(--fg-3); }
+.status-bar__task-label { flex: none; color: var(--fg-2); font-size: var(--text-xs, 12px); }
+.status-bar__task-title { min-width: 0; flex: 1; overflow: hidden; color: var(--fg-0); font-size: var(--text-xs, 12px); font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
+.status-bar__task-count { flex: none; color: var(--fg-2); font-size: var(--text-2xs, 10px); font-variant-numeric: tabular-nums; }
+.status-bar__task-progress { display: flex; flex: none; gap: 3px; width: 48px; }
+.status-bar__task-progress i { flex: 1; height: 3px; border-radius: 3px; background: var(--line-strong); }
+.status-bar__task-progress i.is-done { background: var(--ok); }
+.status-bar__task-progress i.is-in_progress { background: var(--blue-strong); }
+.status-bar__task-progress i.is-blocked { background: var(--err); }
 .status-bar__dot { flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
 .status-bar__dot.is-running { animation: pulse 1.2s ease-in-out infinite; }
 .status-bar__primary { min-width: 0; max-width: 46%; overflow: hidden; color: var(--fg-0); font-size: var(--text-xs, 12px); font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
@@ -49,4 +58,9 @@
   .status-bar__toggle, .status-bar__message { gap: 6px; padding-inline: 8px; }
   .status-bar__primary { max-width: 52%; }
   .status-bar__stop { padding-inline: 9px; }
+}
+
+@media (max-width: 420px) {
+  .status-bar__task-progress { width: 32px; }
+  .status-bar__task-icon { display: none; }
 }
