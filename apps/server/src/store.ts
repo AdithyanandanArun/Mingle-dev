@@ -443,6 +443,9 @@ export class Store {
   isTeamProxySession(sessionId: string): boolean {
     return Boolean(this.get('SELECT 1 AS found FROM mingle_team_proxy_sessions WHERE session_id=?', sessionId));
   }
+  isTeamDeviceDeliveryRun(runId: string): boolean {
+    return Boolean(this.get('SELECT 1 AS found FROM mingle_team_device_deliveries WHERE run_id=?', runId));
+  }
   isGroupSession(sessionId: string): boolean {
     return Boolean(this.get('SELECT 1 AS found FROM group_members WHERE session_id=? AND removed_at IS NULL', sessionId));
   }

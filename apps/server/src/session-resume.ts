@@ -76,6 +76,7 @@ export class SessionResumeService {
     if (!Number.isFinite(startedAt) || Date.now() - startedAt > MAX_RESUME_AGE_MS) return this.skip(entry, 'interrupted-run-expired');
     if (session.status === 'running' || session.status === 'waiting' || this.runtime.isActive(session.id)) return this.skip(entry, 'session-already-active');
     if (this.store.isTeamProxySession(session.id)) return this.skip(entry, 'team-proxy-owned-by-another-device');
+    if (this.store.isTeamDeviceDeliveryRun(entry.runId)) return this.skip(entry, 'team-owner-delivery-requires-live-host-check');
     if (this.groups.forSession(session.id)) return this.skip(entry, 'group-delivery-managed');
     if (!detected.some((provider) => provider.id === session.provider && provider.available)) return this.skip(entry, 'provider-unavailable');
     if (signal.aborted) return;

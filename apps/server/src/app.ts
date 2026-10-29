@@ -93,8 +93,9 @@ const defaultLogger: Logger = (level, message, detail) => {
   else console.log(line);
 };
 
-function interruptedRunMessage(store: Store, sessionId: string): string {
+function interruptedRunMessage(store: Store, sessionId: string, runId?: string): string {
   if (store.isTeamProxySession(sessionId)) return 'Mingle was closed while this remote team delivery was active. It must be resumed by its owner device.';
+  if (runId && store.isTeamDeviceDeliveryRun(runId)) return 'Mingle was closed while this owner-device team delivery was active. It was interrupted because the host delivery could not be confirmed.';
   if (store.isGroupSession(sessionId)) return 'Mingle was closed while this group delivery was active. The delivery is retained for group recovery.';
   return store.getSettings().autoResumeOnRestart === false
     ? 'Mingle was closed while this run was active. Resume it manually when you are ready.'
@@ -123,7 +124,7 @@ export function recoverInterruptedState(store: Store, log: Logger, recovery?: Re
     for (const session of sessions) {
       if (sessionsWithActiveRuns.has(session.id) || sessionsWithPendingApprovals.has(session.id)) {
         store.updateSession(session.id, { status: 'interrupted', error: 'Mingle closed while this run was active.' });
-        store.insertMessage({ sessionId: session.id, role: 'system', kind: 'info', content: interruptedRunMessage(store, session.id) });
+        store.insertMessage({ sessionId: session.id, role: 'system', kind: 'info', content: interruptedRunMessage(store, session.id, activeRuns.find((run) => run.sessionId === session.id)?.id) });
         store.recordEvent({ projectId: session.projectId, sessionId: session.id, type: 'session.run.interrupted', summary: `Run interrupted by restart: ${session.name}`, payload: { reason: 'server restarted' } });
       } else {
         store.updateSession(session.id, {
@@ -359,7 +360,7 @@ export function createApplication(options: ApplicationOptions): MingleApplicatio
         for (const run of store.activeRuns()) {
           store.enqueueSessionResume({ runId: run.id, sessionId: run.sessionId, reason: 'application-closed', taskId: store.taskIdForRun(run.id) });
           const session = store.getSession(run.sessionId, true);
-          if (session) store.insertMessage({ sessionId: run.sessionId, role: 'system', kind: 'info', content: interruptedRunMessage(store, run.sessionId) });
+          if (session) store.insertMessage({ sessionId: run.sessionId, role: 'system', kind: 'info', content: interruptedRunMessage(store, run.sessionId, run.id) });
         }
         await runtime.shutdown();
         await recovery.drain();

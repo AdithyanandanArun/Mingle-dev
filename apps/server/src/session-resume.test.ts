@@ -130,6 +130,23 @@ describe('automatic session resume after restart', () => {
     expect(restarted.fake.runs).toHaveLength(0);
   });
 
+  it('does not run an owner-device team delivery without checking that the host still considers it live', async () => {
+    const dir = dataDir();
+    const before = await boot(dir);
+    const interrupted = seedActiveRun(before);
+    const now = new Date().toISOString();
+    before.app.store.db.prepare(`INSERT INTO mingle_team_device_deliveries
+      (delivery_id,shared_project_id,agent_id,session_id,request_json,status,run_id,created_at,updated_at)
+      VALUES(?,?,?,?,?,'running',?,?,?)`).run(randomUUID(), randomUUID(), randomUUID(), EXAMPLE_CONTRACT_SESSION_ID, '{}', interrupted.runId, now, now);
+    await before.cleanup();
+    apps.splice(apps.indexOf(before), 1);
+
+    const restarted = await boot(dir);
+    await waitFor(() => resumeEvents(restarted).some((event) => event.type === 'session.run.resume-skipped'));
+    expect(resumeEvents(restarted).find((event) => event.type === 'session.run.resume-skipped')?.payload.reason).toBe('team-owner-delivery-requires-live-host-check');
+    expect(restarted.fake.runs).toHaveLength(0);
+  });
+
   it('skips an archived session and records the reason', async () => {
     const dir = dataDir();
     const before = await boot(dir);
