@@ -41,6 +41,7 @@ import { RequestRemoteDelegationSchema } from '../../../packages/contracts/src/r
 import { TeamChatService } from './team-chat/service.ts';
 import { createTeamOrchestration, type TeamOrchestrationDeviceSideFactory } from './team-orchestration/index.ts';
 import { createDeviceSide } from './team-orchestration/device/index.ts';
+import { SessionResumeService } from './session-resume.ts';
 
 export interface ApplicationOptions extends ConfigOptions {
   /** Provider adapters and detection. Inject a fake in tests; the CLI entry passes ./providers/index.ts. */
@@ -92,11 +93,21 @@ const defaultLogger: Logger = (level, message, detail) => {
   else console.log(line);
 };
 
+function interruptedRunMessage(store: Store, sessionId: string): string {
+  if (store.isTeamProxySession(sessionId)) return 'Mingle was closed while this remote team delivery was active. It must be resumed by its owner device.';
+  if (store.isGroupSession(sessionId)) return 'Mingle was closed while this group delivery was active. The delivery is retained for group recovery.';
+  return store.getSettings().autoResumeOnRestart === false
+    ? 'Mingle was closed while this run was active. Resume it manually when you are ready.'
+    : 'Mingle was closed while this run was active. Resuming automatically…';
+}
+
 /** Recovery for state left behind by a process that died or was stopped mid-run. */
 export function recoverInterruptedState(store: Store, log: Logger, recovery?: RecoveryService): { sessions: number; approvals: number; tasks: number; messages: number } {
   let interruptedSessions: ReturnType<Store['sessionsInStatus']> = [];
   const result = store.tx(() => {
-    const sessionsWithActiveRuns = new Set(store.activeRunSessionIds());
+    const activeRuns = store.activeRuns();
+    const sessionsWithActiveRuns = new Set(activeRuns.map((run) => run.sessionId));
+    for (const run of activeRuns) store.enqueueSessionResume({ runId: run.id, sessionId: run.sessionId, reason: 'server-restarted', taskId: store.taskIdForRun(run.id) });
     store.recoverRuns();
     store.cancelPendingUserQuestions('The server restarted while the provider was waiting for input.');
     store.interruptExecutingPlans();
@@ -111,8 +122,8 @@ export function recoverInterruptedState(store: Store, log: Logger, recovery?: Re
     interruptedSessions = sessions;
     for (const session of sessions) {
       if (sessionsWithActiveRuns.has(session.id) || sessionsWithPendingApprovals.has(session.id)) {
-        store.updateSession(session.id, { status: 'interrupted', error: 'The server restarted while this run was active.' });
-        store.insertMessage({ sessionId: session.id, role: 'system', kind: 'info', content: 'The Mingle server restarted while this run was active. The run was interrupted; partial output above (if any) was kept.' });
+        store.updateSession(session.id, { status: 'interrupted', error: 'Mingle closed while this run was active.' });
+        store.insertMessage({ sessionId: session.id, role: 'system', kind: 'info', content: interruptedRunMessage(store, session.id) });
         store.recordEvent({ projectId: session.projectId, sessionId: session.id, type: 'session.run.interrupted', summary: `Run interrupted by restart: ${session.name}`, payload: { reason: 'server restarted' } });
       } else {
         store.updateSession(session.id, {
@@ -149,6 +160,11 @@ export function createApplication(options: ApplicationOptions): MingleApplicatio
   const recovery = new RecoveryService(store);
   const account = new AccountService(config.dataDir, options.env ?? process.env, () => store.touch());
   const setupLifecycle = new AbortController();
+  for (const entry of store.abandonStartingSessionResumes()) {
+    store.recordEvent({ projectId: store.getSession(entry.sessionId, true)?.projectId ?? null, sessionId: entry.sessionId,
+      type: 'session.run.resume-skipped', summary: 'Automatic resume skipped (resume-process-restarted)',
+      payload: { interruptedRunId: entry.runId, reason: 'resume-process-restarted' } });
+  }
   recoverInterruptedState(store, log, recovery);
 
   let boundPort = config.port;
@@ -173,6 +189,7 @@ export function createApplication(options: ApplicationOptions): MingleApplicatio
     store, workspace, tasks, handoffs, runtime, log, attachments, providers: () => providers.cached() ?? [],
     catalog: (session, refresh) => providers.catalog(session, refresh), recovery,
   });
+  const sessionResume = new SessionResumeService(store, runtime, providers, groups, log);
   const teamMcp = new TeamMcpBridge(groups, store, () => boundPort, () => config.host);
   runtime.setGroupServices(groups, teamMcp);
   groups.recover();
@@ -324,6 +341,7 @@ export function createApplication(options: ApplicationOptions): MingleApplicatio
       boundPort = (server.address() as AddressInfo).port;
       store.recordEvent({ type: 'runtime.started', summary: `Mingle server started on ${address().url}`, payload: { version: config.version, port: boundPort } });
       if (options.detectOnStart !== false) providers.warm();
+      sessionResume.start(setupLifecycle.signal);
       return address();
     },
     address,
@@ -338,6 +356,11 @@ export function createApplication(options: ApplicationOptions): MingleApplicatio
         if (pendingNotify) clearTimeout(pendingNotify);
         await Promise.all([closeAntigravityInstall(config.dataDir), closeAntigravityAuth(config.dataDir)]);
         groups.close();
+        for (const run of store.activeRuns()) {
+          store.enqueueSessionResume({ runId: run.id, sessionId: run.sessionId, reason: 'application-closed', taskId: store.taskIdForRun(run.id) });
+          const session = store.getSession(run.sessionId, true);
+          if (session) store.insertMessage({ sessionId: run.sessionId, role: 'system', kind: 'info', content: interruptedRunMessage(store, run.sessionId) });
+        }
         await runtime.shutdown();
         await recovery.drain();
         await attachments.close();

@@ -443,6 +443,9 @@ export class Store {
   isTeamProxySession(sessionId: string): boolean {
     return Boolean(this.get('SELECT 1 AS found FROM mingle_team_proxy_sessions WHERE session_id=?', sessionId));
   }
+  isGroupSession(sessionId: string): boolean {
+    return Boolean(this.get('SELECT 1 AS found FROM group_members WHERE session_id=? AND removed_at IS NULL', sessionId));
+  }
   recoverRuns(): void {
     const at = nowIso();
     for (const row of this.all("SELECT id FROM session_runs WHERE status = 'running'")) {
