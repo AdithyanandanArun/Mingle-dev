@@ -15,6 +15,7 @@ export interface CommitOptions {
   beforeCommit: () => Promise<void>;
   signal?: AbortSignal;
   identity?: GitIdentity;
+  env?: Record<string, string>;
 }
 
 interface RawChange { oldMode: string; newMode: string; newSha: string; status: string; path: string }
@@ -89,9 +90,9 @@ export async function createCommit(top: string, branch: string, head: string | n
 }
 
 async function writeCommit(top: string, tree: string, head: string | null, message: string, options: CommitOptions): Promise<string> {
-  const args = [...await identityArgs(top, options.identity), 'commit-tree', ...(options.sign ? ['-S'] : []), tree, ...(head ? ['-p', head] : [])];
+  const args = [...await identityArgs(top, options.identity, options.env), 'commit-tree', ...(options.sign ? ['-S'] : []), tree, ...(head ? ['-p', head] : [])];
   try {
-    const result = await git(top, args, { stdin: `${message.replace(/\s+$/, '')}\n`, signal: options.signal, detached: options.sign, timeoutMs: options.sign ? 60_000 : 20_000 });
+    const result = await git(top, args, { stdin: `${message.replace(/\s+$/, '')}\n`, signal: options.signal, env: options.env, detached: options.sign, timeoutMs: options.sign ? 60_000 : 20_000 });
     return result.stdout.trim();
   } catch (error) {
     if (!options.sign || !(error instanceof GitFailure)) throw error;

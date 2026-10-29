@@ -3,8 +3,8 @@ import { git } from './git-run.ts';
 export interface GitIdentity { name?: string | null; email?: string | null }
 
 /** Git configuration wins; otherwise return a validated per-command identity from the signed-in owner. */
-export async function identityArgs(cwd: string, fallback?: GitIdentity): Promise<string[]> {
-  const configured = await git(cwd, ['var', 'GIT_COMMITTER_IDENT'], { allowFailure: true });
+export async function identityArgs(cwd: string, fallback?: GitIdentity, env?: Record<string, string>): Promise<string[]> {
+  const configured = await git(cwd, ['var', 'GIT_COMMITTER_IDENT'], { allowFailure: true, env });
   if (configured.code === 0) return [];
   const name = fallback?.name?.trim() ?? '';
   const email = fallback?.email?.trim() ?? '';
