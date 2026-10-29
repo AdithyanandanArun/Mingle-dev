@@ -37,6 +37,7 @@ export const ProgressBoardAssignmentHandoffSchema = z.object({
 export const ProgressBoardMemberSchema = z.object({
   memberId: z.string().min(1).max(100), handle: z.string().min(1).max(32), role: z.enum(['peer', 'orchestrator', 'worker']),
   provider: ProviderSchema, model: z.string().min(1).max(150), device: z.string().min(1).max(120),
+  ownerAccountId: z.string().min(1).max(100).optional(), ownerDisplayName: z.string().max(120).optional(),
   state: ProgressBoardStateSchema, currentTask: ProgressBoardTaskSchema.nullable(), step: ProgressBoardStepSchema.nullable(),
   branch: ProgressBoardBranchSchema.nullable(), blockers: z.array(z.string().max(200)).max(3), health: ProgressBoardHealthSchema.nullable(),
   assignmentHandoff: ProgressBoardAssignmentHandoffSchema.optional(),

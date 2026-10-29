@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { GroupSnapshot } from '../../../../packages/contracts/src/groups.ts';
 import type { GroupMemberHealth, ProgressBoardSnapshot } from '../../../../packages/contracts/src/index.ts';
+import { ProgressBoardSnapshotSchema } from '../../../../packages/contracts/src/index.ts';
 import type {
   TeamChatAgent, TeamChatAuthor, TeamChatGroupView, TeamChatMessage, TeamChatPeer, TeamChatSnapshot, TeamChatSyncRequest, TeamChatSyncResponse,
 } from '../../../../packages/contracts/src/team-chat.ts';
@@ -455,7 +456,14 @@ export class TeamChatService {
     }
     if (view.group.id !== groupId || !view.board) throw notFound('The host has not synced a progress board for this team session yet.');
     const syncedAt = typeof row.created_at === 'string' && Number.isFinite(Date.parse(row.created_at)) ? row.created_at : message.createdAt;
-    return { board: view.board, syncedAt };
+    const board = ProgressBoardSnapshotSchema.parse({
+      ...view.board,
+      members: view.board.members.map((member) => ({
+        ...member,
+        ...(member.ownerAccountId ? { device: member.ownerAccountId === accountId ? 'This device' : member.ownerDisplayName || member.device } : {}),
+      })),
+    });
+    return { board, syncedAt };
   }
 
   async snapshot(projectId: string, page: { limit: number; before?: string }): Promise<TeamChatSnapshot> {

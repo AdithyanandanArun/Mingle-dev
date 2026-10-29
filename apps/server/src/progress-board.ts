@@ -103,22 +103,25 @@ function latestReviewRows(store: Store, group: GroupSnapshot): Map<string, Revie
   }
 }
 
-function cachedOwnerNames(store: Store, group: GroupSnapshot): Map<string, string> {
+function cachedOwnerIdentities(store: Store, group: GroupSnapshot): Map<string, { accountId: string; displayName: string }> {
   try {
     const sessions = group.members.map((member) => member.sessionId);
     if (!sessions.length) return new Map();
     const proxyRows = store.db.prepare(`SELECT session_id,owner_account_id FROM mingle_team_proxy_sessions
       WHERE session_id IN (${sessions.map(() => '?').join(',')})`).all(...sessions) as Array<{ session_id: string; owner_account_id: string }>;
-    if (!proxyRows.length) return new Map();
     const profileRow = store.db.prepare('SELECT snapshot_json FROM mingle_project_team_read_model WHERE local_project_id=?')
       .get(group.group.projectId) as { snapshot_json: string } | undefined;
     if (!profileRow) return new Map();
     const snapshot = JSON.parse(profileRow.snapshot_json) as { members?: Array<{ accountId?: unknown; displayName?: unknown }> };
     const names = new Map((snapshot.members ?? []).flatMap((member) => typeof member.accountId === 'string' && typeof member.displayName === 'string'
       ? [[member.accountId, member.displayName] as const] : []));
-    return new Map(proxyRows.flatMap((row) => {
-      const name = names.get(row.owner_account_id);
-      return name ? [[row.session_id, publicText(name, 120)] as const] : [];
+    const owners = new Map(proxyRows.map((row) => [row.session_id, row.owner_account_id] as const));
+    const host = store.db.prepare(`SELECT owner_account_id FROM mingle_team_host_projects WHERE group_id=? AND group_id!=''`)
+      .get(group.group.id) as { owner_account_id: string } | undefined;
+    if (host) for (const member of group.members) if (!owners.has(member.sessionId)) owners.set(member.sessionId, host.owner_account_id);
+    return new Map([...owners].flatMap(([sessionId, accountId]) => {
+      const name = names.get(accountId);
+      return name ? [[sessionId, { accountId, displayName: publicText(name, 120) }] as const] : [];
     }));
   } catch { return new Map(); }
 }
@@ -279,7 +282,7 @@ export async function buildProgressBoard(input: {
   const assignmentHandoff = latestAssignmentHandoff(store, group);
   const tasks = store.listTasks(group.group.projectId);
   const runs = new Map(store.activeRuns().map((run) => [run.sessionId, run]));
-  const ownerNames = cachedOwnerNames(store, group);
+  const ownerIdentities = cachedOwnerIdentities(store, group);
 
   const members = await Promise.all(group.members.filter((member) => !member.removedAt).map(async (member): Promise<ProgressBoardMember | null> => {
     const session = sessions.get(member.id);
@@ -322,6 +325,7 @@ export async function buildProgressBoard(input: {
     if (review?.push_failure) addBlocker(blockers, review.push_failure);
 
     const isRemote = proxyIds.has(member.id);
+    const owner = ownerIdentities.get(session.id);
     const currentTask = task ? { id: task.id, title: publicText(task.title), status: task.status } : null;
     const progress = activeStep(latestProgressStatus(store, session.id, runId), tasks.filter((item) => item.sessionId === session.id), runId);
     const latestUpdatedAt = [group.group.updatedAt, session.updatedAt, ...deliveries.slice(0, 5).map((delivery) => delivery.updatedAt)]
@@ -338,7 +342,8 @@ export async function buildProgressBoard(input: {
     }
     return {
       memberId: member.id, handle: member.handle, role: member.role, provider: session.provider, model: session.model,
-      device: isRemote ? ownerNames.get(session.id) || 'Remote owner' : 'this device',
+      device: owner?.displayName ?? (isRemote ? 'Remote owner' : 'this device'),
+      ...(owner ? { ownerAccountId: owner.accountId, ownerDisplayName: owner.displayName } : {}),
       state, currentTask, step: progress, branch, blockers: blockers.slice(0, 3), health,
       ...(memberHandoff ? { assignmentHandoff: memberHandoff } : {}), updatedAt: latestUpdatedAt,
     };

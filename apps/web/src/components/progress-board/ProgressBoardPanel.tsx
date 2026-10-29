@@ -92,16 +92,17 @@ function MemberCard({ member, now, onOpen, onCopy }: {
   </article>;
 }
 
-function activityAgentFor(member: ProgressBoardMember, group: GroupSnapshot | undefined, teamMembers: readonly TeamStructureMember[], sessionName: string | undefined): ActivityAgent {
+function activityAgentFor(member: ProgressBoardMember, group: GroupSnapshot | undefined, teamMembers: readonly TeamStructureMember[], sessionName: string | undefined, accountId: string | null): ActivityAgent {
   const groupMember = group?.members.find((candidate) => candidate.id === member.memberId || candidate.handle === member.handle);
   const teamMember = teamMembers.find((candidate) => candidate.handle === member.handle);
   const sessionId = groupMember?.sessionId ?? teamMember?.sessionId ?? null;
-  const local = teamMember ? teamMember.local && Boolean(teamMember.sessionId) : member.device === 'this device' && Boolean(groupMember);
+  const local = member.ownerAccountId && accountId ? member.ownerAccountId === accountId
+    : teamMember ? teamMember.local && Boolean(teamMember.sessionId) : member.device === 'this device' && Boolean(groupMember);
   const role = teamMember?.role === 'orchestrator' ? 'orchestrator' : teamMember?.role === 'idle' ? 'idle' : member.role === 'orchestrator' ? 'orchestrator' : 'worker';
   return {
     agentId: teamMember?.agentId ?? groupMember?.id ?? member.memberId,
     handle: member.handle, name: teamMember?.name ?? sessionName ?? member.handle, provider: member.provider, model: member.model,
-    local, ownerDisplayName: teamMember?.ownerDisplayName ?? member.device,
+    local, ownerDisplayName: member.ownerDisplayName ?? teamMember?.ownerDisplayName ?? member.device,
     deviceName: teamMember?.deviceName ?? member.device, role, state: TEAM_ACTIVITY_STATE[member.state],
     currentTask: member.currentTask?.title ?? teamMember?.currentTask ?? null, sessionId,
     failureMessage: member.state === 'failed' || member.state === 'stalled' ? member.blockers[0] ?? null : null,
@@ -113,6 +114,7 @@ export function ProgressBoardPanel({ projectId, groupId, active, onViewChange, r
   group?: GroupSnapshot; teamMembers?: readonly TeamStructureMember[];
 }) {
   const sessions = useMingle((state) => state.boot?.sessions ?? EMPTY_SESSIONS);
+  const [accountId, setAccountId] = useState<string | null>(null);
   const [board, setBoard] = useState<ProgressBoardResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -123,6 +125,13 @@ export function ProgressBoardPanel({ projectId, groupId, active, onViewChange, r
   const refreshAgain = useRef(false);
   const boardRef = useRef(board);
   boardRef.current = board;
+
+  useEffect(() => {
+    const controller = new AbortController();
+    setAccountId(null);
+    void api.account(controller.signal).then((account) => setAccountId(account.status === 'signed-in' ? account.user?.id ?? null : null)).catch(() => undefined);
+    return () => controller.abort();
+  }, [projectId]);
 
   const refresh = useCallback(async (signal?: AbortSignal) => {
     if (!active || signal?.aborted) return;
@@ -174,7 +183,7 @@ export function ProgressBoardPanel({ projectId, groupId, active, onViewChange, r
 
   const openAgent = (member: ProgressBoardMember) => {
     const name = sessions.find((session) => session.id === group?.members.find((row) => row.id === member.memberId)?.sessionId)?.name;
-    setSelectedAgent(activityAgentFor(member, group, teamMembers, name));
+    setSelectedAgent(activityAgentFor(member, group, teamMembers, name, accountId));
   };
 
   const copyBranch = async (branch: string) => {
@@ -185,7 +194,7 @@ export function ProgressBoardPanel({ projectId, groupId, active, onViewChange, r
     window.setTimeout(() => setCopyNotice(''), 2200);
   };
 
-  const cardRows = useMemo(() => board?.members.map((member) => ({ ...member, device: boardDeviceLabel(member, teamMembers) })) ?? [], [board, teamMembers]);
+  const cardRows = useMemo(() => board?.members.map((member) => ({ ...member, device: boardDeviceLabel(member, teamMembers, accountId) })) ?? [], [board, teamMembers, accountId]);
   const syncedLabel = board ? syncedBoardLabel(board, now) : null;
   return <>
     <div className="progress-board-switch" role="group" aria-label="Session view">

@@ -293,8 +293,23 @@ it('publishes a scrubbed board with the host group view and serves it on the tea
   try {
     const group = sharedGroup(host);
     addBoardSessions(host, group);
+    host.store.db.exec(`CREATE TABLE IF NOT EXISTS mingle_project_team_read_model(local_project_id TEXT PRIMARY KEY,account_id TEXT,snapshot_json TEXT NOT NULL,refreshed_at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS mingle_team_host_projects(group_id TEXT,owner_account_id TEXT);
+      CREATE TABLE IF NOT EXISTS mingle_team_proxy_sessions(session_id TEXT,team_id TEXT,shared_project_id TEXT,agent_id TEXT,owner_account_id TEXT,owner_device_id TEXT,handle TEXT);`);
+    const at = new Date().toISOString();
+    host.store.db.prepare(`INSERT INTO mingle_project_team_read_model(local_project_id,account_id,snapshot_json,refreshed_at) VALUES(?,?,?,?)`)
+      .run(host.project.id, HOST_ACCOUNT, JSON.stringify({ members: [
+        { accountId: HOST_ACCOUNT, displayName: 'Example host' }, { accountId: MEMBER_ACCOUNT, displayName: 'Example member' },
+      ] }), at);
+    host.store.db.prepare(`INSERT INTO mingle_team_host_projects(team_id,shared_project_id,local_project_id,owner_account_id,host_device_id,group_id,settings_json,updated_at)
+      VALUES(?,?,?,?,?,?,?,?)`).run(TEAM, 'shared-project', host.project.id, HOST_ACCOUNT, HOST_DEVICE, group.group.id,
+      JSON.stringify({ leaderOrchestration: true, permissionLevel: 'full-access', integrationTarget: 'main', orchestratorAgentId: 'lead', fallbackAgentIds: [], version: 1, updatedAt: at, updatedByAccountId: HOST_ACCOUNT }), at);
+    host.store.db.prepare(`INSERT INTO mingle_team_proxy_sessions(session_id,team_id,shared_project_id,agent_id,owner_account_id,owner_device_id,handle)
+      VALUES(?,?,?,?,?,?,?)`).run('private-worker', TEAM, 'shared-project', 'worker-agent', MEMBER_ACCOUNT, MEMBER_DEVICE, 'barista');
     const localBoard = await (await import('../progress-board.ts')).buildProgressBoard({ store: host.store, group });
     expect(localBoard.members).toHaveLength(2);
+    expect(localBoard.members.find((row) => row.handle === 'espresso-lead')).toMatchObject({ ownerAccountId: HOST_ACCOUNT, ownerDisplayName: 'Example host' });
+    expect(localBoard.members.find((row) => row.handle === 'barista')).toMatchObject({ ownerAccountId: MEMBER_ACCOUNT, ownerDisplayName: 'Example member' });
     const healthMember = group.members[0]!;
     host.service.setProgressBoardMemberHealthProvider(() => [{ memberId: healthMember.id, handle: healthMember.handle, state: 'cooldown',
       until: '2026-10-29T10:12:00.000Z', reason: 'Quota exhausted at https://secret.example api_key=12345678901234567890' }]);
@@ -322,8 +337,9 @@ it('publishes a scrubbed board with the host group view and serves it on the tea
     expect(synced.board.members).toHaveLength(2);
     expect(synced.syncedAt).toBe(envelope.payload.createdAt);
     expect(synced.board.members.find((row) => row.handle === 'barista')).toMatchObject({
-      currentTask: { title: 'Review [path] [remote]' }, step: { label: 'Inspect [path] [remote]' },
+      device: 'This device', ownerAccountId: MEMBER_ACCOUNT, currentTask: { title: 'Review [path] [remote]' }, step: { label: 'Inspect [path] [remote]' },
     });
+    expect(synced.board.members.find((row) => row.handle === 'espresso-lead')).toMatchObject({ device: 'Example host', ownerAccountId: HOST_ACCOUNT });
     expect(JSON.stringify(synced.board)).not.toContain('/home/example/private');
     expect(JSON.stringify(synced.board)).not.toContain('secret.example');
   } finally { await Promise.all([host.close(), member.close()]); }

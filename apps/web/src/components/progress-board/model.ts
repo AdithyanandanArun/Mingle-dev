@@ -81,9 +81,10 @@ export function syncedBoardLabel(board: Pick<ProgressBoardResponse, 'source' | '
   return board.source === 'host' && board.syncedAt ? `Synced from host · ${relativeTime(board.syncedAt, now)}` : null;
 }
 
-export function boardDeviceLabel(member: ProgressBoardMember, teamMembers: readonly TeamStructureMember[]): string {
+export function boardDeviceLabel(member: ProgressBoardMember, teamMembers: readonly TeamStructureMember[], accountId?: string | null): string {
   const teamMember = teamMembers.find((candidate) => candidate.handle === member.handle);
   if (!teamMember) return member.device;
+  if (accountId && member.ownerAccountId) return member.ownerAccountId === accountId ? 'This device' : member.ownerDisplayName?.trim() || teamMember.ownerDisplayName.trim() || member.device;
   if (teamMember.local) return 'This device';
   return teamMember.ownerDisplayName.trim() || member.device;
 }

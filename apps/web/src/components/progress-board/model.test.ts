@@ -52,7 +52,10 @@ describe('progress board card model', () => {
       deviceId: 'device-1', deviceName: 'MacBook', local: false, sessionId: null, provider: 'codex', model: 'gpt-6.1-sol',
       effort: null, role: 'worker', fallbackRank: null, state: 'idle', consent: 'granted', currentTask: null, lastActivityAt: null, failure: null,
     };
-    expect(boardDeviceLabel(base, [teammate])).toBe('Alex Host');
-    expect(boardDeviceLabel(base, [{ ...teammate, local: true }])).toBe('This device');
+  expect(boardDeviceLabel(base, [teammate])).toBe('Alex Host');
+  expect(boardDeviceLabel(base, [{ ...teammate, local: true }])).toBe('This device');
+  expect(boardDeviceLabel({ ...base, ownerAccountId: 'owner', ownerDisplayName: 'Alex Host' }, [teammate], 'owner')).toBe('This device');
+  expect(boardDeviceLabel({ ...base, ownerAccountId: 'member', ownerDisplayName: 'My Name' }, [teammate], 'member')).toBe('This device');
+  expect(boardDeviceLabel({ ...base, ownerAccountId: 'owner', ownerDisplayName: 'Alex Host' }, [{ ...teammate, local: true }], 'member')).toBe('Alex Host');
   });
 });
