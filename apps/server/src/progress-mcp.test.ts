@@ -74,6 +74,8 @@ describe('built-in progress MCP', () => {
     ]);
     expect(runA.progressMcp?.url).toContain('127.0.0.1');
     expect(runB.progressMcp?.token).not.toBe(runA.progressMcp?.token);
+    expect(runA.context).toContain('mingle_status_set');
+    expect(runA.context).toContain('mingle_plan_update');
     const clientA = await connect(runA.progressMcp!);
     const clientB = await connect(runB.progressMcp!);
 
@@ -121,6 +123,7 @@ describe('built-in progress MCP', () => {
     expect((await t.api('POST', `/api/sessions/${EXAMPLE_CONTRACT_SESSION_ID}/messages`, { content: 'Prepare a read-only plan.', intent: 'plan' })).status).toBe(202);
     const planOptions = await planningRun.promise;
     expect(planOptions.progressMcp).toBeUndefined();
+    expect(planOptions.context).toBeUndefined();
     expect(planOptions.prompt).not.toContain('mingle_status_set');
   });
 });

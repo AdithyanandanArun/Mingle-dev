@@ -532,15 +532,16 @@ export class SessionRuntime {
       const progressInstructions = progressMcp
         ? 'Mingle provides mingle_status_set for the live composer status and mingle_plan_update for a replaceable checklist. Keep them current during multi-step work, updating status as you make progress.'
         : undefined;
-      const effectivePrompt = explicit ? prompt : [providerHandoffBlock, run.intent !== 'plan' ? groupContext?.instructions : undefined, progressInstructions, run.context, prompt].filter(Boolean).join('\n\n');
+      const effectivePrompt = explicit ? prompt : [providerHandoffBlock, run.intent !== 'plan' ? groupContext?.instructions : undefined, run.context, prompt].filter(Boolean).join('\n\n');
       if (explicit && (providerHandoffBlock || progressInstructions)) run.context = [providerHandoffBlock, progressInstructions, run.context].filter(Boolean).join('\n\n');
       if (explicit && groupContext) run.context = [run.context, groupContext.instructions].filter(Boolean).join('\n\n');
       const stagedAttachments = this.attachmentService && run.attachmentOwnerId
         ? await this.attachmentService.stage(run.id, run.attachmentOwnerKind ?? 'message', run.attachmentOwnerId)
         : [];
       if (run.controller.signal.aborted) throw conflict('The run was interrupted before the provider started.');
+      const injectedContext = [explicit ? run.context : undefined, progressInstructions].filter(Boolean).join('\n\n');
       const runOptions: RunOptions & DispatchAwareOptions = {
-        session, prompt: effectivePrompt, intent: run.intent, ...(explicit ? { invocation: explicit, ...(run.context ? { context: run.context } : {}) } : {}), attachments: stagedAttachments, teamMcp, progressMcp, providerTaskState: this.nativeTaskState(session), skills: run.skills, browserMcp, signal: run.controller.signal, settings,
+        session, prompt: effectivePrompt, intent: run.intent, ...(explicit ? { invocation: explicit } : {}), ...(injectedContext ? { context: injectedContext } : {}), attachments: stagedAttachments, teamMcp, progressMcp, providerTaskState: this.nativeTaskState(session), skills: run.skills, browserMcp, signal: run.controller.signal, settings,
         onEvent: (event) => this.handleEvent(run, capabilityTokens.length ? JSON.parse(scrubCapabilities(JSON.stringify(event))) as AdapterEvent : event),
         requestApproval: (request) => this.requestApproval(run, JSON.parse(scrubCapabilities(JSON.stringify(request)))),
         requestUserInput: (request) => this.requestUserInput(run, request),
