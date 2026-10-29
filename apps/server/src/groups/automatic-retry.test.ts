@@ -71,18 +71,28 @@ describe('full-access uncertain delivery recovery', () => {
     expect(t.app.store.listEvents().some((event) => event.type === 'group.recovery.auto-retry')).toBe(false);
   }, 15_000);
 
-  it('does not retry again when the one automatic continuation also fails', async () => {
+  it('retries the same agent only once, then falls back to another member and pauses when none remain', async () => {
     const t = await boot();
     const group = await createGroup(t, 'extended');
     t.fake.script = async () => { throw new Error('The provider stopped after dispatch; side effects may have completed.'); };
 
     const accepted = await t.api('POST', `/api/groups/${group.group.id}/messages`, { content: 'Make a scoped change and verify it.' });
     expect(accepted.status).toBe(202);
-    await waitFor(() => t.fake.runs.length === 2 && t.app.runtime.activeCount() === 0
-      && !t.app.groups.get(group.group.id).deliveries.some((delivery) => delivery.status === 'running'), 10_000, 'one retry to fail and settle');
+    // A request is briefly paused between each failure and its automatic recovery; settle on the final fallback outcome.
+    await waitFor(() => {
+      const current = t.app.groups.get(group.group.id);
+      return t.app.store.listEvents().some((event) => event.type === 'group.delivery.auto-fallback')
+        && t.app.runtime.activeCount() === 0 && current.requests[0]?.status === 'paused'
+        && current.deliveries.length === 3 && current.deliveries.every((delivery) => delivery.status === 'failed');
+    }, 10_000, 'the retry and fallback to fail and the request to pause');
 
-    expect(t.fake.runs).toHaveLength(2);
-    expect(t.app.store.listEvents().filter((event) => event.type === 'group.recovery.auto-retry')).toHaveLength(1);
-    expect(t.app.groups.get(group.group.id).deliveries.filter((delivery) => delivery.status === 'failed')).toHaveLength(2);
+    const snapshot = t.app.groups.get(group.group.id);
+    const events = t.app.store.listEvents();
+    // Original turn, one inspect-first retry on the same agent, then one fallback to the remaining member.
+    expect(t.fake.runs).toHaveLength(3);
+    expect(events.filter((event) => event.type === 'group.recovery.auto-retry')).toHaveLength(1);
+    expect(events.filter((event) => event.type === 'group.delivery.auto-fallback')).toHaveLength(1);
+    expect(snapshot.deliveries.filter((delivery) => delivery.status === 'failed')).toHaveLength(3);
+    expect(new Set(snapshot.deliveries.map((delivery) => delivery.memberId)).size).toBe(2);
   }, 15_000);
 });
