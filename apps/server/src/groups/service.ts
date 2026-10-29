@@ -176,17 +176,37 @@ export class GroupService {
     if (current && current.until >= until) return;
     const reason = failure.kind === 'quota_exhausted' ? 'Provider quota exhausted' : 'Provider rate limited';
     this.providerCooldowns.set(session.provider, { until, reason, kind: failure.kind });
+    this.repo.upsertProviderCooldown({ groupId: group.id, memberId: member.id, provider: session.provider, reason,
+      until: new Date(until).toISOString(), createdAt: new Date(now).toISOString() });
     this.event(group, 'group.member.cooldown', `${session.provider} is cooling down after ${failure.kind.replaceAll('_', ' ')}`, {
       memberId: member.id, provider: session.provider, failureKind: failure.kind, reason, until: new Date(until).toISOString(),
     }, session.id);
   }
 
+  private pruneProviderCooldowns(now = this.now()): void {
+    this.repo.pruneProviderCooldowns(new Date(now).toISOString());
+    for (const [provider, cooldown] of this.providerCooldowns) if (cooldown.until <= now) this.providerCooldowns.delete(provider);
+  }
+
+  private loadProviderCooldowns(): void {
+    const now = this.now();
+    this.pruneProviderCooldowns(now);
+    for (const row of this.repo.providerCooldowns()) {
+      const until = Date.parse(row.until);
+      if (!Number.isFinite(until) || until <= now) continue;
+      const provider = row.provider as Session['provider'];
+      const current = this.providerCooldowns.get(provider);
+      if (current && current.until >= until) continue;
+      this.providerCooldowns.set(provider, { until, reason: row.reason,
+        kind: row.reason === 'Provider quota exhausted' ? 'quota_exhausted' : 'temporary_rate_limit' });
+    }
+  }
+
   private providerOnCooldown(provider: Session['provider']): boolean {
+    this.pruneProviderCooldowns();
     const cooldown = this.providerCooldowns.get(provider);
     if (!cooldown) return false;
-    if (cooldown.until > this.now()) return true;
-    this.providerCooldowns.delete(provider);
-    return false;
+    return cooldown.until > this.now();
   }
 
   private failureCooldownActive(failure: ProviderFailure): boolean {
@@ -448,6 +468,7 @@ export class GroupService {
     this.catalog = options.catalog;
     this.recovery = options.recovery ?? new RecoveryService(options.store);
     this.now = options.now ?? (() => Date.now());
+    this.loadProviderCooldowns();
     this.stallTimeoutMs = Math.max(1000, options.stallTimeoutMs ?? DEFAULT_STALL_TIMEOUT_MS);
     this.stallSweepIntervalMs = Math.max(1000, options.stallSweepIntervalMs ?? DEFAULT_STALL_SWEEP_INTERVAL_MS);
     this.unsubscribe = this.store.subscribe((event) => {
@@ -720,10 +741,11 @@ export class GroupService {
 
   get(id: string): GroupSnapshot { return this.snapshot(this.requireGroup(id)); }
 
-  /** Read-only health summary for progress surfaces; cooldown state is process-local. */
+  /** Read-only health summary for progress surfaces; expired cooldowns are pruned as part of the read. */
   getMemberHealth(groupId: string): GroupMemberHealth[] {
     const group = this.requireGroup(groupId);
     const now = this.now();
+    this.pruneProviderCooldowns(now);
     return this.repo.members(group.id, false).map((member) => {
       const session = this.store.getSession(member.sessionId);
       const cooldown = session ? this.providerCooldowns.get(session.provider) : undefined;

@@ -1,14 +1,16 @@
 import { afterEach, expect, it, vi } from 'vitest';
-import { writeFileSync } from 'node:fs';
+import { rmSync, writeFileSync } from 'node:fs';
 import type { AdapterEvent, GroupSnapshot, Provider, ProviderInfo, RunOptions } from '@mingle/contracts';
 import { EXAMPLE_CONTRACT_SESSION_ID } from '../example.ts';
 import { ProviderError, type DispatchAwareOptions } from '../providers/common.ts';
-import { deferred, runGit, startTestApp, waitFor, type TestApp } from '../test-utils.ts';
+import { deferred, runGit, startTestApp, tmpDir, waitFor, type TestApp } from '../test-utils.ts';
 
 const apps: TestApp[] = [];
+const dataDirs: string[] = [];
 afterEach(async () => {
   vi.restoreAllMocks();
   while (apps.length) await apps.pop()!.cleanup();
+  while (dataDirs.length) rmSync(dataDirs.pop()!, { recursive: true, force: true });
 });
 
 const available = (id: Provider, model: string): ProviderInfo => ({ id, name: id, available: true, version: 'fake', executable: `/fake/${id}`, reason: null,
@@ -127,6 +129,34 @@ it('keeps supervised failures visible without automatically dispatching a replac
   expect(t.fake.runs.some((run) => run.session.id === target.sessionId)).toBe(false);
   expect(t.app.store.listEvents().some((event) => event.type === 'group.delivery.auto-fallback' && event.payload.groupId === group.groupId)).toBe(false);
 }, 15_000);
+
+it('persists provider cooldowns across restart and prunes them at their injected expiry time', async () => {
+  const dir = tmpDir('mingle-group-cooldown-'); dataDirs.push(dir);
+  let clock = Date.now();
+  const before = await startTestApp({ dataDir: dir, keepData: true, groupNow: () => clock }); apps.push(before);
+  const group = await createLocalGroup(before, 'current-leads', 2);
+  const source = group.workers[0]!;
+  await assignTask(before, group.groupId, source.handle, async (options) => {
+    if (options.session.id === source.sessionId) {
+      (options as typeof options & DispatchAwareOptions).onDispatchState?.('dispatched');
+      throw new ProviderError('Account quota exhausted.', { code: 'quota_exhausted', outcomeKnown: true });
+    }
+  });
+  await waitFor(() => before.app.groups.get(group.groupId).deliveries.some((delivery) => delivery.memberId === source.id && delivery.status === 'failed'), 6000, 'quota failure cooldown');
+  expect(before.app.groups.getMemberHealth(group.groupId).find((health) => health.memberId === source.id)).toMatchObject({
+    state: 'cooldown', reason: 'Provider quota exhausted', until: new Date(clock + 15 * 60_000).toISOString(),
+  });
+  expect(before.app.store.db.prepare('SELECT group_id,member_id,provider,reason,until FROM group_provider_cooldowns').get()).toMatchObject({
+    group_id: group.groupId, member_id: source.id, provider: 'codex', reason: 'Provider quota exhausted',
+  });
+  await before.cleanup(); apps.splice(apps.indexOf(before), 1);
+
+  const restarted = await startTestApp({ dataDir: dir, keepData: true, groupNow: () => clock }); apps.push(restarted);
+  expect(restarted.app.groups.getMemberHealth(group.groupId).find((health) => health.memberId === source.id)).toMatchObject({ state: 'cooldown', reason: 'Provider quota exhausted' });
+  clock += 15 * 60_000 + 1;
+  expect(restarted.app.groups.getMemberHealth(group.groupId).find((health) => health.memberId === source.id)?.state).not.toBe('cooldown');
+  expect(restarted.app.store.db.prepare('SELECT COUNT(*) AS count FROM group_provider_cooldowns').get()).toEqual({ count: 0 });
+}, 20_000);
 
 it('replaces a failed Full-access coordinator using the best available worker', async () => {
   const t = await startTestApp(); apps.push(t);

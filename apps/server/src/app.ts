@@ -55,6 +55,8 @@ export interface ApplicationOptions extends ConfigOptions {
   detectOnStart?: boolean;
   runtime?: RuntimeOptions;
   terminal?: TerminalOptions;
+  /** Injectable clock for durable group cooldown and restart-recovery behavior. */
+  groupNow?: () => number;
   /** Injectable sender boundary for invitation tests; credentials remain in the cloud function. */
   projectCollaboration?: { emailSender?: ProjectInvitationEmailSender };
   /** Optional owner-side orchestration executor factory; injected while that implementation is developed independently. */
@@ -191,7 +193,7 @@ export function createApplication(options: ApplicationOptions): MingleApplicatio
   runtime.setAttachments(attachments);
   const groups = new GroupService({
     store, workspace, tasks, handoffs, runtime, log, attachments, providers: () => providers.cached() ?? [],
-    catalog: (session, refresh) => providers.catalog(session, refresh), recovery,
+    catalog: (session, refresh) => providers.catalog(session, refresh), recovery, now: options.groupNow,
   });
   const sessionResume = new SessionResumeService(store, runtime, providers, groups, log);
   const teamMcp = new TeamMcpBridge(groups, store, () => boundPort, () => config.host);

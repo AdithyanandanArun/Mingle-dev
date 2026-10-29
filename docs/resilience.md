@@ -16,7 +16,7 @@ For a local extended group, a dispatched member run uses native Full-access only
 
 Fallback is a group-level `GroupRecoveryPolicy`, not a group default. `automaticFallback` defaults false for supervised/balanced groups. In Full access, it is effectively enabled because the stored false value also represents the legacy/default setting and does not distinguish an explicit opt-out. A configured worker or lead fallback is tried first; otherwise the group selects an eligible available member, preferring a different provider and lower queued/running load while avoiding the orchestrator for worker tasks unless it is the only eligible member. Cross-device candidates require a current Full-access consent and an online owner device. Known same quota-pool exhaustion, provider cooldown, held/removed members, conflicting assignment scope, busy sessions, or permission mismatch exclude a candidate. Full access is allowed to use a different provider when quota-pool identity is unreported; this does not assert that its quota is available. In supervised/balanced groups, `allowUnverifiedQuotaFallback` remains the explicit advanced opt-in for one attempt to a configured cross-provider fallback when the source quota pool is unknown.
 
-Quota exhaustion and temporary rate limits create a process-local provider cooldown until the provider's reported `retryAt`, or 15 minutes when no reset is reported. `getMemberHealth(groupId)` exposes per-member `ok`, `cooldown`, `stalled` or `failed` state, with the cooldown deadline and a short reason. Cooldown memory is not persisted across server restarts.
+Quota exhaustion and temporary rate limits create a durable provider cooldown until the provider's reported `retryAt`, or 15 minutes when no reset is reported. Migration 26 stores the originating group/member, provider, reason, deadline and creation time. The active cooldown is loaded at startup, and expired rows are pruned during startup and health/routing reads. `getMemberHealth(groupId)` exposes the same per-member `ok`, `cooldown`, `stalled` or `failed` state, with the cooldown deadline and a short reason.
 
 Full-access worker reassignment preserves the assignment ID, task, scope and acceptance criteria, and is bounded to two automatic fallbacks per task. A replacement receives a bounded failure/partial-text note and work reference: local workers include their source worktree branch and HEAD plus an instruction to cherry-pick or merge the commit; cross-device workers include the permanent `origin/mingle/<handle>/work` branch and latest known commit plus a fetch/continue instruction. An uncertain checkpoint is retained as context for inspection rather than stopping for human acknowledgement. If no eligible member remains, the group pauses with a transcript blocker. Coordinator failure uses the configured lead fallback or the same availability/load selection.
 
@@ -24,7 +24,7 @@ Running deliveries with no provider-message, tool-output or authenticated team h
 
 ## Durable data and bounds
 
-Migrations 11, 12, 24 and 25 are additive. Version 11 introduces:
+Migrations 11, 12, 24, 25 and 26 are additive. Version 11 introduces:
 
 - Group `autonomy_policy`, `recovery_policy`, `recovery_state` and monotonically increasing `coordinator_epoch`; each claimed delivery records the epoch under which it was dispatched.
 - `session_checkpoints`, versioned and bounded to 64 KiB, at most 20 per session.
@@ -35,6 +35,8 @@ Migrations 11, 12, 24 and 25 are additive. Version 11 introduces:
 - `group_stall_evidence`, retaining fingerprinted evidence/counters rather than transcripts.
 
 Version 25 adds per-request `auto_turn_limit` and `auto_max_hops` columns. These retain Full-access budget extensions without rewriting saved group defaults.
+
+Version 26 adds `group_provider_cooldowns`, a small durable provider/member cooldown table with an expiry index.
 
 Version 12 conditionally adds `session_failures.resolved_at` when absent, preserving compatibility with databases already at version 11 as originally shipped, and adds `group_recovery_deliveries` as a durable one-to-one source/successor link. The optional `GroupDelivery.recoveredByDeliveryId` snapshot field identifies a superseded failed delivery's successor. `GroupRecoveryState.acknowledgedCheckpointId` identifies the durable group checkpoint (not a provider session checkpoint), and coordinator replacement can include a `requestId` to target a Cowork planner lease.
 

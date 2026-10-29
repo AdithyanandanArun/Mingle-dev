@@ -32,6 +32,7 @@ export interface ArtifactRow {
   commitId: string; blob: string; reference: string; handoffEventId: number | null; handoffMessageId: string | null; messageId: string; createdAt: string;
 }
 export interface InputRow { assignmentId: string; taskId: string; path: string; artifactId: string | null }
+export interface ProviderCooldownRow { groupId: string; memberId: string; provider: string; reason: string; until: string; createdAt: string }
 
 const newGroupId = (prefix: string) => `${prefix}_${baseId('msg').slice(4)}`;
 export const groupId = () => newGroupId('grp');
@@ -175,6 +176,22 @@ export class GroupRepo {
     if (sets.length) this.run(`UPDATE group_members SET ${sets.join(', ')} WHERE id = ?`, ...params, id);
   }
   clearHolds(groupId: string): void { this.run('UPDATE group_members SET held = 0 WHERE group_id = ? AND held = 1', groupId); }
+
+  // provider cooldowns
+  upsertProviderCooldown(input: ProviderCooldownRow): void {
+    this.run(`INSERT INTO group_provider_cooldowns(group_id,member_id,provider,reason,until,created_at) VALUES(?,?,?,?,?,?)
+      ON CONFLICT(group_id,member_id,provider) DO UPDATE SET reason=excluded.reason,until=excluded.until,created_at=excluded.created_at`,
+    input.groupId, input.memberId, input.provider, input.reason, input.until, input.createdAt);
+  }
+  providerCooldowns(): ProviderCooldownRow[] {
+    return this.all('SELECT * FROM group_provider_cooldowns ORDER BY created_at ASC, rowid ASC').map((row) => ({
+      groupId: row.group_id as string, memberId: row.member_id as string, provider: row.provider as string,
+      reason: row.reason as string, until: row.until as string, createdAt: row.created_at as string,
+    }));
+  }
+  pruneProviderCooldowns(untilOrBefore: string): number {
+    return this.run('DELETE FROM group_provider_cooldowns WHERE until <= ?', untilOrBefore);
+  }
 
   // messages
   private withAttachments(messages: GroupMessage[]): GroupMessage[] {
