@@ -16,6 +16,8 @@ const archive = join(release, archiveName);
 const digest = createHash('sha256');
 for await (const chunk of createReadStream(archive)) digest.update(chunk);
 const checksum = digest.digest('hex');
+const checksumRecord = (await readFile(`${archive}.sha256`, 'utf8')).trim();
+if (checksumRecord !== `${checksum}  ${archiveName}`) throw new Error('Linux archive checksum sidecar does not match the Arch packaging source.');
 const build = join(release, 'arch-build');
 await rm(build, { recursive: true, force: true });
 await mkdir(build, { recursive: true });

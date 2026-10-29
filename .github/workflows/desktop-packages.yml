@@ -47,6 +47,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: mingle-linux-x64
+          if-no-files-found: error
           compression-level: 0
           retention-days: 7
           path: |
@@ -73,9 +74,20 @@ jobs:
           useradd --create-home minglebuild
           chown -R minglebuild:minglebuild "$GITHUB_WORKSPACE"
           runuser -u minglebuild -- node scripts/package-arch.mjs
+      - name: Verify Arch package metadata and checksum
+        run: |
+          version=$(node -p "JSON.parse(require('fs').readFileSync('apps/desktop/package.json', 'utf8')).version")
+          package="release/mingle-bin-${version}-1-x86_64.pkg.tar.zst"
+          (cd release && sha256sum -c "$(basename "$package").sha256")
+          pacman -Qip "$package"
+          bsdtar -xOf "$package" .PKGINFO > release/arch-package-info.txt
+          grep -Fx 'pkgname = mingle-bin' release/arch-package-info.txt
+          grep -Fx "pkgver = ${version}-1" release/arch-package-info.txt
+          grep -Fx 'arch = x86_64' release/arch-package-info.txt
       - uses: actions/upload-artifact@v4
         with:
           name: mingle-arch-x86_64
+          if-no-files-found: error
           compression-level: 0
           path: |
             release/*.pkg.tar.zst
