@@ -229,7 +229,7 @@ export class GroupService {
 
   private fallbackCandidates(
     group: ConversationGroup, source: MemberRow, sourceProvider: Session['provider'], configuredId?: string | null,
-    allowQueued = false, failure?: ProviderFailure,
+    allowQueued = false, failure?: ProviderFailure, scope?: string[], exceptAssignmentId = '',
   ): MemberRow[] {
     const candidates = this.repo.members(group.id, false).filter((candidate) => {
       if (candidate.id === source.id || candidate.held || candidate.removedAt || this.providerOnCooldown(this.store.getSession(candidate.sessionId)?.provider ?? sourceProvider)) return false;
@@ -242,6 +242,10 @@ export class GroupService {
       if (this.store.listTasks(group.projectId).some((task) => task.sessionId === session.id && (task.status === 'ready' || task.status === 'running'))) return false;
       if (this.repo.activeAssignments(group.id).some((assignment) => assignment.toMemberId === candidate.id
         && this.repo.getDelivery(assignment.deliveryId)?.status === 'queued')) return false;
+      if (scope) {
+        try { this.assertNoTargetTaskConflict(group, candidate, session.worktreePath, scope, exceptAssignmentId); }
+        catch { return false; }
+      }
       if (!this.memberProviderAvailable(candidate, session)) return false;
       if (this.isFullAccessGroup(group) && source.role === 'worker' && this.isTeamOrLocalCoordinator(group, candidate)) return true;
       if (source.role === 'worker' && this.isTeamOrLocalCoordinator(group, candidate)) return false;
@@ -2086,7 +2090,7 @@ export class GroupService {
       return false;
     }
     const configuredId = group.recoveryPolicy?.workerFallbacks?.[source.id];
-    const target = this.fallbackCandidates(group, source, sourceSession.provider, configuredId, true, failure)[0];
+    const target = this.fallbackCandidates(group, source, sourceSession.provider, configuredId, true, failure, assignment.scope, assignment.id)[0];
     const targetSession = target ? this.store.getSession(target.sessionId) : undefined;
     if (!target || !targetSession) {
       this.pauseForAutomaticFallback(group, failure, `No eligible replacement is available for task “${clean(task.title, 200)}”; all members are held, unavailable, busy, or in cooldown.`);
