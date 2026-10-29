@@ -20,9 +20,9 @@ test('rejects an unusable typed parent before attempting the clone', async () =>
   })), /existing folder/i);
 });
 
-test('uses matching singular and plural join success copy with the Add agents next step', () => {
-  assert.equal(joinSuccessCopy(1, false), '1 idle agent is ready. The project lead can now add your agent from Add agents. No model run has started.');
-  assert.equal(joinSuccessCopy(2, false), '2 idle agents are ready. The project lead can now add your agents from Add agents. No model run has started.');
+test('says shared agents join the team session automatically when the lead starts one', () => {
+  assert.equal(joinSuccessCopy(1, false), '1 idle agent is ready. Your agent will be added to the team session automatically when the lead starts one. No model run has started.');
+  assert.equal(joinSuccessCopy(2, false), '2 idle agents are ready. Your agents will be added to the team session automatically when the lead starts one. No model run has started.');
   assert.match(joinSuccessCopy(1, true), /remain private/);
 });
 

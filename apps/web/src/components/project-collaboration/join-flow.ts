@@ -20,7 +20,7 @@ export function joinSuccessCopy(agentCount: number, consentSkipped: boolean): st
   const count = Math.max(0, Math.floor(agentCount));
   const noun = count === 1 ? 'agent' : 'agents';
   const verb = count === 1 ? 'is' : 'are';
-  return `${count} idle ${noun} ${verb} ready. The project lead can now add your ${noun} from Add agents. No model run has started.`;
+  return `${count} idle ${noun} ${verb} ready. Your ${noun} will be added to the team session automatically when the lead starts one. No model run has started.`;
 }
 
 /** Mirrors the server's documented permission defaults when provider metadata omits model policies. */
