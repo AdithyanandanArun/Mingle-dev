@@ -281,11 +281,30 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
         this.assertSafeIntegrationBranch(branchResult.stdout.trim());
         const alreadyIntegrated = await git(workspace.worktreePath, ['merge-base', '--is-ancestor', review.review_ref, head], { allowFailure: true });
         if (alreadyIntegrated.code !== 0) {
-          const mergedResult = await git(workspace.worktreePath,
-            ['-c', 'commit.gpgSign=false', 'merge', '--no-ff', '--no-edit', review.review_ref], { allowFailure: true, timeoutMs: 120_000 });
+          const integrationIsAncestor = await git(workspace.worktreePath, ['merge-base', '--is-ancestor', head, review.review_ref], { allowFailure: true });
+          const mergeArgs = ['-c', 'commit.gpgSign=false'];
+          if (integrationIsAncestor.code !== 0) {
+            const identity = await git(workspace.worktreePath, ['var', 'GIT_COMMITTER_IDENT'], { allowFailure: true });
+            if (identity.code !== 0) {
+              const collaboration = await this.options.collaboration.snapshot(host.local_project_id);
+              const owner = collaboration.members.find((member) => member.accountId === host.owner_account_id);
+              const name = (owner?.displayName ?? '').trim();
+              const email = (owner?.email ?? '').trim();
+              if (!name || !email || /[\r\n<>]/.test(name) || /[\r\n<>]/.test(email)) {
+                throw new HttpError(409, 'Git needs a committer identity to create this merge commit. Set your Git name and email (git config --global user.name/user.email), then retry.');
+              }
+              mergeArgs.push('-c', `user.name=${name}`, '-c', `user.email=${email}`);
+            }
+          }
+          mergeArgs.push('merge', integrationIsAncestor.code === 0 ? '--ff-only' : '--no-ff', '--no-edit', review.review_ref);
+          const mergedResult = await git(workspace.worktreePath, mergeArgs, { allowFailure: true, timeoutMs: 120_000 });
           if (mergedResult.code !== 0) {
+            const unresolved = await git(workspace.worktreePath, ['diff', '--name-only', '--diff-filter=U'], { allowFailure: true });
             await git(workspace.worktreePath, ['merge', '--abort'], { allowFailure: true });
-            throw new HttpError(409, `The worker branch conflicts with the integration branch. Merge ${review.review_ref} manually in ${workspace.worktreePath}, resolve the conflicts, run the checks, and retry team_accept.`);
+            if (unresolved.code === 0 && unresolved.stdout.trim()) {
+              throw new HttpError(409, `The worker branch conflicts with the integration branch. Merge ${review.review_ref} manually in ${workspace.worktreePath}, resolve the conflicts, run the checks, and retry team_accept.`);
+            }
+            throw new HttpError(409, `Git could not merge the worker branch: ${safeRemoteText(mergedResult.stderr.trim()).slice(0, 1_000) || 'unknown Git error'}`);
           }
           merged = true;
         }
