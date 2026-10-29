@@ -84,6 +84,9 @@ it('gives team planners branch-aware integration guidance and keeps non-team gro
   expect(fullAccess).toContain('Never push to a worker branch');
   expect(fullAccess).toContain('git pull --no-rebase origin main');
   expect(fullAccess).toContain('do not check origin for its work');
+  expect(fullAccess).toContain('Prefer team_assign with recipient "auto" unless one agent is clearly better');
+  expect(fullAccess).toContain('non-overlapping file/directory scopes');
+  expect(fullAccess).toContain('avoid cooldown/stalled agents');
   expect(fullAccess.length).toBeLessThanOrEqual(LIMITS.instructions);
 
   const supervised = buildInstructions({ ...team, teamPermissionLevel: 'supervised' });

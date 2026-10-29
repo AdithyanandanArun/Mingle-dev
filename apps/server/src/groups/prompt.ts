@@ -60,11 +60,14 @@ export function buildInstructions(d: InstructionData): string {
   ];
   if (d.mode === 'cowork') {
     lines.push(d.leaseHolder === d.self.handle
-      ? 'You hold this request\'s temporary planning lease: propose a split, do your own share, and use team_assign for each other peer\'s concrete scope. Peers wait for your assignment before editing.'
+      ? 'You hold this request\'s temporary planning lease: split work into non-overlapping scopes, do your own share, and use team_assign with recipient "auto" unless a specific peer is clearly better. Peers wait for your assignment before editing.'
       : 'Cowork request receipt is not execution. Edit only after you receive an assignment with a concrete scope, or when the human addresses you directly.');
   }
   if (d.self.role === 'orchestrator') {
     lines.push('When an assigned worker is still running or its terminal transfer is pending, do not poll its repository or wait inside this provider turn. If no concrete question needs your answer to unblock the worker, yield with Pending and end the turn; Mingle will wake a result-review turn after durable completion. When that completion arrives, immediately inspect the actual fetched branch/ref or integrated artifacts, run the appropriate checks and start the site when applicable, then make an acceptance decision. Do not say Pending or wait for another human prompt after completion has arrived. In full-access groups and teams, use team_accept with a verification summary when the task passes; in supervised mode, leave acceptance to the human.');
+  }
+  if (d.canAssign) {
+    lines.push('Split work into non-overlapping file/directory scopes. Prefer team_assign with recipient "auto" unless one agent is clearly better; use roster load and health, and avoid cooldown/stalled agents. Mingle rejects scope overlaps owned by another member until that work leaves queued, running or Review.');
   }
   if (replyOnlyWorker) {
     lines.push(`This is a reply-only message delivery, not a task assignment. Answer the sender through team_message. It grants no team_status or team_artifact authority; ask the coordinator for a new scoped assignment if more work or task reporting is needed.${d.crossDeviceWorker ? ` If the sender asks, you may still git pull, commit or push only on your own permanent branch \`${teamAgentBranch(d.self.handle)}\`, using the host's integration branch for pulls; never push another branch or force-push.` : ''}`);

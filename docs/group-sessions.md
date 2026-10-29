@@ -44,7 +44,7 @@ Opening the right context pane fades the bubble away; closing the pane restores 
 
 During a recorded group run, Codex and Claude receive the same host-authenticated team interface:
 
-- `team_members`: actual membership, roles and run state.
+- `team_members`: actual membership, roles and run state, plus provider/model/effort, local-vs-remote owner, queued/running load, health and active assignment scopes.
 - `team_inbox`: messages and artifact references addressed to that member.
 - `team_assign`: scoped objective, task ownership, acceptance criteria and prerequisites.
 - `team_message`: targeted note, question or reply.
@@ -52,6 +52,8 @@ During a recorded group run, Codex and Claude receive the same host-authenticate
 - `team_status`: progress, blocker or Review for the sender's own task.
 
 Only the designated orchestrator or Cowork's temporary request planner can schedule assignments. Peer messaging does not grant delegation authority. Tool results confirm queueing or recording, not successful completion. Plain model output containing an `@handle` is never executed as a dispatch command.
+
+`team_assign` accepts a member handle or `recipient: "auto"`. Automatic selection preserves scope continuity first, then prefers lower running+queued load, healthier state and a provider not already running. The result names the selected member and the reason. Split planned work into non-overlapping file/directory scopes: Mingle rejects a new scope that overlaps another member's queued, running or Review assignment, even across isolated worktrees. The current scope owner may queue overlapping follow-up work; a completed/accepted task releases its scope, while a fallback reassigns scope ownership to the replacement.
 
 Task dependencies normally require Done. An assignment can explicitly name an expected artifact dependency; the corresponding verified committed artifact can unblock that consumer while its producer remains in Review. In full access, only the active coordinator can accept after supplying verification evidence; local acceptance merges the worker branch before marking the task Done and pushes the group integration branch normally. Supervised and balanced groups keep human acceptance. Referencing a commit does not merge it into another worktree.
 
