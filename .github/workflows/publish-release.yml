@@ -17,6 +17,10 @@ on:
         description: Successful "Build Windows desktop installer" run ID
         required: true
         type: string
+      include_arch:
+        description: Include the verified Arch package from the Linux run
+        type: boolean
+        default: false
 
 permissions:
   actions: read
@@ -34,6 +38,7 @@ jobs:
       VERSION: ${{ inputs.version }}
       LINUX_RUN: ${{ inputs.linux_run_id }}
       WINDOWS_RUN: ${{ inputs.windows_run_id }}
+      INCLUDE_ARCH: ${{ inputs.include_arch }}
     steps:
       - uses: actions/checkout@v4
       - name: Validate version, tag and source runs
@@ -44,11 +49,15 @@ jobs:
           echo "RELEASE_TAG=$tag" >> "$GITHUB_ENV"
           test -s "docs/releases/$tag.md"
           tagged_sha=$(gh api "repos/$GITHUB_REPOSITORY/commits/$tag" --jq .sha)
-          for platform in linux windows; do
+          platforms=(linux windows)
+          if test "$INCLUDE_ARCH" = true; then platforms+=(arch); fi
+          for platform in "${platforms[@]}"; do
             if test "$platform" = linux; then
               run_id="$LINUX_RUN"; native_job=linux; build_step='Run pnpm package:deb'
-            else
+            elif test "$platform" = windows; then
               run_id="$WINDOWS_RUN"; native_job=windows-x64; build_step='Run pnpm package:windows'
+            else
+              run_id="$LINUX_RUN"; native_job=arch; build_step='Build Arch package as an ordinary user'
             fi
             [[ "$run_id" =~ ^[0-9]+$ ]]
             gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id" > run.json
@@ -56,7 +65,7 @@ jobs:
             test "$(jq -r .head_repository.full_name run.json)" = "$GITHUB_REPOSITORY"
             test "$(jq -r .head_sha run.json)" = "$tagged_sha"
             gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/jobs" > native-jobs.json
-            EXPECTED_JOB="$native_job" BUILD_STEP="$build_step" python3 - <<'PY'
+            EXPECTED_JOB="$native_job" BUILD_STEP="$build_step" PLATFORM="$platform" python3 - <<'PY'
           import json, os
           jobs = [job for job in json.load(open('native-jobs.json'))['jobs'] if job['name'] == os.environ['EXPECTED_JOB']]
           assert len(jobs) == 1, 'Expected exactly one native build job'
@@ -65,6 +74,8 @@ jobs:
           by_name = {step['name']: step for step in steps}
           for required in (os.environ['BUILD_STEP'], 'Run actions/upload-artifact@v4', 'Complete job'):
               assert by_name.get(required, {}).get('conclusion') == 'success', f'Required native check did not pass: {required}'
+          if os.environ['PLATFORM'] == 'arch':
+              assert by_name.get('Verify Arch package metadata and checksum', {}).get('conclusion') == 'success', 'Arch package verification did not pass'
           print('Native build, installer checks and artifact upload passed.')
           PY
           done
@@ -80,6 +91,13 @@ jobs:
           run-id: ${{ inputs.windows_run_id }}
           github-token: ${{ github.token }}
           path: windows
+      - uses: actions/download-artifact@v4
+        if: ${{ inputs.include_arch }}
+        with:
+          name: mingle-arch-x86_64
+          run-id: ${{ inputs.linux_run_id }}
+          github-token: ${{ github.token }}
+          path: arch
       - name: Verify packages
         shell: bash
         run: |
@@ -93,6 +111,17 @@ jobs:
           tar -xOzf "$tarball" "mingle-${VERSION}-linux-x64/resources/build-info.json" | jq -e --arg v "$VERSION" '.version == $v'
           file "$exe" | grep -q 'PE32'
           printf '%s\n' "$deb" "$deb.sha256" "$tarball" "$tarball.sha256" "$exe" "$exe.sha256" > assets.txt
+          if test "$INCLUDE_ARCH" = true; then
+            arch_package="arch/mingle-bin-${VERSION}-1-x86_64.pkg.tar.zst"
+            test -s "$arch_package"; test -s "$arch_package.sha256"
+            (cd arch && sha256sum -c "$(basename "$arch_package").sha256")
+            tar --zstd -xOf "$arch_package" .PKGINFO > arch-package-info.txt
+            grep -Fx 'pkgname = mingle-bin' arch-package-info.txt
+            grep -Fx "pkgver = ${VERSION}-1" arch-package-info.txt
+            grep -Fx 'arch = x86_64' arch-package-info.txt
+            tar --zstd -xOf "$arch_package" opt/mingle/resources/build-info.json | jq -e --arg v "$VERSION" '.version == $v and .target == "linux-x64"'
+            printf '%s\n' "$arch_package" "$arch_package.sha256" >> assets.txt
+          fi
       - name: Publish or verify the release
         shell: bash
         run: |
