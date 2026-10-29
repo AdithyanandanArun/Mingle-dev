@@ -404,6 +404,11 @@ const MIGRATIONS: (string | ((db: DatabaseSync) => void))[] = [
        task_id TEXT, resumed_run_id TEXT, skipped_reason TEXT
      );
      CREATE INDEX IF NOT EXISTS session_resume_queue_state ON session_resume_queue(state, created_at);`,
+    // Migration 25 keeps autonomous budget extensions durable per request without rewriting group settings.
+    (db) => {
+      addColumn(db, 'group_requests', 'auto_turn_limit', 'ALTER TABLE group_requests ADD COLUMN auto_turn_limit INTEGER CHECK (auto_turn_limit BETWEEN 2 AND 200);');
+      addColumn(db, 'group_requests', 'auto_max_hops', 'ALTER TABLE group_requests ADD COLUMN auto_max_hops INTEGER CHECK (auto_max_hops BETWEEN 1 AND 24);');
+    },
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;

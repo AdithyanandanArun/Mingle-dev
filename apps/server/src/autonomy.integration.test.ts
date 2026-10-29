@@ -101,7 +101,7 @@ describe('group autonomy and stall evidence integration', () => {
     expect(t.app.groups.get(initial.group.id).group.maxTurns).toBe(16);
   });
 
-  it('removes the effective turn ceiling only for explicit null and stops at an inherited 2-turn limit', async () => {
+    it('keeps explicit null unlimited and preserves the inherited 2-turn ceiling in supervised mode', async () => {
     const unlimited = await boot();
     const group = await createGroup(unlimited);
     const patched = await unlimited.api('PATCH', `/api/groups/${group.group.id}`, {
@@ -114,7 +114,7 @@ describe('group autonomy and stall evidence integration', () => {
     const bounded = await boot();
     const boundedGroup = await createGroup(bounded);
     const inherited = await bounded.api('PATCH', `/api/groups/${boundedGroup.group.id}`, {
-      maxTurns: 2, maxHops: 6, autonomy: { mode: 'extended' },
+      maxTurns: 2, maxHops: 6, autonomy: { mode: 'supervised' },
     });
     expect(inherited.status).toBe(200);
 

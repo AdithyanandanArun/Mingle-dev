@@ -71,6 +71,8 @@ const mapRequest = (r: Row): GroupRequest => ({
   id: r.id as string, groupId: r.group_id as string, messageId: r.message_id as string, plannerMemberId: r.planner_member_id as string,
   status: r.status as GroupRequest['status'], turnsUsed: r.turns_used as number, createdAt: r.created_at as string, intent: (r.intent as GroupRequest['intent'] | undefined) ?? 'normal',
   ...(typeof r.execution_plan_id === 'string' ? { executionPlanId: r.execution_plan_id } : {}),
+  ...(typeof r.auto_turn_limit === 'number' ? { autoTurnLimit: r.auto_turn_limit } : {}),
+  ...(typeof r.auto_max_hops === 'number' ? { autoMaxHops: r.auto_max_hops } : {}),
 });
 const mapDelivery = (r: Row): DeliveryRow => ({
   id: r.id as string, groupId: r.group_id as string, requestId: r.request_id as string, messageId: r.message_id as string, memberId: r.member_id as string,
@@ -249,8 +251,12 @@ export class GroupRepo {
   requests(groupId: string, limit: number): GroupRequest[] {
     return this.all('SELECT * FROM group_requests WHERE group_id = ? ORDER BY created_at DESC, rowid DESC LIMIT ?', groupId, limit).reverse().map(mapRequest);
   }
-  updateRequest(id: string, patch: { status?: GroupRequest['status']; turnsDelta?: number }): void {
-    this.run('UPDATE group_requests SET status = COALESCE(?, status), turns_used = MAX(0, turns_used + ?), updated_at = ? WHERE id = ?', patch.status ?? null, patch.turnsDelta ?? 0, nowIso(), id);
+  updateRequest(id: string, patch: { status?: GroupRequest['status']; turnsDelta?: number; autoTurnLimit?: number; autoMaxHops?: number }): void {
+    const sets = ['status = COALESCE(?, status)', 'turns_used = MAX(0, turns_used + ?)', 'updated_at = ?'];
+    const values: SQLInputValue[] = [patch.status ?? null, patch.turnsDelta ?? 0, nowIso()];
+    if (patch.autoTurnLimit !== undefined) { sets.push('auto_turn_limit = ?'); values.push(patch.autoTurnLimit); }
+    if (patch.autoMaxHops !== undefined) { sets.push('auto_max_hops = ?'); values.push(patch.autoMaxHops); }
+    this.run(`UPDATE group_requests SET ${sets.join(', ')} WHERE id = ?`, ...values, id);
   }
   updateActiveRequestPlanners(groupId: string, memberId: string): void {
     this.run("UPDATE group_requests SET planner_member_id = ?, updated_at = ? WHERE group_id = ? AND status = 'active'", memberId, nowIso(), groupId);

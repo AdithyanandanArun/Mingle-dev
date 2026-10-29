@@ -83,6 +83,8 @@ const FULL_SHA = /^[0-9a-f]{40,64}$/i;
 const DEFAULT_LIMITS = { maxParallel: 2, maxTurns: 80, maxHops: 6 };
 const MAX_SAFE_RETRIES = 1;
 const MAX_SAFE_RETRY_DELAY_MS = 24 * 60 * 60 * 1000;
+const MAX_AUTONOMOUS_TURNS = 200;
+const MAX_AUTONOMOUS_HOPS = 24;
 function isSafeBranchName(value: string): boolean {
   return value.length <= 200 && /^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(value) && !value.includes('..')
     && !value.includes('//') && !value.includes('@{') && !value.endsWith('/')
@@ -124,6 +126,71 @@ export class GroupService {
   private readonly deletingGroups = new Set<string>();
   private teamDispatchGuard?: (sessionId: string, groupId: string) => Promise<boolean>;
   private teamRunFinishedHook?: (input: { sessionId: string; runId: string; outcome: Outcome; groupId: string; deliveryId: string }) => void;
+
+  private isFullAccessGroup(group: ConversationGroup): boolean {
+    try {
+      const row = this.store.db.prepare(`SELECT settings_json FROM mingle_team_host_projects WHERE group_id=? AND group_id!=''`).get(group.id) as { settings_json: string } | undefined;
+      if (row) {
+        const settings = TeamOrchestrationSettingsSchema.safeParse(JSON.parse(row.settings_json));
+        return settings.success && settings.data.permissionLevel === 'full-access';
+      }
+    } catch { /* An ordinary local group has no team policy row. */ }
+    return group.autonomy?.mode === 'extended';
+  }
+
+  private requestTurnLimit(group: ConversationGroup, request: { autoTurnLimit?: number }): number | null {
+    const configured = effectiveTurnLimit(group);
+    if (!this.isFullAccessGroup(group)) return request.autoTurnLimit ?? configured;
+    const ceiling = configured === null ? MAX_AUTONOMOUS_TURNS : Math.min(MAX_AUTONOMOUS_TURNS, configured * 4);
+    const initial = configured === null ? MAX_AUTONOMOUS_TURNS : Math.min(configured, ceiling);
+    return Math.min(request.autoTurnLimit ?? initial, ceiling);
+  }
+
+  private requestHopLimit(group: ConversationGroup, request: { autoMaxHops?: number }): number {
+    return request.autoMaxHops ?? group.maxHops;
+  }
+
+  /** Raises only this request's durable internal thresholds; configured group settings stay unchanged. */
+  private extendRequestBudget(group: ConversationGroup, requestIdArg: string, requiredTurns?: number, requiredHop?: number): ReturnType<GroupRepo['getRequest']> {
+    let request = this.repo.getRequest(requestIdArg);
+    if (!request || !this.isFullAccessGroup(group)) return request;
+    let nextTurnLimit = request.autoTurnLimit;
+    let nextHopLimit = request.autoMaxHops;
+    const configuredTurns = effectiveTurnLimit(group);
+    if (requiredTurns !== undefined) {
+      const initial = configuredTurns === null ? MAX_AUTONOMOUS_TURNS : Math.min(configuredTurns, MAX_AUTONOMOUS_TURNS);
+      const current = nextTurnLimit ?? initial;
+      const ceiling = configuredTurns === null ? MAX_AUTONOMOUS_TURNS : Math.min(MAX_AUTONOMOUS_TURNS, configuredTurns * 4);
+      if (requiredTurns > current && current < ceiling) {
+        nextTurnLimit = Math.min(ceiling, Math.max(requiredTurns, current + (configuredTurns ?? MAX_AUTONOMOUS_TURNS)));
+      }
+    }
+    const currentHops = nextHopLimit ?? group.maxHops;
+    if (requiredHop !== undefined && requiredHop > currentHops && currentHops < MAX_AUTONOMOUS_HOPS) {
+      nextHopLimit = Math.min(MAX_AUTONOMOUS_HOPS, Math.max(requiredHop, currentHops + 1));
+    }
+    if (nextTurnLimit === request.autoTurnLimit && nextHopLimit === request.autoMaxHops) return request;
+
+    this.store.tx(() => {
+      this.repo.updateRequest(requestIdArg, {
+        ...(nextTurnLimit !== undefined ? { autoTurnLimit: nextTurnLimit } : {}),
+        ...(nextHopLimit !== undefined ? { autoMaxHops: nextHopLimit } : {}),
+      });
+      const turnChange = nextTurnLimit !== request!.autoTurnLimit
+        ? { from: request!.autoTurnLimit ?? (configuredTurns === null ? MAX_AUTONOMOUS_TURNS : Math.min(configuredTurns, MAX_AUTONOMOUS_TURNS)), to: nextTurnLimit,
+            hardCeiling: configuredTurns === null ? MAX_AUTONOMOUS_TURNS : Math.min(MAX_AUTONOMOUS_TURNS, configuredTurns * 4) }
+        : null;
+      const hopChange = nextHopLimit !== request!.autoMaxHops ? { from: request!.autoMaxHops ?? group.maxHops, to: nextHopLimit, hardCeiling: MAX_AUTONOMOUS_HOPS } : null;
+      const changes = [turnChange ? `turns ${turnChange.from} → ${turnChange.to}` : '', hopChange ? `hops ${hopChange.from} → ${hopChange.to}` : ''].filter(Boolean).join('; ');
+      this.repo.insertMessage({ groupId: group.id, senderMemberId: null, recipients: [], kind: 'status', requestId: requestIdArg,
+        content: `Full-access coordination budget auto-extended: ${changes}. Work continues without resetting usage.` });
+      this.event(group, 'group.budget.auto-extended', 'Full-access coordination budget auto-extended', {
+        requestId: requestIdArg, ...(turnChange ? { turns: turnChange } : {}), ...(hopChange ? { hops: hopChange } : {}),
+      });
+    });
+    request = this.repo.getRequest(requestIdArg);
+    return request;
+  }
 
   constructor(options: GroupServiceOptions) {
     this.store = options.store;
@@ -1058,9 +1125,21 @@ export class GroupService {
     const checkpoint = this.recoveryCheckpoint(group, action.checkpointId, failure, delivery.requestId, delivery.id);
     const request = this.repo.getRequest(delivery.requestId);
     if (!request) throw conflict('The delivery request no longer exists');
-    const limit = effectiveTurnLimit(group);
-    if (limit !== null && request.turnsUsed + this.repo.requestDeliveries(request.id, ['queued']).length >= limit) throw conflict(`The request turn budget (${limit}) has been reached`);
-    if (delivery.hop > group.maxHops) throw conflict(`The message hop limit (${group.maxHops}) has been reached`);
+    const committed = request.turnsUsed + this.repo.requestDeliveries(request.id, ['queued']).length;
+    const budgetRequest = this.extendRequestBudget(group, request.id, committed + 1, delivery.hop);
+    const limit = budgetRequest ? this.requestTurnLimit(group, budgetRequest) : effectiveTurnLimit(group);
+    const hopLimit = budgetRequest ? this.requestHopLimit(group, budgetRequest) : group.maxHops;
+    if ((limit !== null && committed >= limit) || delivery.hop > hopLimit) {
+      if (!this.isFullAccessGroup(group)) {
+        if (limit !== null && committed >= limit) throw conflict(`The request turn budget (${limit}) has been reached`);
+        throw conflict(`The message hop limit (${hopLimit}) has been reached`);
+      }
+      const reason = delivery.hop > hopLimit
+        ? `The message hop limit reached its hard full-access ceiling of ${hopLimit}. Pending work is retained for review and resume.`
+        : `The request turn budget reached its hard full-access ceiling of ${limit} turns. Pending work is retained for review and resume.`;
+      this.holdBudget(group, request.id, reason, committed + 1, delivery.hop);
+      throw conflict(reason);
+    }
     const existing = this.existingRecoveryContinuation(group, delivery);
     if (existing) {
       this.linkRecoverySuccessor(group, delivery, existing.id);
@@ -1117,7 +1196,7 @@ export class GroupService {
     this.assertNoTargetTaskConflict(group, target, targetSession.worktreePath, assignment.scope, assignment.id);
     const request = this.repo.getRequest(delivery.requestId);
     if (!request) throw conflict('The assignment request no longer exists');
-    const limit = effectiveTurnLimit(group);
+    const limit = this.requestTurnLimit(group, request);
     if (limit !== null && request.turnsUsed + this.repo.requestDeliveries(request.id, ['queued']).length >= limit) throw conflict(`The request turn budget (${limit}) has been reached`);
     const old = this.repo.getMessage(delivery.messageId)?.content ?? task.description;
     const sourceCheckpointId = typeof checkpoint?.payload.providerCheckpointId === 'string' ? checkpoint.payload.providerCheckpointId : undefined;
@@ -1329,9 +1408,14 @@ export class GroupService {
       return linked;
     }
     const hop = failed.hop + 1;
-    const limit = effectiveTurnLimit(group);
-    if (hop > group.maxHops || (limit !== null && request.turnsUsed + this.repo.requestDeliveries(request.id, ['queued']).length >= limit)) {
-      const reason = 'The coordinator was replaced, but its continuation needs another turn or hop beyond the current group limit. The request remains retained for review.';
+    const committed = request.turnsUsed + this.repo.requestDeliveries(request.id, ['queued']).length;
+    const budgetRequest = this.extendRequestBudget(group, request.id, committed + 1, hop) ?? request;
+    const limit = this.requestTurnLimit(group, budgetRequest);
+    const hopLimit = this.requestHopLimit(group, budgetRequest);
+    if (hop > hopLimit || (limit !== null && committed >= limit)) {
+      const reason = this.isFullAccessGroup(group)
+        ? `The coordinator was replaced, but its continuation reached the hard full-access ceiling (${limit ?? 'no turn ceiling'} turns, ${hopLimit} hops). The request remains retained for review.`
+        : 'The coordinator was replaced, but its continuation needs another turn or hop beyond the current group limit. The request remains retained for review.';
       this.repo.updateRequest(request.id, { status: 'paused' });
       this.repo.updateGroup(group.id, { recoveryState: { status: 'paused', reason, activeRequestId: request.id, updatedAt: nowIso() } });
       this.repo.insertMessage({ groupId: group.id, senderMemberId: null, recipients: [], kind: 'status', requestId: request.id, content: reason });
@@ -1781,7 +1865,7 @@ export class GroupService {
     const mode = checkpoint.payload.mode === 'supervised' ? 'supervised' : 'balanced';
     const checkpointLabel = mode === 'supervised' ? 'supervised delegation batch' : 'balanced scope expansion';
     const hop = Math.max(0, ...[...sourceDeliveries.values()].map((delivery) => delivery.hop)) + 1;
-    const turnLimit = effectiveTurnLimit(group);
+    const turnLimit = this.requestTurnLimit(group, request);
     const committed = request.turnsUsed + this.repo.requestDeliveries(request.id, ['queued']).length;
     if (hop > group.maxHops || (turnLimit !== null && committed >= turnLimit)) {
       const reason = `The acknowledged ${checkpointLabel} needs another planner turn beyond the current request limit. Raise the applicable limit and resume; the objective and source scope are retained.`;
@@ -1977,8 +2061,8 @@ export class GroupService {
     } catch { /* Non-team groups, older databases and malformed settings retain conservative guidance. */ }
     const instructions = buildInstructions({
       title: group.title, mode: group.mode, self: roster.find((r) => r.you)!, roster, canAssign: this.mayAssign(group, member, request.plannerMemberId), leaseHolder: lease,
-      requestExcerpt: this.repo.getMessage(request.messageId)?.content ?? '', deliveryKind: delivery.kind, hop: delivery.hop, maxHops: group.maxHops,
-      turnsUsed: request.turnsUsed, maxTurns: effectiveTurnLimit(group), unread: this.repo.countAddressedAfter(group.id, member.id, member.lastReadSeq),
+      requestExcerpt: this.repo.getMessage(request.messageId)?.content ?? '', deliveryKind: delivery.kind, hop: delivery.hop, maxHops: this.requestHopLimit(group, request),
+      turnsUsed: request.turnsUsed, maxTurns: this.requestTurnLimit(group, request), unread: this.repo.countAddressedAfter(group.id, member.id, member.lastReadSeq),
       crossDeviceWorker: member.role === 'worker' && Boolean(this.store.db.prepare('SELECT 1 AS found FROM mingle_team_proxy_sessions WHERE session_id=?').get(member.sessionId)),
       teamPermissionLevel, integrationBranch,
       assignment: assignment ? { id: assignment.id, taskId: assignment.taskId, scope: assignment.scope } : null,
@@ -2412,13 +2496,18 @@ export class GroupService {
   }
 
   private async startDelivery(group: ConversationGroup, member: MemberRow, session: Session, d: DeliveryRow): Promise<boolean> {
-    const request = this.repo.getRequest(d.requestId);
+    let request = this.repo.getRequest(d.requestId);
     if (!request) { this.cancel(d, 'The request no longer exists'); return false; }
-    if (d.hop > group.maxHops) {
-      this.holdBudget(group, request.id, `A queued delivery needs hop ${d.hop}, above the current ${group.maxHops} hop limit. Raise the hop limit and resume, or cancel the affected agent's pending work.`);
+    request = this.extendRequestBudget(group, request.id, request.turnsUsed + 1, d.hop) ?? request;
+    const hopLimit = this.requestHopLimit(group, request);
+    if (d.hop > hopLimit) {
+      const reason = this.isFullAccessGroup(group)
+        ? `A queued delivery needs hop ${d.hop}, above the hard full-access ceiling of ${hopLimit} hops. Pending work is retained for review and resume.`
+        : `A queued delivery needs hop ${d.hop}, above the current ${hopLimit} hop limit. Raise the hop limit and resume, or cancel the affected agent's pending work.`;
+      this.holdBudget(group, request.id, reason);
       return false;
     }
-    const turnLimit = effectiveTurnLimit(group);
+    const turnLimit = this.requestTurnLimit(group, request);
     if (turnLimit !== null && request.turnsUsed >= turnLimit) {
       this.exhaustBudget(group, request.id);
       return false;
@@ -2462,10 +2551,15 @@ export class GroupService {
       }
       if (latestDelivery?.status !== 'queued' || latestDelivery.memberId !== d.memberId || !latestRequest || latestRequest.status !== 'active') return false;
       if (latestGroup.paused || latestMember.held || this.sessionBusy(latestSession)) return false;
-      const latestTurnLimit = effectiveTurnLimit(latestGroup);
+      const latestBudgetRequest = this.extendRequestBudget(latestGroup, latestRequest.id, latestRequest.turnsUsed + 1, d.hop) ?? latestRequest;
+      const latestTurnLimit = this.requestTurnLimit(latestGroup, latestBudgetRequest);
       if (latestTurnLimit !== null && latestRequest.turnsUsed >= latestTurnLimit) { this.exhaustBudget(latestGroup, latestRequest.id); return false; }
-      if (d.hop > latestGroup.maxHops) {
-        this.holdBudget(latestGroup, latestRequest.id, `A queued delivery needs hop ${d.hop}, above the current ${latestGroup.maxHops} hop limit. Raise the hop limit and resume, or cancel the affected agent's pending work.`);
+      const latestHopLimit = this.requestHopLimit(latestGroup, latestBudgetRequest);
+      if (d.hop > latestHopLimit) {
+        const reason = this.isFullAccessGroup(latestGroup)
+          ? `A queued delivery needs hop ${d.hop}, above the hard full-access ceiling of ${latestHopLimit} hops. Pending work is retained for review and resume.`
+          : `A queued delivery needs hop ${d.hop}, above the current ${latestHopLimit} hop limit. Raise the hop limit and resume, or cancel the affected agent's pending work.`;
+        this.holdBudget(latestGroup, latestRequest.id, reason);
         return false;
       }
     }
@@ -2530,12 +2624,32 @@ export class GroupService {
   }
 
   private exhaustBudget(group: ConversationGroup, requestIdArg: string): void {
-    const limit = effectiveTurnLimit(group);
-    this.holdBudget(group, requestIdArg, `A request used all ${limit ?? 'configured'} allowed model turns. Pending work is retained. Raise the turn limit and resume, or cancel the affected agent's pending work and send a new request.`);
+    const request = this.repo.getRequest(requestIdArg);
+    const limit = request ? this.requestTurnLimit(group, request) : effectiveTurnLimit(group);
+    const reason = this.isFullAccessGroup(group)
+      ? `A request reached its hard full-access ceiling of ${limit ?? MAX_AUTONOMOUS_TURNS} model turns. Pending work is retained for review and resume, or cancel the affected agent's pending work and send a new request.`
+      : `A request used all ${limit ?? 'configured'} allowed model turns. Pending work is retained. Raise the turn limit and resume, or cancel the affected agent's pending work and send a new request.`;
+    this.holdBudget(group, requestIdArg, reason);
   }
 
-  private holdBudget(group: ConversationGroup, requestIdArg: string, reason: string): void {
-    this.store.tx(() => this.holdBudgetRecord(group, requestIdArg, reason));
+  private holdBudget(group: ConversationGroup, requestIdArg: string, reason: string, requiredTurnsArg?: number, requiredHopArg?: number): void {
+    let holdReason = reason;
+    const request = this.repo.getRequest(requestIdArg);
+    if (request && this.isFullAccessGroup(group)) {
+      const queued = this.repo.requestDeliveries(requestIdArg, ['queued']);
+      const requiredTurns = Math.max(request.turnsUsed + queued.length, requiredTurnsArg ?? 0);
+      const requiredHop = Math.max(requiredHopArg ?? 0, ...(queued.length ? queued.map((delivery) => delivery.hop) : [0])) || undefined;
+      const extended = this.extendRequestBudget(group, requestIdArg, requiredTurns, requiredHop) ?? request;
+      const turnLimit = this.requestTurnLimit(group, extended);
+      const hopLimit = this.requestHopLimit(group, extended);
+      const turnBlocked = turnLimit !== null && requiredTurns > turnLimit;
+      const hopBlocked = requiredHop !== undefined && requiredHop > hopLimit;
+      if (!turnBlocked && !hopBlocked) return;
+      holdReason = turnBlocked
+        ? `The request reached its hard full-access ceiling of ${turnLimit} model turns. Pending work is retained for review and resume, or cancel the affected agent's pending work and send a new request.`
+        : `The request reached its hard full-access ceiling of ${hopLimit} message hops. Pending work is retained for review and resume, or cancel the affected agent's pending work and send a new request.`;
+    }
+    this.store.tx(() => this.holdBudgetRecord(group, requestIdArg, holdReason));
   }
 
   /** Caller already owns Store.tx. */
@@ -2543,7 +2657,11 @@ export class GroupService {
     this.repo.updateRequest(requestIdArg, { status: 'paused' });
     this.repo.updateGroup(group.id, { paused: true, pauseReason: reason });
     this.repo.insertMessage({ groupId: group.id, senderMemberId: null, recipients: [], kind: 'status', content: reason, requestId: requestIdArg });
-    this.event(group, 'group.budget.exhausted', 'Coordination budget reached; queued work is retained', { requestId: requestIdArg, maxTurns: effectiveTurnLimit(group), maxHops: group.maxHops });
+    const request = this.repo.getRequest(requestIdArg);
+    this.event(group, 'group.budget.exhausted', 'Coordination budget reached; queued work is retained', {
+      requestId: requestIdArg, maxTurns: request ? this.requestTurnLimit(group, request) : effectiveTurnLimit(group),
+      maxHops: request ? this.requestHopLimit(group, request) : group.maxHops,
+    });
   }
 
   private cancel(d: DeliveryRow, reason: string): void {
@@ -2627,8 +2745,9 @@ export class GroupService {
       this.repo.markNotified(batch.map((a) => a.id));
       if (!target || target.removedAt) continue;
         const committed = request.turnsUsed + this.repo.requestDeliveries(request.id, ['queued']).length;
-       const turnLimit = effectiveTurnLimit(group);
-       const blockedByBudget = hop > group.maxHops || (turnLimit !== null && committed >= turnLimit);
+        const turnLimit = this.requestTurnLimit(group, request);
+        const hopLimit = this.requestHopLimit(group, request);
+        const blockedByBudget = hop > hopLimit || (turnLimit !== null && committed >= turnLimit);
       const reportable = batch.filter((assignment) => !this.hasQueuedAssignmentReply(request.id, target.id, assignment));
       if (!reportable.length) continue;
       const lines: ResultLine[] = reportable.map((a) => {
@@ -2664,8 +2783,9 @@ export class GroupService {
     if (!target || target.removedAt || target.id === worker.id) return false;
     const hop = source.hop + 1;
     const committed = request.turnsUsed + this.repo.requestDeliveries(request.id, ['queued']).length;
-    const turnLimit = effectiveTurnLimit(group);
-    const blockedByBudget = hop > group.maxHops || (turnLimit !== null && committed >= turnLimit);
+    const turnLimit = this.requestTurnLimit(group, request);
+    const hopLimit = this.requestHopLimit(group, request);
+    const blockedByBudget = hop > hopLimit || (turnLimit !== null && committed >= turnLimit);
     const resultDeliveryId = deliveryId();
     let inserted = false;
     this.store.tx(() => {
@@ -2740,9 +2860,9 @@ export class GroupService {
     const { group, member, request, delivery } = this.live(ctx);
     return {
       you: member.handle, role: member.role, mode: group.mode, canAssign: this.mayAssign(group, member, request.plannerMemberId),
-      autonomy: { mode: group.autonomy?.mode ?? 'balanced', emergencyTurnLimit: effectiveTurnLimit(group) },
+      autonomy: { mode: group.autonomy?.mode ?? 'balanced', emergencyTurnLimit: this.requestTurnLimit(group, request) },
       recovery: group.recoveryState ? { status: group.recoveryState.status, ...(group.recoveryState.reason ? { reason: group.recoveryState.reason } : {}) } : { status: 'healthy' },
-      request: { id: request.id, turnsUsed: request.turnsUsed, maxTurns: effectiveTurnLimit(group), hop: delivery.hop, maxHops: group.maxHops },
+      request: { id: request.id, turnsUsed: request.turnsUsed, maxTurns: this.requestTurnLimit(group, request), hop: delivery.hop, maxHops: this.requestHopLimit(group, request) },
       members: this.roster(group, member),
     };
   }
@@ -2775,9 +2895,21 @@ export class GroupService {
     if (!recipientSession) throw conflict(`@${recipient.handle} is archived`);
     if (this.repo.countRunMessages(group.id, member.id, delivery.runId!, 'assignment') >= MAX_ASSIGNMENTS_PER_RUN) throw conflict('Too many assignments in one turn');
     const hop = delivery.hop + 1;
-    if (hop > group.maxHops) throw conflict(`The message hop limit (${group.maxHops}) has been reached for this request`);
-    const turnLimit = effectiveTurnLimit(group);
-    if (turnLimit !== null && request.turnsUsed + this.repo.requestDeliveries(request.id, ['queued']).length >= turnLimit) throw conflict(`The request turn budget (${turnLimit}) has been reached`);
+    const committed = request.turnsUsed + this.repo.requestDeliveries(request.id, ['queued']).length;
+    const budgetRequest = this.extendRequestBudget(group, request.id, committed + 1, hop) ?? request;
+    const hopLimit = this.requestHopLimit(group, budgetRequest);
+    const turnLimit = this.requestTurnLimit(group, budgetRequest);
+    if (hop > hopLimit || (turnLimit !== null && committed >= turnLimit)) {
+      if (!this.isFullAccessGroup(group)) {
+        if (hop > hopLimit) throw conflict(`The message hop limit (${hopLimit}) has been reached for this request`);
+        throw conflict(`The request turn budget (${turnLimit}) has been reached`);
+      }
+      const reason = hop > hopLimit
+        ? `The request reached its hard full-access ceiling of ${hopLimit} hops. Pending work is retained for review and resume.`
+        : `The request reached its hard full-access ceiling of ${turnLimit} model turns. Pending work is retained for review and resume.`;
+      this.holdBudget(group, request.id, reason, committed + 1, hop);
+      throw conflict(reason);
+    }
 
     const scope = normalizeScopes(input.scope);
     const dependsOn = [...new Set(input.dependsOn ?? [])].sort();
@@ -2872,9 +3004,21 @@ export class GroupService {
     const wake = input.expectsReply ?? false;
     const hop = delivery.hop + 1;
     if (wake) {
-      if (hop > group.maxHops) throw conflict(`The message hop limit (${group.maxHops}) has been reached; send an informational message instead`);
-       const turnLimit = effectiveTurnLimit(group);
-       if (turnLimit !== null && request.turnsUsed + this.repo.requestDeliveries(request.id, ['queued']).length >= turnLimit) throw conflict(`The request turn budget (${turnLimit}) has been reached`);
+      const committed = request.turnsUsed + this.repo.requestDeliveries(request.id, ['queued']).length;
+      const budgetRequest = this.extendRequestBudget(group, request.id, committed + 1, hop) ?? request;
+      const hopLimit = this.requestHopLimit(group, budgetRequest);
+      const turnLimit = this.requestTurnLimit(group, budgetRequest);
+      if (hop > hopLimit || (turnLimit !== null && committed >= turnLimit)) {
+        if (!this.isFullAccessGroup(group)) {
+          if (hop > hopLimit) throw conflict(`The message hop limit (${hopLimit}) has been reached; send an informational message instead`);
+          throw conflict(`The request turn budget (${turnLimit}) has been reached`);
+        }
+        const reason = hop > hopLimit
+          ? `The request reached its hard full-access ceiling of ${hopLimit} hops. Pending work is retained for review and resume.`
+          : `The request reached its hard full-access ceiling of ${turnLimit} model turns. Pending work is retained for review and resume.`;
+        this.holdBudget(group, request.id, reason, committed + 1, hop);
+        throw conflict(reason);
+      }
     }
     const result = this.store.tx(() => {
       this.live(ctx);

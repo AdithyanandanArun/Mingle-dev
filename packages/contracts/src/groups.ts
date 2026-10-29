@@ -72,6 +72,8 @@ export interface GroupMessage {
 export interface GroupRequest {
   id: string; groupId: string; messageId: string; plannerMemberId: string;
   status: 'active' | 'completed' | 'paused'; turnsUsed: number; createdAt: string; intent: 'normal' | 'plan'; executionPlanId?: string;
+  /** Internal per-request extensions; never change the group's configured defaults. */
+  autoTurnLimit?: number; autoMaxHops?: number;
 }
 export interface GroupDelivery {
   id: string; groupId: string; requestId: string; messageId: string; memberId: string;
