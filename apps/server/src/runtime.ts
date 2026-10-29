@@ -45,11 +45,6 @@ export function beginProcessShutdown(): void {
   processShutdownAt ??= Date.now();
 }
 
-/** A newly constructed application starts a new lifecycle (also supports embedded test apps). */
-export function resetProcessShutdownState(): void {
-  processShutdownAt = null;
-}
-
 function shutdownIsActive(): boolean {
   return processShutdownAt !== null;
 }
@@ -187,6 +182,7 @@ function sanitizeProviderFailureInput(error: unknown, scrub: (value: string) => 
 }
 
 export class SessionRuntime {
+  private shutdownStartedAt: number | null = null;
   private readonly active = new Map<string, ActiveRun>();
   private readonly compactions = new Map<string, ActiveCompaction>();
   private readonly stopping = new Set<string>();
@@ -222,6 +218,11 @@ export class SessionRuntime {
     await this.teamProxy?.authorizeApprovalDecision(approvalId);
   }
   setAttachments(service: AttachmentService): void { this.attachmentService = service; }
+
+  /** Marks this runtime as closing before asynchronous application cleanup begins. */
+  beginShutdown(): void {
+    this.shutdownStartedAt ??= Date.now();
+  }
 
   activeCount(): number {
     return this.active.size + this.compactions.size + (this.teamProxy?.activeCount() ?? 0);
@@ -606,10 +607,11 @@ export class SessionRuntime {
         run.failureCause = error;
         const signaled = hasTerminationSignal(error);
         const failureAt = Date.now();
-        if (signaled && !shutdownIsActive()) await new Promise((resolve) => setTimeout(resolve, SHUTDOWN_SIGNAL_GRACE_MS));
-        const shutdownWithinGrace = processShutdownAt !== null && processShutdownAt >= failureAt
-          && processShutdownAt - failureAt <= SHUTDOWN_SIGNAL_GRACE_MS;
-        if (shutdownIsActive() || (signaled && shutdownWithinGrace)) {
+        const shuttingDown = shutdownIsActive() || this.shutdownStartedAt !== null;
+        if (signaled && !shuttingDown) await new Promise((resolve) => setTimeout(resolve, SHUTDOWN_SIGNAL_GRACE_MS));
+        const shutdownWithinGrace = [processShutdownAt, this.shutdownStartedAt].some((at) => at !== null && at >= failureAt
+          && at - failureAt <= SHUTDOWN_SIGNAL_GRACE_MS);
+        if (shutdownIsActive() || this.shutdownStartedAt !== null || (signaled && shutdownWithinGrace)) {
           outcome = 'interrupted';
           run.shutdownInterruption = true;
         }
@@ -1332,7 +1334,7 @@ export class SessionRuntime {
         this.closeStream(run, outcome === 'completed' ? null : 'partial');
         this.finishTools(run);
         this.store.setRunChanges(run.id, changes);
-        if (outcome === 'interrupted' && (run.shutdownInterruption || shutdownIsActive())) {
+        if (outcome === 'interrupted' && (run.shutdownInterruption || shutdownIsActive() || this.shutdownStartedAt !== null)) {
           this.store.enqueueSessionResume({ runId: run.id, sessionId: run.sessionId, reason: 'application-closed', taskId: run.taskId });
         }
         this.store.finishRun(run.id, outcome, durationMs, finishedAt);
@@ -1393,7 +1395,7 @@ export class SessionRuntime {
 
   /** Aborts all native provider work and waits (bounded) for provider cleanup. */
   async shutdown(): Promise<void> {
-    beginProcessShutdown();
+    this.beginShutdown();
     const runs = [...this.active.values()];
     const compactions = [...this.compactions.entries()];
     for (const run of runs) this.interrupt(run.sessionId);
