@@ -231,39 +231,114 @@ export class GroupService {
     group: ConversationGroup, source: MemberRow, sourceProvider: Session['provider'], configuredId?: string | null,
     allowQueued = false, failure?: ProviderFailure, scope?: string[], exceptAssignmentId = '',
   ): MemberRow[] {
+    return this.rankAssignees(group, {
+      strategy: 'fallback', excludeMemberIds: [source.id], source, sourceProvider, configuredId,
+      allowQueued, failure, scope, exceptAssignmentId,
+    });
+  }
+
+  private rankAssignees(
+    group: ConversationGroup,
+    options: {
+      strategy: 'automatic' | 'fallback'; excludeMemberIds?: string[]; source?: MemberRow;
+      sourceProvider?: Session['provider']; configuredId?: string | null; allowQueued?: boolean;
+      failure?: ProviderFailure; scope?: string[]; exceptAssignmentId?: string;
+    },
+  ): MemberRow[] {
+    const excluded = new Set(options.excludeMemberIds ?? []);
+    const sourceSession = options.source ? this.store.getSession(options.source.sessionId) : undefined;
+    const health = new Map(this.getMemberHealth(group.id).map((entry) => [entry.memberId, entry]));
+    const runningByProvider = new Map<Session['provider'], number>();
+    for (const delivery of this.repo.deliveries(group.id, ['running'])) {
+      const runningMember = this.repo.getMember(delivery.memberId);
+      const runningSession = runningMember ? this.store.getSession(runningMember.sessionId) : undefined;
+      if (runningSession) runningByProvider.set(runningSession.provider, (runningByProvider.get(runningSession.provider) ?? 0) + 1);
+    }
+    const load = (candidate: MemberRow) => this.repo.memberDeliveries(candidate.id, ['queued', 'running']).length;
+    const healthRank = (candidate: MemberRow) => ({ ok: 0, stalled: 1, failed: 2, cooldown: 3 } as const)[health.get(candidate.id)?.state ?? 'failed'];
+    const scopeConflictsWithAnotherMember = (candidate: MemberRow): boolean => {
+      if (!options.scope) return false;
+      return this.repo.assignments(group.id).some((assignment) => assignment.id !== options.exceptAssignmentId
+        && assignment.toMemberId !== candidate.id && Boolean(this.assignmentScopeStatus(assignment))
+        && scopesOverlap(options.scope!, assignment.scope) !== null);
+    };
     const candidates = this.repo.members(group.id, false).filter((candidate) => {
-      if (candidate.id === source.id || candidate.held || candidate.removedAt || this.providerOnCooldown(this.store.getSession(candidate.sessionId)?.provider ?? sourceProvider)) return false;
+      if (excluded.has(candidate.id) || candidate.held || candidate.removedAt) return false;
       const session = this.store.getSession(candidate.sessionId);
-      if (!session || this.sessionBusy(session) || this.repo.memberDeliveries(candidate.id, ['running']).length) return false;
-      const sourceSession = this.store.getSession(source.sessionId);
-      if (!sourceSession || session.policy !== sourceSession.policy) return false;
-      if (failure?.kind === 'quota_exhausted' && !this.quotaFallbackPoolCheck(group, failure, session).ok) return false;
-      if (!allowQueued && this.repo.memberDeliveries(candidate.id, ['queued']).length) return false;
+      if (!session || this.providerOnCooldown(session.provider) || !this.memberProviderAvailable(candidate, session)) return false;
+      if (options.strategy === 'automatic') return !scopeConflictsWithAnotherMember(candidate);
+
+      if (!options.source || !sourceSession || this.sessionBusy(session) || this.repo.memberDeliveries(candidate.id, ['running']).length) return false;
+      if (session.policy !== sourceSession.policy) return false;
+      if (options.failure?.kind === 'quota_exhausted' && !this.quotaFallbackPoolCheck(group, options.failure, session).ok) return false;
+      if (!options.allowQueued && this.repo.memberDeliveries(candidate.id, ['queued']).length) return false;
       if (this.store.listTasks(group.projectId).some((task) => task.sessionId === session.id && (task.status === 'ready' || task.status === 'running'))) return false;
       if (this.repo.activeAssignments(group.id).some((assignment) => assignment.toMemberId === candidate.id
         && this.repo.getDelivery(assignment.deliveryId)?.status === 'queued')) return false;
-      if (scope) {
-        try { this.assertNoTargetTaskConflict(group, candidate, scope, exceptAssignmentId); }
+      if (options.scope) {
+        try { this.assertNoTargetTaskConflict(group, candidate, options.scope, options.exceptAssignmentId ?? ''); }
         catch { return false; }
       }
-      if (!this.memberProviderAvailable(candidate, session)) return false;
-      if (this.isFullAccessGroup(group) && source.role === 'worker' && this.isTeamOrLocalCoordinator(group, candidate)) return true;
-      if (source.role === 'worker' && this.isTeamOrLocalCoordinator(group, candidate)) return false;
+      if (this.isTeamOrLocalCoordinator(group, candidate)
+        && options.source.role === 'worker' && !this.isFullAccessGroup(group)) return false;
       return true;
     });
-    const configured = configuredId ? candidates.find((candidate) => candidate.id === configuredId) : undefined;
-    const rest = candidates.filter((candidate) => candidate.id !== configured?.id).sort((a, b) => {
-      const aSession = this.store.getSession(a.sessionId)!;
-      const bSession = this.store.getSession(b.sessionId)!;
-      const aCoordinator = this.isTeamOrLocalCoordinator(group, a) ? 1 : 0;
-      const bCoordinator = this.isTeamOrLocalCoordinator(group, b) ? 1 : 0;
-      const aSameProvider = Number(aSession.provider === sourceProvider);
-      const bSameProvider = Number(bSession.provider === sourceProvider);
-      const load = (member: MemberRow) => this.repo.memberDeliveries(member.id, ['queued', 'running']).length;
-      return aCoordinator - bCoordinator || aSameProvider - bSameProvider || load(a) - load(b)
-        || a.joinedAt.localeCompare(b.joinedAt);
-    });
-    return [...(configured ? [configured] : []), ...rest];
+    const configured = options.strategy === 'fallback' && options.configuredId
+      ? candidates.find((candidate) => candidate.id === options.configuredId) : undefined;
+    const compare = (a: MemberRow, b: MemberRow): number => {
+      if (configured) {
+        const configuredOrder = Number(b.id === configured.id) - Number(a.id === configured.id);
+        if (configuredOrder) return configuredOrder;
+      }
+      if (options.strategy === 'automatic') {
+        const continuityOrder = this.rankAssigneeContinuity(group, b, options.scope ?? []).score
+          - this.rankAssigneeContinuity(group, a, options.scope ?? []).score;
+        if (continuityOrder) return continuityOrder;
+        const loadOrder = load(a) - load(b);
+        if (loadOrder) return loadOrder;
+        const healthOrder = healthRank(a) - healthRank(b);
+        if (healthOrder) return healthOrder;
+        const sessionA = this.store.getSession(a.sessionId)!;
+        const sessionB = this.store.getSession(b.sessionId)!;
+        const diversityOrder = (runningByProvider.get(sessionA.provider) ?? 0) - (runningByProvider.get(sessionB.provider) ?? 0);
+        return diversityOrder || a.joinedAt.localeCompare(b.joinedAt);
+      }
+      const sessionA = this.store.getSession(a.sessionId)!;
+      const sessionB = this.store.getSession(b.sessionId)!;
+      const coordinatorOrder = Number(this.isTeamOrLocalCoordinator(group, a)) - Number(this.isTeamOrLocalCoordinator(group, b));
+      const providerOrder = Number(sessionA.provider === options.sourceProvider) - Number(sessionB.provider === options.sourceProvider);
+      return coordinatorOrder || providerOrder || load(a) - load(b) || healthRank(a) - healthRank(b) || a.joinedAt.localeCompare(b.joinedAt);
+    };
+    return candidates.sort(compare);
+  }
+
+  private automaticPickReason(group: ConversationGroup, recipient: MemberRow, scope: string[]): string {
+    const continuity = this.rankAssigneeContinuity(group, recipient, scope);
+    const load = this.repo.memberDeliveries(recipient.id, ['queued', 'running']);
+    const running = load.filter((delivery) => delivery.status === 'running').length;
+    const queued = load.filter((delivery) => delivery.status === 'queued').length;
+    const session = this.store.getSession(recipient.sessionId);
+    const health = this.getMemberHealth(group.id).find((entry) => entry.memberId === recipient.id)?.state ?? 'failed';
+    const diversity = session && (this.repo.deliveries(group.id, ['running']).some((delivery) => {
+      const owner = this.repo.getMember(delivery.memberId);
+      return owner && this.store.getSession(owner.sessionId)?.provider === session.provider;
+    })) ? `provider ${session.provider} has running work` : `provider diversity (${session?.provider ?? 'unknown'} not currently running)`;
+    return `${continuity.directory ? `scope continuity in ${continuity.directory}` : `lowest load (${running} running, ${queued} queued)`}; load ${running} running/${queued} queued; health ${health}; ${diversity}`;
+  }
+
+  private rankAssigneeContinuity(group: ConversationGroup, candidate: MemberRow, scope: string[]): { score: number; directory: string | null } {
+    let score = 0;
+    let directory: string | null = null;
+    for (const assignment of this.repo.assignments(group.id)) {
+      if (assignment.toMemberId !== candidate.id || !this.assignmentScopeStatus(assignment)) continue;
+      for (const requested of scope) for (const owned of assignment.scope) {
+        const requestedDir = requested.includes('/') ? requested.split('/')[0]! : '.';
+        const ownedDir = owned.includes('/') ? owned.split('/')[0]! : '.';
+        if (scopesOverlap([requested], [owned])) { score += 2; directory ??= ownedDir; }
+        else if (requestedDir === ownedDir) { score += 1; directory ??= ownedDir; }
+      }
+    }
+    return { score, directory };
   }
 
   isMemberAvailable(groupId: string, memberIdArg: string): boolean {
@@ -3565,8 +3640,22 @@ ${task ? `Task ${task.id}: ${task.title}\nAcceptance: ${task.acceptanceCriteria}
     if (!this.mayAssign(group, member, request.plannerMemberId)) {
       throw forbidden(group.mode === 'cowork' ? 'Only the peer holding this request\'s planning lease can assign work' : 'Only the group orchestrator can assign work');
     }
-    const recipient = this.activeByHandle(group, input.recipient);
-    if (recipient.id === member.id) throw unprocessable('You cannot assign work to yourself');
+    const scope = normalizeScopes(input.scope);
+    let autoSelection: string | undefined;
+    let recipient: MemberRow;
+    if (input.recipient === 'auto') {
+      let candidates = this.rankAssignees(group, { strategy: 'automatic', excludeMemberIds: [member.id], scope });
+      if (!candidates.length && group.mode !== 'orchestrated') {
+        const onlySelf = this.rankAssignees(group, { strategy: 'automatic', scope });
+        if (onlySelf.length === 1 && onlySelf[0]!.id === member.id) candidates = onlySelf;
+      }
+      recipient = candidates[0]!;
+      if (!recipient) throw conflict('No eligible member is available for automatic assignment; check the team roster, provider availability, cooldowns and scope ownership.');
+      autoSelection = `Auto-picked @${recipient.handle}: ${this.automaticPickReason(group, recipient, scope)}`;
+    } else {
+      recipient = this.activeByHandle(group, input.recipient);
+      if (recipient.id === member.id) throw unprocessable('You cannot assign work to yourself');
+    }
     const recipientSession = this.store.getSession(recipient.sessionId);
     if (!recipientSession) throw conflict(`@${recipient.handle} is archived`);
     if (this.repo.countRunMessages(group.id, member.id, delivery.runId!, 'assignment') >= MAX_ASSIGNMENTS_PER_RUN) throw conflict('Too many assignments in one turn');
@@ -3587,7 +3676,6 @@ ${task ? `Task ${task.id}: ${task.title}\nAcceptance: ${task.acceptanceCriteria}
       throw conflict(reason);
     }
 
-    const scope = normalizeScopes(input.scope);
     const dependsOn = [...new Set(input.dependsOn ?? [])].sort();
     const wanted = new Map<string, { taskId: string; path: string }>();
     for (const artifact of input.inputArtifacts ?? []) {
@@ -3604,7 +3692,7 @@ ${task ? `Task ${task.id}: ${task.title}\nAcceptance: ${task.acceptanceCriteria}
 
     const active = this.repo.activeAssignments(group.id);
     const same = active.find((a) => a.fingerprint === fingerprint);
-    if (same) return { assignmentId: same.id, taskId: same.taskId, deliveryId: same.deliveryId, recipient: recipient.handle, status: 'queued-or-active', deduplicated: true };
+    if (same) return { assignmentId: same.id, taskId: same.taskId, deliveryId: same.deliveryId, recipient: recipient.handle, status: 'queued-or-active', deduplicated: true, ...(autoSelection ? { selection: autoSelection } : {}) };
     const previous = this.repo.requestAssignments(request.id).find((assignment) => assignment.fingerprint === fingerprint);
     if (previous) {
       const priorDelivery = this.repo.getDelivery(previous.deliveryId);
@@ -3612,7 +3700,7 @@ ${task ? `Task ${task.id}: ${task.title}\nAcceptance: ${task.acceptanceCriteria}
         'The same assignment objective and scope was proposed again after its prior delivery settled.');
       return {
         assignmentId: previous.id, taskId: previous.taskId, deliveryId: previous.deliveryId, recipient: recipient.handle,
-        status: priorDelivery?.status ?? 'unavailable', deduplicated: true,
+        status: priorDelivery?.status ?? 'unavailable', deduplicated: true, ...(autoSelection ? { selection: autoSelection } : {}),
       };
     }
     this.assertNoAssignmentScopeConflict(group, member, recipient, scope, session.id);
@@ -3648,14 +3736,15 @@ ${task ? `Task ${task.id}: ${task.title}\nAcceptance: ${task.acceptanceCriteria}
         const existing = producer ? this.verifiedArtifact(assignment, producer, wantedInput.path, null) : undefined;
         this.repo.insertInput(id, wantedInput.taskId, wantedInput.path, existing?.id ?? null);
       }
-      this.repo.updateRequest(request.id, { status: 'active' });
-      this.repo.touchGroup(group.id);
-      this.event(group, 'group.assignment.created', `Assignment: @${member.handle} → @${recipient.handle}: ${title}`, { assignmentId: id, taskId: task.id, deliveryId: deliveryIdValue, scope }, session.id);
-      return { id, taskId: task.id, deliveryId: deliveryIdValue, assignment };
+       this.repo.updateRequest(request.id, { status: 'active' });
+       this.repo.touchGroup(group.id);
+       this.event(group, 'group.assignment.created', `Assignment: @${member.handle} → @${recipient.handle}: ${title}`, { assignmentId: id, taskId: task.id, deliveryId: deliveryIdValue, scope }, session.id);
+       if (autoSelection) this.event(group, 'group.assignment.auto-picked', 'Automatic assignment target selected', { memberId: recipient.id, handle: recipient.handle, reason: autoSelection, assignmentId: id }, session.id);
+       return { id, taskId: task.id, deliveryId: deliveryIdValue, assignment };
     });
     const waitingOn = this.dependencyState(created.assignment, this.store.getTask(created.taskId)!).waiting;
     this.schedule(group.id);
-    return { assignmentId: created.id, taskId: created.taskId, deliveryId: created.deliveryId, recipient: recipient.handle, status: 'queued', waitingOn, deduplicated: false };
+    return { assignmentId: created.id, taskId: created.taskId, deliveryId: created.deliveryId, recipient: recipient.handle, status: 'queued', waitingOn, deduplicated: false, ...(autoSelection ? { selection: autoSelection } : {}) };
   }
 
   message(ctx: GroupRunContext, input: TeamMessage): unknown {

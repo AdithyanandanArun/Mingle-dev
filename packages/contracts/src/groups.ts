@@ -102,7 +102,7 @@ export interface GroupSnapshot {
 export interface GroupRunContext { groupId: string; memberId: string; requestId: string; deliveryId: string; hop: number; instructions: string }
 export interface TeamMcpConnection { url: string; token: string }
 export const TeamAssignSchema = z.object({
-  recipient: AgentHandleSchema, title: z.string().trim().min(1).max(200),
+  recipient: z.union([AgentHandleSchema, z.literal('auto')]), title: z.string().trim().min(1).max(200),
   objective: z.string().trim().min(1).max(12000), acceptanceCriteria: z.string().max(4000).default(''),
   scope: z.array(z.string().min(1).max(1000)).min(1).max(40),
   dependsOn: z.array(z.string().min(1).max(100)).max(30).default([]),
