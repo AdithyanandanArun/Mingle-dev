@@ -954,6 +954,7 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
     }
 
     const groupId = boundGroup?.group.id ?? `group_${randomUUID().replaceAll('-', '')}`;
+    const savedSettings = await this.withIntegrationTarget(context, settings, row ?? null);
     this.options.store.tx(() => {
       this.syncSessions(context, settings, { agentIds: new Set(teamSessionAgents.map(({ agent }) => agent.id)), restoreRemoved: true });
       this.syncTeamSessionPolicyInStore(session.id, settings.permissionLevel);
@@ -972,8 +973,8 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
           orchestratorSessionId: session.id, members: [{ sessionId: session.id, handle, role: 'orchestrator', held: false }] });
       }
       this.markLowerConsentsForReconsent(context, prior?.permissionLevel ?? 'supervised', settings);
+      this.saveHostProject(context, groupId, savedSettings, row ?? null);
     });
-    await this.saveHostProject(context, groupId, settings, row ?? null);
     row = this.readHost(context.project.teamId, context.project.sharedProjectId)!;
     if (!row || row.group_id !== groupId) throw new HttpError(500, 'The team session could not be saved.');
     await this.reconcileConsentedTeamAgents(context, row);
@@ -1025,9 +1026,9 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
         const orchestrator = context.agents.find((candidate) => candidate.sessionId === anchor.id && candidate.deviceId === context.localDeviceId);
         const orchestratorAgentId = input.mode === 'cowork' ? null : orchestrator?.id ?? null;
         const minimumVersion = Math.max(1, Number(consentRow.settings_version) || 1);
-        const settings = TeamOrchestrationSettingsSchema.parse({ leaderOrchestration: true, permissionLevel,
+        const settings = await this.withIntegrationTarget(context, TeamOrchestrationSettingsSchema.parse({ leaderOrchestration: true, permissionLevel,
           orchestratorAgentId, fallbackAgentIds: [], version: currentRow ? Math.max(this.settings(currentRow).version + 1, minimumVersion) : minimumVersion,
-          updatedAt: new Date(this.now()).toISOString(), updatedByAccountId: context.accountId });
+          updatedAt: new Date(this.now()).toISOString(), updatedByAccountId: context.accountId }), currentRow ?? null);
         const selected = this.syncSessions(context, settings, { agentIds: new Set([agent.id, ...(orchestrator ? [orchestrator.id] : [])]), restoreRemoved: true });
         const remoteMember = selected.find((member) => member.handle === this.handleFor(teamId, sharedProjectId, agent.id));
         if (!remoteMember) throw new HttpError(404, `${agent.name} has no usable proxy session.`);
@@ -1043,7 +1044,7 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
             { sessionId: anchor.id, handle: localMemberHandle, role: 'orchestrator', held: false },
             { sessionId: remoteMember.sessionId, handle: remoteHandle, role: 'worker', held: false },
           ] });
-        await this.saveHostProject(context, groupId, settings, currentRow ?? null);
+        this.saveHostProject(context, groupId, settings, currentRow ?? null);
       } else {
         if (!groupId || !groupSnapshot) throw new HttpError(404, 'Group not found.');
         groupSnapshot = await this.attachAgentToExistingGroup(context, groupSnapshot, currentRow ?? null, agent, consentRow, input.handle);
@@ -1094,10 +1095,10 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
     const priorSettings = currentRow?.group_id === groupId ? this.settings(currentRow) : null;
     const nextVersion = currentRow ? Math.max(this.settings(currentRow).version + 1, minimumVersion) : minimumVersion;
     const orchestratorAgentId = group.mode === 'cowork' ? null : orchestratorAgent?.id ?? null;
-    const settings = priorSettings && priorSettings.version >= minimumVersion ? priorSettings
+    const settings = await this.withIntegrationTarget(context, priorSettings && priorSettings.version >= minimumVersion ? priorSettings
       : TeamOrchestrationSettingsSchema.parse({ ...(priorSettings ?? { leaderOrchestration: true, permissionLevel,
         orchestratorAgentId, fallbackAgentIds: [] }),
-        version: priorSettings ? minimumVersion : nextVersion, updatedAt: new Date(this.now()).toISOString(), updatedByAccountId: context.accountId });
+        version: priorSettings ? minimumVersion : nextVersion, updatedAt: new Date(this.now()).toISOString(), updatedByAccountId: context.accountId }), currentRow);
     const selected = this.syncSessions(context, settings, { agentIds: new Set([agent.id, ...(orchestratorAgent ? [orchestratorAgent.id] : [])]), restoreRemoved: true });
     const remoteMember = selected.find((member) => member.handle === this.handleFor(teamId, sharedProjectId, agent.id));
     if (!remoteMember) throw new HttpError(404, `${agent.name} has no usable proxy session.`);
@@ -1108,7 +1109,7 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
     this.hostRows.prepare(`UPDATE mingle_team_proxy_sessions SET handle=? WHERE team_id=? AND shared_project_id=? AND agent_id=?`)
       .run(remoteHandle, teamId, sharedProjectId, agent.id);
     const updated = await this.options.groups.addTeamMember(groupId, { sessionId: remoteMember.sessionId, handle: remoteHandle });
-      await this.saveHostProject(context, groupId, settings, currentRow);
+    this.saveHostProject(context, groupId, settings, currentRow);
     this.syncTeamRoster(context, groupId, settings);
     return updated;
   }
@@ -1147,7 +1148,8 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
     return handle;
   }
 
-  private async saveHostProject(context: ProjectContext, groupId: string, settings: TeamOrchestrationSettings, prior: HostRow | null): Promise<void> {
+  /** Resolves origin's default branch once, before any group rows are written, so the save itself can stay transactional. */
+  private async withIntegrationTarget(context: ProjectContext, settings: TeamOrchestrationSettings, prior: HostRow | null): Promise<TeamOrchestrationSettings> {
     const priorHasTarget = prior ? typeof (safeJson(prior.settings_json, {}) as Record<string, unknown>).integrationTarget === 'string' : false;
     if (!priorHasTarget) {
       const projectPath = this.options.store.getProject(context.localProjectId)?.path;
@@ -1157,9 +1159,13 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
         const tracking = await git(projectPath, ['symbolic-ref', '--quiet', '--short', 'refs/remotes/origin/HEAD'], { allowFailure: true });
         const candidate = advertised ?? (tracking.code === 0 ? tracking.stdout.trim().replace(/^origin\//, '') : 'main');
         const checked = await git(projectPath, ['check-ref-format', `refs/heads/${candidate}`], { allowFailure: true });
-        settings = TeamOrchestrationSettingsSchema.parse({ ...settings, integrationTarget: checked.code === 0 ? candidate : 'main' });
+        return TeamOrchestrationSettingsSchema.parse({ ...settings, integrationTarget: checked.code === 0 ? candidate : 'main' });
       }
     }
+    return settings;
+  }
+
+  private saveHostProject(context: ProjectContext, groupId: string, settings: TeamOrchestrationSettings, prior: HostRow | null): void {
     const at = settings.updatedAt;
     if (prior) {
       const result = this.hostRows.prepare(`UPDATE mingle_team_host_projects SET group_id=?,settings_json=?,updated_at=? WHERE team_id=? AND shared_project_id=? AND group_id=?`)
