@@ -227,6 +227,80 @@ export class AttachmentService {
 
   forOwner(ownerKind: OwnerKind, ownerId: string): AttachmentRow[] { return this.repo.forOwner(ownerKind, ownerId); }
 
+  /** Copies one failed message's sent files into fresh draft rows for a new retry message. */
+  async cloneMessageAttachments(sessionId: string, sourceMessageId: string): Promise<string[]> {
+    const scope: UploadScope = { kind: 'session', id: sessionId };
+    const projectId = this.requireScope(scope);
+    const rows = this.repo.forOwner('message', sourceMessageId);
+    if (!rows.length) return [];
+    if (rows.length > ATTACHMENT_LIMITS.filesPerMessage || rows.reduce((sum, row) => sum + row.size, 0) > ATTACHMENT_LIMITS.totalBytes
+      || rows.some((row) => row.size > (row.kind === 'image' ? ATTACHMENT_LIMITS.imageBytes : ATTACHMENT_LIMITS.fileBytes))) {
+      throw conflict('The failed message’s attachments exceed the current retry limits. Remove or resize the files before retrying.');
+    }
+    if (rows.some((row) => row.scopeKind !== 'session' || row.scopeId !== sessionId || row.projectId !== projectId)) {
+      throw notFound('An attachment is no longer available for this session.');
+    }
+
+    const opened: Array<{ row: AttachmentRow; handle: FileHandle }> = [];
+    const missing: string[] = [];
+    for (const row of rows) {
+      const handle = await this.openBlob(row).catch(() => undefined);
+      if (handle) opened.push({ row, handle });
+      else missing.push(row.name);
+    }
+    if (missing.length) {
+      await Promise.all(opened.map(({ handle }) => handle.close().catch(() => undefined)));
+      throw conflict(`The failed message’s attachments are missing from disk: ${missing.join(', ')}. Reattach the missing files before retrying.`);
+    }
+
+    const copied: Array<{ id: string; row: AttachmentRow }> = [];
+    const createdPaths: string[] = [];
+    try {
+      for (const { row, handle } of opened) {
+        const id = attachmentId();
+        const target = this.blobPath(id);
+        const output = await open(target, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL, 0o600);
+        createdPaths.push(target);
+        try {
+          const hash = createHash('sha256');
+          const buffer = Buffer.allocUnsafe(64 * 1024);
+          let position = 0;
+          while (position < row.size) {
+            const { bytesRead } = await handle.read(buffer, 0, Math.min(buffer.length, row.size - position), position);
+            if (!bytesRead) throw conflict(`“${row.name}” is no longer available on disk. Reattach it before retrying.`);
+            const chunk = buffer.subarray(0, bytesRead);
+            hash.update(chunk);
+            let written = 0;
+            while (written < chunk.length) {
+              const result = await output.write(chunk, written, chunk.length - written, position + written);
+              if (!result.bytesWritten) throw new Error('Could not clone failed-message attachment');
+              written += result.bytesWritten;
+            }
+            position += bytesRead;
+          }
+          const info = await handle.stat();
+          if (!info.isFile() || info.size !== row.size || hash.digest('hex') !== row.sha256) {
+            throw conflict(`“${row.name}” changed on disk after it was uploaded. Reattach it before retrying.`);
+          }
+        } finally { await output.close(); }
+        copied.push({ id, row });
+      }
+
+      this.store.tx(() => {
+        if (this.requireScope(scope) !== projectId) throw notFound('Session not found');
+        for (const { id, row } of copied) this.repo.insert({ id, projectId, scopeKind: 'session', scopeId: sessionId,
+          kind: row.kind, name: row.name, mimeType: row.mimeType, size: row.size, sha256: row.sha256 });
+      });
+      this.store.touch();
+      return copied.map(({ id }) => id);
+    } catch (error) {
+      await Promise.all(createdPaths.map((file) => unlink(file).catch(() => undefined)));
+      throw error;
+    } finally {
+      await Promise.all(opened.map(({ handle }) => handle.close().catch(() => undefined)));
+    }
+  }
+
   ref(row: AttachmentRef): AttachmentRef {
     return { id: row.id, name: row.name, mimeType: row.mimeType, size: row.size, kind: row.kind, createdAt: row.createdAt };
   }

@@ -306,11 +306,12 @@ export function Composer({ session, statusBar }: { session: Session; statusBar?:
     }
   };
   const retryFailedMessage = async () => {
-    if (!failedMessage?.content.trim() || failedMessage.attachments?.length || !providerFailure || session.provider === providerFailure.provider || !provider?.available || sending || updating) return;
+    if (!failedMessage || (!failedMessage.content.trim() && !failedMessage.attachments?.length) || !providerFailure
+      || session.provider === providerFailure.provider || !provider?.available || sending || updating) return;
     setSending(true);
     setError(null);
     try {
-      await api.sendMessage(session.id, failedMessage.content, [], [], failedMessage.contextRefs, 'normal');
+      await api.retryMessage(session.id, failedMessage.id);
       await useMingle.getState().refreshNow();
     } catch (cause) {
       setError(errorMessage(cause));
@@ -320,7 +321,8 @@ export function Composer({ session, statusBar }: { session: Session; statusBar?:
   };
   const disabled = running || sending || updating || connection !== 'online';
   const providerFailureCopy = providerFailure ? providerSwitchFailureCopy(providerFailure) : null;
-  const canRetryFailedMessage = Boolean(providerFailure && session.provider !== providerFailure.provider && provider?.available && failedMessage?.content.trim() && !failedMessage.attachments?.length);
+  const canRetryFailedMessage = Boolean(providerFailure && session.provider !== providerFailure.provider && provider?.available && failedMessage
+    && (failedMessage.content.trim() || failedMessage.attachments?.length));
   const currentProvider = providers?.find((p) => p.id === session.provider);
   const modelData = (currentProvider?.models ?? []) as ProviderModel[];
   const currentModel = modelData.find((m) => m.id === session.model || m.aliases?.includes(session.model));
@@ -455,7 +457,6 @@ export function Composer({ session, statusBar }: { session: Session; statusBar?:
         <span>{providerFailureCopy}</span>{' '}
         <button type="button" className="link-btn" onClick={() => setModelOpenRequest((value) => value + 1)} disabled={disabled} title={running ? 'Wait for the active run to finish before switching providers.' : 'Choose another available provider.'}>Switch provider</button>
         {canRetryFailedMessage ? <>{' '}<button type="button" className="link-btn" onClick={() => void retryFailedMessage()} disabled={disabled}>Retry with {PROVIDER_NAME[session.provider]}</button></> : null}
-        {providerFailure && session.provider !== providerFailure.provider && failedMessage?.attachments?.length ? <span>Reattach the failed message’s files before retrying.</span> : null}
       </div> : null}
       {statusBar}
       <div className={cx('composer', blocker && 'is-blocked')}>

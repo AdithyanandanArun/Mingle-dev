@@ -221,6 +221,8 @@ export const api = {
       throw error;
     }
   },
+  retryMessage: (id: string, messageId: string) => json<{ accepted: boolean }>(
+    `/api/sessions/${encodeURIComponent(id)}/messages/${encodeURIComponent(messageId)}/retry`, 'POST', {}),
   editPlan: (id: string, input: EditSessionPlan) => json<SessionPlan>(`/api/plans/${encodeURIComponent(id)}`, 'PATCH', input),
   approvePlan: (id: string, revision: number) => json<SessionPlan>(`/api/plans/${encodeURIComponent(id)}/approve`, 'POST', { revision }),
   executePlan: (id: string) => json<{ accepted: true; runId: string | null; deliveryId?: string; plan: SessionPlan }>(`/api/plans/${encodeURIComponent(id)}/execute`, 'POST', {}),

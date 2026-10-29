@@ -27,6 +27,15 @@ it('publishes the user message optimistically and rolls it back on a rejected se
   expect(events.map(([name]) => name)).toEqual(['session', 'session-remove']);
 });
 
+it('retries a failed message through the server-owned message and attachment clone endpoint', async () => {
+  const fetch = vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({ accepted: true }), { status: 202 }));
+  vi.stubGlobal('fetch', fetch);
+  await expect(api.retryMessage('session/one', 'message one')).resolves.toEqual({ accepted: true });
+  expect(fetch).toHaveBeenCalledWith('/api/sessions/session%2Fone/messages/message%20one/retry', expect.objectContaining({
+    method: 'POST', body: '{}',
+  }));
+});
+
 it('publishes a group message before sending and adopts the durable response snapshot', async () => {
   const snapshot = { group: { id: 'group-1' }, members: [], messages: [], requests: [], deliveries: [], assignments: [] };
   vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(new Response(JSON.stringify(snapshot), { status: 202 })));

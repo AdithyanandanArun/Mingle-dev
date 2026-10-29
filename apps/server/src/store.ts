@@ -471,6 +471,12 @@ export class Store {
     const row = this.get('SELECT * FROM messages WHERE id = ?', id);
     return row ? this.withAttachments([mapMessage(row)])[0] : undefined;
   }
+  latestFailedUserMessage(sessionId: string): Message | undefined {
+    const row = this.get(`SELECT m.* FROM messages m JOIN session_runs r ON r.id = m.run_id
+      WHERE m.session_id = ? AND m.role = 'user' AND r.session_id = m.session_id AND r.user_message_id = m.id AND r.status = 'failed'
+      ORDER BY m.seq DESC LIMIT 1`, sessionId);
+    return row ? this.withAttachments([mapMessage(row)])[0] : undefined;
+  }
   /** Adds attachment metadata (never bytes or paths) to human messages that have linked files. */
   private withAttachments(messages: Message[]): Message[] {
     const ids = messages.filter((message) => message.role === 'user').map((message) => message.id);

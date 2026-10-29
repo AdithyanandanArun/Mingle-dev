@@ -109,6 +109,21 @@ const ImportsQuery = z.object({ provider: ProviderSchema, projectId: z.string().
 const DirectoriesQuery = z.object({ path: z.string().min(1).max(4096).optional(), query: z.string().max(200).optional(), hidden: z.enum(['true', 'false']).optional() }).strict();
 const RevealDirectory = z.object({ path: z.string().min(1).max(4096) }).strict();
 
+function validateSessionAttachmentSupport(s: Services, session: Session, attachments: readonly { kind: string; size: number }[], content: string): void {
+  if (attachments.some((row) => row.kind === 'image')) {
+    const info = s.providers.cached()?.find((row) => row.id === session.provider);
+    const model = info?.models.find((candidate) => candidate.id === session.model || candidate.aliases?.includes(session.model));
+    const imagesSupported = model?.inputModalities ? model.inputModalities.includes('image') : info?.promptCapabilities?.image === true;
+    if (!imagesSupported) throw badRequest(`${session.provider} has not reported image input for this session, so no message was sent.`);
+    if (session.provider === 'claude' && attachments.some((row) => row.kind === 'image' && row.size > ATTACHMENT_LIMITS.claudeImageBytes)) {
+      throw badRequest('Claude image attachments are limited to 5 MiB each. Remove the large image or resize it before sending.');
+    }
+  }
+  if (session.provider === 'opencode' && attachments.length && /^\s*\/[A-Za-z0-9][A-Za-z0-9_.:-]*(?:\s|$)/.test(content)) {
+    throw badRequest('OpenCode native slash commands cannot carry attachments. Remove the attachments or send a regular message.');
+  }
+}
+
 export function buildRouter(s: Services) {
   const routes: Route[] = [];
   const add = (method: string, pattern: string, handler: Handler) => routes.push({ method, ...compile(pattern), handler });
@@ -469,6 +484,45 @@ export function buildRouter(s: Services) {
     const result: SessionUsage = { ...usage, session: { id: latest.id, inputTokens: latest.inputTokens, outputTokens: latest.outputTokens, costUsd: latest.costUsd } };
     return result;
   });
+  add('POST', '/api/sessions/:id/messages/:messageId/retry', async (ctx) => {
+    await ctx.body(emptyBrowserBody);
+    const id = param(ctx, 'id');
+    const messageId = param(ctx, 'messageId');
+    const session = s.store.getSession(id);
+    if (!session) throw notFound('Session not found');
+    if (s.groups.forSession(id)) throw conflict('Retry a group delivery through its group recovery controls.');
+    const message = s.store.getMessage(messageId);
+    if (!message || message.sessionId !== id) throw notFound('Message not found in this session');
+    const run = message.runId ? s.store.getRun(message.runId) : undefined;
+    if (message.role !== 'user' || !run || run.sessionId !== id || run.userMessageId !== message.id || run.status !== 'failed') {
+      throw conflict('Only a failed user message can be retried.');
+    }
+    if (s.store.latestFailedUserMessage(id)?.id !== message.id) throw conflict('Only the latest failed user message can be retried.');
+    if (s.runtime.isActive(id) || session.status === 'running' || session.status === 'waiting') {
+      throw conflict('Session already has an active run or provider cleanup is still in progress');
+    }
+
+    const sourceAttachments = s.attachments.forOwner('message', message.id);
+    validateSessionAttachmentSupport(s, session, sourceAttachments, message.content);
+    const attachmentIds = await s.attachments.cloneMessageAttachments(id, message.id);
+    const discardClones = async () => { await Promise.all(attachmentIds.map((attachmentId) => s.attachments.discard(attachmentId).catch(() => undefined))); };
+    try {
+      const latest = s.store.getSession(id);
+      if (!latest) throw notFound('Session not found');
+      if (latest.provider !== session.provider || latest.model !== session.model || latest.worktreePath !== session.worktreePath) {
+        throw conflict('Session settings changed while preparing the retry. Try again with the current session.');
+      }
+      if (s.groups.forSession(id)) throw conflict('This session joined a group while preparing the retry. Use its group recovery controls.');
+      if (s.runtime.isActive(id) || latest.status === 'running' || latest.status === 'waiting') {
+        throw conflict('Session already has an active run or provider cleanup is still in progress');
+      }
+      s.runtime.start(id, message.content, { attachmentIds, contextRefs: message.contextRefs, deferContextResolution: true });
+      return new Reply(202, { accepted: true });
+    } catch (error) {
+      await discardClones();
+      throw error;
+    }
+  });
   add('POST', '/api/sessions/:id/messages', async (ctx) => {
     const id = param(ctx, 'id');
     const { content, intent, skills: selected, attachmentIds, contextRefs } = await ctx.body(SendMessageSchema);
@@ -502,14 +556,7 @@ export function buildRouter(s: Services) {
       return skills;
     } : undefined;
     const attachmentRows = s.attachments.validate({ kind: 'session', id }, attachmentIds ?? []);
-    if (attachmentRows.some((row) => row.kind === 'image')) {
-      const info = s.providers.cached()?.find((row) => row.id === session.provider);
-      const model = info?.models.find((candidate) => candidate.id === session.model || candidate.aliases?.includes(session.model));
-      const imagesSupported = model?.inputModalities ? model.inputModalities.includes('image') : info?.promptCapabilities?.image === true;
-      if (!imagesSupported) throw badRequest(`${session.provider} has not reported image input for this session, so no message was sent.`);
-      if (session.provider === 'claude' && attachmentRows.some((row) => row.kind === 'image' && row.size > 5 * 1024 * 1024)) throw badRequest('Claude image attachments are limited to 5 MiB each. Remove the large image or resize it before sending.');
-    }
-    if (session.provider === 'opencode' && attachmentRows.length && /^\s*\/[A-Za-z0-9][A-Za-z0-9_.:-]*(?:\s|$)/.test(content)) throw badRequest('OpenCode native slash commands cannot carry attachments. Remove the attachments or send a regular message.');
+    validateSessionAttachmentSupport(s, session, attachmentRows, content);
     const latest = s.store.getSession(id);
     if (!latest) throw notFound('Session not found');
     if (s.groups.forSession(id)) throw conflict('This session joined a group while loading skills. Send through its group conversation.');

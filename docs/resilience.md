@@ -74,10 +74,13 @@ All paths are under `/api`:
 | `GET /sessions/:id/recovery` | — | `{ checkpoint: RecoveryCheckpoint \| null, failure: ProviderFailure \| null }` |
 | `POST /sessions/:id/checkpoints` | `{ reason: string (1–200), runId?: string }` | `RecoveryCheckpoint` (201) |
 | `POST /groups/:id/recovery` | `RecoveryActionRequest` | `RecoveryActionResult` |
+| `POST /sessions/:id/messages/:messageId/retry` | `{}` | `{ accepted: true }` (202) |
 | `POST /sessions/:id/compact` | `{ operationId?: string (1–100) }` | `ContextCompactionResult` |
 | `POST /sessions/:id/compact/interrupt` | `{ operationId: string (1–100) }` | `{ interrupted: boolean }` |
 
 The strict recovery action union is idempotency keyed and supports retry with an optional approach note, delivery reassign to a selected existing member, coordinator replacement, Ask me/pause, acknowledgement of a specific durable checkpoint, and explicit resume. Group recovery calls `GroupService.recoverAction`; startup's `recover()` remains distinct. Stale action state is revalidated in the group service, not trusted from a renderer snapshot.
+
+Provider-switch retry accepts only the latest failed user message belonging to that session. The server creates fresh attachment rows and private file copies, retains the original content and context references, checks the current provider's attachment support, and starts a normal run through the session's current provider (including its pending provider handoff). Missing files are reported by name; a stale message or wrong session is rejected. Attachment count, total-size, per-file, provider image and native-command limits still apply. Group deliveries continue through group recovery instead.
 
 Startup does not call the general group resume action. Eligible running group deliveries use a separate one-attempt startup continuation path that does not acknowledge unrelated pending checkpoints or clear member holds; queued work starts only after provider discovery. Other interrupted work remains visibly paused. Team proxy sessions are never continued as ordinary local sessions; the owner device remains the only provider-runtime owner, and the host redispatches only after stopping the stale owner turn. Each started restart successor records `group.delivery.resumed`.
 
