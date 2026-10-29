@@ -687,6 +687,7 @@ export function createDeviceSide(deps: DeviceSideDeps): {
   }
 
   async function validateDelivery(envelope: AuthenticatedEnvelope, payload: TeamDeliveryPayload): Promise<{ shared: SharedBinding; agent: SharedBinding['agents'][number]; sessionId: string } | { rejection: 'no-consent' | 'needs-reconsent' | 'paused' | 'agent-unavailable' | 'busy' | 'invalid' }> {
+    if (payload.hop > 12 && payload.permissionLevel !== 'full-access') return { rejection: 'invalid' };
     let shared = await findBindingBySharedProject(envelope.teamId, payload.sharedProjectId);
     if (!shared || payload.sharedProjectId !== shared.sharedProjectId || !await authorizedHost(envelope, shared)
       || payload.integrationDeviceId !== await hostDeviceId(shared)) return { rejection: 'invalid' };

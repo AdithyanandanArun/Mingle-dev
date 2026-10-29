@@ -251,7 +251,8 @@ export const TeamDeliveryPayloadSchema = z.object({
   role: TeamAgentRoleSchema, kind: z.enum(['request', 'assignment', 'message', 'result']),
   /** Full prompt for the agent turn, built by the host (instructions + content). Bounded. */
   content: z.string().min(1).max(100_000),
-  hop: z.number().int().min(0).max(12),
+  /** Group settings cap normal hops at 12; Full-access requests may internally extend to 24. */
+  hop: z.number().int().min(0).max(24),
   permissionLevel: TeamPermissionLevelSchema, settingsVersion: z.number().int().min(1),
   taskId: Id.optional(),
   /** Assignment file/directory scope. Absent on legacy and project-wide deliveries. */

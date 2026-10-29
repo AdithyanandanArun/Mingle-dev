@@ -362,6 +362,21 @@ describe('owner-device team orchestration', () => {
     expect(f.side.localConsent(SHARED)).toMatchObject({ state: 'granted', permissionLevel: 'full-access', settingsVersion: 7 });
   });
 
+  it('accepts internally extended hops only when both the host and owner consent grant Full access', async () => {
+    const f = await fixture();
+    await sendStructure(f, structure(1, 'full-access'));
+    await f.setConsent('full-access', 1);
+    const supervised = deliveryPayload({ deliveryId: `delivery-${randomUUID()}`, hop: 13, permissionLevel: 'supervised' });
+    await f.deliver(supervised);
+    expect(f.sent.at(-1)?.payload).toMatchObject({ status: 'rejected', rejection: 'invalid' });
+
+    const fullAccess = deliveryPayload({ deliveryId: `delivery-${randomUUID()}`, hop: 24, permissionLevel: 'full-access' });
+    await f.deliver(fullAccess);
+    await waitFor(() => f.sent.some((message) => message.kind === 'teamgroup.delivery.status'
+      && message.payload.deliveryId === fullAccess.deliveryId && message.payload.status === 'completed'));
+    expect(f.runtime.startCount).toBe(1);
+  });
+
   it('advances consent timestamps from persisted owner state after a wall-clock correction and restart', async () => {
     const f = await fixture();
     await sendStructure(f);
