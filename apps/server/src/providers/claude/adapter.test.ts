@@ -78,6 +78,27 @@ describe('claude adapter', () => {
     expect(text(run.events)).toBe('No streaming here');
   });
 
+  it('captures Claude subagent assistant text by parent tool use without adding it to the main transcript', async () => {
+    const run = makeRun({ session: { provider: 'claude' } });
+    const { adapter } = adapterFor([
+      init(),
+      { type: 'assistant', session_id: 'sess-1', parent_tool_use_id: null, message: { id: 'root', content: [{ type: 'tool_use', id: 'task-1', name: 'Task', input: { description: 'Explore auth', subagent_type: 'Explore', model: 'claude-haiku-4-5-20251001', prompt: 'Find the auth flow' } }] } },
+      { type: 'stream_event', session_id: 'sess-1', parent_tool_use_id: 'task-1', event: { type: 'message_start', message: { id: 'child-message' } } },
+      { type: 'stream_event', session_id: 'sess-1', parent_tool_use_id: 'task-1', event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'Auth lives in ' } } },
+      { type: 'stream_event', session_id: 'sess-1', parent_tool_use_id: 'task-1', event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'the session service.' } } },
+      { type: 'assistant', session_id: 'sess-1', parent_tool_use_id: 'task-1', message: { id: 'child-message', content: [{ type: 'text', text: 'Auth lives in the session service.' }] } },
+      success({ result: '' }),
+    ]);
+
+    await adapter.run(run.options);
+
+    expect(text(run.events)).toBe('');
+    expect(run.events.filter((event) => event.type === 'subagent.text')).toEqual([
+      { type: 'subagent.text', parentId: 'task-1', messageId: 'child-message', text: 'Auth lives in ' },
+      { type: 'subagent.text', parentId: 'task-1', messageId: 'child-message', text: 'the session service.' },
+    ]);
+  });
+
   it('maps canUseTool onto requestApproval and fails closed', async () => {
     const decisions: boolean[] = [true, false];
     const run = makeRun({ approve: (request) => { if (request.tool === 'Write') throw new Error('boom'); return decisions.shift() ?? false; } });

@@ -102,6 +102,11 @@ export class ClaudeMessageMapper {
     this.emit({ type: 'text', text: separator + delta });
   }
 
+  private subagentText(parentId: string, messageId: string | undefined, text: string, blockIndex = 0): void {
+    if (!text) return;
+    this.emit({ type: 'subagent.text', parentId, messageId: messageId ?? `message-${blockIndex}`, text });
+  }
+
   private toolActivity(id: string, name: string, input: string, parentId: string | null, status: ToolActivity['status'], output?: string, durationMs?: number, summaryOverride?: string, details?: { cwd?: string; exitCode?: number; processId?: string }): void {
     const category: ToolCategory = name === 'Bash' ? 'command'
       : /^mcp__mingle_team__team_/.test(name) ? 'agent'
@@ -232,7 +237,10 @@ export class ClaudeMessageMapper {
         const delta = isRecord(event.delta) ? event.delta : null;
         if (delta?.type === 'text_delta' && typeof delta.text === 'string') {
           const messageId = this.currentMessageIds.get(parentKey);
-          if (messageId && !parentId) {
+          if (messageId && parentId) {
+            this.streamedMessages.add(JSON.stringify([parentId, messageId]));
+            this.subagentText(parentId, messageId, delta.text);
+          } else if (messageId) {
             this.streamedMessages.add(JSON.stringify([parentId, messageId]));
             this.text(delta.text);
           }
@@ -266,11 +274,14 @@ export class ClaudeMessageMapper {
     }
     const id = str(inner.id);
     const streamed = id !== undefined && this.streamedMessages.has(JSON.stringify([parentId, id]));
-    for (const block of inner.content) {
+    for (const [blockIndex, block] of inner.content.entries()) {
       if (!isRecord(block)) continue;
-      if (block.type === 'text' && typeof block.text === 'string' && !streamed && !parentId) {
-        this.textBlockOpen = false;
-        this.text(block.text);
+      if (block.type === 'text' && typeof block.text === 'string' && !streamed) {
+        if (parentId) this.subagentText(parentId, id, block.text, blockIndex);
+        else {
+          this.textBlockOpen = false;
+          this.text(block.text);
+        }
       } else if (block.type === 'tool_use') {
         const name = str(block.name) ?? 'tool';
         if (typeof block.id === 'string' && this.seenTools.has(block.id)) {

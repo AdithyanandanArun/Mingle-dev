@@ -43,7 +43,10 @@ export interface ToolCall {
   name: string; category: ToolCategory; status: ToolStatus; summary: string; command: string | null;
   input: string; output: string; outputTruncated?: boolean; cwd: string | null; exitCode: number | null; processId: string | null;
   startedAt: string; finishedAt: string | null; durationMs: number | null;
+  /** Assistant text emitted by a provider-owned child agent; retained on its spawning call. */
+  subagentMessages?: SubagentMessage[];
 }
+export interface SubagentMessage { id: string; content: string; createdAt: string }
 /** Provider-supplied fields; host assigns durable IDs and timestamps. Missing fields retain their previous value. */
 export interface ToolActivity {
   id: string; name: string; category: ToolCategory; status: ToolStatus;
@@ -227,6 +230,7 @@ export type AdapterEvent =
   | { type: 'tool'; name: string; content: string }
   | { type: 'tool.activity'; activity: ToolActivity }
   | { type: 'tool.output'; id: string; delta: string }
+  | { type: 'subagent.text'; parentId: string; messageId: string; text: string }
   | { type: 'usage'; inputTokens: number; outputTokens: number; costUsd: number | null }
   | { type: 'info'; content: string };
 export interface AgentAdapter {

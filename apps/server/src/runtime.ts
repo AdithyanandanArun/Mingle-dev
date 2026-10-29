@@ -1,7 +1,7 @@
 import { ContextCompactionResultSchema, EditSessionPlanSchema, NativeUserInputRequestSchema, ProviderTaskPlanSchema, SessionPlanProposalSchema, SessionPlanStepsSchema, UserInputAnswersSchema } from '@mingle/contracts';
 import type { ProjectIntelligenceService } from './project-intelligence/service.ts';
 import { existsSync, statSync } from 'node:fs';
-import type { ProviderTaskPlan, AdapterEvent, Approval, ContextCompactionResult, EditSessionPlan, Message, ProviderFailure, ProviderSkill, RunChanges, RunOptions, Session, SessionPlan, Task, UserInputAnswers, UserQuestion, ToolActivity, ToolCall } from '@mingle/contracts';
+import type { ProviderTaskPlan, AdapterEvent, Approval, ContextCompactionResult, EditSessionPlan, Message, ProviderFailure, ProviderSkill, RunChanges, RunOptions, Session, SessionPlan, SubagentMessage, Task, UserInputAnswers, UserQuestion, ToolActivity, ToolCall } from '@mingle/contracts';
 import type { Hub } from './hub.ts';
 import type { Store } from './store.ts';
 import type { TaskService } from './tasks.ts';
@@ -31,6 +31,18 @@ export interface RuntimeOptions {
 }
 
 interface ToolBuffer { call: ToolCall; output: string; dirty: boolean; tick: number | null }
+
+const MAX_SUBAGENT_MESSAGES = 30;
+const MAX_SUBAGENT_TEXT_PER_MESSAGE = 8_000;
+const MAX_SUBAGENT_TEXT_TOTAL = 24_000;
+
+function isSubagentLaunch(provider: Session['provider'], call: ToolCall): boolean {
+  if (call.category !== 'agent' || /mingle_team|team_/i.test(call.name)) return false;
+  if (provider === 'claude') return call.name === 'Task' || call.name === 'Agent';
+  if (provider === 'codex') return call.name === 'agent:spawnAgent' || call.name === 'agent:spawn_agent';
+  return false;
+}
+
 interface ActiveRun {
   id: string;
   startedAt: string;
@@ -667,6 +679,9 @@ export class SessionRuntime {
         case 'tool.activity':
           this.recordTool(run, event.activity);
           break;
+        case 'subagent.text':
+          this.recordSubagentText(run, event.parentId, event.messageId, event.text);
+          break;
         case 'tool.output':
           this.appendToolOutput(run, event.id, event.delta);
           break;
@@ -816,6 +831,26 @@ export class SessionRuntime {
       call.durationMs = buffer.tick === null ? null : Math.max(0, Math.round(performance.now() - buffer.tick));
     }
     if (typeof activity.durationMs === 'number' && Number.isFinite(activity.durationMs) && activity.durationMs >= 0) call.durationMs = Math.round(activity.durationMs);
+    this.persistTool(buffer);
+    this.store.touch();
+  }
+
+  private recordSubagentText(run: ActiveRun, parentId: string, messageId: string, text: string): void {
+    const buffer = run.tools.get(parentId.slice(0, 200));
+    if (!buffer || !isSubagentLaunch(run.provider, buffer.call) || !text) return;
+    const safeText = redactSecrets(text);
+    if (!safeText) return;
+    const messages = buffer.call.subagentMessages ?? (buffer.call.subagentMessages = []);
+    let message = messages.find((entry) => entry.id === messageId);
+    if (!message) {
+      if (messages.length >= MAX_SUBAGENT_MESSAGES) return;
+      message = { id: truncate(messageId, 200), content: '', createdAt: nowIso() };
+      messages.push(message);
+    }
+    const currentTotal = messages.reduce((total, entry) => total + entry.content.length, 0);
+    const available = Math.min(MAX_SUBAGENT_TEXT_PER_MESSAGE - message.content.length, MAX_SUBAGENT_TEXT_TOTAL - currentTotal);
+    if (available <= 0) return;
+    message.content += safeText.slice(0, available);
     this.persistTool(buffer);
     this.store.touch();
   }
