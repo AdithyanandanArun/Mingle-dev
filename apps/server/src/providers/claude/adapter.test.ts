@@ -101,6 +101,30 @@ describe('claude adapter', () => {
     ]);
   });
 
+  it('keeps a background Agent launch running, routes task text, and completes from task_notification', async () => {
+    const run = makeRun({ session: { provider: 'claude' } });
+    const { adapter } = adapterFor([
+      init(),
+      { type: 'assistant', session_id: 'sess-1', parent_tool_use_id: null, message: { id: 'root', content: [{ type: 'tool_use', id: 'agent-use-1', name: 'Agent', input: { description: 'Explore auth', subagent_type: 'Explore', prompt: 'Trace auth', run_in_background: true } }] } },
+      { type: 'user', session_id: 'sess-1', message: { content: [{ type: 'tool_result', tool_use_id: 'agent-use-1', content: [{ type: 'text', text: 'Async agent launched successfully (agent_id: task-1).' }] }] }, tool_use_result: { backgroundTaskId: 'task-1' } },
+      { type: 'system', subtype: 'task_started', task_id: 'task-1', tool_use_id: 'agent-use-1', is_backgrounded: true, session_id: 'sess-1' },
+      { type: 'stream_event', session_id: 'sess-1', parent_tool_use_id: 'task-1', event: { type: 'message_start', message: { id: 'child-message' } } },
+      { type: 'stream_event', session_id: 'sess-1', parent_tool_use_id: 'task-1', event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'Auth routes are in session.ts.' } } },
+      { type: 'assistant', session_id: 'sess-1', parent_tool_use_id: 'task-1', message: { id: 'child-message', content: [{ type: 'text', text: 'Auth routes are in session.ts.' }] } },
+      { type: 'system', subtype: 'task_notification', task_id: 'task-1', status: 'completed', output_file: '/tmp/task-output.txt', summary: 'Auth route review finished.', usage: { duration_ms: 1800 }, session_id: 'sess-1' },
+      success({ result: '' }),
+    ]);
+
+    await adapter.run(run.options);
+
+    const activities = run.events.filter((event) => event.type === 'tool.activity' && event.activity.id === 'agent-use-1');
+    expect(activities.at(-1)).toMatchObject({ type: 'tool.activity', activity: { status: 'completed' } });
+    expect(activities.slice(0, -1).every((event) => event.type === 'tool.activity' && event.activity.status === 'running')).toBe(true);
+    expect(activities.at(-1)).toMatchObject({ type: 'tool.activity', activity: { output: 'Auth route review finished.', summary: 'Auth route review finished.' } });
+    expect(activities[1]).toMatchObject({ type: 'tool.activity', activity: { input: expect.stringContaining('"backgroundTaskId":"task-1"') } });
+    expect(run.events).toContainEqual({ type: 'subagent.text', parentId: 'agent-use-1', messageId: 'child-message', text: 'Auth routes are in session.ts.' });
+  });
+
   it('maps canUseTool onto requestApproval and fails closed', async () => {
     const decisions: boolean[] = [true, false];
     const run = makeRun({ approve: (request) => { if (request.tool === 'Write') throw new Error('boom'); return decisions.shift() ?? false; } });

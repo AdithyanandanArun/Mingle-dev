@@ -38,6 +38,16 @@ describe('subagent helpers', () => {
     ]);
   });
 
+  it('marks Claude asynchronous Agent launches as background while they are still running', () => {
+    const launch = call({
+      id: 'background-launch', providerId: 'agent-use-async', name: 'Agent', category: 'agent', status: 'running',
+      input: JSON.stringify({ description: 'Explore auth', prompt: 'Trace auth', run_in_background: true, sdkResult: { background: true, backgroundTaskId: 'task-async' } }),
+    });
+    expect(deriveSubagents([launch], 'claude', 'claude-sonnet-5-5')).toMatchObject([
+      { status: 'running', background: true, label: 'Explore auth' },
+    ]);
+  });
+
   it('normalizes labels and reports terminal status labels', () => {
     expect(slugSubagentLabel('Éxplore: Auth / Session')).toBe('explore-auth-session');
     expect(subagentStatusLabel('running')).toBe('Running');

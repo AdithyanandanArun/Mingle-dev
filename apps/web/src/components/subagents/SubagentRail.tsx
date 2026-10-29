@@ -66,7 +66,9 @@ export function SubagentRail({
                 {subagent.status === 'running' ? <LoaderCircle size={12} className="single-subagents__spinner" aria-hidden="true" /> : null}
                 <span className={subagent.status === 'running' ? 'activity-shimmer' : undefined}>{status}</span>
               </span>
-              <small className="agent-presence__model" title={`${subagent.model} · ${subagent.type}`}>{subagent.model} · {subagent.type}</small>
+              <small className="agent-presence__model" title={`${subagent.model} · ${subagent.type}${subagent.background ? ' · background' : ''}`}>
+                {subagent.model} · {subagent.type}{subagent.background ? ' · background' : ''}
+              </small>
             </button>
           </li>;
         })}

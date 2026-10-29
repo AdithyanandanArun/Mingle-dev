@@ -11,6 +11,7 @@ export interface SubagentRun {
   model: string;
   prompt: string;
   status: ToolCall['status'];
+  background: boolean;
   startedAt: string;
   endedAt: string | null;
   finalResult: string;
@@ -41,6 +42,12 @@ function isSubagentLaunch(call: ToolCall, provider: Provider): boolean {
   if (provider === 'codex') return call.name === 'agent:spawnAgent' || call.name === 'agent:spawn_agent';
   if (provider === 'opencode') return call.name.toLowerCase() === 'task';
   return false;
+}
+
+function isBackgroundLaunch(input: Record<string, unknown>): boolean {
+  const sdkResult = input.sdkResult && typeof input.sdkResult === 'object' && !Array.isArray(input.sdkResult)
+    ? input.sdkResult as Record<string, unknown> : {};
+  return input.run_in_background === true || sdkResult.background === true || typeof sdkResult.backgroundTaskId === 'string';
 }
 
 export function slugSubagentLabel(label: string): string {
@@ -76,6 +83,7 @@ export function deriveSubagents(calls: readonly ToolCall[], provider: Provider, 
       model: reportedModel ?? parentModel,
       prompt: textField(input, 'prompt', 'task') ?? '',
       status: parentCall.status,
+      background: provider === 'claude' && isBackgroundLaunch(input),
       startedAt: parentCall.startedAt,
       endedAt: parentCall.finishedAt,
       finalResult: parentCall.output,

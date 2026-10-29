@@ -12,6 +12,21 @@ const boot = async (options: Parameters<typeof startTestApp>[0] = {}) => {
 afterEach(async () => { while (apps.length) await apps.pop()!.cleanup(); });
 
 describe('subagent tool-call persistence', () => {
+  it('marks a background agent interrupted with an explicit note when the parent run ends first', async () => {
+    const app = await boot();
+    app.fake.script = async (_options, emit) => {
+      emit({ type: 'tool.activity', activity: {
+        id: 'background-agent', name: 'Agent', category: 'agent', status: 'running', parentId: null,
+        input: JSON.stringify({ description: 'Explore auth', prompt: 'Trace auth', run_in_background: true, sdkResult: { background: true, backgroundTaskId: 'task-async' } }),
+      } });
+    };
+    expect((await app.api('POST', `/api/sessions/${EXAMPLE_CLIENT_SESSION_ID}/messages`, { content: 'Explore auth' })).status).toBe(202);
+    await waitFor(async () => (await app.api('GET', '/api/bootstrap')).json.sessions.find((session: any) => session.id === EXAMPLE_CLIENT_SESSION_ID)?.status === 'idle');
+    const call = (await app.api('GET', '/api/bootstrap')).json.toolCalls.find((tool: any) => tool.providerId === 'background-agent');
+    expect(call).toMatchObject({ status: 'interrupted' });
+    expect(call.output).toContain('Background agent did not report completion before the run ended.');
+  });
+
   it('returns a subagent launch, its assistant text and child calls in bootstrap after reload', async () => {
     const first = await boot({ keepData: true });
     first.fake.script = async (_options, emit) => {

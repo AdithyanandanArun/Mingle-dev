@@ -981,7 +981,19 @@ export class SessionRuntime {
         buffer.call.status = 'interrupted';
         buffer.call.finishedAt = at;
         buffer.call.durationMs = buffer.tick === null ? null : Math.max(0, Math.round(performance.now() - buffer.tick));
-        buffer.output = (buffer.output + '\n[Mingle: run ended before this tool reported completion.]').slice(-MAX_TOOL_CHARS);
+        let backgroundAgent = false;
+        try {
+          const input: unknown = JSON.parse(buffer.call.input);
+          if (input && typeof input === 'object' && !Array.isArray(input)) {
+            const data = input as Record<string, unknown>;
+            const result = data.sdkResult && typeof data.sdkResult === 'object' ? data.sdkResult as Record<string, unknown> : {};
+            backgroundAgent = isSubagentLaunch(run.provider, buffer.call) && (data.run_in_background === true || result.background === true || typeof result.backgroundTaskId === 'string');
+          }
+        } catch { /* retain the ordinary tool interruption note for partial provider input */ }
+        const note = backgroundAgent
+          ? '[Mingle: Background agent did not report completion before the run ended.]'
+          : '[Mingle: run ended before this tool reported completion.]';
+        buffer.output = (buffer.output + `\n${note}`).slice(-MAX_TOOL_CHARS);
       }
       this.persistTool(buffer);
     }

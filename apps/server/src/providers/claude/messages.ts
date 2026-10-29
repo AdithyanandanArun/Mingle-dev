@@ -145,13 +145,15 @@ export class ClaudeMessageMapper {
         // Task events describe work owned by the existing Agent/Bash invocation; they are not a second tool call.
         this.taskToToolUse.set(taskId, toolUseId);
         this.taskStates.set(taskId, { status: 'running' });
+        if (message.is_backgrounded === true) this.markBackgroundTask(taskId, toolUseId);
         this.syncTaskActivity(taskId);
       }
       return;
     }
     if (message.subtype === 'task_progress') {
       const taskId = str(message.task_id);
-      const id = taskId ? this.taskToToolUse.get(taskId) : undefined;
+      const id = taskId ? this.taskToToolUse.get(taskId) ?? str(message.tool_use_id) : undefined;
+      if (taskId && id) this.taskToToolUse.set(taskId, id);
       const usage = isRecord(message.usage) ? message.usage : {};
       if (taskId && id && !this.completedTools.has(id) && message.ambient !== true) {
         this.taskStates.set(taskId, { status: 'running', summary: str(message.summary) ?? str(message.description), ...(typeof usage.duration_ms === 'number' ? { durationMs: usage.duration_ms } : {}) });
@@ -161,9 +163,10 @@ export class ClaudeMessageMapper {
     }
     if (message.subtype === 'task_notification') {
       const taskId = str(message.task_id);
-      const id = taskId ? this.taskToToolUse.get(taskId) : undefined;
+      const id = taskId ? this.taskToToolUse.get(taskId) ?? str(message.tool_use_id) : undefined;
+      if (taskId && id) this.taskToToolUse.set(taskId, id);
       if (id && taskId && !this.completedTools.has(id)) {
-        const status = message.status === 'failed' ? 'failed' : message.status === 'stopped' ? 'interrupted' : 'completed';
+        const status = message.status === 'failed' ? 'failed' : message.status === 'stopped' || message.status === 'interrupted' ? 'interrupted' : 'completed';
         const usage = isRecord(message.usage) ? message.usage : {};
         this.taskStates.set(taskId, { status, summary: str(message.summary), ...(typeof usage.duration_ms === 'number' ? { durationMs: usage.duration_ms } : {}) });
         this.syncTaskActivity(taskId);
@@ -198,8 +201,22 @@ export class ClaudeMessageMapper {
     const state = this.taskStates.get(taskId);
     const tool = id ? this.tools.get(id) : undefined;
     if (!id || !state || !tool || this.completedTools.has(id)) return;
-    this.toolActivity(id, tool.name, tool.input, tool.parentId, state.status, undefined, state.durationMs, state.summary);
+    this.toolActivity(id, tool.name, tool.input, tool.parentId, state.status,
+      state.status === 'running' ? undefined : state.summary, state.durationMs, state.summary);
     if (state.status !== 'running') this.completedTools.add(id);
+  }
+
+  private markBackgroundTask(taskId: string, toolUseId: string): void {
+    const tool = this.tools.get(toolUseId);
+    if (!tool || !/^(Agent|Task)$/.test(tool.name)) return;
+    let input: Record<string, unknown>;
+    try { const parsed: unknown = JSON.parse(tool.input); if (!isRecord(parsed)) return; input = parsed; } catch { return; }
+    const current = isRecord(input.sdkResult) ? input.sdkResult : {};
+    input.sdkResult = { ...current, background: true, backgroundTaskId: taskId };
+    const inputText = JSON.stringify(input);
+    this.tools.set(toolUseId, { ...tool, input: inputText });
+    if (this.completedTools.has(toolUseId)) this.completedTools.delete(toolUseId);
+    this.toolActivity(toolUseId, tool.name, inputText, tool.parentId, 'running');
   }
 
   private syncTasksForTool(toolUseId: string): void {
@@ -207,9 +224,10 @@ export class ClaudeMessageMapper {
   }
 
   private streamEvent(message: Record<string, unknown>): void {
-    const parentId = str(message.parent_tool_use_id) ?? null;
-    if (!parentId) this.noteSession(message.session_id);
-    const parentKey = JSON.stringify(parentId);
+    const rawParentId = str(message.parent_tool_use_id) ?? null;
+    const parentId = rawParentId ? this.taskToToolUse.get(rawParentId) ?? rawParentId : null;
+    if (!rawParentId) this.noteSession(message.session_id);
+    const parentKey = JSON.stringify(rawParentId);
     const event = isRecord(message.event) ? message.event : null;
     if (!event) return;
     switch (event.type) {
@@ -239,10 +257,10 @@ export class ClaudeMessageMapper {
         if (delta?.type === 'text_delta' && typeof delta.text === 'string') {
           const messageId = this.currentMessageIds.get(parentKey);
           if (messageId && parentId) {
-            this.streamedMessages.add(JSON.stringify([parentId, messageId]));
+            this.streamedMessages.add(JSON.stringify([rawParentId, messageId]));
             this.subagentText(parentId, messageId, delta.text);
           } else if (messageId) {
-            this.streamedMessages.add(JSON.stringify([parentId, messageId]));
+            this.streamedMessages.add(JSON.stringify([rawParentId, messageId]));
             this.text(delta.text);
           }
         }
@@ -267,14 +285,15 @@ export class ClaudeMessageMapper {
   private assistant(message: Record<string, unknown>): void {
     const inner = isRecord(message.message) ? message.message : null;
     if (!inner || !Array.isArray(inner.content)) return;
-    const parentId = str(message.parent_tool_use_id) ?? null;
-    if (!parentId) this.noteSession(message.session_id);
+    const rawParentId = str(message.parent_tool_use_id) ?? null;
+    const parentId = rawParentId ? this.taskToToolUse.get(rawParentId) ?? rawParentId : null;
+    if (!rawParentId) this.noteSession(message.session_id);
     if (typeof message.error === 'string') {
       this.lastAssistantError = message.error;
       return; // synthetic API-error text is reported through the result message instead
     }
     const id = str(inner.id);
-    const streamed = id !== undefined && this.streamedMessages.has(JSON.stringify([parentId, id]));
+    const streamed = id !== undefined && this.streamedMessages.has(JSON.stringify([rawParentId, id]));
     for (const block of inner.content) {
       if (!isRecord(block)) continue;
       if (block.type === 'text' && typeof block.text === 'string' && !streamed) {
@@ -313,29 +332,40 @@ export class ClaudeMessageMapper {
       const id = typeof block.tool_use_id === 'string' ? block.tool_use_id : null;
       const tool = id ? this.tools.get(id) : undefined;
       if (!id || !tool) continue;
-      const structured = isRecord(message.tool_use_result) && tool.name === 'Bash' ? message.tool_use_result : null;
+      const toolResult = isRecord(message.tool_use_result) ? message.tool_use_result : null;
+      const structured = toolResult && tool.name === 'Bash' ? toolResult : null;
       const body = toolResultText(block.content).trim();
       const stdout = structured?.isImage === true ? '' : str(structured?.stdout) ?? '';
       const stderr = str(structured?.stderr) ?? '';
       const structuredOutput = [stdout, stderr && `[stderr]\n${stderr}`].filter(Boolean).join('\n');
       const output = structuredOutput || body;
       const exitCode = typeof structured?.exitCode === 'number' ? structured.exitCode : undefined;
-      const taskId = str(structured?.backgroundTaskId);
+      const taskId = str(toolResult?.backgroundTaskId) ?? str(toolResult?.taskId) ?? str(toolResult?.task_id)
+        ?? output.match(/(?:agent|task)[_\s-]?id\s*[:=]\s*([A-Za-z0-9_-]{1,200})/i)?.[1];
       if (taskId) this.taskToToolUse.set(taskId, id);
+      const launchInput = (() => { try { const value: unknown = JSON.parse(tool.input); return isRecord(value) ? value : {}; } catch { return {}; } })();
+      const isAgentLaunch = /^(Agent|Task)$/.test(tool.name);
+      const backgroundLaunch = isAgentLaunch && (launchInput.run_in_background === true
+        || Boolean(taskId)
+        || /async agent launched successfully|background agent (?:launched|started)|agent launched in background|(?:running|started|launched).{0,30}background|background.{0,30}(?:running|started|launched)/i.test(output));
       let input = tool.input;
-      if (taskId) {
+      if (taskId || backgroundLaunch) {
         try {
           const parsed: unknown = JSON.parse(input);
-          if (isRecord(parsed)) input = JSON.stringify({ ...parsed, sdkResult: { backgroundTaskId: taskId } });
+          if (isRecord(parsed)) input = JSON.stringify({ ...parsed, sdkResult: {
+            ...(taskId ? { backgroundTaskId: taskId } : {}), ...(backgroundLaunch ? { background: true } : {}),
+          } });
         } catch { /* retain original provider input if it is partial or malformed JSON */ }
       }
+      this.tools.set(id, { ...tool, input });
       const cwd = str(structured?.cwd);
       const processId = str(structured?.processId);
       const durationMs = typeof structured?.durationMs === 'number' ? structured.durationMs : undefined;
-      const status = block.is_error === true || (exitCode !== undefined && exitCode !== 0) ? 'failed' : 'completed';
+      const failed = block.is_error === true || (exitCode !== undefined && exitCode !== 0);
+      const status = failed ? 'failed' : backgroundLaunch ? 'running' : 'completed';
       this.toolActivity(id, tool.name, input, tool.parentId, status, output || undefined, durationMs, undefined, { ...(cwd ? { cwd } : {}), ...(exitCode !== undefined ? { exitCode } : {}), ...(processId ? { processId } : {}) });
       if (status === 'completed' && !this.completedTools.has(id)) this.planResult(tool.name, tool.input, tool.parentId, message.tool_use_result);
-      this.completedTools.add(id);
+      if (status !== 'running') this.completedTools.add(id);
     }
   }
 
