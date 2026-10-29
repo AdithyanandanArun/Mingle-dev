@@ -340,14 +340,15 @@ export class ClaudeMessageMapper {
       const structuredOutput = [stdout, stderr && `[stderr]\n${stderr}`].filter(Boolean).join('\n');
       const output = structuredOutput || body;
       const exitCode = typeof structured?.exitCode === 'number' ? structured.exitCode : undefined;
-      const taskId = str(toolResult?.backgroundTaskId) ?? str(toolResult?.taskId) ?? str(toolResult?.task_id)
-        ?? output.match(/(?:agent|task)[_\s-]?id\s*[:=]\s*([A-Za-z0-9_-]{1,200})/i)?.[1];
-      if (taskId) this.taskToToolUse.set(taskId, id);
+      const structuredTaskId = str(toolResult?.backgroundTaskId) ?? str(toolResult?.taskId) ?? str(toolResult?.task_id);
       const launchInput = (() => { try { const value: unknown = JSON.parse(tool.input); return isRecord(value) ? value : {}; } catch { return {}; } })();
       const isAgentLaunch = /^(Agent|Task)$/.test(tool.name);
+      // Only explicit launch signals count; a foreground agent's final answer may mention background work in prose.
       const backgroundLaunch = isAgentLaunch && (launchInput.run_in_background === true
-        || Boolean(taskId)
-        || /async agent launched successfully|background agent (?:launched|started)|agent launched in background|(?:running|started|launched).{0,30}background|background.{0,30}(?:running|started|launched)/i.test(output));
+        || Boolean(structuredTaskId) || /^\s*async agent launched successfully/i.test(output));
+      const taskId = structuredTaskId
+        ?? (backgroundLaunch ? output.match(/(?:agent|task)[_\s-]?id\s*[:=]\s*([A-Za-z0-9_-]{1,200})/i)?.[1] : undefined);
+      if (taskId) this.taskToToolUse.set(taskId, id);
       let input = tool.input;
       if (taskId || backgroundLaunch) {
         try {

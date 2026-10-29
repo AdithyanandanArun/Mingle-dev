@@ -125,6 +125,22 @@ describe('claude adapter', () => {
     expect(run.events).toContainEqual({ type: 'subagent.text', parentId: 'agent-use-1', messageId: 'child-message', text: 'Auth routes are in session.ts.' });
   });
 
+  it('completes a foreground Agent whose answer mentions background work', async () => {
+    const run = makeRun({ session: { provider: 'claude' } });
+    const { adapter } = adapterFor([
+      init(),
+      { type: 'assistant', session_id: 'sess-1', parent_tool_use_id: null, message: { id: 'root', content: [{ type: 'tool_use', id: 'agent-use-2', name: 'Agent', input: { description: 'Start worker', prompt: 'Start the queue worker' } }] } },
+      { type: 'user', session_id: 'sess-1', message: { content: [{ type: 'tool_result', tool_use_id: 'agent-use-2', content: [{ type: 'text', text: 'Started the queue worker; it is running in the background (task id: q-7).' }] }] } },
+      success({ result: '' }),
+    ]);
+
+    await adapter.run(run.options);
+
+    const activities = run.events.filter((event) => event.type === 'tool.activity' && event.activity.id === 'agent-use-2');
+    expect(activities.at(-1)).toMatchObject({ type: 'tool.activity', activity: { status: 'completed' } });
+    expect(activities.at(-1)).not.toMatchObject({ activity: { input: expect.stringContaining('backgroundTaskId') } });
+  });
+
   it('maps canUseTool onto requestApproval and fails closed', async () => {
     const decisions: boolean[] = [true, false];
     const run = makeRun({ approve: (request) => { if (request.tool === 'Write') throw new Error('boom'); return decisions.shift() ?? false; } });
