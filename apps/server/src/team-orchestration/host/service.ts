@@ -1389,6 +1389,7 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
     const { expectedVersion: _expectedVersion, ...patch } = input;
     const fallbackIds = input.fallbackAgentIds ?? prior.fallbackAgentIds;
     const otherSettingsChanged = input.leaderOrchestration !== undefined && input.leaderOrchestration !== prior.leaderOrchestration
+      || input.integrationTarget !== undefined && input.integrationTarget !== prior.integrationTarget
       || input.fallbackAgentIds !== undefined && JSON.stringify(input.fallbackAgentIds) !== JSON.stringify(prior.fallbackAgentIds);
     if (otherSettingsChanged && group?.deliveries.some((delivery) => liveDelivery(delivery.status))) {
       throw new HttpError(409, 'Wait for active team deliveries before changing orchestration settings.');
