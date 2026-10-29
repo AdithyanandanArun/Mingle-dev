@@ -5,6 +5,7 @@ import { useMingle } from '../../store/store';
 import { api, errorMessage } from '../../lib/api';
 import { clockTime, cx } from '../../lib/format';
 import { AgentPresenceRail } from '../group/AgentPresenceRail';
+import { ProgressBoardPanel } from '../progress-board/ProgressBoardPanel';
 import { AgentIdentity } from '../group/AgentIdentity';
 import { MessageRow } from '../ConversationParts';
 import type { Speaker } from '../../lib/groupTimeline';
@@ -322,6 +323,7 @@ export function TeamSessionView({ projectId, teamSession, structure }: {
   const [loading, setLoading] = useState(true);
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [boardView, setBoardView] = useState(false);
   const scroller = useRef<HTMLDivElement>(null);
   const follows = useRef(true);
   const olderHeight = useRef<number | null>(null);
@@ -416,6 +418,7 @@ export function TeamSessionView({ projectId, teamSession, structure }: {
   const agents = activeSnapshot?.agents ?? [];
   const members = structureSnapshot?.members ?? [];
   const groupView = activeSnapshot?.groupView?.group.id === teamSession.groupId ? activeSnapshot.groupView : null;
+  const boardRefreshKey = `${groupView?.version ?? 0}:${groupView?.updatedAt ?? ''}:${activeSnapshot?.messages.at(-1)?.createdAt ?? ''}`;
   const timeline = useMemo(() => mergeTeamSessionTimeline(messages, groupView), [messages, groupView]);
   const latestTimelineRow = timeline.at(-1);
   const latestTimelineContent = latestTimelineRow?.type === 'team-chat' ? latestTimelineRow.message.body : latestTimelineRow?.entry.content;
@@ -465,7 +468,9 @@ export function TeamSessionView({ projectId, teamSession, structure }: {
     <div className="group-body">
       <section className="group-body__conversation" aria-label="Team session conversation">
         <TeamConsentBanner projectId={projectId} />
-        <div className="group-transcript">
+        <ProgressBoardPanel projectId={projectId} groupId={teamSession.groupId} active={boardView} onViewChange={setBoardView}
+          refreshKey={boardRefreshKey} teamMembers={structureSnapshot?.members ?? []} />
+        <div className="group-transcript" hidden={boardView}>
           <div className="chat__scroll" ref={scroller} role="log" aria-live="polite" aria-label={`Team session: ${teamSession.title}`} onScroll={(event) => {
             const node = event.currentTarget;
             follows.current = node.scrollHeight - node.scrollTop - node.clientHeight < 80;
@@ -500,7 +505,7 @@ export function TeamSessionView({ projectId, teamSession, structure }: {
           onSent={async () => { await refresh(); }} />
         <div className="composer-wrap"><GitBar project={project} session={null} /></div>
       </section>
-      <AgentPresenceRail snapshot={null} members={[]} sessions={sessions} runs={[]} approvals={[]} connection={connection} providers={[]} hidden={contextOpen} teamMembers={members} teamStates={teamStates} projectId={projectId} expandAtWidth={600} />
+      <AgentPresenceRail snapshot={null} members={[]} sessions={sessions} runs={[]} approvals={[]} connection={connection} providers={[]} hidden={contextOpen || boardView} teamMembers={members} teamStates={teamStates} projectId={projectId} expandAtWidth={600} />
     </div>
   </div>;
 }

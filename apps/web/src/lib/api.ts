@@ -4,6 +4,7 @@ import type {
 } from '@mingle/contracts';
 import type { AccountState, AccountConnection, AccountPreferences, SavedAccountPreferences, AttachmentRef, NativeActionCatalog } from '@mingle/contracts';
 import type { ProjectCollaborationSnapshot, SendTeamChatMessage, TeamChatSnapshot, TeamChatMessage } from '@mingle/contracts';
+import type { ProgressBoardSnapshot } from '@mingle/contracts';
 import type {
   ContextCompactionResult as ContractContextCompactionResult,
   ProviderFailure as ContractProviderFailure,
@@ -170,6 +171,7 @@ export const api = {
   updateSession: (id: string, patch: SessionPatch) => json<Session>(`/api/sessions/${encodeURIComponent(id)}`, 'PATCH', patch),
   createGroup: (input: CreateGroup) => json<GroupSnapshot>('/api/groups', 'POST', input),
   group: (id: string, signal?: AbortSignal) => json<GroupSnapshot>(groupBase(id), 'GET', undefined, signal),
+  groupBoard: (id: string, signal?: AbortSignal) => json<ProgressBoardSnapshot>(`${groupBase(id)}/board`, 'GET', undefined, signal),
   updateGroup: (id: string, patch: GroupPatch) => json<GroupSnapshot>(groupBase(id), 'PATCH', patch),
   deleteGroup: (id: string) => json<{ ok: boolean; sessionIds: string[]; notices: string[] }>(groupBase(id), 'DELETE'),
   recoverGroup: (id: string, action: ApiRecoveryActionRequest) => json<ApiRecoveryActionResult>(`${groupBase(id)}/recovery`, 'POST', action),

@@ -24,6 +24,7 @@ import { useTeamStructure } from '../../lib/team-structure-context';
 import { StatusBar } from '../status-bar/StatusBar';
 import { deriveStatusBarState } from '../status-bar/deriveStatusBarState';
 import { stopGroup } from '../../lib/groupActions';
+import { ProgressBoardPanel } from '../progress-board/ProgressBoardPanel';
 
 const NO_SESSIONS: Session[] = [];
 const NO_MESSAGES: Message[] = [];
@@ -182,6 +183,9 @@ export function GroupConversation({ snapshot }: { snapshot: GroupSnapshot }) {
   const placement = useMemo(() => placeRuns(items, runs), [items, runs]);
   const calls = useMemo(() => toolCallsByRun(allCalls, sessionIds), [allCalls, sessionIds]);
   const activeSessionIds = useMemo(() => new Set(members.map((member) => member.sessionId)), [members]);
+  const boardRefreshEvent = allEvents.filter((event) => event.projectId === project?.id
+    && ((event.sessionId && activeSessionIds.has(event.sessionId)) || event.payload.groupId === snapshot.group.id)).at(-1)?.id ?? 0;
+  const boardRefreshKey = `${snapshot.group.updatedAt}:${snapshot.deliveries.map((delivery) => `${delivery.id}:${delivery.updatedAt}`).join(',')}:${boardRefreshEvent}`;
   const pending = useMemo(() => (approvals ?? []).filter((approval) => approval.status === 'pending' && activeSessionIds.has(approval.sessionId)), [approvals, activeSessionIds]);
   const plannerRequest = [...snapshot.requests].reverse().find((request) => request.status === 'active') ?? [...snapshot.requests].reverse()[0];
   const coordinatorMember = members.find((member) => member.id === snapshot.group.orchestratorMemberId)
@@ -202,6 +206,7 @@ export function GroupConversation({ snapshot }: { snapshot: GroupSnapshot }) {
   const scroller = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
   const [away, setAway] = useState(false);
+  const [boardView, setBoardView] = useState(false);
   const contentSig = items.filter((item): item is NativeItem => item.type === 'native').map((item) => `${item.key}:${item.message.content.length}`).join('|');
   const activitySig = runs.map((run) => `${run.id}:${run.status}:${run.toolCount}:${run.changes?.status ?? 'unknown'}:${run.changes?.fileCount ?? ''}`).join('|');
   const planningSig = `${plans.map((plan) => `${plan.id}:${plan.revision}:${plan.status}`).join(',')}|${questions.map((question) => `${question.id}:${question.status}`).join(',')}`;
@@ -280,7 +285,9 @@ export function GroupConversation({ snapshot }: { snapshot: GroupSnapshot }) {
     <div className="chat chat--group">
       <div className="group-body">
       <section className="group-body__conversation" aria-label="Group conversation">
-      <div className="group-transcript">
+      <ProgressBoardPanel projectId={project.id} groupId={snapshot.group.id} active={boardView} onViewChange={setBoardView}
+        refreshKey={boardRefreshKey} group={snapshot} teamMembers={teamStructure.snapshot?.projectId === project.id ? teamStructure.snapshot.members : []} />
+      <div className="group-transcript" hidden={boardView}>
       <div
         className="chat__scroll" ref={scroller} role="log" aria-live="polite" aria-label={`Group conversation: ${snapshot.group.title || anchor.name}`}
         onScroll={(event) => {
@@ -326,7 +333,7 @@ export function GroupConversation({ snapshot }: { snapshot: GroupSnapshot }) {
           <GroupRemoteActivity key={snapshot.group.id} groupId={snapshot.group.id} />
         </div>
       </div>
-      {away ? (
+      {away && !boardView ? (
         <button type="button" className="jump" onClick={() => { const el = scroller.current; if (el) el.scrollTo({ top: latestPosition(el), behavior: 'smooth' }); }}>
           <ArrowDown size={13} /> Latest
         </button>
@@ -337,7 +344,7 @@ export function GroupConversation({ snapshot }: { snapshot: GroupSnapshot }) {
         <GroupComposer key={snapshot.group.id} snapshot={snapshot} anchor={anchor} onOpenMembers={() => useMingle.getState().setGroupMembersOpen(snapshot.group.id)} footer={<GitBar project={project} session={anchor} />} />
       </div>
       </section>
-      <AgentPresenceRail snapshot={snapshot} members={members} sessions={sessions} runs={allRuns} approvals={approvals ?? []} connection={connection} providers={providers} hidden={contextOpen}
+      <AgentPresenceRail snapshot={snapshot} members={members} sessions={sessions} runs={allRuns} approvals={approvals ?? []} connection={connection} providers={providers} hidden={contextOpen || boardView}
         teamMembers={teamStructure.snapshot?.projectId === project.id ? teamStructure.snapshot.members : []} projectId={project.id} />
       </div>
     </div>
