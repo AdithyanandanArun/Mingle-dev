@@ -51,7 +51,11 @@ async function runAssignments(t: TestApp, snapshot: GroupSnapshot, maxRuns: numb
   };
   const result = await t.api('POST', `/api/groups/${snapshot.group.id}/messages`, { content: 'Run a bounded sequence of worker assignments.' });
   expect(result.status).toBe(202);
-  await waitFor(() => t.app.runtime.activeCount() === 0 && !t.app.groups.get(snapshot.group.id).deliveries.some((delivery) => delivery.status === 'running'), 15_000, 'group budget turns to settle');
+  await waitFor(() => {
+    const current = t.app.groups.get(snapshot.group.id);
+    return t.app.runtime.activeCount() === 0 && !current.deliveries.some((delivery) => delivery.status === 'running')
+      && (!current.deliveries.some((delivery) => delivery.status === 'queued') || current.group.paused);
+  }, 15_000, 'group budget turns to settle');
 }
 
 describe('full-access group budgets', () => {
