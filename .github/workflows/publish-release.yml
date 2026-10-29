@@ -18,9 +18,9 @@ on:
         required: true
         type: string
       include_arch:
-        description: Include the verified Arch package from the Linux run
+        description: Include the verified Arch package (required for 0.0.8 and later)
         type: boolean
-        default: false
+        default: true
 
 permissions:
   actions: read
@@ -41,6 +41,8 @@ jobs:
       INCLUDE_ARCH: ${{ inputs.include_arch }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: v${{ inputs.version }}
       - name: Validate version, tag and source runs
         shell: bash
         run: |
@@ -49,6 +51,12 @@ jobs:
           echo "RELEASE_TAG=$tag" >> "$GITHUB_ENV"
           test -s "docs/releases/$tag.md"
           tagged_sha=$(gh api "repos/$GITHUB_REPOSITORY/commits/$tag" --jq .sha)
+          test "$(git rev-parse HEAD)" = "$tagged_sha"
+          python3 - <<'PY'
+          import os
+          version = tuple(map(int, os.environ['VERSION'].split('.')))
+          assert version < (0, 0, 8) or os.environ['INCLUDE_ARCH'] == 'true', 'Stable releases from 0.0.8 require the verified Arch artifact'
+          PY
           platforms=(linux windows)
           if test "$INCLUDE_ARCH" = true; then platforms+=(arch); fi
           for platform in "${platforms[@]}"; do
