@@ -242,7 +242,7 @@ export class GroupService {
     options: {
       strategy: 'automatic' | 'fallback'; excludeMemberIds?: string[]; source?: MemberRow;
       sourceProvider?: Session['provider']; configuredId?: string | null; allowQueued?: boolean;
-      failure?: ProviderFailure; scope?: string[]; exceptAssignmentId?: string;
+      failure?: ProviderFailure; scope?: string[]; exceptAssignmentId?: string; dependsOn?: string[];
     },
   ): MemberRow[] {
     const excluded = new Set(options.excludeMemberIds ?? []);
@@ -258,9 +258,13 @@ export class GroupService {
     const healthRank = (candidate: MemberRow) => ({ ok: 0, stalled: 1, failed: 2, cooldown: 3 } as const)[health.get(candidate.id)?.state ?? 'failed'];
     const scopeConflictsWithAnotherMember = (candidate: MemberRow): boolean => {
       if (!options.scope) return false;
-      return this.repo.assignments(group.id).some((assignment) => assignment.id !== options.exceptAssignmentId
-        && assignment.toMemberId !== candidate.id && Boolean(this.assignmentScopeStatus(assignment))
-        && scopesOverlap(options.scope!, assignment.scope) !== null);
+      return this.repo.assignments(group.id).some((assignment) => {
+        if (assignment.id === options.exceptAssignmentId || assignment.toMemberId === candidate.id || !this.assignmentScopeStatus(assignment)
+          || !scopesOverlap(options.scope!, assignment.scope)) return false;
+        const delivery = this.repo.getDelivery(assignment.deliveryId);
+        const task = this.store.getTask(assignment.taskId);
+        return !(options.dependsOn?.includes(assignment.taskId) && delivery?.status === 'completed' && task?.status === 'review');
+      });
     };
     const candidates = this.repo.members(group.id, false).filter((candidate) => {
       if (excluded.has(candidate.id) || candidate.held || candidate.removedAt) return false;
@@ -3456,16 +3460,19 @@ ${task ? `Task ${task.id}: ${task.title}\nAcceptance: ${task.acceptanceCriteria}
   }
 
   private assertNoAssignmentScopeConflict(
-    group: ConversationGroup, requesting: MemberRow, recipient: MemberRow, scope: string[], eventSessionId: string,
+    group: ConversationGroup, requesting: MemberRow, recipient: MemberRow, scope: string[], eventSessionId: string, dependsOn: string[] = [],
   ): void {
     for (const assignment of this.repo.assignments(group.id)) {
       if (assignment.toMemberId === recipient.id || !this.assignmentScopeStatus(assignment)) continue;
+      const delivery = this.repo.getDelivery(assignment.deliveryId);
+      const task = this.store.getTask(assignment.taskId);
+      // A completed producer can safely hand a reviewed scope to its dependency-ordered consumer.
+      if (dependsOn.includes(assignment.taskId) && delivery?.status === 'completed' && task?.status === 'review') continue;
       const requestedPath = scope.find((requested) => assignment.scope.some((owned) => scopesOverlap([requested], [owned])));
       if (!requestedPath) continue;
       const ownedPath = assignment.scope.find((owned) => scopesOverlap([requestedPath], [owned]))!;
       const owner = this.repo.getMember(assignment.toMemberId);
       if (!owner || owner.removedAt) continue;
-      const task = this.store.getTask(assignment.taskId);
       const overlappingPaths = [requestedPath, ownedPath];
       this.event(group, 'group.assignment.scope-conflict', 'Assignment blocked by an active edit-scope conflict', {
         requestingMemberId: requesting.id, conflictingMemberId: owner.id, assignmentId: assignment.id,
@@ -3641,12 +3648,13 @@ ${task ? `Task ${task.id}: ${task.title}\nAcceptance: ${task.acceptanceCriteria}
       throw forbidden(group.mode === 'cowork' ? 'Only the peer holding this request\'s planning lease can assign work' : 'Only the group orchestrator can assign work');
     }
     const scope = normalizeScopes(input.scope);
+    const dependsOn = [...new Set(input.dependsOn ?? [])].sort();
     let autoSelection: string | undefined;
     let recipient: MemberRow;
     if (input.recipient === 'auto') {
-      let candidates = this.rankAssignees(group, { strategy: 'automatic', excludeMemberIds: [member.id], scope });
+      let candidates = this.rankAssignees(group, { strategy: 'automatic', excludeMemberIds: [member.id], scope, dependsOn });
       if (!candidates.length && group.mode !== 'orchestrated') {
-        const onlySelf = this.rankAssignees(group, { strategy: 'automatic', scope });
+        const onlySelf = this.rankAssignees(group, { strategy: 'automatic', scope, dependsOn });
         if (onlySelf.length === 1 && onlySelf[0]!.id === member.id) candidates = onlySelf;
       }
       recipient = candidates[0]!;
@@ -3679,7 +3687,6 @@ ${task ? `Task ${task.id}: ${task.title}\nAcceptance: ${task.acceptanceCriteria}
       throw conflict(reason);
     }
 
-    const dependsOn = [...new Set(input.dependsOn ?? [])].sort();
     const wanted = new Map<string, { taskId: string; path: string }>();
     for (const artifact of input.inputArtifacts ?? []) {
       if (!dependsOn.includes(artifact.taskId)) throw unprocessable(`Input artifact task ${artifact.taskId} must also be listed in dependsOn`);
@@ -3706,7 +3713,7 @@ ${task ? `Task ${task.id}: ${task.title}\nAcceptance: ${task.acceptanceCriteria}
         status: priorDelivery?.status ?? 'unavailable', deduplicated: true, ...(autoSelection ? { selection: autoSelection } : {}),
       };
     }
-    this.assertNoAssignmentScopeConflict(group, member, recipient, scope, session.id);
+    this.assertNoAssignmentScopeConflict(group, member, recipient, scope, session.id, dependsOn);
     const checkpoint = this.assignmentCheckpointRequired(group, request.id, delivery, scope);
     if (checkpoint) return { status: 'awaiting-human-ack', checkpointId: checkpoint.id, reason: checkpoint.reason, queued: false };
 
