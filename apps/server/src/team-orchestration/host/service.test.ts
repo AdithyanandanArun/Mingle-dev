@@ -2019,6 +2019,32 @@ it('promotes a consented online fallback after quota exhaustion and never infers
   expect(group.group.paused).toBe(true);
 });
 
+it('selects an available consented team member in Full access when no leader fallback was configured', async () => {
+  const fx = fixture();
+  fx.store.updateSession(LOCAL_AGENT, { policy: 'full-access' });
+  await fx.host.enable(PROJECT, { leaderOrchestration: true, permissionLevel: 'full-access', orchestratorAgentId: LOCAL_AGENT, fallbackAgentIds: [] });
+  await grantRemote(fx, 1, { permissionLevel: 'full-access' });
+  const group = await fx.host.addAgentToSession(LOCAL_AGENT, { agentId: REMOTE_AGENT });
+  const structure = await fx.host.structure(PROJECT);
+  await fx.host.change(PROJECT, { action: 'set-orchestrator', agentId: REMOTE_AGENT, expectedVersion: structure.settings!.version });
+  const proxyId = String((fx.store.db.prepare('SELECT session_id FROM mingle_team_proxy_sessions WHERE agent_id=?').get(REMOTE_AGENT) as { session_id: string }).session_id);
+  const member = group.members.find((candidate) => candidate.sessionId === proxyId)!;
+  const deliveryId = 'quota-delivery-with-dynamic-fallback';
+  const requestId = 'quota-request-with-dynamic-fallback';
+  group.deliveries.push({ id: deliveryId, groupId: group.group.id, requestId, messageId: 'quota-message-dynamic', memberId: member.id,
+    status: 'running', runId: 'quota-host-run-dynamic', hop: 0, error: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), kind: 'request' });
+  const userMessage = fx.store.insertMessage({ sessionId: proxyId, role: 'user', content: 'Continue autonomously', runId: 'quota-host-run-dynamic' });
+  fx.store.insertRun({ id: 'quota-host-run-dynamic', sessionId: proxyId, userMessageId: userMessage.id, provider: 'codex', model: 'gpt-6-codex', startedAt: new Date().toISOString() });
+  fx.host.start({ session: fx.store.getSession(proxyId)!, runId: 'quota-host-run-dynamic', content: 'Continue autonomously', options: { groupDeliveryId: deliveryId },
+    context: { groupId: group.group.id, memberId: member.id, requestId, deliveryId, hop: 0, instructions: 'Instructions' } });
+  await waitFor(() => fx.outgoing.find((entry) => entry.kind === 'teamgroup.delivery' && (entry.payload as { deliveryId?: string }).deliveryId === deliveryId));
+  await fx.incoming('teamgroup.delivery.status', { sharedProjectId: SHARED, deliveryId, agentId: REMOTE_AGENT, status: 'failed', runId: 'owner-run-dynamic',
+    failure: { id: 'failure-dynamic', sessionId: 'owner-session-remote', kind: 'quota_exhausted', actor: 'lead', provider: 'codex', retryable: false,
+      dispatchState: 'dispatched', continuationSafety: 'unknown', message: 'Quota exhausted', occurredAt: new Date().toISOString() }, at: new Date().toISOString() });
+  expect(group.group.orchestratorMemberId).toBe(`member-${LOCAL_AGENT}`);
+  expect((await fx.host.structure(PROJECT)).settings?.orchestratorAgentId).toBe(LOCAL_AGENT);
+});
+
 it('fails a proxy delivery at its configurable idle timeout using the injected clock', async () => {
   vi.useFakeTimers({ now: new Date('2026-10-24T12:00:00.000Z') });
   let clock = Date.now();

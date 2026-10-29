@@ -96,6 +96,7 @@ const liveDelivery = (status: string) => ['queued', 'accepted', 'running', 'awai
 const rankPermission = (value: TeamPermissionLevel): number => value === 'full-access' ? 1 : 0;
 const teamPermissionForPolicy = (policy: Session['policy']): TeamPermissionLevel => policy === 'full-access' ? 'full-access' : 'supervised';
 const publishableLocalProviders = new Set(['claude', 'codex', 'opencode']);
+const PROVIDER_COOLDOWN_MS = 15 * 60 * 1000;
 const safeJson = <T>(text: string, fallback: T): T => { try { return JSON.parse(text) as T; } catch { return fallback; } };
 const safeArtifactText = (value: string, max: number): string => redactSecrets(value).replace(/[\u0000-\u001f\u007f]/g, ' ').slice(0, max);
 
@@ -2217,6 +2218,7 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
       throw new HttpError(403, 'The delivery heartbeat came from a different device, agent, or run.');
     }
     await this.verifyOwnerDevice(delivery.team_id, envelope.fromDeviceId, delivery.owner_account_id);
+    this.options.groups.touchDeliveryActivity?.(delivery.session_id, delivery.run_id);
     await this.deliveryMutations.run(delivery.delivery_id, async () => {
       const current = this.delivery(delivery.delivery_id);
       if (!current || !liveDelivery(current.status) || this.completionIntent(current)) return;
@@ -2369,7 +2371,13 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
     });
     if (!claimed) return;
     if (failure) this.options.recovery.recordFailure(delivery.session_id, delivery.run_id, failure);
-    if (failure?.kind === 'quota_exhausted') await this.promoteFallback(delivery.team_id, delivery.shared_project_id, 'fallback-quota');
+    if (failure?.kind === 'quota_exhausted') await this.promoteFallback(delivery.team_id, delivery.shared_project_id, 'fallback-quota', failure.kind);
+    else if (failure && ['temporary_rate_limit', 'authentication', 'provider_unavailable'].includes(failure.kind)) {
+      const host = this.readHost(delivery.team_id, delivery.shared_project_id);
+      if (host && this.settings(host).permissionLevel === 'full-access') {
+        await this.promoteFallback(delivery.team_id, delivery.shared_project_id, 'fallback-provider-failure', failure.kind);
+      }
+    }
   }
 
   private completionIntent(delivery: DeliveryRow): CompletionIntent | null {
@@ -2800,6 +2808,20 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
     const hostProject = session ? this.hostRows.prepare(`SELECT * FROM mingle_team_host_projects WHERE local_project_id=? AND group_id=?`)
       .get(session.projectId, input.groupId) as HostRow | undefined : undefined;
     if (!sourceMessageId && !hostProject) return;
+    if (hostProject && input.outcome === 'failed' && !this.isProxySession(input.sessionId)) {
+      const failure = this.options.store.latestProviderFailure(input.sessionId);
+      const settings = this.settings(hostProject);
+      const eligibleKind = failure && ['quota_exhausted', 'temporary_rate_limit', 'authentication', 'provider_unavailable'].includes(failure.kind);
+      if (failure?.runId === input.runId && failure.actor === 'lead' && eligibleKind
+        && (failure.kind === 'quota_exhausted' || settings.permissionLevel === 'full-access')) {
+        this.track(this.context(hostProject.local_project_id).then((context) => {
+          const activeLeader = context.agents.find((agent) => agent.id === settings.orchestratorAgentId);
+          if (!activeLeader || activeLeader.sessionId !== input.sessionId) return false;
+          const reason = failure.kind === 'quota_exhausted' ? 'fallback-quota' as const : 'fallback-provider-failure' as const;
+          return this.promoteFallback(context.project.teamId, context.project.sharedProjectId, reason, failure.kind);
+        }));
+      }
+    }
     const output = input.outcome === 'completed'
       ? this.options.store.listMessages(input.sessionId, { limit: 2_000 }).filter((message) => message.runId === input.runId && message.role === 'assistant' && message.kind !== 'streaming')
         .map((message) => message.content).join('\n\n').trim()
@@ -2835,7 +2857,7 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
     const deviceOffline = !this.isOnline(delivery.team_id, delivery.owner_device_id);
     const message = deviceOffline ? 'The remote agent timed out while its device was offline.' : 'The remote agent stopped responding.';
     void this.finishDelivery(deliveryId, 'failed', undefined, message)
-      .then(() => wasLeader && deviceOffline ? this.promoteFallback(delivery.team_id, delivery.shared_project_id, 'fallback-offline') : undefined);
+      .then(() => wasLeader && deviceOffline ? this.promoteFallback(delivery.team_id, delivery.shared_project_id, 'fallback-offline', 'provider_unavailable') : undefined);
   }
 
   private artifactAuthority(delivery: DeliveryRow): ArtifactAuthorityRow {
@@ -3035,34 +3057,80 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
     }
     if (this.isOnline(proxy.team_id, proxy.owner_device_id)) return true;
     if (proxy.agent_id === settings.orchestratorAgentId) {
-      await this.promoteFallback(proxy.team_id, proxy.shared_project_id, 'fallback-offline');
+      await this.promoteFallback(proxy.team_id, proxy.shared_project_id, 'fallback-offline', 'provider_unavailable');
       return false;
     }
     this.options.groups.holdTeamMember(sessionId, 'The owner device is offline.');
     return false;
   }
 
-  private async promoteFallback(teamId: string, sharedProjectId: string, reason: 'fallback-quota' | 'fallback-offline'): Promise<boolean> {
-    return this.mutations.run(`${teamId}\0${sharedProjectId}`, () => this.promoteFallbackLocked(teamId, sharedProjectId, reason));
+  private async promoteFallback(
+    teamId: string, sharedProjectId: string, reason: 'fallback-quota' | 'fallback-offline' | 'fallback-provider-failure',
+    failureKind: ProviderFailure['kind'] = reason === 'fallback-quota' ? 'quota_exhausted' : 'provider_unavailable',
+  ): Promise<boolean> {
+    return this.mutations.run(`${teamId}\0${sharedProjectId}`, () => this.promoteFallbackLocked(teamId, sharedProjectId, reason, failureKind));
   }
 
-  private async promoteFallbackLocked(teamId: string, sharedProjectId: string, reason: 'fallback-quota' | 'fallback-offline'): Promise<boolean> {
+  private async promoteFallbackLocked(
+    teamId: string, sharedProjectId: string, reason: 'fallback-quota' | 'fallback-offline' | 'fallback-provider-failure',
+    failureKind: ProviderFailure['kind'],
+  ): Promise<boolean> {
     const row = this.readHost(teamId, sharedProjectId);
     if (!row) return false;
     const context = await this.context(row.local_project_id);
     const settings = this.settings(row);
-    for (const id of settings.fallbackAgentIds) {
+    const group = this.options.groups.get(row.group_id);
+    const groupHealth = this.options.groups.getMemberHealth?.(row.group_id) ?? [];
+    const rosterRows = this.hostRows.prepare(`SELECT agent_id,role FROM mingle_team_host_roster
+      WHERE team_id=? AND shared_project_id=? AND removed_at IS NULL`).all(teamId, sharedProjectId) as Array<{ agent_id: string; role: TeamAgentRole }>;
+    const automaticTeamCandidates = settings.permissionLevel === 'full-access'
+      ? rosterRows.filter((agent) => agent.agent_id !== settings.orchestratorAgentId && agent.role !== 'idle').map((agent) => agent.agent_id)
+        .filter((id) => !settings.fallbackAgentIds.includes(id))
+        .sort((leftId, rightId) => {
+          const sourceProvider = context.agents.find((agent) => agent.id === settings.orchestratorAgentId)?.provider;
+          const agentFor = (id: string) => context.agents.find((agent) => agent.id === id);
+          const sessionFor = (id: string) => {
+            const agent = agentFor(id);
+            if (!agent) return undefined;
+            return agent.deviceId === context.localDeviceId ? agent.sessionId : (this.hostRows.prepare(`SELECT session_id FROM mingle_team_proxy_sessions
+              WHERE team_id=? AND shared_project_id=? AND agent_id=?`).get(teamId, sharedProjectId, id) as { session_id?: string } | undefined)?.session_id;
+          };
+          const memberFor = (id: string) => group.members.find((member) => member.sessionId === sessionFor(id));
+          const load = (id: string) => {
+            const member = memberFor(id);
+            return member ? group.deliveries.filter((delivery) => delivery.memberId === member.id && ['queued', 'running'].includes(delivery.status)).length : Number.MAX_SAFE_INTEGER;
+          };
+          return Number(agentFor(leftId)?.provider === sourceProvider) - Number(agentFor(rightId)?.provider === sourceProvider)
+            || load(leftId) - load(rightId);
+        })
+      : [];
+    const candidateIds = [...new Set([...settings.fallbackAgentIds, ...automaticTeamCandidates])];
+    for (const id of candidateIds) {
       const agent = context.agents.find((candidate) => candidate.id === id);
-      if (!agent || !agent.sessionId || this.consentFor(context, id) !== 'granted' || agent.deviceId !== context.localDeviceId && !this.isOnline(teamId, agent.deviceId)) continue;
-      const failure = this.options.store.latestProviderFailure(agent.sessionId);
-      if (failure?.kind === 'quota_exhausted') continue;
+      if (!agent || this.consentFor(context, id) !== 'granted' || agent.deviceId !== context.localDeviceId && !this.isOnline(teamId, agent.deviceId)
+        || ['offline', 'failed', 'quota-exhausted', 'paused'].includes(agent.state)) continue;
       const handle = this.handleFor(teamId, sharedProjectId, id);
       const sessionId = agent.deviceId === context.localDeviceId ? agent.sessionId : (this.hostRows.prepare('SELECT session_id FROM mingle_team_proxy_sessions WHERE team_id=? AND shared_project_id=? AND agent_id=?')
         .get(teamId, sharedProjectId, id) as { session_id?: string } | undefined)?.session_id;
       if (!handle || !sessionId) continue;
+      const groupMember = group.members.find((member) => member.sessionId === sessionId);
+      if (!groupMember || groupMember.held || groupMember.removedAt || group.deliveries.some((delivery) => delivery.memberId === groupMember.id && delivery.status === 'running')
+        || groupHealth.some((health) => health.memberId === groupMember.id && (health.state === 'cooldown' || health.state === 'failed' || health.state === 'stalled'))
+        || this.options.groups.isMemberAvailable && !this.options.groups.isMemberAvailable(row.group_id, groupMember.id)) continue;
+      const failure = this.options.store.latestProviderFailure(sessionId);
+      if (failure && ['quota_exhausted', 'temporary_rate_limit'].includes(failure.kind)) {
+        const retryAt = failure.retryAt ? Date.parse(failure.retryAt) : Number.NaN;
+        const occurredAt = Date.parse(failure.occurredAt);
+        const cooldownUntil = Number.isFinite(retryAt) ? retryAt : Number.isFinite(occurredAt) ? occurredAt + PROVIDER_COOLDOWN_MS : Number.POSITIVE_INFINITY;
+        if (cooldownUntil > this.now()) continue;
+      }
       const at = new Date(this.now()).toISOString();
       const history = this.history(row);
-      history.push({ id: `leader_${randomUUID().replaceAll('-', '')}`, at, fromAgentId: settings.orchestratorAgentId, toAgentId: id, reason, byAccountId: null });
+      const historyReason = reason === 'fallback-provider-failure'
+        ? ['quota_exhausted', 'temporary_rate_limit'].includes(failureKind) ? 'fallback-quota' as const : 'fallback-offline' as const
+        : reason;
+      history.push({ id: `leader_${randomUUID().replaceAll('-', '')}`, at, fromAgentId: settings.orchestratorAgentId, toAgentId: id, reason: historyReason,
+        ...(reason === 'fallback-provider-failure' ? { failureKind } : {}), byAccountId: null });
       if (history.length > 50) history.splice(0, history.length - 50);
       const next = TeamOrchestrationSettingsSchema.parse({ ...settings, orchestratorAgentId: id, version: settings.version + 1,
         updatedAt: at, updatedByAccountId: settings.updatedByAccountId });
@@ -3079,7 +3147,7 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
             .run(JSON.stringify(next), JSON.stringify(history), at, teamId, sharedProjectId, row.settings_json);
           if (Number(changed.changes) !== 1) throw new HttpError(409, 'Team orchestration settings changed during automatic handover.');
           this.syncTeamRoster(context, row.group_id, next);
-          this.options.groups.setTeamLeader(row.group_id, sessionId, { paused: false, pauseReason: null });
+            this.options.groups.setTeamLeader(row.group_id, sessionId, { paused: false, pauseReason: null, automatic: true, failureKind, reason });
         });
       } catch { continue; }
       await this.broadcastStructure(context, this.readHost(teamId, sharedProjectId)!);
@@ -3136,6 +3204,8 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
     const delivery = candidates.find((candidate) => !candidate.remote_run_id || candidate.remote_run_id === parsed.data.runId);
     if (!delivery) return;
     await this.verifyOwnerDevice(delivery.team_id, envelope.fromDeviceId, delivery.owner_account_id);
+    this.options.groups.recordRemoteDeliveryActivity?.(delivery.session_id, delivery.run_id, parsed.data.entries);
+    this.options.groups.touchDeliveryActivity?.(delivery.session_id, delivery.run_id);
     await this.deliveryMutations.run(delivery.delivery_id, async () => {
       const current = this.delivery(delivery.delivery_id);
       if (current && liveDelivery(current.status) && !this.completionIntent(current)) this.extendDeliveryTimeout(current.delivery_id);

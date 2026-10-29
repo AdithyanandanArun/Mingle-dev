@@ -54,11 +54,17 @@ export interface TeamOrchestrationGroups {
   syncTeamRosterMembers(groupId: string, members: Array<{ sessionId: string; handle: string; role: 'orchestrator' | 'worker' | 'idle'; held: boolean }>, managedSessionIds?: string[]): void;
   addTeamMember(groupId: string, input: { sessionId: string; handle: string }): Promise<import('@mingle/contracts').GroupSnapshot>;
   pumpTeamGroup(groupId: string): void;
-  setTeamLeader(groupId: string, sessionId: string | null, options?: { paused?: boolean; pauseReason?: string | null }): void;
+  setTeamLeader(groupId: string, sessionId: string | null, options?: {
+    paused?: boolean; pauseReason?: string | null; automatic?: boolean; failureKind?: import('@mingle/contracts').ProviderFailure['kind']; reason?: string;
+  }): void;
+  getMemberHealth?(groupId: string): import('@mingle/contracts').GroupMemberHealth[];
+  isMemberAvailable?(groupId: string, memberId: string): boolean;
   pauseTeamGroup(groupId: string, reason: string): void;
   sendTeamMessage(groupId: string, input: { content: string; recipients?: string[]; clientMessageId: string }): string[];
   contextForRun(sessionId: string, runId: string): import('@mingle/contracts').GroupRunContext | undefined;
   onRunFinished(sessionId: string, runId: string, outcome: 'completed' | 'failed' | 'interrupted'): void;
+  touchDeliveryActivity?(sessionId: string, runId: string): void;
+  recordRemoteDeliveryActivity?(sessionId: string, runId: string, entries: import('@mingle/contracts').TeamAgentActivityEntry[]): void;
   acceptTask(context: GroupRunContext, input: TeamAcceptTask): unknown;
   recordIntegrationPublication?(context: GroupRunContext, input: { branch: string; commitSha: string; error?: string }): void;
   notifyIntegrationBranch?(context: GroupRunContext, input: { branch: string; commitSha: string }): string[];
