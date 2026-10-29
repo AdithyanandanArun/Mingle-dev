@@ -55,6 +55,8 @@ Only the designated orchestrator or Cowork's temporary request planner can sched
 
 `team_assign` accepts a member handle or `recipient: "auto"`. Automatic selection preserves scope continuity first, then prefers lower running+queued load, healthier state and a provider not already running. The result names the selected member and the reason. Split planned work into non-overlapping file/directory scopes: Mingle rejects a new scope that overlaps another member's queued, running or Review assignment, even across isolated worktrees. The current scope owner may queue overlapping follow-up work; a completed/accepted task releases its scope, while a fallback reassigns scope ownership to the replacement.
 
+Automatic picks and scope-conflict refusals emit `group.assignment.auto-picked` and `group.assignment.scope-conflict` workspace events. They contain routing IDs, reasons and overlapping paths, not conversation transcript text.
+
 Task dependencies normally require Done. An assignment can explicitly name an expected artifact dependency; the corresponding verified committed artifact can unblock that consumer while its producer remains in Review. In full access, only the active coordinator can accept after supplying verification evidence; local acceptance merges the worker branch before marking the task Done and pushes the group integration branch normally. Supervised and balanced groups keep human acceptance. Referencing a commit does not merge it into another worktree.
 
 ## Limits, interruption and recovery

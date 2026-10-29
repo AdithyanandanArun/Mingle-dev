@@ -3650,7 +3650,10 @@ ${task ? `Task ${task.id}: ${task.title}\nAcceptance: ${task.acceptanceCriteria}
         if (onlySelf.length === 1 && onlySelf[0]!.id === member.id) candidates = onlySelf;
       }
       recipient = candidates[0]!;
-      if (!recipient) throw conflict('No eligible member is available for automatic assignment; check the team roster, provider availability, cooldowns and scope ownership.');
+      if (!recipient) {
+        this.assertNoAssignmentScopeConflict(group, member, member, scope, session.id);
+        throw conflict('No eligible member is available for automatic assignment; check the team roster, provider availability and cooldowns.');
+      }
       autoSelection = `Auto-picked @${recipient.handle}: ${this.automaticPickReason(group, recipient, scope)}`;
     } else {
       recipient = this.activeByHandle(group, input.recipient);

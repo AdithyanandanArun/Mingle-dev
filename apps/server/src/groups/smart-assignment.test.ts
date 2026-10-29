@@ -205,4 +205,8 @@ it('uses provider diversity to break equal-load automatic assignment ties', asyn
   await waitFor(() => autoResult, 8_000, 'automatic provider-diverse assignment');
   expect(autoResult).toMatchObject({ recipient: preferred.handle, status: 'queued' });
   expect(String((autoResult as { selection: string }).selection)).toContain('provider diversity');
+  const autoEvent = t.app.store.listEvents().find((event) => event.type === 'group.assignment.auto-picked');
+  expect(autoEvent?.payload).toMatchObject({ memberId: preferred.id, handle: preferred.handle, assignmentId: (autoResult as { assignmentId: string }).assignmentId });
+  expect(String(autoEvent?.payload.reason)).toContain('provider diversity');
+  expect(JSON.stringify(autoEvent?.payload)).not.toContain('Choose a diverse provider');
 });
