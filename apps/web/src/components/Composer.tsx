@@ -2,8 +2,8 @@ import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { ArrowUp, FilePlus2, Square } from 'lucide-react';
 import type { AttachmentRef, ProviderModel, Session } from '@mingle/contracts';
 import { useMingle } from '../store/store';
-import { api, errorMessage, type ProviderCatalog, type SessionPatch } from '../lib/api';
-import { MOD, PROVIDER_NAME } from './ui';
+import { api, errorMessage, type ApiProviderFailure, type ProviderCatalog, type SessionPatch } from '../lib/api';
+import { MOD, PROVIDER_NAME, Badge } from './ui';
 import { cx } from '../lib/format';
 import { SelectMenu } from './SelectMenu';
 import { ModelPicker } from './ModelPicker';
@@ -12,6 +12,7 @@ import { GitBar } from './git/GitBar';
 import { AttachmentDrafts, AttachmentTray, useAttachmentDraft } from './AttachmentDrafts';
 import { usePresence } from '../lib/motion';
 import { useTeamStructure } from '../lib/team-structure-context';
+import { providerSwitchFailureCopy } from '../lib/providerFailureUi';
 import {
   appendContextReference, ContextReferenceChips, EMPTY_CONTEXT_REFS, FileContextPicker,
   findFileMentionTrigger, removeFileMentionTrigger, type FileMentionTrigger,
@@ -38,6 +39,7 @@ export function Composer({ session }: { session: Session }) {
   const [compactStatus, setCompactStatus] = useState<{ status: 'running' | 'completed' | 'unsupported' | 'failed'; message?: string } | null>(null);
   const [updating, setUpdating] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [providerFailure, setProviderFailure] = useState<ApiProviderFailure | null>(null);
   const [catalog, setCatalog] = useState<ProviderCatalog | null>(null);
   const [catalogError, setCatalogError] = useState<string | null>(null);
   const [catalogRevision, setCatalogRevision] = useState(0);
@@ -66,6 +68,9 @@ export function Composer({ session }: { session: Session }) {
   const modelControl = useRef<HTMLButtonElement>(null);
   const reasoningControl = useRef<HTMLButtonElement>(null);
   const policyControl = useRef<HTMLButtonElement>(null);
+  const failedMessage = useMingle((s) => providerFailure?.runId
+    ? s.boot?.messages.find((message) => message.sessionId === session.id && message.runId === providerFailure.runId && message.role === 'user')
+    : undefined);
 
   const closeFilePicker = () => {
     const position = filePickerRestoreCaret.current ?? fileMentionTrigger.current?.end ?? caret.current;
@@ -108,6 +113,19 @@ export function Composer({ session }: { session: Session }) {
     el.style.height = `${Math.min(el.scrollHeight, 260)}px`;
   }, [draft, session.id]);
   useEffect(() => { setError(null); setCompactStatus(null); setPlanningMode(false); }, [session.id]);
+  useEffect(() => {
+    if (session.status !== 'error' || !session.error) {
+      setProviderFailure(null);
+      return;
+    }
+    const controller = new AbortController();
+    void api.sessionRecovery(session.id, controller.signal).then(({ failure }) => {
+      if (!controller.signal.aborted) setProviderFailure(failure);
+    }).catch(() => {
+      if (!controller.signal.aborted) setProviderFailure(null);
+    });
+    return () => controller.abort();
+  }, [session.id, session.status, session.error]);
   useEffect(() => { setUsageOpen(false); }, [session.id, session.provider, session.model]);
   const closeUsage = useCallback(() => {
     setUsageOpen(false);
@@ -286,7 +304,22 @@ export function Composer({ session }: { session: Session }) {
       setUpdating(false);
     }
   };
+  const retryFailedMessage = async () => {
+    if (!failedMessage?.content.trim() || failedMessage.attachments?.length || !providerFailure || session.provider === providerFailure.provider || !provider?.available || sending || updating) return;
+    setSending(true);
+    setError(null);
+    try {
+      await api.sendMessage(session.id, failedMessage.content, [], [], failedMessage.contextRefs, 'normal');
+      await useMingle.getState().refreshNow();
+    } catch (cause) {
+      setError(errorMessage(cause));
+    } finally {
+      setSending(false);
+    }
+  };
   const disabled = running || sending || updating || connection !== 'online';
+  const providerFailureCopy = providerFailure ? providerSwitchFailureCopy(providerFailure) : null;
+  const canRetryFailedMessage = Boolean(providerFailure && session.provider !== providerFailure.provider && provider?.available && failedMessage?.content.trim() && !failedMessage.attachments?.length);
   const currentProvider = providers?.find((p) => p.id === session.provider);
   const modelData = (currentProvider?.models ?? []) as ProviderModel[];
   const currentModel = modelData.find((m) => m.id === session.model || m.aliases?.includes(session.model));
@@ -417,6 +450,12 @@ export function Composer({ session }: { session: Session }) {
   }, [activeSuggestion, pickerId, suggestion]);
   return (
     <div className="composer-wrap">
+      {providerFailureCopy ? <div className="composer__note is-error" role="alert">
+        <span>{providerFailureCopy}</span>{' '}
+        <button type="button" className="link-btn" onClick={() => setModelOpenRequest((value) => value + 1)} disabled={disabled} title={running ? 'Wait for the active run to finish before switching providers.' : 'Choose another available provider.'}>Switch provider</button>
+        {canRetryFailedMessage ? <>{' '}<button type="button" className="link-btn" onClick={() => void retryFailedMessage()} disabled={disabled}>Retry with {PROVIDER_NAME[session.provider]}</button></> : null}
+        {providerFailure && session.provider !== providerFailure.provider && failedMessage?.attachments?.length ? <span>Reattach the failed message’s files before retrying.</span> : null}
+      </div> : null}
       <div className={cx('composer', blocker && 'is-blocked')}>
         <label htmlFor={`composer-${session.id}`} className="sr-only">Message {session.name}</label>
         <ContextReferenceChips refs={contextRefs} disabled={sending || updating} onRemove={(index) => useMingle.getState().setContextDraft(session.id, contextRefs.filter((_, i) => i !== index))} />
@@ -487,9 +526,11 @@ export function Composer({ session }: { session: Session }) {
             <button type="button" className={cx('composer__plan-toggle', planningMode && 'is-active')} aria-pressed={planningMode} disabled={disabled} title="Ask the provider for a native read-only plan" onClick={() => { setPlanningMode((value) => !value); setSelectedSkills([]); setError(null); }}>
               {planningMode ? 'Planning on' : 'Plan'}
             </button>
+            {session.handoffFromProvider ? <Badge tone="info" title="No extra model call; context is included with your next message.">Handoff pending from {PROVIDER_NAME[session.handoffFromProvider]}</Badge> : null}
             <ModelPicker triggerRef={modelControl} openRequest={modelOpenRequest} className="composer__model-picker" label="Model"
               value={{ provider: session.provider, model: selectedModelId }} providers={providers ?? []}
-              lockProvider={Boolean(session.providerSessionId)} disabled={disabled} placement="top"
+              title={running ? 'Provider and model selection is disabled while this session is running.' : undefined}
+              disabled={disabled} placement="top"
               onChange={({ provider, model }) => { void configure({ provider, model }); }} />
             <SelectMenu triggerRef={reasoningControl} className="composer__select" label="Reasoning effort and service tier" value={combinedValue} selectedValues={combinedSelectedValues} displayValue={combinedDisplay} openRequest={reasoningOpenRequest} disabled={disabled}
               options={combinedOptions}

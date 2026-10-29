@@ -361,6 +361,7 @@ export function ModelPicker({
               {query ? <button type="button" aria-label="Clear model search" title="Clear search" onClick={() => { setQuery(''); searchInput.current?.focus(); }}><X size={13} aria-hidden="true" /></button> : null}
             </label> : null}
           </div>
+          {!lockProvider && activeProviderId !== value.provider ? <p className="model-picker__notice" role="status">Context will be handed off with your next message; no extra model call.</p> : null}
           {lockProvider && catalogProviders.length > 1 ? <p className="model-picker__notice">Provider changes are locked for this conversation.</p> : null}
           {unavailableProviderReason ? <p className="model-picker__notice model-picker__notice--warn" role="status">Unavailable: {unavailableProviderReason}</p> : null}
           {modelOptions.length ? <div id={listId} className="model-picker__models" role="listbox" aria-label="Models" aria-busy={false} key={activeProvider?.id}>
