@@ -1492,11 +1492,9 @@ it('fetches permanent worker branches and merges diverging results locally for f
   expect(runGit(origin, 'rev-parse', 'refs/heads/main').trim()).toBe(mergedHead);
 });
 
-it('interrupts an old owner turn before re-dispatching a full-access restart continuation', async () => {
+it('interrupts an old owner turn before re-dispatching a supervised restart continuation', async () => {
   const fx = fixture();
   const group = await addRemoteToSession(fx);
-  await fx.host.update(PROJECT, { expectedVersion: 1, permissionLevel: 'full-access' });
-  await grantRemote(fx, 2, { permissionLevel: 'full-access' });
   const worker = group.members.find((member) => member.sessionId.startsWith('proxy_'))!;
   const session = fx.store.getSession(worker.sessionId)!;
   const deliveryId = 'restart-old-delivery';
@@ -1518,7 +1516,7 @@ it('interrupts an old owner turn before re-dispatching a full-access restart con
   group.deliveries.push({ id: successorId, groupId: group.group.id, requestId, messageId: 'restart-continuation-message', memberId: worker.id,
     status: 'queued', runId: null, hop: 0, error: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), kind: 'result' });
   group.group.paused = true;
-  group.group.pauseReason = 'Waiting for provider availability before full-access restart continuation.';
+  group.group.pauseReason = 'Waiting for provider availability before restart continuation.';
   fx.restartHost();
   await waitFor(() => fx.outgoing.some((entry) => entry.kind === 'teamgroup.interrupt' && (entry.payload as { deliveryId?: string }).deliveryId === deliveryId));
   expect(fx.host.isActive(session.id)).toBe(true);

@@ -198,8 +198,8 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
       const group = this.groupOrNull(row.group_id);
       const groupDelivery = group?.deliveries.find((delivery) => delivery.id === row.delivery_id);
       const host = this.readHost(row.team_id, row.shared_project_id);
-      if (host && this.settings(host).permissionLevel === 'full-access' && groupDelivery?.status === 'interrupted'
-        && groupDelivery.error === 'Interrupted because Mingle restarted') {
+      if (host && groupDelivery?.status === 'interrupted' && groupDelivery.error === 'Interrupted because Mingle restarted'
+        && groupDelivery.recoveredByDeliveryId) {
         // The host-side queue has already made a bounded continuation. Interrupt the old owner run
         // before releasing the proxy slot so the new delivery cannot race its persistent worktree.
         this.active.set(row.session_id, { runId: row.run_id, controller: new AbortController() });

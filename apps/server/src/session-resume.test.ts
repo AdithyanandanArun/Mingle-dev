@@ -147,7 +147,7 @@ describe('automatic session resume after restart', () => {
     expect(restarted.fake.runs).toHaveLength(0);
   });
 
-  it('leaves a balanced group interrupted for explicit recovery', async () => {
+  it('leaves a balanced group paused when automatic restart continuation is disabled', async () => {
     const dir = dataDir();
     const before = await boot(dir);
     await before.api('POST', '/api/providers/refresh', {});
@@ -157,6 +157,7 @@ describe('automatic session resume after restart', () => {
       agent: { handle: 'resume-worker', isolated: true, configuration: { provider: 'claude', model: 'claude-sonnet-5-5', effort: 'high', policy: 'supervised', serviceTier: 'standard' } },
     });
     expect(created.status).toBe(201);
+    before.app.store.updateSettings({ autoResumeOnRestart: false });
     before.fake.script = async (options, emit) => {
       await Promise.race([new Promise<void>((resolve) => options.signal.addEventListener('abort', () => resolve(), { once: true })), new Promise<void>((resolve) => setTimeout(resolve, 5000))]);
       if (!options.signal.aborted) emit({ type: 'text', text: 'Completed before restart.' });
@@ -168,15 +169,47 @@ describe('automatic session resume after restart', () => {
     apps.splice(apps.indexOf(before), 1);
 
     const restarted = await boot(dir);
-    await waitFor(() => resumeEvents(restarted).some((event) => event.type === 'session.run.resume-skipped'));
+    await waitFor(() => restarted.app.groups.get(created.json.group.id).deliveries.some((delivery) => delivery.status === 'interrupted'));
     const snapshot = restarted.app.groups.get(created.json.group.id);
-    expect(resumeEvents(restarted).find((event) => event.type === 'session.run.resume-skipped')?.payload.reason).toBe('group-delivery-managed');
     const delivery = snapshot.deliveries.find((row) => row.runId === interrupted.id);
     expect(delivery?.status).toBe('interrupted');
     if (!delivery) throw new Error('The interrupted group delivery was not retained.');
     expect(restarted.app.store.db.prepare('SELECT retryable FROM group_deliveries WHERE id=?').get(delivery.id)).toEqual({ retryable: 1 });
     expect(restarted.fake.runs).toHaveLength(0);
   });
+
+  it('requeues one supervised group delivery after restart with an inspect-first continuation', async () => {
+    const dir = dataDir();
+    const before = await boot(dir);
+    await before.api('POST', '/api/providers/refresh', {});
+    await before.api('PATCH', `/api/sessions/${EXAMPLE_CONTRACT_SESSION_ID}`, { provider: 'claude', model: 'claude-sonnet-5-5' });
+    const created = await before.api('POST', '/api/groups', {
+      sessionId: EXAMPLE_CONTRACT_SESSION_ID, mode: 'current-leads',
+      agent: { handle: 'supervised-resume-worker', isolated: true, configuration: { provider: 'claude', model: 'claude-sonnet-5-5', effort: 'high', policy: 'supervised', serviceTier: 'standard' } },
+    });
+    expect(created.status).toBe(201);
+    const groupId = (created.json as { group: { id: string } }).group.id;
+    before.fake.script = async (options) => {
+      await new Promise<void>((resolve) => options.signal.addEventListener('abort', () => resolve(), { once: true }));
+    };
+    expect((await before.api('POST', `/api/groups/${groupId}/messages`, { content: 'Continue the supervised grouped implementation.' })).status).toBe(202);
+    await waitFor(() => before.app.groups.get(groupId).deliveries.find((delivery) => delivery.status === 'running'));
+    const interrupted = before.app.store.activeRuns()[0]!;
+    await before.cleanup();
+    apps.splice(apps.indexOf(before), 1);
+
+    const restarted = await boot(dir);
+    await waitFor(() => restarted.fake.runs.length === 1 && restarted.app.runtime.activeCount() === 0
+      && !restarted.app.groups.get(groupId).deliveries.some((delivery) => delivery.status === 'running'), 10_000, 'supervised group continuation');
+    const snapshot = restarted.app.groups.get(groupId);
+    const original = snapshot.deliveries.find((delivery) => delivery.runId === interrupted.id)!;
+    const successor = snapshot.deliveries.find((delivery) => delivery.id === original.recoveredByDeliveryId);
+    expect(original.status).toBe('interrupted');
+    expect(successor).toMatchObject({ status: 'completed' });
+    expect(restarted.fake.runs[0]?.prompt).toMatch(/inspect the saved recovery checkpoint and current state first/i);
+    expect(restarted.app.store.listEvents().some((event) => event.type === 'group.delivery.resumed'
+      && event.payload.interruptedDeliveryId === original.id)).toBe(true);
+  }, 20_000);
 
   it('requeues one interrupted local group delivery after restart when the group is full access', async () => {
     const dir = dataDir();

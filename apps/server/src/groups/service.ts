@@ -95,7 +95,8 @@ const DEFAULT_STALL_TIMEOUT_MS = 10 * 60 * 1000;
 const DEFAULT_STALL_SWEEP_INTERVAL_MS = 30 * 1000;
 const MAX_AUTONOMOUS_TURNS = 200;
 const MAX_AUTONOMOUS_HOPS = 24;
-const RESTART_RESUME_PAUSE_REASON = 'Waiting for provider availability before full-access restart continuation.';
+const MAX_RESTART_RESUME_AGE_MS = 24 * 60 * 60 * 1000;
+const RESTART_RESUME_PAUSE_REASON = 'Waiting for provider availability before restart continuation.';
 function isSafeBranchName(value: string): boolean {
   return value.length <= 200 && /^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(value) && !value.includes('..')
     && !value.includes('//') && !value.includes('@{') && !value.endsWith('/')
@@ -2495,6 +2496,8 @@ export class GroupService {
     if (source.status !== 'interrupted' || source.error !== 'Interrupted because Mingle restarted'
       || source.attempts > MAX_SAFE_RETRIES || this.repo.deliverySuccessor(group.id, source.id)
       || this.repo.deliverySource(group.id, source.id)) return false;
+    const startedAt = Date.parse(source.startedAt ?? source.createdAt);
+    if (!Number.isFinite(startedAt) || this.now() - startedAt > MAX_RESTART_RESUME_AGE_MS) return false;
     const member = this.repo.getMember(source.memberId);
     const request = this.repo.getRequest(source.requestId);
     if (!member || member.removedAt || member.held || !request || request.status === 'completed') return false;
@@ -2534,13 +2537,13 @@ ${task ? `Task ${task.id}: ${task.title}\nAcceptance: ${task.acceptanceCriteria}
     return true;
   }
 
-  /** Startup recovery. Full-access continuations are queued only; provider discovery starts them after listen(). */
+  /** Startup recovery. Restart continuations are queued only; provider discovery starts them after listen(). */
   recover(): void {
     for (const group of this.repo.listGroups()) {
       try {
         this.store.tx(() => {
           const wasPaused = group.paused;
-          const fullAccess = !wasPaused && this.isFullAccessGroup(group);
+          const autoResume = !wasPaused && this.store.getSettings().autoResumeOnRestart !== false;
           const interrupted: DeliveryRow[] = [];
           let touched = 0;
           for (const d of this.repo.deliveries(group.id, ['running'])) {
@@ -2552,10 +2555,10 @@ ${task ? `Task ${task.id}: ${task.title}\nAcceptance: ${task.acceptanceCriteria}
             touched++;
           }
           let requeued = 0;
-          if (fullAccess) for (const delivery of interrupted) if (this.queueRestartContinuation(group, delivery)) requeued++;
+          if (autoResume) for (const delivery of interrupted) if (this.queueRestartContinuation(group, delivery)) requeued++;
           const waiting = this.repo.deliveries(group.id).filter((d) => d.status === 'queued' || ((d.status === 'failed' || d.status === 'interrupted') && d.retryable));
           if (waiting.length && !wasPaused && !this.repo.getGroup(group.id)?.paused) {
-            if (fullAccess && this.repo.deliveries(group.id, ['queued']).length) {
+            if (autoResume && this.repo.deliveries(group.id, ['queued']).length) {
               this.repo.updateGroup(group.id, { paused: true, pauseReason: RESTART_RESUME_PAUSE_REASON });
               this.restartResumeGroups.add(group.id);
             } else {
@@ -2564,8 +2567,8 @@ ${task ? `Task ${task.id}: ${task.title}\nAcceptance: ${task.acceptanceCriteria}
           }
           if (waiting.length || touched) {
             for (const request of this.repo.requestsWithStatus(group.id, 'active')) this.refreshRequest(request.id, true);
-            this.event(group, 'group.recovered', fullAccess && requeued
-              ? 'Full-access group continuation queued after restart' : 'Group work paused after restart', { interrupted: touched, waiting: waiting.length, requeued });
+            this.event(group, 'group.recovered', autoResume && requeued
+              ? 'Group continuation queued after restart' : 'Group work paused after restart', { interrupted: touched, waiting: waiting.length, requeued });
           }
         });
       } catch (error) {
@@ -2576,7 +2579,7 @@ ${task ? `Task ${task.id}: ${task.title}\nAcceptance: ${task.acceptanceCriteria}
 
   hasRestartResumeWork(): boolean { return this.restartResumeGroups.size > 0; }
 
-  /** Releases full-access restart continuations after provider availability has been refreshed. */
+  /** Releases restart continuations after provider availability has been refreshed. */
   resumeAfterRestart(availableProviders: string[]): void {
     const available = new Set(availableProviders);
     for (const groupId of this.restartResumeGroups) {
@@ -2599,7 +2602,7 @@ ${task ? `Task ${task.id}: ${task.title}\nAcceptance: ${task.acceptanceCriteria}
       this.store.tx(() => {
         this.repo.updateGroup(group.id, { paused: false, pauseReason: null });
         for (const request of this.repo.requestsWithStatus(group.id, 'paused')) this.refreshRequest(request.id);
-        this.event(group, 'group.recovery.restart-resumed', 'Full-access group continuation resumed after provider discovery', {
+        this.event(group, 'group.recovery.restart-resumed', 'Group continuation resumed after provider discovery', {
           queued: this.repo.deliveries(group.id, ['queued']).length,
         });
       });
@@ -3222,6 +3225,7 @@ ${task ? `Task ${task.id}: ${task.title}\nAcceptance: ${task.acceptanceCriteria}
     }
     const assignment = d.assignmentId ? this.repo.getAssignment(d.assignmentId) : undefined;
     const recoverySource = this.repo.deliverySource(group.id, d.id);
+    const recoverySourceDelivery = recoverySource ? this.repo.getDelivery(recoverySource) : undefined;
     const planInput = request.executionPlanId ? this.planInputMessage(request.executionPlanId, group.id, member.id) : undefined;
     if (request.executionPlanId && !planInput) {
       this.cancel(d, 'The original plan inputs are no longer available. Replan with the current group agent.');
@@ -3332,6 +3336,11 @@ ${task ? `Task ${task.id}: ${task.title}\nAcceptance: ${task.acceptanceCriteria}
     this.deliveryActivity.set(d.id, { fingerprint: this.deliveryActivityFingerprint(this.repo.getDelivery(d.id)!), at: this.now() });
     this.reserved.delete(session.id);
     this.event(group, 'group.delivery.started', `Delivery started: @${member.handle}`, { deliveryId: d.id, runId, kind: d.kind, hop: d.hop }, session.id);
+    if (recoverySourceDelivery?.error === 'Interrupted because Mingle restarted') {
+      this.event(group, 'group.delivery.resumed', `Restarted delivery resumed: @${member.handle}`, {
+        interruptedDeliveryId: recoverySourceDelivery.id, deliveryId: d.id, runId,
+      }, session.id);
+    }
     return true;
   }
 
