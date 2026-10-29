@@ -99,7 +99,7 @@ export const MessageRow = memo(function MessageRow({ m, provider, speaker, onAsk
   if (m.role === 'user') {
     return (
       <article className="msg msg--user" aria-label="Your message" data-message-id={m.id}>
-        <div className="msg__bubble"><Markdown text={m.content} /><AttachmentHistory attachments={m.attachments} /><ContextReferenceChips refs={m.contextRefs ?? []} /></div>
+        <div className="msg__bubble">{m.kind === 'remote-recovery' ? <small>Resumed after restart</small> : null}<Markdown text={m.content} /><AttachmentHistory attachments={m.attachments} /><ContextReferenceChips refs={m.contextRefs ?? []} /></div>
         {m.createdAt ? <time className="msg__time" dateTime={m.createdAt} title={clockTime(m.createdAt)}>{clockTime(m.createdAt)}</time> : null}
       </article>
     );

@@ -140,6 +140,9 @@ export function SettingsPage({ onReplayOnboarding }: { onReplayOnboarding: () =>
         <div className="settings-page__section-head settings-page__section-head--next"><h2>Context</h2></div>
         <AutoCompactSetting settings={settings} disabled={disabled} update={update} />
         <div className="settings-page__section-head settings-page__section-head--next"><h2>Workspace & permissions</h2></div>
+        <SettingRow title="Resume after restart" description="Automatically continue local sessions that were interrupted when Mingle closed. Group deliveries and remote-device team work keep their separate recovery behavior." htmlFor="st-auto-resume">
+          <SelectMenu id="st-auto-resume" label="Resume sessions after restart" value={settings.autoResumeOnRestart === false ? 'off' : 'on'} disabled={disabled} options={[{ value: 'on', label: 'On' }, { value: 'off', label: 'Off' }]} onChange={(value) => void update({ autoResumeOnRestart: value === 'on' }, 'auto-resume')} />
+        </SettingRow>
         <SettingRow title="Workspace" description="Use a separate Git worktree, or edit the existing project folder." htmlFor="st-workspace">
           <SelectMenu id="st-workspace" label="Default workspace" value={settings.defaultIsolated ? 'worktree' : 'project'} disabled={disabled} options={[{ value: 'worktree', label: 'Isolated worktree' }, { value: 'project', label: 'Project folder' }]} onChange={(value) => void update({ defaultIsolated: value === 'worktree' }, 'workspace')} />
         </SettingRow>
