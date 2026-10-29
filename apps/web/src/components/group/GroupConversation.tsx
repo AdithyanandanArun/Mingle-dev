@@ -183,8 +183,9 @@ export function GroupConversation({ snapshot }: { snapshot: GroupSnapshot }) {
   const calls = useMemo(() => toolCallsByRun(allCalls, sessionIds), [allCalls, sessionIds]);
   const activeSessionIds = useMemo(() => new Set(members.map((member) => member.sessionId)), [members]);
   const pending = useMemo(() => (approvals ?? []).filter((approval) => approval.status === 'pending' && activeSessionIds.has(approval.sessionId)), [approvals, activeSessionIds]);
+  const plannerRequest = [...snapshot.requests].reverse().find((request) => request.status === 'active') ?? [...snapshot.requests].reverse()[0];
   const coordinatorMember = members.find((member) => member.id === snapshot.group.orchestratorMemberId)
-    ?? [...snapshot.requests].reverse().map((request) => members.find((member) => member.id === request.plannerMemberId)).find((member): member is NonNullable<typeof member> => Boolean(member))
+    ?? members.find((member) => member.id === plannerRequest?.plannerMemberId)
     ?? members.find((member) => member.sessionId === snapshot.group.anchorSessionId);
   const coordinatorSession = coordinatorMember ? sessions.find((candidate) => candidate.id === coordinatorMember.sessionId) : anchor;
   const coordinatorRuns = useMemo(() => allRuns.filter((run) => run.sessionId === coordinatorSession?.id), [allRuns, coordinatorSession?.id]);
