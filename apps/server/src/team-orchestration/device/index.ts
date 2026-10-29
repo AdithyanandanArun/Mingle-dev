@@ -26,6 +26,7 @@ import { HttpError, errorMessage, nowIso, redactSecrets } from '../../util.ts';
 import { git, trimmed } from '../../repository/git-run.ts';
 import { TeamMcpProxy } from './mcp-proxy.ts';
 import { createCommit } from '../../repository/commit.ts';
+import { identityArgs } from '../../repository/identity.ts';
 import { signingConfigured } from '../../repository/inspect.ts';
 import { fetchTeamAgentBranch, fetchTeamIntegrationBranch, pushTeamCompletionBranch, teamAgentBranch } from '../../repository/team-branch.ts';
 import { isDeniedName, normalizeRelative } from '../../paths.ts';
@@ -1023,7 +1024,15 @@ export function createDeviceSide(deps: DeviceSideDeps): {
           if (dirty.stdout.trim()) {
             integrationNote = `Mingle could not merge origin/${integrationBranch} because this worker worktree has uncommitted changes. Keep them and merge the integration branch manually when ready.`;
           } else {
-            const merged = await git(worktreePath, ['-c', 'commit.gpgSign=false', 'merge', '--no-edit', baseRevision], { allowFailure: true, timeoutMs: 120_000 });
+            let identity: string[];
+            try {
+              const user = deps.account.snapshot().user;
+              identity = await identityArgs(worktreePath, { name: user?.name, email: user?.email });
+            } catch (error) {
+              integrationNote = error instanceof Error ? error.message : 'Set your Git name and email (git config --global user.name/user.email), then retry.';
+              identity = [];
+            }
+            const merged = integrationNote ? { code: 1, stderr: integrationNote } : await git(worktreePath, [...identity, '-c', 'commit.gpgSign=false', 'merge', '--no-edit', baseRevision], { allowFailure: true, timeoutMs: 120_000 });
             if (merged.code !== 0) {
               await git(worktreePath, ['merge', '--abort'], { allowFailure: true });
               const detail = safeText(merged.stderr.replace(/\b(?:https?|ssh|git):\/\/[^\s'"<>]+/gi, '[remote]')
@@ -1081,6 +1090,7 @@ export function createDeviceSide(deps: DeviceSideDeps): {
       if (!branch) throw new Error('The isolated delivery worktree has no branch for a controlled artifact commit.');
       const commit = await createCommit(worktreePath, branch, head, paths, `Mingle team delivery ${activeDelivery.payload.deliveryId}`, {
         sign: await signingConfigured(worktreePath),
+        identity: { name: deps.account.snapshot().user?.name, email: deps.account.snapshot().user?.email },
         beforeCommit: async () => {
           if (cancelled.has(activeDelivery.payload.deliveryId) || activeDelivery.controller.signal.aborted) {
             throw new Error('The team delivery was cancelled before its file snapshot could be committed.');

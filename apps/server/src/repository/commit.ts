@@ -4,6 +4,7 @@ import path from 'node:path';
 import { isDeniedName } from '../paths.ts';
 import { HttpError, conflict, unprocessable } from '../util.ts';
 import { git, GitFailure } from './git-run.ts';
+import { identityArgs, type GitIdentity } from './identity.ts';
 
 export interface CreatedCommit { commit: string; paths: string[]; indexSynced: boolean }
 
@@ -13,6 +14,7 @@ export interface CommitOptions {
   /** Runs after the private tree is built and just before the commit object is written; throw to abort. */
   beforeCommit: () => Promise<void>;
   signal?: AbortSignal;
+  identity?: GitIdentity;
 }
 
 interface RawChange { oldMode: string; newMode: string; newSha: string; status: string; path: string }
@@ -87,7 +89,7 @@ export async function createCommit(top: string, branch: string, head: string | n
 }
 
 async function writeCommit(top: string, tree: string, head: string | null, message: string, options: CommitOptions): Promise<string> {
-  const args = ['commit-tree', ...(options.sign ? ['-S'] : []), tree, ...(head ? ['-p', head] : [])];
+  const args = [...await identityArgs(top, options.identity), 'commit-tree', ...(options.sign ? ['-S'] : []), tree, ...(head ? ['-p', head] : [])];
   try {
     const result = await git(top, args, { stdin: `${message.replace(/\s+$/, '')}\n`, signal: options.signal, detached: options.sign, timeoutMs: options.sign ? 60_000 : 20_000 });
     return result.stdout.trim();

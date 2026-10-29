@@ -30,6 +30,7 @@ import { KeyedLock } from '../../repository/lock.ts';
 import { normalizeScopes, safeArtifactPath } from '../../groups/routing.ts';
 import { isDeniedName } from '../../paths.ts';
 import { fetchTeamCompletionBranch, pushTeamIntegrationBranch, teamAgentBranch } from '../../repository/team-branch.ts';
+import { identityArgs } from '../../repository/identity.ts';
 
 type Row = Record<string, unknown>;
 type HostRow = {
@@ -284,17 +285,10 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
           const integrationIsAncestor = await git(workspace.worktreePath, ['merge-base', '--is-ancestor', head, review.review_ref], { allowFailure: true });
           const mergeArgs = ['-c', 'commit.gpgSign=false'];
           if (integrationIsAncestor.code !== 0) {
-            const identity = await git(workspace.worktreePath, ['var', 'GIT_COMMITTER_IDENT'], { allowFailure: true });
-            if (identity.code !== 0) {
-              const collaboration = await this.options.collaboration.snapshot(host.local_project_id);
-              const owner = collaboration.members.find((member) => member.accountId === host.owner_account_id);
-              const name = (owner?.displayName ?? '').trim();
-              const email = (owner?.email ?? '').trim();
-              if (!name || !email || /[\r\n<>]/.test(name) || /[\r\n<>]/.test(email)) {
-                throw new HttpError(409, 'Git needs a committer identity to create this merge commit. Set your Git name and email (git config --global user.name/user.email), then retry.');
-              }
-              mergeArgs.push('-c', `user.name=${name}`, '-c', `user.email=${email}`);
-            }
+            const collaboration = await this.options.collaboration.snapshot(host.local_project_id);
+            const owner = collaboration.members.find((member) => member.accountId === host.owner_account_id);
+            try { mergeArgs.push(...await identityArgs(workspace.worktreePath, { name: owner?.displayName, email: owner?.email })); }
+            catch (error) { throw new HttpError(409, error instanceof Error ? error.message : 'Git needs a committer identity.'); }
           }
           mergeArgs.push('merge', integrationIsAncestor.code === 0 ? '--ff-only' : '--no-ff', '--no-edit', review.review_ref);
           const mergedResult = await git(workspace.worktreePath, mergeArgs, { allowFailure: true, timeoutMs: 120_000 });
