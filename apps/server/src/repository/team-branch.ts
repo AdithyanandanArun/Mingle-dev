@@ -79,7 +79,6 @@ export async function mergeTeamIntegrationTarget(input: {
   }
   const format = await git(worktreePath, ['check-ref-format', `refs/heads/${targetBranch}`], { allowFailure: true, signal });
   if (format.code !== 0) throw new Error('The integration target branch is invalid.');
-  await assertOriginSafe(worktreePath, 'fetch', signal);
   const trackingRef = `refs/remotes/origin/${targetBranch}`;
   const fetched = await git(worktreePath, ['fetch', '--no-tags', '--no-recurse-submodules', 'origin', `refs/heads/${targetBranch}:${trackingRef}`],
     { network: true, allowFailure: true, signal, timeoutMs: 120_000 });

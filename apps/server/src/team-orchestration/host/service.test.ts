@@ -27,9 +27,12 @@ const REMOTE_AGENT = 'remote-published-agent';
 
 const fixtures: Array<{ close(): Promise<void> }> = [];
 const paths: string[] = [];
+const originalHome = process.env.HOME;
 afterEach(async () => {
   while (fixtures.length) await fixtures.pop()!.close();
   while (paths.length) rmSync(paths.pop()!, { recursive: true, force: true });
+  if (originalHome === undefined) delete process.env.HOME;
+  else process.env.HOME = originalHome;
 });
 
 function fixture(options: { deviceId?: string; accountId?: string; role?: 'leader' | 'admin' | 'member'; deliveryTimeoutMs?: number; deliveryMaxDurationMs?: number; now?: () => number;
@@ -1348,12 +1351,14 @@ it('imports remote artifacts into isolated refs and includes those ref names in 
 });
 
 it('merges concurrent origin advances with accepted worker results before publishing', async () => {
+  process.env.HOME = tmpDir('mingle-team-host-home-'); paths.push(process.env.HOME);
   const fx = fixture();
   const originRoot = tmpDir('mingle-team-host-origin-'); paths.push(originRoot);
   const origin = path.join(originRoot, 'origin.git');
   mkdirSync(origin);
   execFileSync('git', ['init', '-q', '--bare', '--initial-branch=main', origin]);
   runGit(fx.project.path, 'remote', 'add', 'origin', origin);
+  runGit(fx.project.path, 'remote', 'set-url', '--push', 'origin', origin);
   runGit(fx.project.path, 'push', '-u', 'origin', 'main');
   const baseRevision = runGit(fx.project.path, 'rev-parse', 'HEAD').trim();
 
