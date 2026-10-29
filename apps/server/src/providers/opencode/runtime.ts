@@ -37,7 +37,7 @@ export function environmentSecrets(env: NodeJS.ProcessEnv): string[] {
  * that `opencode acp` starts gets a random password so no other local process can drive the conversation. Both stay out of argv.
  */
 export function opencodeEnvironment(base: NodeJS.ProcessEnv, permission?: Record<string, unknown>): Record<string, string> {
-  return cleanEnv(base, ['OPENCODE_PERMISSION', 'MINGLE_TEAM_MCP_TOKEN', 'MINGLE_BROWSER_MCP_TOKEN', 'RELAY_TEAM_MCP_TOKEN', 'RELAY_BROWSER_MCP_TOKEN'], {
+  return cleanEnv(base, ['OPENCODE_PERMISSION', 'MINGLE_TEAM_MCP_TOKEN', 'MINGLE_BROWSER_MCP_TOKEN', 'MINGLE_PROGRESS_MCP_TOKEN', 'RELAY_TEAM_MCP_TOKEN', 'RELAY_BROWSER_MCP_TOKEN', 'RELAY_PROGRESS_MCP_TOKEN'], {
     OPENCODE_DISABLE_AUTOUPDATE: '1',
     OPENCODE_SERVER_PASSWORD: randomBytes(24).toString('hex'),
     ...(permission ? { OPENCODE_PERMISSION: JSON.stringify(permission) } : {}),

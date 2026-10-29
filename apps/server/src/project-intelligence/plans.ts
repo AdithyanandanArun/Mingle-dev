@@ -9,14 +9,14 @@ export interface PlanSummary { created: Task[]; updated: Task[]; missing: Task[]
 type Step = ProviderTaskPlan['steps'][number];
 
 /**
- * Source-key prefix of one plan. Native task lists (`claude-tasks…`) carry persistent provider task IDs, so their keys
- * are scoped to the session only (`provider:<session>:<planId>:<nativeId>`, with source.providerId = the native ID).
+ * Source-key prefix of one plan. Native task lists (`claude-tasks…`) and Mingle progress plans carry persistent step IDs,
+ * so their keys are scoped to the session only (`provider:<session>:<planId>:<nativeId>`, with source.providerId = the ID).
  * Every other plan (Codex plans, Claude todo lists) identifies steps by title, so the same title in an unrelated request
  * must not reuse an old task: those keys are anchored to the parent request task, or to the run when there is none.
  * Continuation runs of the same parent keep their identity.
  */
 export function planPrefix(session: Session, planId: string, parentTaskId: string | undefined, runId: string): string {
-  if (planId.startsWith('claude-tasks')) return `provider:${session.id}:${planId}:`;
+  if (planId.startsWith('claude-tasks') || planId.startsWith('mingle-status:')) return `provider:${session.id}:${planId}:`;
   return `provider:${session.id}:${parentTaskId ? `parent:${parentTaskId}` : `run:${runId}`}:${planId}:`;
 }
 

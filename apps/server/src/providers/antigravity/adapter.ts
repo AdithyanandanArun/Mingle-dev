@@ -62,7 +62,7 @@ class AntigravityRun {
     this.interrupted.catch(() => undefined);
   }
   private emit(event: AdapterEvent): void {
-    const secrets = [this.options.browserMcp?.token, this.options.teamMcp?.token, this.env.GEMINI_API_KEY, this.env.GOOGLE_API_KEY];
+    const secrets = [this.options.browserMcp?.token, this.options.teamMcp?.token, this.options.progressMcp?.token, this.env.GEMINI_API_KEY, this.env.GOOGLE_API_KEY];
     const scrub = (value: unknown): unknown => typeof value === 'string' ? safeAntigravityText(value, secrets)
       : Array.isArray(value) ? value.map(scrub)
         : isRecord(value) ? Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, scrub(entry)])) : value;
@@ -88,14 +88,17 @@ class AntigravityRun {
       if (this.signal.aborted) throw abortError();
       this.runtime = await startAntigravity(this.executable, this.companion, {
         env: this.env, ...(this.deps.spawn ? { spawn: this.deps.spawn } : {}), cwd: this.options.session.worktreePath,
-        timeoutMs: this.deps.timeoutMs ?? 12_000, signal: this.signal, keepLockOnUnresponsive: true, secrets: [this.options.browserMcp?.token, this.options.teamMcp?.token, this.env.GEMINI_API_KEY, this.env.GOOGLE_API_KEY],
+        timeoutMs: this.deps.timeoutMs ?? 12_000, signal: this.signal, keepLockOnUnresponsive: true, secrets: [this.options.browserMcp?.token, this.options.teamMcp?.token, this.options.progressMcp?.token, this.env.GEMINI_API_KEY, this.env.GOOGLE_API_KEY],
         notification: (method, params) => this.onNotification(method, params), request: (method, params) => this.onRequest(method, params),
       });
       const { conn, capabilities } = this.runtime;
-      const connections = [this.options.browserMcp && { name: 'mingle_browser', ...this.options.browserMcp }, this.options.teamMcp && { name: 'mingle_team', ...this.options.teamMcp }].filter((value): value is { name: string; url: string; token: string } => Boolean(value));
-      if (connections.length && object(capabilities.mcpCapabilities).http !== true) throw new ProviderError('The selected Antigravity runtime did not advertise HTTP MCP support. Mingle browser and team tools cannot be connected; no prompt was sent.', { code: 'mcp_unsupported' });
-      const mcpServers = connections.map((connection) => ({ type: 'http', name: connection.name, url: connection.url, headers: [{ name: 'Authorization', value: `Bearer ${connection.token}` }] }));
-      const params = { cwd: this.options.session.worktreePath, mcpServers, _meta: { antigravity: { eagerMcpServers: connections.map((connection) => connection.name), mcpMaxOutputBytes: 64_000 } } };
+      const connections = [this.options.browserMcp && { name: 'mingle_browser', ...this.options.browserMcp }, this.options.teamMcp && { name: 'mingle_team', ...this.options.teamMcp }, this.options.progressMcp && { name: 'mingle_progress', ...this.options.progressMcp }].filter((value): value is { name: string; url: string; token: string } => Boolean(value));
+      const supportsHttpMcp = object(capabilities.mcpCapabilities).http === true;
+      if (connections.some((connection) => connection.name !== 'mingle_progress') && !supportsHttpMcp) throw new ProviderError('The selected Antigravity runtime did not advertise HTTP MCP support. Mingle browser and team tools cannot be connected; no prompt was sent.', { code: 'mcp_unsupported' });
+      if (this.options.progressMcp && !supportsHttpMcp) this.info('This Antigravity runtime does not advertise HTTP MCP support. Mingle progress tools are unavailable; use the native task plan when reported.');
+      const registeredConnections = connections.filter((connection) => supportsHttpMcp || connection.name !== 'mingle_progress');
+      const mcpServers = registeredConnections.map((connection) => ({ type: 'http', name: connection.name, url: connection.url, headers: [{ name: 'Authorization', value: `Bearer ${connection.token}` }] }));
+      const params = { cwd: this.options.session.worktreePath, mcpServers, _meta: { antigravity: { eagerMcpServers: registeredConnections.map((connection) => connection.name), mcpMaxOutputBytes: 64_000 } } };
       const existing = this.options.session.providerSessionId;
       if (existing) {
         this.sessionId = existing;
@@ -132,7 +135,7 @@ class AntigravityRun {
     } catch (error) {
       if (this.violation) throw this.violation;
       if (this.options.signal.aborted) throw abortError();
-      throw new ProviderError(`Antigravity ACP: ${safeAntigravityError(error, [this.options.browserMcp?.token, this.options.teamMcp?.token, this.env.GEMINI_API_KEY, this.env.GOOGLE_API_KEY])}`, { code: error instanceof ProviderError ? error.code : error instanceof AcpRpcError && error.code === -32000 ? 'authentication_required' : 'antigravity_failed', cause: error });
+      throw new ProviderError(`Antigravity ACP: ${safeAntigravityError(error, [this.options.browserMcp?.token, this.options.teamMcp?.token, this.options.progressMcp?.token, this.env.GEMINI_API_KEY, this.env.GOOGLE_API_KEY])}`, { code: error instanceof ProviderError ? error.code : error instanceof AcpRpcError && error.code === -32000 ? 'authentication_required' : 'antigravity_failed', cause: error });
     } finally {
       this.phase = 'done';
       this.options.signal.removeEventListener('abort', this.onAbort);
@@ -205,7 +208,8 @@ class AntigravityRun {
     const mcp = object(object(call._meta).mcp);
     const trustedTeam = this.options.teamMcp && mcp.server === 'mingle_team' && typeof mcp.tool === 'string' && TEAM.has(mcp.tool);
     const trustedBrowser = this.options.browserMcp && mcp.server === 'mingle_browser' && typeof mcp.tool === 'string' && /^browser_[a-z_]+$/.test(mcp.tool);
-    let approved = Boolean(trustedTeam || trustedBrowser);
+    const trustedProgress = this.options.progressMcp && mcp.server === 'mingle_progress' && ['mingle_status_set', 'mingle_plan_update'].includes(String(mcp.tool));
+    let approved = Boolean(trustedTeam || trustedBrowser || trustedProgress);
     if (!approved) {
       try { approved = await Promise.race([this.options.requestApproval({ tool: truncate(text(call.title) ?? 'Antigravity tool', 200), description: truncate(text(call.title) ?? 'Antigravity requested tool permission', 1000), input: object(call.rawInput) }), this.interrupted.catch(() => false)]); }
       catch { approved = false; }

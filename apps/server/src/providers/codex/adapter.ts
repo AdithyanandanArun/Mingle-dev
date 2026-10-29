@@ -151,15 +151,16 @@ class CodexRun {
     const how = info.error
       ? `could not be started (${info.error.message}${(info.error as NodeJS.ErrnoException).code === 'ENOENT' ? '; check that the executable and the session worktree exist' : ''})`
       : `exited unexpectedly ${info.signal ? `from signal ${info.signal}` : `with code ${info.exitCode}`}`;
-    const detail = this.stderr.summary(1_500, [this.options.browserMcp?.token, this.options.teamMcp?.token]);
+    const detail = this.stderr.summary(1_500, [this.options.browserMcp?.token, this.options.teamMcp?.token, this.options.progressMcp?.token]);
     return `Codex app-server ${how}.${detail ? ` stderr: ${detail}` : ''}`;
   }
 
   async execute(operation: 'run' | 'compact' = 'run'): Promise<void> {
     const { session, signal } = this.options;
-    const env = cleanEnv(this.ctx.env, ['ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_AUTH_TOKEN', 'MINGLE_TEAM_MCP_TOKEN', 'MINGLE_BROWSER_MCP_TOKEN', 'RELAY_TEAM_MCP_TOKEN', 'RELAY_BROWSER_MCP_TOKEN']);
+    const env = cleanEnv(this.ctx.env, ['ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_AUTH_TOKEN', 'MINGLE_TEAM_MCP_TOKEN', 'MINGLE_BROWSER_MCP_TOKEN', 'MINGLE_PROGRESS_MCP_TOKEN', 'RELAY_TEAM_MCP_TOKEN', 'RELAY_BROWSER_MCP_TOKEN', 'RELAY_PROGRESS_MCP_TOKEN']);
     if (this.options.browserMcp) env.MINGLE_BROWSER_MCP_TOKEN = this.options.browserMcp.token;
     if (this.options.teamMcp) env.MINGLE_TEAM_MCP_TOKEN = this.options.teamMcp.token;
+    if (this.options.progressMcp) env.MINGLE_PROGRESS_MCP_TOKEN = this.options.progressMcp.token;
     this.child = this.ctx.spawn(this.executable, ['app-server'], {
       cwd: session.worktreePath, env, stdio: ['pipe', 'pipe', 'pipe'], detached: process.platform !== 'win32', windowsHide: true,
     });
@@ -286,6 +287,10 @@ class CodexRun {
     if (this.options.teamMcp) overrides['mcp_servers.mingle_team'] = {
       url: this.options.teamMcp.url, bearer_token_env_var: 'MINGLE_TEAM_MCP_TOKEN', enabled: true,
       startup_timeout_sec: 15, tool_timeout_sec: 180, default_tools_approval_mode: 'approve',
+    };
+    if (this.options.progressMcp) overrides['mcp_servers.mingle_progress'] = {
+      url: this.options.progressMcp.url, bearer_token_env_var: 'MINGLE_PROGRESS_MCP_TOKEN', enabled: true,
+      startup_timeout_sec: 15, tool_timeout_sec: 30, default_tools_approval_mode: 'approve',
     };
     const threadConfig = Object.keys(overrides).length ? { config: overrides } : {};
     let result: unknown;

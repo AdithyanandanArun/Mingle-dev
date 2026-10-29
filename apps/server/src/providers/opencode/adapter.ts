@@ -17,6 +17,7 @@ const PROMPT_TIMEOUT = 24 * 60 * 60_000;
 const CANCEL_DRAIN_MS = 4_000;
 const BROWSER_PREFIX = 'mingle_browser_';
 const TEAM_PREFIX = 'mingle_team_';
+const PROGRESS_PREFIX = 'mingle_progress_';
 const text = (value: unknown): string | undefined => typeof value === 'string' ? value : undefined;
 const json = (value: unknown, max = 20_000): string => { try { return truncate(typeof value === 'string' ? value : JSON.stringify(value) ?? '', max); } catch { return ''; } };
 
@@ -27,7 +28,7 @@ const json = (value: unknown, max = 20_000): string => { try { return truncate(t
  * Supervised, and file edits are additionally allowed in Auto-accept edits. Interactive question and plan-mode tools are denied
  * because ACP has no channel for answering them. Full access allows everything.
  */
-export function permissionRules(policy: Policy, relay: { browser: boolean; team: boolean }, intent: RunOptions['intent'] = 'normal'): Record<string, unknown> | null {
+export function permissionRules(policy: Policy, relay: { browser: boolean; team: boolean; progress?: boolean }, intent: RunOptions['intent'] = 'normal'): Record<string, unknown> | null {
   if (!OPENCODE_POLICIES.includes(policy)) return null;
   const denied = { question: 'deny', plan_enter: 'deny', plan_exit: 'deny' };
   if (intent === 'plan') return {
@@ -46,6 +47,7 @@ export function permissionRules(policy: Policy, relay: { browser: boolean; team:
   // Mingle's own gateways enforce their own approvals and tab ownership; asking again here would double-prompt.
   if (relay.browser) rules[`${BROWSER_PREFIX}*`] = 'allow';
   if (relay.team) rules[`${TEAM_PREFIX}*`] = 'allow';
+  if (relay.progress) rules[`${PROGRESS_PREFIX}*`] = 'allow';
   return rules;
 }
 
@@ -109,7 +111,7 @@ class OpencodeRun {
   constructor(private readonly options: RunOptions, private readonly env: NodeJS.ProcessEnv, private readonly executable: string, private readonly deps: OpencodeAdapterDeps) {
     this.signal = AbortSignal.any([options.signal, this.cancellation.signal]);
     this.interrupted.catch(() => undefined);
-    this.secrets = [options.browserMcp?.token, options.teamMcp?.token, ...environmentSecrets(env)];
+    this.secrets = [options.browserMcp?.token, options.teamMcp?.token, options.progressMcp?.token, ...environmentSecrets(env)];
   }
   private emit(event: AdapterEvent): void {
     const scrub = (value: unknown): unknown => typeof value === 'string' ? safeOpencodeText(value, this.secrets)
@@ -132,11 +134,11 @@ class OpencodeRun {
   }
 
   async execute(operation: 'run' | 'compact' = 'run'): Promise<void> {
-    const { session, browserMcp, teamMcp } = this.options;
+    const { session, browserMcp, teamMcp, progressMcp } = this.options;
     this.options.signal.addEventListener('abort', this.onAbort, { once: true });
     try {
       if (this.signal.aborted) throw abortError();
-      const rules = permissionRules(session.policy, { browser: Boolean(browserMcp), team: Boolean(teamMcp) }, this.options.intent);
+      const rules = permissionRules(session.policy, { browser: Boolean(browserMcp), team: Boolean(teamMcp), progress: Boolean(progressMcp) }, this.options.intent);
       const childEnv = opencodeEnvironment(this.env, rules ?? undefined);
       // The generated server password must never reach persisted tool output, even if a tool prints its environment.
       this.secrets.push(...environmentSecrets(childEnv));
@@ -146,13 +148,15 @@ class OpencodeRun {
         notification: (method, params) => this.onNotification(method, params), request: (method, params) => this.onRequest(method, params),
       });
       const { conn, capabilities } = this.runtime;
-      const connections = [browserMcp && { name: 'mingle_browser', ...browserMcp }, teamMcp && { name: 'mingle_team', ...teamMcp }]
+      const connections = [browserMcp && { name: 'mingle_browser', ...browserMcp }, teamMcp && { name: 'mingle_team', ...teamMcp }, progressMcp && { name: 'mingle_progress', ...progressMcp }]
         .filter((value): value is { name: string; url: string; token: string } => Boolean(value));
-      if (connections.length && object(capabilities.mcpCapabilities).http !== true) {
+      const supportsHttpMcp = object(capabilities.mcpCapabilities).http === true;
+      if (connections.some((connection) => connection.name !== 'mingle_progress') && !supportsHttpMcp) {
         throw new ProviderError('The selected OpenCode runtime did not advertise HTTP MCP support. Mingle browser and team tools cannot be connected; no prompt was sent.', { code: 'mcp_unsupported' });
       }
+      if (progressMcp && !supportsHttpMcp) this.info('This OpenCode runtime does not advertise HTTP MCP support. Mingle progress tools are unavailable; use the native task plan when reported.');
       // Per-session ACP registration keeps the capability in this child's memory only; nothing is written to OpenCode configuration.
-      const mcpServers = connections.map((connection) => ({ type: 'http', name: connection.name, url: connection.url, headers: [{ name: 'Authorization', value: `Bearer ${connection.token}` }] }));
+      const mcpServers = connections.filter((connection) => supportsHttpMcp || connection.name !== 'mingle_progress').map((connection) => ({ type: 'http', name: connection.name, url: connection.url, headers: [{ name: 'Authorization', value: `Bearer ${connection.token}` }] }));
       const params = { cwd: session.worktreePath, mcpServers };
       const existing = session.providerSessionId;
       if (existing) {
@@ -322,7 +326,8 @@ class OpencodeRun {
     const reject = options.find((option) => option.kind === 'reject_once' && typeof option.optionId === 'string');
     if (!reject) return cancelled;
     const name = text(call.name) ?? '';
-    const trusted = Boolean((this.options.browserMcp && name.startsWith(BROWSER_PREFIX)) || (this.options.teamMcp && name.startsWith(TEAM_PREFIX)));
+    const trustedProgress = this.options.progressMcp && ['mingle_progress_mingle_status_set', 'mingle_progress_mingle_plan_update'].includes(name);
+    const trusted = Boolean((this.options.browserMcp && name.startsWith(BROWSER_PREFIX)) || (this.options.teamMcp && name.startsWith(TEAM_PREFIX)) || trustedProgress);
     let approved = trusted;
     if (!approved && allow) {
       const title = text(call.title) ?? name ?? 'OpenCode tool';

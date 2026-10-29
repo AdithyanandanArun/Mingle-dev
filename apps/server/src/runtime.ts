@@ -1,7 +1,7 @@
 import { ContextCompactionResultSchema, EditSessionPlanSchema, NativeUserInputRequestSchema, ProviderTaskPlanSchema, SessionPlanProposalSchema, SessionPlanStepsSchema, UserInputAnswersSchema } from '@mingle/contracts';
 import type { ProjectIntelligenceService } from './project-intelligence/service.ts';
 import { existsSync, statSync } from 'node:fs';
-import type { ProviderTaskPlan, AdapterEvent, Approval, ContextCompactionResult, EditSessionPlan, Message, ProviderFailure, ProviderSkill, RunChanges, RunOptions, Session, SessionPlan, SubagentMessage, Task, UserInputAnswers, UserQuestion, ToolActivity, ToolCall } from '@mingle/contracts';
+import type { ProviderTaskPlan, AdapterEvent, Approval, ContextCompactionResult, EditSessionPlan, Message, MinglePlanUpdate, MingleStatusSet, ProviderFailure, ProviderSkill, RunChanges, RunOptions, Session, SessionPlan, SubagentMessage, Task, UserInputAnswers, UserQuestion, ToolActivity, ToolCall } from '@mingle/contracts';
 import type { Hub } from './hub.ts';
 import type { Store } from './store.ts';
 import type { TaskService } from './tasks.ts';
@@ -11,6 +11,7 @@ import { captureRunTree, compareRunTrees, unavailableRunChanges, type RunTreeSna
 import type { GroupService } from './groups/service.ts';
 import type { TeamMcpBridge } from './team-mcp.ts';
 import type { BrowserMcpBridge } from './browser-mcp.ts';
+import type { ProgressMcpBridge } from './progress-mcp.ts';
 import type { AttachmentService } from './attachments/service.ts';
 import type { NativeInvocation, RunAttachment } from '@mingle/contracts';
 import type { RecoveryService } from './recovery/service.ts';
@@ -159,6 +160,7 @@ export class SessionRuntime {
   private readonly questionTimers = new Map<string, NodeJS.Timeout>();
   private groups?: GroupService;
   private teamMcp?: TeamMcpBridge;
+  private progressMcp?: ProgressMcpBridge;
   private teamProxy?: TeamProxyRuntimeService;
   private attachmentService?: AttachmentService;
   private readonly abortGraceMs: number;
@@ -180,6 +182,7 @@ export class SessionRuntime {
     this.groups = groups;
     this.teamMcp = teamMcp;
   }
+  setProgressMcp(progressMcp: ProgressMcpBridge): void { this.progressMcp = progressMcp; }
   setTeamProxyService(service: TeamProxyRuntimeService): void { this.teamProxy = service; }
 
   async authorizeApprovalDecision(approvalId: string): Promise<void> {
@@ -517,17 +520,27 @@ export class SessionRuntime {
         ? run.teamMcpConnection
         : run.intent !== 'plan' && groupContext ? this.teamMcp?.create(run.id, session, run.controller.signal, groupContext) : undefined;
       if (teamMcp) capabilityTokens.push(teamMcp.token);
+      const progressMcp = run.intent !== 'plan' ? this.progressMcp?.create({
+        runId: run.id, session, signal: run.controller.signal,
+        isLive: () => this.isRunLive(run.sessionId, run.id),
+        setStatus: (status) => this.setProgressStatus(run, status),
+        updatePlan: (plan) => this.updateProgressPlan(run, plan),
+      }) : undefined;
+      if (progressMcp) capabilityTokens.push(progressMcp.token);
       const explicit = run.invocation;
       const providerHandoffBlock = await this.providerHandoffBlock(run, session);
-      const effectivePrompt = explicit ? prompt : [providerHandoffBlock, run.intent !== 'plan' ? groupContext?.instructions : undefined, run.context, prompt].filter(Boolean).join('\n\n');
-      if (explicit && providerHandoffBlock) run.context = [providerHandoffBlock, run.context].filter(Boolean).join('\n\n');
+      const progressInstructions = progressMcp
+        ? 'Mingle provides mingle_status_set for the live composer status and mingle_plan_update for a replaceable checklist. Keep them current during multi-step work, updating status as you make progress.'
+        : undefined;
+      const effectivePrompt = explicit ? prompt : [providerHandoffBlock, run.intent !== 'plan' ? groupContext?.instructions : undefined, progressInstructions, run.context, prompt].filter(Boolean).join('\n\n');
+      if (explicit && (providerHandoffBlock || progressInstructions)) run.context = [providerHandoffBlock, progressInstructions, run.context].filter(Boolean).join('\n\n');
       if (explicit && groupContext) run.context = [run.context, groupContext.instructions].filter(Boolean).join('\n\n');
       const stagedAttachments = this.attachmentService && run.attachmentOwnerId
         ? await this.attachmentService.stage(run.id, run.attachmentOwnerKind ?? 'message', run.attachmentOwnerId)
         : [];
       if (run.controller.signal.aborted) throw conflict('The run was interrupted before the provider started.');
       const runOptions: RunOptions & DispatchAwareOptions = {
-        session, prompt: effectivePrompt, intent: run.intent, ...(explicit ? { invocation: explicit, ...(run.context ? { context: run.context } : {}) } : {}), attachments: stagedAttachments, teamMcp, providerTaskState: this.nativeTaskState(session), skills: run.skills, browserMcp, signal: run.controller.signal, settings,
+        session, prompt: effectivePrompt, intent: run.intent, ...(explicit ? { invocation: explicit, ...(run.context ? { context: run.context } : {}) } : {}), attachments: stagedAttachments, teamMcp, progressMcp, providerTaskState: this.nativeTaskState(session), skills: run.skills, browserMcp, signal: run.controller.signal, settings,
         onEvent: (event) => this.handleEvent(run, capabilityTokens.length ? JSON.parse(scrubCapabilities(JSON.stringify(event))) as AdapterEvent : event),
         requestApproval: (request) => this.requestApproval(run, JSON.parse(scrubCapabilities(JSON.stringify(request)))),
         requestUserInput: (request) => this.requestUserInput(run, request),
@@ -565,6 +578,7 @@ export class SessionRuntime {
     if (!run.cleanupPending) await this.attachmentService?.release(run.id);
     this.browserMcp?.revoke(run.id);
     this.teamMcp?.revoke(run.id);
+    this.progressMcp?.revoke(run.id);
     let changes: RunChanges;
     try {
       changes = run.cleanupPending
@@ -623,6 +637,39 @@ export class SessionRuntime {
     const tasks = this.store.listTasks(session.projectId).filter(task => task.sessionId === session.id && task.source?.kind === 'provider' && task.source.providerId && task.source.key === `provider:${session.id}:claude-tasks:root:${task.source.providerId}` && !task.source.missing).slice(-100);
     const byId = new Map(tasks.map(task => [task.id, task.source!.providerId!]));
     return tasks.map(task => ({ id: task.source!.providerId!, title: task.title.slice(0, 200), description: task.description.slice(0, 4000), status: task.source!.reportedStatus ?? 'pending', dependsOn: task.dependsOn.map(id => byId.get(id)).filter((id): id is string => Boolean(id)) }));
+  }
+
+  private progressText(run: ActiveRun, value: string, max: number): string {
+    const scrubbed = run.capabilityTokens.reduce((text, token) => text.split(token).join('[redacted]'), value);
+    return truncate(redactSecrets(scrubbed).replaceAll('\0', ''), max);
+  }
+
+  private setProgressStatus(run: ActiveRun, status: MingleStatusSet): void {
+    if (!this.isRunLive(run.sessionId, run.id)) throw conflict('This progress tool connection has expired');
+    const session = this.store.getSession(run.sessionId);
+    if (!session) throw notFound('Session not found');
+    const safeStatus = {
+      step: this.progressText(run, status.step, 120),
+      ...(status.detail !== undefined ? { detail: this.progressText(run, status.detail, 300) } : {}),
+      ...(status.progress ? { progress: status.progress } : {}),
+    };
+    this.store.recordEvent({ projectId: session.projectId, sessionId: session.id, type: 'session.progress.status', summary: 'Run progress updated', payload: { runId: run.id, status: safeStatus } });
+  }
+
+  private updateProgressPlan(run: ActiveRun, plan: MinglePlanUpdate): void {
+    if (!this.isRunLive(run.sessionId, run.id)) throw conflict('This progress tool connection has expired');
+    const session = this.store.getSession(run.sessionId);
+    if (!session) throw notFound('Session not found');
+    const steps = plan.steps.map((step, index) => ({
+      id: `step-${index + 1}`, title: this.progressText(run, step.title, 160), status: step.status,
+    }));
+    const planId = `mingle-status:${session.id}`;
+    const providerPlan: ProviderTaskPlan = {
+      planId, replace: true,
+      steps: steps.map((step) => ({ ...step, status: step.status === 'done' ? 'completed' : step.status })),
+    };
+    this.intelligence?.applyPlan(session, run.id, providerPlan);
+    this.store.recordEvent({ projectId: session.projectId, sessionId: session.id, type: 'session.progress.plan', summary: 'Run progress checklist replaced', payload: { runId: run.id, planId, steps } });
   }
 
   private async releaseAfterCleanup(run: ActiveRun): Promise<void> {
@@ -1256,6 +1303,7 @@ export class SessionRuntime {
           this.store.insertMessage({ sessionId: run.sessionId, runId: run.id, role: 'system', kind: 'info', content: 'The provider completed without exposing a native plan. No reviewable plan was saved.' });
         }
         this.intelligence?.finishRun(session, run.id, outcome);
+        this.store.recordEvent({ projectId: session.projectId, sessionId: run.sessionId, type: 'session.progress.status', summary: 'Run progress status cleared', payload: { runId: run.id, status: null } });
         this.store.recordEvent({
           projectId: session.projectId, sessionId: run.sessionId, type: `session.run.${outcome}`,
           summary: outcome === 'completed' ? `Run completed: ${session.name}` : outcome === 'failed' ? `Run failed: ${session.name}` : `Run interrupted: ${session.name}`,

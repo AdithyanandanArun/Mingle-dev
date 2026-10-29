@@ -29,6 +29,7 @@ import { RepositoryService } from './repository/service.ts';
 import { BrowserMcpBridge } from './browser-mcp.ts';
 import { GroupService } from './groups/service.ts';
 import { TeamMcpBridge } from './team-mcp.ts';
+import { ProgressMcpBridge } from './progress-mcp.ts';
 import { closeAntigravityInstall } from './antigravity-install.ts';
 import { closeAntigravityAuth } from './antigravity-auth.ts';
 import { AttachmentService } from './attachments/service.ts';
@@ -175,11 +176,13 @@ export function createApplication(options: ApplicationOptions): MingleApplicatio
   const providers = new ProviderService(options.providers, () => store.getSettings(), log, () => store.touch());
   const browser = new BrowserService({ dataDir: config.dataDir, getSettings: () => store.getSettings(), onChange: () => store.touch(), log, sessionExists: (id) => Boolean(store.getSession(id)) });
   const browserMcp = new BrowserMcpBridge(browser, store, () => boundPort, (sessionId, tabId) => hub.broadcast({ type: 'browser.opened', sessionId, tabId }), () => config.host);
+  const progressMcp = new ProgressMcpBridge(store, () => boundPort, () => config.host);
   const intelligence = new ProjectIntelligenceService({ store, tasks, log });
   const runtime = new SessionRuntime(store, hub, options.providers, tasks, log, options.runtime, (session) => {
     repository.assertSessionAvailable(session);
     resolveRunConfig(providers.cached()?.find((row) => row.id === session.provider), session, { effort: true, policy: true, serviceTier: true });
   }, browserMcp, intelligence, recovery);
+  runtime.setProgressMcp(progressMcp);
   const terminals = new TerminalManager(store, hub, log, options.terminal);
   const workspace = new WorkspaceService(store, config.dataDir, runtime, () => providers.cached());
   const repository = new RepositoryService({ store, workspace, runtime, log });
@@ -282,6 +285,7 @@ export function createApplication(options: ApplicationOptions): MingleApplicatio
       const url = new URL(req.url ?? '/', 'http://mingle.local');
       if (url.pathname === '/api/team/mcp') return await teamMcp.handle(req, res);
       if (url.pathname === '/api/browser/mcp') return await browserMcp.handle(req, res);
+      if (url.pathname === '/api/progress/mcp') return await progressMcp.handle(req, res);
       if (url.pathname === '/api' || url.pathname.startsWith('/api/')) {
         if (await handleAttachmentRequest(attachments, req, res, url)) return;
         const reply = await dispatch(req, res, url);
@@ -370,6 +374,7 @@ export function createApplication(options: ApplicationOptions): MingleApplicatio
         await intelligence.close();
         await repository.close();
         browserMcp.close();
+        progressMcp.close();
         await browser.close();
         terminals.killAll();
         await hub.close();

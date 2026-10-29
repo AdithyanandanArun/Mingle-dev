@@ -14,7 +14,7 @@ import { readAntigravityMetadata, writeAntigravityMetadata } from './cache.js';
 
 export const ANTIGRAVITY_POLICIES: Policy[] = ['supervised', 'balanced', 'full-access'];
 export const ANTIGRAVITY_DEFAULT: ProviderModel = { id: 'default', name: 'Antigravity default', reasoningEfforts: [{ id: 'none', label: 'Native default' }], defaultReasoningEffort: 'none', policies: ANTIGRAVITY_POLICIES };
-const REMOVE_ENV = ['MINGLE_BROWSER_MCP_TOKEN', 'MINGLE_TEAM_MCP_TOKEN', 'RELAY_BROWSER_MCP_TOKEN', 'RELAY_TEAM_MCP_TOKEN', 'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'CLAUDE_CODE_OAUTH_TOKEN', 'OPENAI_API_KEY', 'CODEX_API_KEY'];
+const REMOVE_ENV = ['MINGLE_BROWSER_MCP_TOKEN', 'MINGLE_TEAM_MCP_TOKEN', 'MINGLE_PROGRESS_MCP_TOKEN', 'RELAY_BROWSER_MCP_TOKEN', 'RELAY_TEAM_MCP_TOKEN', 'RELAY_PROGRESS_MCP_TOKEN', 'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'CLAUDE_CODE_OAUTH_TOKEN', 'OPENAI_API_KEY', 'CODEX_API_KEY'];
 export type AntigravitySpawn = (file: string, args: string[], options: SpawnOptions) => ChildLike;
 const spawnDefault: AntigravitySpawn = (file, args, options) => spawn(file, args, options) as unknown as ChildLike;
 export interface AntigravityExecutable { path: string; companion: string }
