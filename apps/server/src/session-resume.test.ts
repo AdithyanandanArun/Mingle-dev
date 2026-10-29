@@ -173,7 +173,8 @@ describe('automatic session resume after restart', () => {
     expect(resumeEvents(restarted).find((event) => event.type === 'session.run.resume-skipped')?.payload.reason).toBe('group-delivery-managed');
     const delivery = snapshot.deliveries.find((row) => row.runId === interrupted.id);
     expect(delivery?.status).toBe('interrupted');
-    expect(restarted.app.store.db.prepare('SELECT retryable FROM group_deliveries WHERE id=?').get(delivery?.id)).toEqual({ retryable: 1 });
+    if (!delivery) throw new Error('The interrupted group delivery was not retained.');
+    expect(restarted.app.store.db.prepare('SELECT retryable FROM group_deliveries WHERE id=?').get(delivery.id)).toEqual({ retryable: 1 });
     expect(restarted.fake.runs).toHaveLength(0);
   });
 
