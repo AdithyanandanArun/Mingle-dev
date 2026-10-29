@@ -19,6 +19,12 @@ const STATUS = /^(?:status|progress|any (?:updates?|progress)|how(?:'s| is) (?:i
 export function classifyPrompt(prompt: string): PromptClass {
   const text = prompt.trim();
   if (!text) return { kind: 'ignore', reason: 'empty' };
+  const coordinatorText = text.toLowerCase();
+  if (coordinatorText.includes('request from the human in the group conversation:')
+    || coordinatorText.includes('your latest delegation batch has returned.')
+    || coordinatorText.includes('the statuses below describe native turns;')) {
+    return { kind: 'ignore', reason: 'coordinator-delivery' };
+  }
   const firstLine = text.split(/\r?\n/).find((line) => line.trim() && !/^```/.test(line.trim()))?.trim() ?? text;
   if (/^\/[\w:-]+(?:\s|$)/.test(firstLine) && !text.includes('\n')) return { kind: 'ignore', reason: 'command' };
   if (ACKNOWLEDGEMENT.test(text) || STATUS.test(text) && text.length < 120) return { kind: 'ignore', reason: 'conversational' };

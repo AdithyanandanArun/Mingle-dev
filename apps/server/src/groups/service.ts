@@ -3634,6 +3634,24 @@ ${task ? `Task ${task.id}: ${task.title}\nAcceptance: ${task.acceptanceCriteria}
     const status = unresolvedFailure || pendingCheckpoint ? 'paused'
       : open.length || retry ? (hold || group?.paused || retry ? 'paused' : 'active') : 'completed';
     if (status !== request.status) this.repo.updateRequest(id, { status });
+    if (status === 'completed' && group && this.isFullAccessGroup(group)) {
+      const coordinator = this.repo.getMember(request.plannerMemberId);
+      if (coordinator) {
+        const completedRuns = this.store.db.prepare(`SELECT run_id FROM group_deliveries
+          WHERE request_id=? AND member_id=? AND status='completed' AND run_id IS NOT NULL`).all(id, coordinator.id) as Array<{ run_id: string }>;
+        for (const { run_id } of completedRuns) {
+          for (const task of this.store.listTasks(group.projectId).filter((candidate) => candidate.sessionId === coordinator.sessionId
+            && candidate.source?.kind === 'request' && candidate.source.runId === run_id && candidate.status === 'review')) {
+            if (task.source?.overrides?.includes('status')) continue;
+            const unfinished = task.dependsOn.some((dependency) => this.store.getTask(dependency)?.status !== 'done');
+            if (unfinished) continue;
+            const completedTask = this.store.updateTask(task.id, { status: 'done' });
+            this.store.recordEvent({ projectId: task.projectId, sessionId: task.sessionId, type: 'task.done',
+              summary: `Full-access group request completed: ${completedTask.title}`, payload: { taskId: task.id, from: 'review', to: 'done' } });
+          }
+        }
+      }
+    }
     if (status === 'completed' && request.executionPlanId) {
       const plan = this.store.getSessionPlan(request.executionPlanId);
       if (plan?.status === 'executing' && !plan.executionRunId) {
