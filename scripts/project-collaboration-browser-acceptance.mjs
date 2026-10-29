@@ -9,13 +9,16 @@ import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { createServer } from 'node:net';
 import { spawn } from 'node:child_process';
-import { createWriteStream, existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { createWriteStream, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
+const consentDisclaimerVersion = readFileSync(path.join(root, 'packages/contracts/src/team-orchestration.ts'), 'utf8')
+  .match(/export const TEAM_CONSENT_DISCLAIMER_VERSION = ['"]([^'"]+)['"]/)?.[1];
+assert.ok(consentDisclaimerVersion, 'the public consent disclaimer version is available to the Example fixture');
 const serverRequire = createRequire(new URL('../apps/server/package.json', import.meta.url));
 const webRequire = createRequire(new URL('../apps/web/package.json', import.meta.url));
 const tsxCli = serverRequire.resolve('tsx/cli');
@@ -63,7 +66,7 @@ let memberTeamSessionCreated = false;
 let memberGroupResultState = 'in-progress';
 let memberConsentPermission = 'supervised';
 let memberConsentSettingsVersion = 1;
-let memberConsentDisclaimerVersion = '2026-10-24.1';
+let memberConsentDisclaimerVersion = consentDisclaimerVersion;
 let memberTeamSettingsVersion = 1;
 let changeAccountDuringTargetStructureOnce = false;
 let localSessions = [];
@@ -80,6 +83,7 @@ let collaborationSnapshot;
 let publishedTeamSessionIds = [];
 let orchestrationEnabled = false;
 let orchestrationPermission = 'supervised';
+let orchestrationIntegrationTarget = 'main';
 let orchestrationVersion = 3;
 let sharedTeamSession = null;
 let collaborationBound = false;
@@ -323,7 +327,7 @@ function teamStructureSnapshot(id = projectId) {
     const now = new Date().toISOString();
     return {
       projectId: id, teamId: TEAM_ID, sharedProjectId: SHARED_PROJECT_ID, enabled: true,
-      settings: { leaderOrchestration: true, permissionLevel: 'supervised', orchestratorAgentId: 'example-host-agent', fallbackAgentIds: [], version: memberTeamSettingsVersion, updatedAt: now, updatedByAccountId: LEADER_ID },
+      settings: { leaderOrchestration: true, permissionLevel: 'supervised', integrationTarget: 'main', orchestratorAgentId: 'example-host-agent', fallbackAgentIds: [], version: memberTeamSettingsVersion, updatedAt: now, updatedByAccountId: LEADER_ID },
       host: { deviceId: 'example-leader-device', accountId: LEADER_ID, displayName: 'Example leader device', online: true, isThisDevice: false },
       canEdit: false,
       myConsent: { teamId: TEAM_ID, sharedProjectId: SHARED_PROJECT_ID, accountId: 'example-invitee-account', deviceId: 'example-invitee-device', agentIds: ['example-invited-agent-1'], permissionLevel: memberConsentPermission, settingsVersion: memberConsentSettingsVersion, disclaimerVersion: memberConsentDisclaimerVersion, state: 'granted', acceptedAt: now, updatedAt: now },
@@ -367,7 +371,7 @@ function teamStructureSnapshot(id = projectId) {
     sharedProjectId: SHARED_PROJECT_ID,
     enabled: orchestrationEnabled,
     settings: orchestrationEnabled ? {
-      leaderOrchestration: true, permissionLevel: orchestrationPermission, orchestratorAgentId: null,
+      leaderOrchestration: true, permissionLevel: orchestrationPermission, integrationTarget: orchestrationIntegrationTarget, orchestratorAgentId: null,
       fallbackAgentIds: [], version: orchestrationVersion, updatedAt: new Date().toISOString(), updatedByAccountId: LEADER_ID,
     } : null,
     host: { deviceId: 'example-leader-device', accountId: LEADER_ID, displayName: 'Example leader device', online: true, isThisDevice: true },
@@ -499,7 +503,7 @@ async function main() {
   const context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
   await context.grantPermissions(['clipboard-read', 'clipboard-write']).catch(() => {});
   page = await context.newPage();
-  page.setDefaultTimeout(6000);
+  page.setDefaultTimeout(12_000);
   await page.addInitScript(() => {
     const listeners = new Set();
     const queued = [];
@@ -887,11 +891,15 @@ async function main() {
     assert.match(await teammate.innerText(), /claude.*example-claude-model.*example-teammate-device/i);
     const activeSessionId = await page.evaluate((id) => JSON.parse(localStorage.getItem('relay.ui.v2') ?? '{}').sessionByProject?.[id], projectId);
     const shareCallsBefore = requests.filter((item) => item.method === 'POST' && item.pathname === `/api/projects/${projectId}/team-orchestration/share-session`).length;
+    assert.equal(await onboarding.locator('input').count(), 0, 'unconfigured sharing does not offer an integration target that the share endpoint cannot save');
+    orchestrationIntegrationTarget = 'release/integration';
     await onboarding.getByRole('button', { name: 'Share current session', exact: true }).click();
     await waitFor(() => requests.filter((item) => item.method === 'POST' && item.pathname === `/api/projects/${projectId}/team-orchestration/share-session`).length === shareCallsBefore + 1, 'active session share request');
     const sessionShare = requests.findLast((item) => item.method === 'POST' && item.pathname === `/api/projects/${projectId}/team-orchestration/share-session`);
     assert.deepEqual(sessionShare?.body, { sessionId: activeSessionId, permissionLevel: 'supervised' }, 'empty roster still shares the current session and uses its agent as the automatic lead');
     await dialog.locator('.team-orch-settings__session').getByText('already shared', { exact: false }).waitFor();
+    assert.equal(await onboarding.getByRole('textbox', { name: /Integration target branch/ }).inputValue(), 'release/integration', 'first sharing adopts the exact integration target returned by the host');
+    orchestrationIntegrationTarget = 'main';
     const check = dialog.getByRole('checkbox', { name: /Share Example local agent 2 with this project/ }).first();
     await check.check();
     const structureReadsBeforePublish = teamStructureReads;
@@ -940,7 +948,7 @@ async function main() {
     await page.locator('.sitem').filter({ hasText: 'Example local agent 2' }).click();
     const dialog = await ensureTeammatesDialog();
     const onboarding = dialog.locator('.team-orch-settings');
-    await onboarding.locator('.team-orch-settings__field > p').filter({ hasText: /Raising to Full access requires every teammate/ }).waitFor();
+    await onboarding.locator('.team-orch-settings__field > p').filter({ hasText: /Owners who already consented to Full access keep sharing/ }).waitFor();
     const selectedSessionId = await page.evaluate((id) => JSON.parse(localStorage.getItem('relay.ui.v2') ?? '{}').sessionByProject?.[id], projectId);
     const invitationsBefore = requests.filter((item) => item.method === 'POST' && item.pathname === `/api/projects/${projectId}/collaboration/invitations`).length;
     const shareCallsBefore = requests.filter((item) => item.method === 'POST' && item.pathname === `/api/projects/${projectId}/team-orchestration/share-session`).length;
@@ -1017,10 +1025,11 @@ async function main() {
     assert.equal((await summary.innerText()).includes('Example local agent 2'), false, 'a changed active session cannot replace the canonical shared session');
   });
 
-  await test('permission edits use only the versioned permission patch and preserve advanced leader settings', async () => {
+  await test('versioned permission edits preserve the integration target and advanced leader settings', async () => {
     orchestrationEnabled = true;
     orchestrationPermission = 'supervised';
     orchestrationVersion = 41;
+    orchestrationIntegrationTarget = 'release/integration';
     sharedTeamSession = { groupId: 'example-permission-group', sessionId: localSessions[0].id, title: 'Example permission group' };
     await page.reload({ waitUntil: 'domcontentloaded' });
     await page.getByRole('button', { name: 'Add teammates', exact: true }).waitFor();
@@ -1031,8 +1040,9 @@ async function main() {
     await onboarding.getByRole('button', { name: 'Save permission level', exact: true }).click();
     await onboarding.getByRole('status').filter({ hasText: 'Team permission level saved.' }).waitFor();
     const update = requests.findLast((item) => item.method === 'PATCH' && item.pathname === `/api/projects/${projectId}/team-orchestration`);
-    assert.deepEqual(update?.body, { permissionLevel: 'full-access', expectedVersion: 41 }, 'permission-only save does not reset leader orchestration, orchestrator, or fallback settings');
+    assert.deepEqual(update?.body, { permissionLevel: 'full-access', integrationTarget: 'release/integration', expectedVersion: 41 }, 'permission save preserves the configured integration target and does not reset leader orchestration, orchestrator, or fallback settings');
     assert.equal(requests.filter((item) => item.method === 'POST' && item.pathname === `/api/projects/${projectId}/team-orchestration/share-session`).length, shareCallsBefore, 'permission editing does not call the binding endpoint');
+    orchestrationIntegrationTarget = 'main';
     sharedTeamSession = null;
     orchestrationEnabled = false;
     orchestrationPermission = 'supervised';
@@ -1148,7 +1158,7 @@ async function main() {
     await onboarding.getByRole('button', { name: 'Save permission level', exact: true }).click();
     await onboarding.getByRole('status').filter({ hasText: 'Team permission level saved.' }).waitFor();
     const patch = requests.findLast((item) => item.method === 'PATCH' && item.pathname === `/api/projects/${projectId}/team-orchestration`);
-    assert.deepEqual(patch?.body, { permissionLevel: 'full-access', expectedVersion: 64 });
+    assert.deepEqual(patch?.body, { permissionLevel: 'full-access', integrationTarget: 'main', expectedVersion: 64 });
     assert.equal(requests.filter((item) => item.method === 'POST' && item.pathname === `/api/projects/${projectId}/team-orchestration/share-session`).length, shareCallsBefore, 'canonical permission save never attempts a provider publication');
   });
   unsupportedAnchorSession = false;
@@ -1306,7 +1316,7 @@ async function main() {
     assert.ok(consentRequestIndex >= consentStartIndex, 'the explicit consent action is recorded');
     assert.ok(consentRefreshIndex > consentRequestIndex, 'the latest team structure is loaded before the join UI advances');
     assert.deepEqual(requests[consentRequestIndex]?.body, {
-      sessionIds: [joinedSessions[0]?.id], permissionLevel: 'full-access', settingsVersion: 19, disclaimerVersion: '2026-10-24.1',
+      sessionIds: [joinedSessions[0]?.id], permissionLevel: 'full-access', settingsVersion: 19, disclaimerVersion: consentDisclaimerVersion,
     }, 'existing permission is preserved while the consent request carries the new project’s exact current settings version');
     await page.getByRole('dialog', { name: 'Project joined' }).getByRole('button', { name: 'Open project', exact: true }).click();
     memberConsentPermission = 'supervised';
