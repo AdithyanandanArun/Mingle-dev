@@ -1347,7 +1347,7 @@ it('imports remote artifacts into isolated refs and includes those ref names in 
   expect(assistant?.content).toContain('Artifact import/integration failures');
 });
 
-it('fetches permanent worker branches and fast-forwards the integration branch for full-access acceptance', async () => {
+it('merges concurrent origin advances with accepted worker results before publishing', async () => {
   const fx = fixture();
   const originRoot = tmpDir('mingle-team-host-origin-'); paths.push(originRoot);
   const origin = path.join(originRoot, 'origin.git');
@@ -1408,6 +1408,15 @@ it('fetches permanent worker branches and fast-forwards the integration branch f
   expect(runGit(fx.project.path, 'rev-parse', `refs/remotes/origin/${branch}`).trim()).toBe(branchTip);
   expect(runGit(fx.project.path, 'rev-parse', 'HEAD').trim()).toBe(baseRevision);
 
+  const concurrentRoot = tmpDir('mingle-team-concurrent-main-'); paths.push(concurrentRoot);
+  const concurrentClone = path.join(concurrentRoot, 'repo');
+  execFileSync('git', ['clone', '-q', origin, concurrentClone]);
+  writeFileSync(path.join(concurrentClone, 'remote-update.txt'), 'pushed by another contributor\n');
+  runGit(concurrentClone, 'add', '--', 'remote-update.txt');
+  runGit(concurrentClone, '-c', 'user.name=Concurrent contributor', '-c', 'user.email=contributor@example.invalid', 'commit', '-m', 'Concurrent main update');
+  const concurrentHead = runGit(concurrentClone, 'rev-parse', 'HEAD').trim();
+  runGit(concurrentClone, 'push', 'origin', 'main');
+
   const context = { groupId: group.group.id, memberId: orchestrator.id, requestId, deliveryId, hop: 1, instructions: 'Review result' };
   await expect(fx.host.acceptTask(context, fx.local.id, { taskId, verificationSummary: 'Tests pass and I inspected the diff.' }))
     .rejects.toMatchObject({ status: 403 });
@@ -1421,8 +1430,11 @@ it('fetches permanent worker branches and fast-forwards the integration branch f
   expect(fx.store.getTask(taskId)?.status).toBe('done');
   expect(group.assignments[0]).toMatchObject({ acceptedBy: 'orchestrator', verificationSummary: 'Tests pass and I inspected the diff.' });
   const mergedHead = runGit(fx.project.path, 'rev-parse', 'HEAD').trim();
-  // The integration branch has not moved since the worker's base, so acceptance fast-forwards instead of creating a merge commit.
-  expect(mergedHead).toBe(commitSha);
+  expect(mergedHead).not.toBe(commitSha);
+  expect(() => runGit(fx.project.path, 'merge-base', '--is-ancestor', commitSha, mergedHead)).not.toThrow();
+  expect(() => runGit(fx.project.path, 'merge-base', '--is-ancestor', concurrentHead, mergedHead)).not.toThrow();
+  expect(runGit(fx.project.path, 'rev-list', '--parents', '-n', '1', mergedHead).trim().split(' ')).toHaveLength(3);
+  expect(runGit(fx.project.path, 'show', `${mergedHead}:remote-update.txt`).trim()).toBe('pushed by another contributor');
   expect(accepted).toMatchObject({ integrationBranch: 'main', integrationHead: mergedHead, integrationPush: { branch: 'main', commitSha: mergedHead } });
   expect(runGit(origin, 'rev-parse', 'refs/heads/main').trim()).toBe(mergedHead);
   expect(fx.integrationPublications).toContainEqual({ branch: 'main', commitSha: mergedHead });
