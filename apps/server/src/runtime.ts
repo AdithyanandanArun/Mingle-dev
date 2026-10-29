@@ -1,7 +1,7 @@
 import { ContextCompactionResultSchema, EditSessionPlanSchema, NativeUserInputRequestSchema, ProviderTaskPlanSchema, SessionPlanProposalSchema, SessionPlanStepsSchema, UserInputAnswersSchema } from '@mingle/contracts';
 import type { ProjectIntelligenceService } from './project-intelligence/service.ts';
 import { existsSync, statSync } from 'node:fs';
-import type { ProviderTaskPlan, AdapterEvent, Approval, ContextCompactionResult, EditSessionPlan, Message, ProviderFailure, ProviderSkill, RunChanges, RunOptions, Session, SessionPlan, UserInputAnswers, UserQuestion, ToolActivity, ToolCall } from '@mingle/contracts';
+import type { ProviderTaskPlan, AdapterEvent, Approval, ContextCompactionResult, EditSessionPlan, Message, ProviderFailure, ProviderSkill, RunChanges, RunOptions, Session, SessionPlan, Task, UserInputAnswers, UserQuestion, ToolActivity, ToolCall } from '@mingle/contracts';
 import type { Hub } from './hub.ts';
 import type { Store } from './store.ts';
 import type { TaskService } from './tasks.ts';
@@ -18,6 +18,8 @@ import type { TeamProxyRuntimeService } from './team-orchestration/types.ts';
 import { providerFailure } from './providers/failure.ts';
 import type { DispatchAwareOptions, DispatchState } from './providers/common.ts';
 import { buildMessageContext } from './message-context.ts';
+import { buildProviderHandoff } from './provider-handoff.ts';
+import { git } from './repository/git-run.ts';
 
 export interface RuntimeOptions {
   /** Milliseconds to wait after an abort before declaring an unresponsive adapter interrupted. */
@@ -57,6 +59,10 @@ interface ActiveRun {
   intent: 'normal' | 'plan';
   executionPlanId?: string;
   context?: string;
+  providerHandoff?: {
+    fromProvider: Session['provider']; fromModel: string; pendingAt: string;
+    messages: Message[]; latestPlan?: SessionPlan; openTasks: Task[];
+  };
   contextRefs?: Message['contextRefs'];
   deferContextResolution?: boolean;
   resolveSkills?: () => Promise<ProviderSkill[]>;
@@ -212,6 +218,14 @@ export class SessionRuntime {
     }
     if (!proxy) this.validateSession?.(runSession);
 
+    const pendingProviderHandoff = session.handoffFromProvider && session.handoffFromModel && session.handoffPendingAt
+      ? {
+        fromProvider: session.handoffFromProvider, fromModel: session.handoffFromModel, pendingAt: session.handoffPendingAt,
+        messages: this.store.listMessages(sessionId), latestPlan: this.store.listSessionPlans(sessionId).at(-1),
+        openTasks: this.store.listTasks(session.projectId).filter((task) => task.sessionId === sessionId && task.status !== 'done'),
+      }
+      : undefined;
+
     const handoffs = this.store.unconsumedHandoffs(sessionId);
     const runId = newId('run');
     if (proxy) {
@@ -246,6 +260,7 @@ export class SessionRuntime {
       baseInput: session.inputTokens, baseOutput: session.outputTokens, baseCost: session.costUsd, taskId: options.taskId ?? null, skills: options.skills ?? [], invocation, intent: options.intent ?? 'normal', executionPlanId: options.executionPlanId,
       contextRefs: options.contextRefs, deferContextResolution: options.deferContextResolution, resolveSkills: options.resolveSkills,
       context: [options.context, invocation && handoffs.length ? this.composePrompt(handoffs, '') : undefined].filter(Boolean).join('\n\n') || undefined,
+      providerHandoff: pendingProviderHandoff,
       attachmentOwnerKind: options.attachmentOwnerKind ?? 'message', attachmentOwnerId: options.attachmentOwnerId, changeBaseline: null, dispatchState: 'unknown',
       teamRun: options.teamRun === true, teamMcpConnection: options.teamMcp, onActivity: options.onActivity,
       onApproval: options.onApproval, onApprovalDecision: options.onApprovalDecision,
@@ -405,6 +420,51 @@ export class SessionRuntime {
     return ['[Mingle context — artifacts handed off to this session since your last turn]', ...blocks, '[End of handed-off context]', '', content].join('\n\n');
   }
 
+  private async providerHandoffBlock(run: ActiveRun, session: Session): Promise<string | undefined> {
+    const handoff = run.providerHandoff;
+    if (!handoff) return undefined;
+    let changedFiles: string[] = [];
+    let diffStat = '';
+    try {
+      const [status, unstaged, staged] = await Promise.all([
+        git(session.worktreePath, ['status', '--short', '--untracked-files=normal'], { timeoutMs: 5_000, maxBuffer: 64 * 1024 }),
+        git(session.worktreePath, ['diff', '--stat', '--no-ext-diff'], { timeoutMs: 5_000, maxBuffer: 64 * 1024 }),
+        git(session.worktreePath, ['diff', '--cached', '--stat', '--no-ext-diff'], { timeoutMs: 5_000, maxBuffer: 64 * 1024 }),
+      ]);
+      changedFiles = status.stdout.split(/\r?\n/).filter(Boolean).slice(0, 80).map((line) => {
+        const state = line.slice(0, 2).trim() || '??';
+        return `${state} ${line.slice(3).trim()}`;
+      });
+      diffStat = [unstaged.stdout.trim(), staged.stdout.trim()].filter(Boolean).join('\n').slice(0, 1_800);
+    } catch {
+      diffStat = 'Git status and diff statistics were unavailable.';
+    }
+    return buildProviderHandoff({
+      fromProvider: handoff.fromProvider, fromModel: handoff.fromModel,
+      toProvider: session.provider, toModel: session.model,
+      latestPlan: handoff.latestPlan, openTasks: handoff.openTasks, changedFiles, diffStat,
+      messages: handoff.messages,
+    });
+  }
+
+  private consumeProviderHandoff(run: ActiveRun, block: string): void {
+    const handoff = run.providerHandoff;
+    if (!handoff) return;
+    this.store.tx(() => {
+      const session = this.store.getSession(run.sessionId, true);
+      if (!session || session.handoffPendingAt !== handoff.pendingAt) return;
+      this.store.updateSession(run.sessionId, { handoffFromProvider: null, handoffFromModel: null, handoffPendingAt: null });
+      this.store.recordEvent({
+        projectId: session.projectId, sessionId: session.id, type: 'session.provider.handoff',
+        summary: `Conversation context handed off to ${session.provider}`,
+        payload: {
+          fromProvider: handoff.fromProvider, toProvider: session.provider,
+          fromModel: handoff.fromModel, toModel: session.model, bytes: Buffer.byteLength(block),
+        },
+      });
+    });
+  }
+
   private async execute(run: ActiveRun, startSession: Session, prompt: string): Promise<void> {
     let outcome: 'completed' | 'failed' | 'interrupted' = 'completed';
     let failure: string | null = null;
@@ -446,7 +506,9 @@ export class SessionRuntime {
         : run.intent !== 'plan' && groupContext ? this.teamMcp?.create(run.id, session, run.controller.signal, groupContext) : undefined;
       if (teamMcp) capabilityTokens.push(teamMcp.token);
       const explicit = run.invocation;
-      const effectivePrompt = explicit ? prompt : [run.intent !== 'plan' ? groupContext?.instructions : undefined, run.context, prompt].filter(Boolean).join('\n\n');
+      const providerHandoffBlock = await this.providerHandoffBlock(run, session);
+      const effectivePrompt = explicit ? prompt : [providerHandoffBlock, run.intent !== 'plan' ? groupContext?.instructions : undefined, run.context, prompt].filter(Boolean).join('\n\n');
+      if (explicit && providerHandoffBlock) run.context = [providerHandoffBlock, run.context].filter(Boolean).join('\n\n');
       if (explicit && groupContext) run.context = [run.context, groupContext.instructions].filter(Boolean).join('\n\n');
       const stagedAttachments = this.attachmentService && run.attachmentOwnerId
         ? await this.attachmentService.stage(run.id, run.attachmentOwnerKind ?? 'message', run.attachmentOwnerId)
@@ -459,7 +521,11 @@ export class SessionRuntime {
         requestUserInput: (request) => this.requestUserInput(run, request),
         onDispatchState: (state) => { run.dispatchState = state; },
       };
-      const adapterRun = Promise.resolve().then(() => adapter.run(runOptions));
+      const adapterRun = Promise.resolve().then(() => {
+        const running = adapter.run(runOptions);
+        if (providerHandoffBlock) this.consumeProviderHandoff(run, providerHandoffBlock);
+        return running;
+      });
       const grace = new Promise<'grace'>((resolve) => {
         const onAbort = () => setTimeout(() => resolve('grace'), this.abortGraceMs).unref();
         if (run.controller.signal.aborted) onAbort();

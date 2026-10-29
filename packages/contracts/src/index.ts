@@ -14,6 +14,7 @@ export interface Session {
   id: string; projectId: string; name: string; provider: Provider; model: string; effort: Effort;
   status: SessionStatus; policy: Policy; serviceTier?: string; isolated: boolean; worktreePath: string; branch: string | null;
   providerSessionId: string | null; createdAt: string; updatedAt: string; error: string | null;
+  handoffFromProvider?: Provider | null; handoffFromModel?: string | null; handoffPendingAt?: string | null;
   inputTokens: number; outputTokens: number; costUsd: number | null;
   pinned: boolean; unread: boolean;
 }

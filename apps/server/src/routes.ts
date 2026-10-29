@@ -4,7 +4,7 @@ import {
   CreateGroupSchema, AddGroupAgentSchema, UpdateGroupSchema, SendGroupMessageSchema, RepositoryCommitSchema, RepositoryPushSchema, RepositoryBranchSchema, RepositoryPullRequestSchema, BrowserConnectSchema, BrowserActionSchema, ApprovalDecisionSchema, ConversationIdSchema, ImportConversationSchema, ProviderSchema, CloneProjectSchema, NewProjectSchema, CreateProjectSchema, CreateSessionSchema, CreateTaskSchema, HandoffSchema, SendMessageSchema, UpdateProjectSchema, UpdateSessionSchema, UpdateSettingsSchema, UpdateTaskSchema, EditSessionPlanSchema, UserInputAnswersSchema,
   RecoveryActionRequestSchema,
 } from '@mingle/contracts';
-import type { Bootstrap, SessionUsage } from '@mingle/contracts';
+import type { Bootstrap, Session, SessionUsage } from '@mingle/contracts';
 import { gitStatus } from './git.ts';
 import type { Hub } from './hub.ts';
 import { listDirectory, readTextFile, searchFiles, writeTextFile } from './paths.ts';
@@ -16,7 +16,7 @@ import type { HandoffService } from './handoffs.ts';
 import type { WorkspaceService } from './workspace.ts';
 import type { ServerConfig } from './config.ts';
 import type { TerminalManager } from './terminal.ts';
-import { HttpError, badRequest, conflict, notFound } from './util.ts';
+import { HttpError, badRequest, conflict, notFound, nowIso } from './util.ts';
 import { resolveRunConfig } from './session-config.ts';
 import type { ImportService } from './imports.ts';
 import { defaultModel } from './provider-config.ts';
@@ -365,10 +365,56 @@ export function buildRouter(s: Services) {
   });
   add('PATCH', '/api/sessions/:id', async (ctx) => {
     const id = param(ctx, 'id');
-    const patch = await ctx.body(UpdateSessionSchema);
+    let patch = await ctx.body(UpdateSessionSchema);
     const session = s.store.getSession(id);
+    if (!session) throw notFound('Session not found');
     if (s.groups.forSession(id) && patch.provider && patch.provider !== session?.provider) throw conflict('Group members retain their provider identity. Add another agent to use a different provider.');
-    const updated = s.workspace.updateSession(id, patch);
+    const providerChanged = patch.provider !== undefined && patch.provider !== session.provider;
+    let updated: Session;
+    if (providerChanged) {
+      if (s.runtime.isActive(id) || session.status === 'running' || session.status === 'waiting') {
+        throw conflict('Wait for this run to finish or interrupt it before changing its provider or model.');
+      }
+      const settings = s.store.getSettings();
+      const provider = patch.provider!;
+      const model = patch.model ?? defaultModel(provider, settings);
+      const resolved = resolveRunConfig(s.providers.cached()?.find((row) => row.id === provider), {
+        provider, model, effort: patch.effort ?? session.effort, policy: patch.policy ?? session.policy,
+        serviceTier: patch.serviceTier ?? session.serviceTier,
+      }, { effort: patch.effort !== undefined, policy: patch.policy !== undefined, serviceTier: patch.serviceTier !== undefined });
+      patch = { ...patch, provider, model, effort: resolved.effort, policy: resolved.policy, serviceTier: resolved.serviceTier };
+      const hasHistory = s.store.listMessages(id).some((message) => message.role === 'user' || message.role === 'assistant');
+      const handoffAt = hasHistory ? nowIso() : null;
+      const oldProvider = s.providers.cached()?.find((row) => row.id === session.provider);
+      const newProvider = s.providers.cached()?.find((row) => row.id === provider);
+      const modelLabel = (providerId: typeof provider, modelId: string) => {
+        const info = s.providers.cached()?.find((row) => row.id === providerId);
+        return info?.models.find((row) => row.id === modelId || row.aliases?.includes(modelId))?.name ?? modelId;
+      };
+      updated = s.store.tx(() => {
+        const next = s.store.updateSession(id, {
+          ...patch, providerSessionId: null,
+          handoffFromProvider: hasHistory ? session.provider : null,
+          handoffFromModel: hasHistory ? session.model : null,
+          handoffPendingAt: handoffAt,
+        });
+        if (hasHistory) {
+          const fromModel = modelLabel(session.provider, session.model);
+          const toModel = modelLabel(provider, resolved.model);
+          const fromName = oldProvider?.name ?? session.provider;
+          const toName = newProvider?.name ?? provider;
+          s.store.insertMessage({ sessionId: id, role: 'system', kind: 'info', content: `Switched from ${fromName} (${fromModel}) to ${toName} (${toModel}). Mingle will hand off this conversation's context with your next message. No extra model call; your conversation is passed along with the next message.` });
+        }
+        s.store.recordEvent({
+          projectId: session.projectId, sessionId: id, type: 'session.updated',
+          summary: `Session settings updated: ${next.name}`,
+          payload: { fields: Object.keys(patch), model: next.model, effort: next.effort, provider: next.provider, ...(hasHistory ? { handoffPending: true, fromProvider: session.provider, toProvider: next.provider } : {}) },
+        });
+        return next;
+      });
+    } else {
+      updated = s.workspace.updateSession(id, patch);
+    }
     if (patch.policy !== undefined && patch.policy !== session?.policy) {
       await s.teamOrchestration.host.sessionPolicyChanged(id);
       return s.store.getSession(id) ?? updated;

@@ -41,6 +41,12 @@ function ensureMessageContextColumns(db: DatabaseSync): void {
   addColumn(db, 'group_messages', 'context_refs_json', 'ALTER TABLE group_messages ADD COLUMN context_refs_json TEXT;');
 }
 
+function ensureProviderHandoffColumns(db: DatabaseSync): void {
+  addColumn(db, 'sessions', 'handoff_from_provider', 'ALTER TABLE sessions ADD COLUMN handoff_from_provider TEXT;');
+  addColumn(db, 'sessions', 'handoff_from_model', 'ALTER TABLE sessions ADD COLUMN handoff_from_model TEXT;');
+  addColumn(db, 'sessions', 'handoff_pending_at', 'ALTER TABLE sessions ADD COLUMN handoff_pending_at TEXT;');
+}
+
 function ensureTeamChatProvenanceColumns(db: DatabaseSync): void {
   addColumn(db, 'team_chat_messages', 'author_device_id', 'ALTER TABLE team_chat_messages ADD COLUMN author_device_id TEXT;');
   addColumn(db, 'team_chat_messages', 'author_signature', 'ALTER TABLE team_chat_messages ADD COLUMN author_signature TEXT;');
@@ -416,6 +422,8 @@ export function openDatabase(file: string): DatabaseSync {
   // Reconcile databases which applied the unreleased first version of migration 19 before
   // its provenance columns were added. The operation is deliberately idempotent.
   ensureTeamChatProvenanceColumns(db);
+  // Session handoff state is additive and reconciled for every supported historical schema.
+  ensureProviderHandoffColumns(db);
   if (!existed && file !== ':memory:') {
     try { chmodSync(file, 0o600); } catch { /* best effort on platforms without POSIX modes */ }
   }
