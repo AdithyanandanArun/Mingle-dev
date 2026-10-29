@@ -2,11 +2,11 @@ import { createHash } from 'node:crypto';
 import { realpathSync } from 'node:fs';
 import path from 'node:path';
 import {
-  nativeActionCommands, nativeActionSkills, TeamOrchestrationSettingsSchema,
+  nativeActionCommands, nativeActionSkills, TeamOrchestrationSettingsSchema, TEAM_CONSENT_DISCLAIMER_VERSION,
 } from '@mingle/contracts';
 import type {
   AddGroupAgent, AgentConfiguration, AutonomyConfig, ConversationGroup, CreateGroup, GroupAssignment, GroupDelivery, GroupMember, GroupMessage, GroupMode, MessageContextRef, SessionPlan,
-  GroupMilestone, GroupRecoveryPolicy, GroupRecoveryState, ProviderFailure, RecoveryActionRequest, RecoveryActionResult, RecoveryCheckpoint,
+  GroupMemberHealth, GroupMilestone, GroupRecoveryPolicy, GroupRecoveryState, ProviderFailure, RecoveryActionRequest, RecoveryActionResult, RecoveryCheckpoint,
   GroupRunContext, GroupSnapshot, ProviderInfo, ProviderSkill, Session, Task, TeamAcceptTask, TeamArtifactSchema, TeamAssignSchema, TeamMessageSchema, TeamStatusSchema, UpdateGroupSchema,
 } from '@mingle/contracts';
 import type { z } from 'zod';
@@ -53,6 +53,7 @@ export interface GroupRecoveryReader {
   failure(sessionId: string): ProviderFailure | null;
   failureForRun(runId: string): ProviderFailure | null;
   clearFailure(sessionId: string): void;
+  recordFailure?(sessionId: string, runId: string, failure: ProviderFailure): void;
 }
 export interface GroupServiceOptions {
   store: Store; workspace: WorkspaceService; tasks: TaskService; handoffs: HandoffService; runtime: GroupRuntime; log: GroupLog;
@@ -60,6 +61,9 @@ export interface GroupServiceOptions {
   attachments?: AttachmentService;
   catalog?: GroupCatalog;
   recovery?: GroupRecoveryReader;
+  now?: () => number;
+  stallTimeoutMs?: number;
+  stallSweepIntervalMs?: number;
 }
 
 type Outcome = 'completed' | 'failed' | 'interrupted';
@@ -84,7 +88,11 @@ const SNAPSHOT_REQUESTS = 100;
 const FULL_SHA = /^[0-9a-f]{40,64}$/i;
 const DEFAULT_LIMITS = { maxParallel: 2, maxTurns: 80, maxHops: 6 };
 const MAX_SAFE_RETRIES = 1;
+const MAX_AUTOMATIC_FALLBACKS_PER_TASK = 2;
 const MAX_SAFE_RETRY_DELAY_MS = 24 * 60 * 60 * 1000;
+const DEFAULT_PROVIDER_COOLDOWN_MS = 15 * 60 * 1000;
+const DEFAULT_STALL_TIMEOUT_MS = 10 * 60 * 1000;
+const DEFAULT_STALL_SWEEP_INTERVAL_MS = 30 * 1000;
 const MAX_AUTONOMOUS_TURNS = 200;
 const MAX_AUTONOMOUS_HOPS = 24;
 const RESTART_RESUME_PAUSE_REASON = 'Waiting for provider availability before full-access restart continuation.';
@@ -115,6 +123,14 @@ export class GroupService {
   private readonly attachments?: AttachmentService;
   private readonly catalog?: GroupCatalog;
   private readonly recovery?: GroupRecoveryReader;
+  private readonly now: () => number;
+  private readonly stallTimeoutMs: number;
+  private readonly stallSweepIntervalMs: number;
+  private readonly providerCooldowns = new Map<Session['provider'], { until: number; reason: string; kind: ProviderFailure['kind'] }>();
+  private readonly deliveryActivity = new Map<string, { fingerprint: string; at: number }>();
+  private readonly stalledDeliveries = new Map<string, { at: number; reason: string }>();
+  private readonly remoteActivityText = new Map<string, string>();
+  private stallTimer: ReturnType<typeof setInterval> | null = null;
   private closed = false;
   private lock: Promise<unknown> = Promise.resolve();
   private readonly pending = new Set<string>();
@@ -140,6 +156,124 @@ export class GroupService {
       }
     } catch { /* An ordinary local group has no team policy row. */ }
     return group.autonomy?.mode === 'extended';
+  }
+
+  private automaticFallbackEnabled(group: ConversationGroup): boolean {
+    // `automaticFallback: false` is also the legacy/default representation, so Full access wins
+    // unless a future contract version can distinguish an explicit opt-out from an omitted value.
+    return this.isFullAccessGroup(group) || group.recoveryPolicy?.automaticFallback === true;
+  }
+
+  private recordProviderCooldown(group: ConversationGroup, member: MemberRow, failure: ProviderFailure | null): void {
+    if (!failure || (failure.kind !== 'quota_exhausted' && failure.kind !== 'temporary_rate_limit')) return;
+    const session = this.store.getSession(member.sessionId, true);
+    if (!session) return;
+    const retryAt = failure.retryAt ? Date.parse(failure.retryAt) : Number.NaN;
+    const now = this.now();
+    const until = Number.isFinite(retryAt) ? Math.max(now, retryAt) : now + DEFAULT_PROVIDER_COOLDOWN_MS;
+    const current = this.providerCooldowns.get(session.provider);
+    if (current && current.until >= until) return;
+    const reason = failure.kind === 'quota_exhausted' ? 'Provider quota exhausted' : 'Provider rate limited';
+    this.providerCooldowns.set(session.provider, { until, reason, kind: failure.kind });
+    this.event(group, 'group.member.cooldown', `${session.provider} is cooling down after ${failure.kind.replaceAll('_', ' ')}`, {
+      memberId: member.id, provider: session.provider, failureKind: failure.kind, reason, until: new Date(until).toISOString(),
+    }, session.id);
+  }
+
+  private providerOnCooldown(provider: Session['provider']): boolean {
+    const cooldown = this.providerCooldowns.get(provider);
+    if (!cooldown) return false;
+    if (cooldown.until > this.now()) return true;
+    this.providerCooldowns.delete(provider);
+    return false;
+  }
+
+  private failureCooldownActive(failure: ProviderFailure): boolean {
+    if (failure.kind !== 'quota_exhausted' && failure.kind !== 'temporary_rate_limit') return false;
+    const retryAt = failure.retryAt ? Date.parse(failure.retryAt) : Number.NaN;
+    const occurredAt = Date.parse(failure.occurredAt);
+    const until = Number.isFinite(retryAt) ? retryAt : Number.isFinite(occurredAt) ? occurredAt + DEFAULT_PROVIDER_COOLDOWN_MS : Number.POSITIVE_INFINITY;
+    return until > this.now();
+  }
+
+  private memberProviderAvailable(member: MemberRow, session: Session): boolean {
+    const isProxy = Boolean(this.store.db.prepare('SELECT 1 AS found FROM mingle_team_proxy_sessions WHERE session_id=?').get(session.id));
+    if (isProxy) {
+      try {
+        const proxy = this.store.db.prepare(`SELECT p.team_id,p.shared_project_id,p.agent_id,p.owner_account_id,p.owner_device_id,
+            c.state,c.permission_level,c.settings_version,c.disclaimer_version,c.owner_account_id AS consent_owner,c.owner_device_id AS consent_device,
+            h.settings_json,d.last_seen_at,d.revoked_at
+          FROM mingle_team_proxy_sessions p
+          JOIN mingle_team_host_projects h ON h.team_id=p.team_id AND h.shared_project_id=p.shared_project_id AND h.group_id=?
+          JOIN mingle_team_host_roster r ON r.team_id=p.team_id AND r.shared_project_id=p.shared_project_id AND r.agent_id=p.agent_id AND r.removed_at IS NULL
+          JOIN mingle_team_host_consents c ON c.team_id=p.team_id AND c.shared_project_id=p.shared_project_id AND c.agent_id=p.agent_id
+          JOIN mingle_transport_devices_cache d ON d.team_id=p.team_id AND d.id=p.owner_device_id AND d.account_id=h.owner_account_id
+          WHERE p.session_id=?`).get(member.groupId, session.id) as {
+            owner_account_id: string; owner_device_id: string; state: string; permission_level: string; settings_version: number;
+            disclaimer_version: string; consent_owner: string; consent_device: string; settings_json: string;
+            last_seen_at: string | null; revoked_at: string | null;
+          } | undefined;
+        const settings = proxy ? TeamOrchestrationSettingsSchema.safeParse(JSON.parse(proxy.settings_json)) : undefined;
+        if (!proxy || proxy.state !== 'granted' || !settings?.success
+          || settings.data.permissionLevel === 'full-access' && proxy.permission_level !== 'full-access'
+          || proxy.disclaimer_version !== TEAM_CONSENT_DISCLAIMER_VERSION || proxy.consent_owner !== proxy.owner_account_id
+          || proxy.consent_device !== proxy.owner_device_id || proxy.revoked_at || !proxy.last_seen_at) return false;
+        const age = this.now() - Date.parse(proxy.last_seen_at);
+        return proxy.settings_version === settings.data.version
+          && Number.isFinite(age) && age >= 0 && age <= 90_000;
+      } catch { return false; }
+    }
+    if (!this.providers) return true;
+    return this.providers().some((provider) => provider.id === session.provider && provider.available);
+  }
+
+  private fallbackCandidates(
+    group: ConversationGroup, source: MemberRow, sourceProvider: Session['provider'], configuredId?: string | null,
+    allowQueued = false, failure?: ProviderFailure,
+  ): MemberRow[] {
+    const candidates = this.repo.members(group.id, false).filter((candidate) => {
+      if (candidate.id === source.id || candidate.held || candidate.removedAt || this.providerOnCooldown(this.store.getSession(candidate.sessionId)?.provider ?? sourceProvider)) return false;
+      const session = this.store.getSession(candidate.sessionId);
+      if (!session || this.sessionBusy(session) || this.repo.memberDeliveries(candidate.id, ['running']).length) return false;
+      const sourceSession = this.store.getSession(source.sessionId);
+      if (!sourceSession || session.policy !== sourceSession.policy) return false;
+      if (failure?.kind === 'quota_exhausted' && !this.quotaFallbackPoolCheck(group, failure, session).ok) return false;
+      if (!allowQueued && this.repo.memberDeliveries(candidate.id, ['queued']).length) return false;
+      if (this.store.listTasks(group.projectId).some((task) => task.sessionId === session.id && (task.status === 'ready' || task.status === 'running'))) return false;
+      if (this.repo.activeAssignments(group.id).some((assignment) => assignment.toMemberId === candidate.id
+        && this.repo.getDelivery(assignment.deliveryId)?.status === 'queued')) return false;
+      if (!this.memberProviderAvailable(candidate, session)) return false;
+      if (this.isFullAccessGroup(group) && source.role === 'worker' && this.isTeamOrLocalCoordinator(group, candidate)) return true;
+      if (source.role === 'worker' && this.isTeamOrLocalCoordinator(group, candidate)) return false;
+      return true;
+    });
+    const configured = configuredId ? candidates.find((candidate) => candidate.id === configuredId) : undefined;
+    const rest = candidates.filter((candidate) => candidate.id !== configured?.id).sort((a, b) => {
+      const aSession = this.store.getSession(a.sessionId)!;
+      const bSession = this.store.getSession(b.sessionId)!;
+      const aCoordinator = this.isTeamOrLocalCoordinator(group, a) ? 1 : 0;
+      const bCoordinator = this.isTeamOrLocalCoordinator(group, b) ? 1 : 0;
+      const aSameProvider = Number(aSession.provider === sourceProvider);
+      const bSameProvider = Number(bSession.provider === sourceProvider);
+      const load = (member: MemberRow) => this.repo.memberDeliveries(member.id, ['queued', 'running']).length;
+      return aCoordinator - bCoordinator || aSameProvider - bSameProvider || load(a) - load(b)
+        || a.joinedAt.localeCompare(b.joinedAt);
+    });
+    return [...(configured ? [configured] : []), ...rest];
+  }
+
+  isMemberAvailable(groupId: string, memberIdArg: string): boolean {
+    const group = this.repo.getGroup(groupId);
+    const member = group ? this.repo.getMember(memberIdArg) : undefined;
+    const session = member ? this.store.getSession(member.sessionId) : undefined;
+    return Boolean(group && member && member.groupId === group.id && !member.held && !member.removedAt && session
+      && !this.sessionBusy(session) && !this.providerOnCooldown(session.provider) && this.memberProviderAvailable(member, session));
+  }
+
+  private isTeamOrLocalCoordinator(group: ConversationGroup, member: MemberRow): boolean {
+    if (member.role === 'orchestrator') return true;
+    if (group.mode === 'cowork') return this.repo.requests(group.id, 1000).some((request) => request.status !== 'completed' && request.plannerMemberId === member.id);
+    return group.mode === 'current-leads' && member.sessionId === group.anchorSessionId;
   }
 
   private isTeamGroup(group: ConversationGroup): boolean {
@@ -229,6 +363,9 @@ export class GroupService {
     this.attachments = options.attachments;
     this.catalog = options.catalog;
     this.recovery = options.recovery ?? new RecoveryService(options.store);
+    this.now = options.now ?? (() => Date.now());
+    this.stallTimeoutMs = Math.max(1000, options.stallTimeoutMs ?? DEFAULT_STALL_TIMEOUT_MS);
+    this.stallSweepIntervalMs = Math.max(1000, options.stallSweepIntervalMs ?? DEFAULT_STALL_SWEEP_INTERVAL_MS);
     this.unsubscribe = this.store.subscribe((event) => {
       if (event?.type.startsWith('task.')) {
         const taskId = typeof event.payload.taskId === 'string' ? event.payload.taskId : null;
@@ -237,6 +374,11 @@ export class GroupService {
         for (const group of this.repo.listGroups()) if (group.projectId === event.projectId) this.schedule(group.id);
       }
     });
+    this.stallTimer = setInterval(() => {
+      try { this.sweepStalledDeliveries(); }
+      catch (error) { this.log('warn', 'The group stall sweep failed', error); }
+    }, this.stallSweepIntervalMs);
+    this.stallTimer.unref?.();
   }
 
   /** Used only by the shared-project host to create its regular scheduler group without provisioning provider sessions. */
@@ -386,9 +528,11 @@ export class GroupService {
   }
 
   /** Manual and automatic host handover share one scheduler update path. */
-  setTeamLeader(groupId: string, sessionId: string | null, options: { paused?: boolean; pauseReason?: string | null } = {}): void {
+  setTeamLeader(groupId: string, sessionId: string | null, options: {
+    paused?: boolean; pauseReason?: string | null; automatic?: boolean; failureKind?: ProviderFailure['kind']; reason?: string;
+  } = {}): void {
     const group = this.requireGroup(groupId);
-    if (this.repo.deliveries(groupId, ['running']).length) throw conflict('Wait for running team deliveries before changing the orchestrator.');
+    if (!options.automatic && this.repo.deliveries(groupId, ['running']).length) throw conflict('Wait for running team deliveries before changing the orchestrator.');
     const members = this.repo.members(groupId, false);
     const next = sessionId ? members.find((member) => member.sessionId === sessionId) : undefined;
     if (sessionId && !next) throw conflict('The selected team orchestrator is not an active member.');
@@ -412,6 +556,16 @@ export class GroupService {
       this.event(group, next ? 'group.team.leader-changed' : 'group.team.leader-required', next ? `Team orchestrator changed to @${next.handle}` : 'Team group needs an orchestrator', {
         fromMemberId: previous?.id ?? null, toMemberId: next?.id ?? null, coordinatorEpoch: (group.coordinatorEpoch ?? 1) + 1,
       }, next?.sessionId);
+      if (options.automatic && next && previous && previous.id !== next.id) {
+        const failureKind = options.failureKind ?? 'unknown';
+        const reason = clean(options.reason ?? 'The previous coordinator is unavailable.', 300);
+        const request = this.repo.requestsWithStatus(groupId, 'active').at(-1);
+        this.repo.insertMessage({ groupId, senderMemberId: null, recipients: [], kind: 'status', ...(request ? { requestId: request.id } : {}),
+          content: `@${previous.handle} became unavailable (${failureKind.replaceAll('_', ' ')}); coordinator role moved to @${next.handle}.` });
+        this.event(group, 'group.delivery.auto-fallback', `Automatic coordinator fallback: @${previous.handle} → @${next.handle}`, {
+          fromMemberId: previous.id, toMemberId: next.id, failureKind, reason,
+        }, next.sessionId);
+      }
     });
     if (next) this.schedule(groupId);
     this.store.touch();
@@ -481,6 +635,28 @@ export class GroupService {
   snapshots(): GroupSnapshot[] { return this.repo.listGroups().map((group) => this.snapshot(group)); }
 
   get(id: string): GroupSnapshot { return this.snapshot(this.requireGroup(id)); }
+
+  /** Read-only health summary for progress surfaces; cooldown state is process-local. */
+  getMemberHealth(groupId: string): GroupMemberHealth[] {
+    const group = this.requireGroup(groupId);
+    const now = this.now();
+    return this.repo.members(group.id, false).map((member) => {
+      const session = this.store.getSession(member.sessionId);
+      const cooldown = session ? this.providerCooldowns.get(session.provider) : undefined;
+      if (cooldown && cooldown.until > now) return {
+        memberId: member.id, handle: member.handle, state: 'cooldown', until: new Date(cooldown.until).toISOString(), reason: cooldown.reason,
+      };
+      const stalled = this.repo.memberDeliveries(member.id, ['running']).find((delivery) => this.stalledDeliveries.has(delivery.id));
+      if (stalled) {
+        const state = this.stalledDeliveries.get(stalled.id)!;
+        return { memberId: member.id, handle: member.handle, state: 'stalled', until: new Date(state.at + this.stallTimeoutMs).toISOString(), reason: state.reason };
+      }
+      const failedDelivery = this.repo.memberDeliveries(member.id, ['failed']).at(-1);
+      const failure = failedDelivery?.runId ? this.recovery?.failureForRun(failedDelivery.runId) : undefined;
+      return { memberId: member.id, handle: member.handle, state: member.held || failure ? 'failed' : 'ok',
+        ...(failure ? { reason: clean(failure.message, 500) } : {}) };
+    });
+  }
 
   forSession(sessionId: string): GroupSnapshot | undefined {
     const member = this.repo.activeMemberOfSession(sessionId);
@@ -1527,19 +1703,161 @@ export class GroupService {
     this.event(group, 'group.recovery.fallback-blocked', bounded, { failureId: failure.id, kind: failure.kind });
   }
 
+  private automaticFallbackFailureEligible(delivery: DeliveryRow, failure: ProviderFailure): boolean {
+    const retrySucceededOnce = this.hasSameMemberRecoveryRetry(delivery);
+    if (delivery.retryable && !(delivery.status === 'interrupted' && retrySucceededOnce)) return false;
+    const recoverableKind = ['quota_exhausted', 'temporary_rate_limit', 'authentication', 'provider_unavailable'].includes(failure.kind);
+    return recoverableKind || retrySucceededOnce || delivery.attempts > MAX_SAFE_RETRIES;
+  }
+
+  private hasSameMemberRecoveryRetry(delivery: DeliveryRow): boolean {
+    let cursor = delivery;
+    for (let depth = 0; depth < 8; depth++) {
+      const predecessorId = this.repo.deliverySource(delivery.groupId, cursor.id);
+      const predecessor = predecessorId ? this.repo.getDelivery(predecessorId) : undefined;
+      if (!predecessor || predecessor.memberId !== delivery.memberId || predecessor.assignmentId !== delivery.assignmentId) break;
+      return true;
+    }
+    return false;
+  }
+
+  private isStallFailure(failure: ProviderFailure | null): boolean {
+    return failure?.kind === 'unknown' && failure.message.startsWith('Stalled — no activity for ');
+  }
+
+  private mayRetryStalledDelivery(delivery: DeliveryRow, failure: ProviderFailure | null): boolean {
+    return this.isStallFailure(failure) && !this.hasSameMemberRecoveryRetry(delivery);
+  }
+
+  private automaticFallbackCount(group: ConversationGroup, assignmentIdArg: string, taskId: string): number {
+    const row = this.store.db.prepare(`SELECT COUNT(*) AS count FROM events WHERE project_id=? AND type='group.delivery.auto-fallback'
+      AND json_extract(payload,'$.groupId')=? AND json_extract(payload,'$.assignmentId')=? AND json_extract(payload,'$.taskId')=?`)
+      .get(group.projectId, group.id, assignmentIdArg, taskId) as { count: number };
+    return Number(row.count);
+  }
+
+  private deliveryActivityFingerprint(delivery: DeliveryRow): string {
+    const member = this.repo.getMember(delivery.memberId);
+    const sessionId = member?.sessionId;
+    if (!sessionId || !delivery.runId) return '';
+    const messages = this.store.listMessages(sessionId, { limit: 50 }).filter((message) => message.runId === delivery.runId)
+      .map((message) => [message.id, message.role, message.content.slice(-2_000)]);
+    const tools = this.store.listRunTools(delivery.runId, 200).map((tool) => [tool.id, tool.status, tool.output.length,
+      tool.output.slice(-200), tool.summary, tool.exitCode]);
+    return createHash('sha256').update(JSON.stringify([messages, tools])).digest('hex');
+  }
+
+  /** Cross-device host hook: the authenticated owner heartbeat/activity resets this delivery's idle clock. */
+  touchDeliveryActivity(sessionId: string, runId: string): void {
+    const delivery = this.repo.deliveryByRun(runId);
+    const member = delivery ? this.repo.getMember(delivery.memberId) : undefined;
+    if (!delivery || !member || member.sessionId !== sessionId || delivery.status !== 'running') return;
+    const fingerprint = this.deliveryActivityFingerprint(delivery);
+    this.deliveryActivity.set(delivery.id, { fingerprint, at: this.now() });
+    this.stalledDeliveries.delete(delivery.id);
+  }
+
+  /** Retain only a bounded scrubbed assistant excerpt from authenticated owner-device activity. */
+  recordRemoteDeliveryActivity(sessionId: string, runId: string, entries: import('@mingle/contracts').TeamAgentActivityEntry[]): void {
+    const delivery = this.repo.deliveryByRun(runId);
+    const member = delivery ? this.repo.getMember(delivery.memberId) : undefined;
+    if (!delivery || !member || member.sessionId !== sessionId || delivery.status !== 'running') return;
+    const assistant = entries.filter((entry) => entry.kind === 'assistant').map((entry) => clean(entry.text, 8_000)).filter(Boolean).join('\n');
+    if (assistant) {
+      this.remoteActivityText.set(runId, `${this.remoteActivityText.get(runId) ?? ''}\n${assistant}`.slice(-5_000));
+      if (this.remoteActivityText.size > 200) this.remoteActivityText.delete(this.remoteActivityText.keys().next().value!);
+    }
+    this.touchDeliveryActivity(sessionId, runId);
+  }
+
+  /** Single periodic sweep shared by local and owner-device team runs; public for deterministic tests. */
+  sweepStalledDeliveries(nowOverride?: number): void {
+    if (this.closed) return;
+    const now = nowOverride ?? this.now();
+    for (const group of this.repo.listGroups()) {
+      for (const delivery of this.repo.deliveries(group.id, ['running'])) {
+        const member = this.repo.getMember(delivery.memberId);
+        const session = member ? this.store.getSession(member.sessionId) : undefined;
+        if (!member || !session || !delivery.runId) continue;
+        const run = this.store.getRun(delivery.runId);
+        if (run?.status !== 'running') continue;
+        const pendingQuestion = this.store.bootstrapQuestions(500).some((question) => question.runId === delivery.runId && question.status === 'pending');
+        if (session.status === 'waiting' || this.store.pendingApprovals(session.id).length || pendingQuestion) {
+          this.deliveryActivity.set(delivery.id, { fingerprint: this.deliveryActivityFingerprint(delivery), at: now });
+          this.stalledDeliveries.delete(delivery.id);
+          continue;
+        }
+        const fingerprint = this.deliveryActivityFingerprint(delivery);
+        const activity = this.deliveryActivity.get(delivery.id);
+        if (!activity) {
+          const startedAt = Date.parse(run.startedAt || delivery.startedAt || delivery.createdAt);
+          this.deliveryActivity.set(delivery.id, { fingerprint, at: Number.isFinite(startedAt) ? startedAt : now });
+          continue;
+        }
+        if (activity.fingerprint !== fingerprint) {
+          this.deliveryActivity.set(delivery.id, { fingerprint, at: now });
+          this.stalledDeliveries.delete(delivery.id);
+          continue;
+        }
+        if (now - activity.at < this.stallTimeoutMs || this.stalledDeliveries.has(delivery.id)) continue;
+        const reason = `Stalled — no activity for ${Math.max(1, Math.round(this.stallTimeoutMs / 60_000))} min`;
+        this.stalledDeliveries.set(delivery.id, { at: activity.at, reason });
+        const fullAccess = this.isFullAccessGroup(group);
+        const failure: ProviderFailure = {
+          id: newId('msg'), sessionId: session.id, runId: delivery.runId,
+          actor: member.role === 'orchestrator' || group.mode === 'cowork' && this.repo.getRequest(delivery.requestId)?.plannerMemberId === member.id ? 'lead' : 'worker',
+          kind: 'unknown', provider: session.provider, retryable: true, safeToRetry: false, outcomeUnknown: true,
+          dispatchState: 'dispatched', continuationSafety: 'unknown', message: reason, occurredAt: new Date(now).toISOString(),
+        };
+        if (fullAccess) this.recovery?.recordFailure?.(session.id, delivery.runId, failure);
+        this.store.tx(() => {
+          this.repo.insertMessage({ groupId: group.id, senderMemberId: null, recipients: [member.id], kind: 'status', requestId: delivery.requestId,
+            content: `${reason}: @${member.handle}${fullAccess ? '. Mingle is interrupting the run and will retry or reassign automatically.' : '. Review the delivery and choose a recovery action.'}` });
+          if (!fullAccess) this.repo.updateGroup(group.id, { recoveryState: { status: 'degraded', reason, activeRequestId: delivery.requestId, updatedAt: nowIso() } });
+          this.event(group, 'group.delivery.stalled', reason, { deliveryId: delivery.id, memberId: member.id, failureKind: 'unknown', reason }, session.id);
+        });
+        if (fullAccess) {
+          try {
+            if (!this.runtime.interrupt(session.id)) this.log('warn', `Stalled group delivery ${delivery.id} could not be interrupted through the runtime`, { runId: delivery.runId });
+          } catch (error) { this.log('warn', `Stalled group delivery ${delivery.id} could not be interrupted`, error); }
+        }
+      }
+    }
+  }
+
+  private pauseForAutomaticFallback(groupArg: ConversationGroup, failure: ProviderFailure, reason: string): void {
+    const group = this.repo.getGroup(groupArg.id);
+    if (!group) return;
+    const bounded = clean(reason, 1000);
+    if (group.paused && group.pauseReason === bounded) return;
+    this.store.tx(() => {
+      const current = this.repo.getGroup(group.id);
+      if (!current) return;
+      this.repo.updateGroup(current.id, { paused: true, pauseReason: bounded, recoveryState: {
+        status: 'paused', reason: bounded, lastFailureId: failure.id,
+        ...(current.recoveryState?.activeRequestId ? { activeRequestId: current.recoveryState.activeRequestId } : {}), updatedAt: nowIso(),
+      } });
+      const requestIdArg = current.recoveryState?.activeRequestId;
+      this.repo.insertMessage({ groupId: current.id, senderMemberId: null, recipients: [], kind: 'status',
+        ...(requestIdArg ? { requestId: requestIdArg } : {}), content: `Automatic recovery paused: ${bounded}` });
+      this.event(current, 'group.recovery.fallback-blocked', bounded, { failureId: failure.id, kind: failure.kind });
+    });
+  }
+
   private recordFallbackBlocked(groupId: string, failure: ProviderFailure, reason: string): void {
     if (!failure.runId) return;
     this.store.tx(() => {
       const group = this.repo.getGroup(groupId);
       const currentFailure = this.recovery?.failureForRun(failure.runId!);
       if (!group || currentFailure?.id !== failure.id) return;
-      this.setFallbackBlocked(group, failure, reason);
+      if (this.isFullAccessGroup(group)) this.pauseForAutomaticFallback(group, failure, reason);
+      else this.setFallbackBlocked(group, failure, reason);
     });
   }
 
   private quotaFallbackPoolCheck(group: ConversationGroup, source: ProviderFailure, target: Session): { ok: true; verification: 'verified-distinct' | 'unverified' } | { ok: false; reason: string } {
     const targetFailure = this.recovery?.failure(target.id);
-    if (targetFailure?.kind === 'quota_exhausted') return { ok: false, reason: `Automatic quota fallback was blocked because @${target.id} has a current quota-exhausted provider failure.` };
+    if (targetFailure && this.failureCooldownActive(targetFailure)) return { ok: false, reason: `Automatic quota fallback was blocked because @${target.id} is still in provider cooldown.` };
     const sourcePool = source.quotaPool?.trim();
     const targetPool = targetFailure?.quotaPool?.trim();
     if (sourcePool && targetPool) {
@@ -1550,6 +1868,7 @@ export class GroupService {
     if (source.provider === target.provider) {
       return { ok: false, reason: 'Automatic quota fallback was blocked because this provider uses the same runtime authentication and did not report distinct quota pools.' };
     }
+    if (this.isFullAccessGroup(group)) return { ok: true, verification: 'verified-distinct' };
     const optedIn = (group.recoveryPolicy as QuotaRecoveryPolicy | undefined)?.allowUnverifiedQuotaFallback === true;
     if (!optedIn) return { ok: false, reason: 'Quota-pool identity is unreported. Enable the explicit unverified-pool fallback option to allow one cross-provider attempt.' };
     return { ok: true, verification: 'unverified' };
@@ -1590,7 +1909,7 @@ export class GroupService {
 
   private async attemptAutomaticLeadFallback(groupArg: ConversationGroup): Promise<boolean> {
     const group = this.repo.getGroup(groupArg.id);
-    if (!group || group.paused || !group.recoveryPolicy?.automaticFallback || !group.recoveryPolicy.leadFallbackMemberId) return false;
+    if (!group || group.paused || this.isTeamGroup(group) || !this.automaticFallbackEnabled(group)) return false;
     const coworkRequest = group.mode === 'cowork'
       ? this.repo.requests(group.id, 1000).find((request) =>
         this.repo.requestDeliveries(request.id, ['failed', 'interrupted']).some((row) => row.memberId === request.plannerMemberId && row.runId))
@@ -1603,17 +1922,17 @@ export class GroupService {
       ? this.repo.requestDeliveries(coworkRequest.id, ['failed', 'interrupted']).filter((row) => row.memberId === lead.id && row.runId).at(-1)
       : this.repo.memberDeliveries(lead.id, ['failed', 'interrupted']).filter((row) => row.runId).at(-1);
     const failure = failed?.runId ? this.recovery?.failureForRun(failed.runId) : null;
-    if (!failed || !failure || failure.actor !== 'lead' || failure.kind !== 'quota_exhausted') return false;
-    if (failure.outcomeUnknown !== false || failure.dispatchState === 'unknown') {
+    if (!failed || !failure || failure.actor !== 'lead' || !this.automaticFallbackFailureEligible(failed, failure)) return false;
+    if (!this.isFullAccessGroup(group) && (failure.outcomeUnknown !== false || failure.dispatchState === 'unknown')) {
       this.recordFallbackBlocked(group.id, failure, 'Automatic coordinator fallback is waiting for a human because the provider outcome or dispatch state is unknown.');
       return false;
     }
-    const targetId = group.recoveryPolicy.leadFallbackMemberId;
-    const target = this.repo.getMember(targetId);
     const sourceSession = this.store.getSession(lead.sessionId);
+    if (!sourceSession) return false;
+    const target = this.fallbackCandidates(group, lead, sourceSession.provider, group.recoveryPolicy?.leadFallbackMemberId, false, failure)[0];
     const targetSession = target ? this.store.getSession(target.sessionId) : undefined;
-    if (!target || target.groupId !== group.id || target.removedAt || target.held || !sourceSession || !targetSession) {
-      this.recordFallbackBlocked(group.id, failure, 'Automatic coordinator fallback is unavailable: the configured replacement is not an active, available group member.');
+    if (!target || !targetSession) {
+      this.pauseForAutomaticFallback(group, failure, 'No active, available coordinator replacement is outside provider cooldown.');
       return false;
     }
     if (this.sessionBusy(sourceSession) || this.repo.memberDeliveries(lead.id, ['running']).length) return false;
@@ -1622,8 +1941,8 @@ export class GroupService {
       this.recordFallbackBlocked(group.id, failure, `Automatic coordinator fallback was blocked: @${target.handle} must share @${lead.handle}'s permission policy.`);
       return false;
     }
-    const pool = this.quotaFallbackPoolCheck(group, failure, targetSession);
-    if (!pool.ok) { this.recordFallbackBlocked(group.id, failure, pool.reason); return false; }
+    const pool = failure.kind === 'quota_exhausted' ? this.quotaFallbackPoolCheck(group, failure, targetSession) : { ok: true as const, verification: 'verified-distinct' as const };
+    if (!pool.ok) { this.pauseForAutomaticFallback(group, failure, pool.reason); return false; }
     const fingerprint = this.automaticFallbackFingerprint(group.id, failed.id, target.id);
     if (!fingerprint) return false;
     const captureKey = `${group.id}:lead:${failed.id}`;
@@ -1633,7 +1952,8 @@ export class GroupService {
       let checkpoint: RecoveryCheckpoint;
       try {
         checkpoint = await this.recovery!.capture(sourceSession.id, `Automatic quota handoff for ${failed.id}`, failed.runId!);
-        this.validateHandoffCheckpoint(checkpoint, sourceSession.id, failed.runId!);
+        // This is a Full-access handoff. Keep uncertain side-effect references in the checkpoint
+        // and continuation instructions rather than turning them into an approval gate.
       } catch (error) {
         const reason = error instanceof HttpError ? error.message : 'A fresh source recovery checkpoint could not be captured; automatic fallback remains blocked.';
         this.recordFallbackBlocked(group.id, failure, reason);
@@ -1664,10 +1984,18 @@ export class GroupService {
             || currentFailure?.id !== failure.id || !currentSourceSession || !currentTargetSession
             || this.sessionBusy(currentSourceSession) || this.repo.memberDeliveries(lead.id, ['running']).length
             || this.sessionBusy(currentTargetSession) || this.repo.memberDeliveries(target.id, ['queued', 'running']).length) return;
-          this.validateHandoffCheckpoint(checkpoint, currentSourceSession.id, failed.runId!);
-          const currentPool = this.quotaFallbackPoolCheck(fresh, currentFailure, currentTargetSession);
-          if (!currentPool.ok) { this.setFallbackBlocked(fresh, failure, currentPool.reason); return; }
+          const currentPool = currentFailure.kind === 'quota_exhausted'
+            ? this.quotaFallbackPoolCheck(fresh, currentFailure, currentTargetSession)
+            : { ok: true as const, verification: 'verified-distinct' as const };
+          if (!currentPool.ok) { this.pauseForAutomaticFallback(fresh, failure, currentPool.reason); return; }
           this.applyCoordinatorReplacement(fresh, target.id, true, undefined, coworkRequest?.id, currentPool.verification, checkpoint);
+          const status = `@${lead.handle} failed (${failure.kind.replaceAll('_', ' ')}); coordinator role moved to @${target.handle} with the current request checkpoint.`;
+          this.repo.insertMessage({ groupId: fresh.id, senderMemberId: null, recipients: [], kind: 'status',
+            ...(coworkRequest ? { requestId: coworkRequest.id } : {}), content: status });
+          this.event(fresh, 'group.delivery.auto-fallback', `Automatic coordinator fallback: @${lead.handle} → @${target.handle}`, {
+            fromMemberId: lead.id, toMemberId: target.id, failureKind: failure.kind, reason: clean(failure.message, 300),
+            ...(coworkRequest ? { requestId: coworkRequest.id } : {}),
+          }, target.sessionId);
           moved = true;
         });
       } catch (error) {
@@ -1688,42 +2016,89 @@ export class GroupService {
     const automaticFallback = Boolean(policy.leadFallbackMemberId || Object.keys(workerFallbacks).length) && policy.automaticFallback;
     const nextPolicy: GroupRecoveryPolicy = { ...policy, automaticFallback, workerFallbacks };
     this.repo.updateGroup(group.id, { recoveryPolicy: nextPolicy });
-    this.event(group, 'group.recovery-policy.consumed', 'Configured worker fallback was consumed by quota handoff', {
+    this.event(group, 'group.recovery-policy.consumed', 'Configured worker fallback was consumed by automatic handoff', {
       sourceMemberId: sourceId, replacementMemberId: targetId, recoveryPolicy: nextPolicy,
     });
+  }
+
+  private automaticAssignmentHandoff(
+    source: MemberRow, sourceSession: Session, delivery: DeliveryRow, failure: ProviderFailure, checkpoint: RecoveryCheckpoint,
+  ): string {
+    const proxy = Boolean(this.store.db.prepare('SELECT 1 AS found FROM mingle_team_proxy_sessions WHERE session_id=?').get(sourceSession.id));
+    const transcriptText = sourceSession.id && delivery.runId
+      ? this.store.listMessages(sourceSession.id, { limit: 200 }).filter((message) => message.runId === delivery.runId && message.role === 'assistant')
+        .map((message) => clean(message.content, 5000)).filter(Boolean).join('\n').slice(-5000)
+      : '';
+    const sourceText = proxy ? this.remoteActivityText.get(delivery.runId ?? '') ?? transcriptText : transcriptText;
+    if (proxy) {
+      let branch = `mingle/${source.handle}/work`;
+      let commit = '';
+      try {
+        const review = this.store.db.prepare(`SELECT branch,commit_sha FROM mingle_team_host_review_branches
+          WHERE branch=? AND commit_sha IS NOT NULL ORDER BY rowid DESC LIMIT 1`).get(branch) as { branch?: string; commit_sha?: string } | undefined;
+        if (review?.branch) branch = review.branch;
+        if (review?.commit_sha) commit = review.commit_sha;
+      } catch { /* Older host databases may not have the review-branch table. */ }
+      if (!commit) {
+        try {
+          const proxy = this.store.db.prepare('SELECT team_id,shared_project_id,agent_id FROM mingle_team_proxy_sessions WHERE session_id=?')
+            .get(sourceSession.id) as { team_id: string; shared_project_id: string; agent_id: string } | undefined;
+          const intents = proxy ? this.store.db.prepare(`SELECT failure_json FROM mingle_team_host_deliveries WHERE team_id=?
+            AND shared_project_id=? AND agent_id=? ORDER BY issued_at DESC LIMIT 20`).all(proxy.team_id, proxy.shared_project_id, proxy.agent_id) as Array<{ failure_json?: string | null }> : [];
+          for (const row of intents) {
+            const intent = row.failure_json ? JSON.parse(row.failure_json) as { pushedBranch?: { name?: string; commitSha?: string } } : undefined;
+            if (intent?.pushedBranch?.name === branch && intent.pushedBranch.commitSha) { commit = intent.pushedBranch.commitSha; break; }
+          }
+        } catch { /* A failure payload is not completion evidence. */ }
+      }
+      return `Failed worker: @${source.handle} (${sourceSession.provider}/${sourceSession.model}); failure: ${failure.kind}.\n`
+        + `Committed remote work: origin/${clean(branch, 240)}${commit ? ` @ ${clean(commit, 64)}` : ' (latest commit not reported)'}. Fetch it with \`git fetch origin ${clean(branch, 240)}\`, inspect the fetched commit, then continue from that work instead of starting over.\n`
+        + `Final/partial text: ${clean(sourceText || failure.message, 5_000)}\n`;
+    }
+    const branch = checkpoint.worktree.branch ?? sourceSession.branch ?? 'unknown';
+    const head = checkpoint.worktree.head ?? 'unknown';
+    return `Failed worker: @${source.handle} (${sourceSession.provider}/${sourceSession.model}); failure: ${failure.kind}.\n`
+      + `Committed local work: branch ${clean(branch, 200)} at HEAD ${clean(head, 100)}. This repository shares Git objects with the source worktree; inspect the commit and cherry-pick ${clean(head, 100)} (or merge its branch) into your worktree before continuing. Do not start over.\n`
+      + `Final/partial text: ${clean(sourceText || failure.message, 5_000)}\n`;
   }
 
   private async attemptAutomaticWorkerFallback(groupArg: ConversationGroup, deliveryArg: DeliveryRow): Promise<boolean> {
     const group = this.repo.getGroup(groupArg.id);
     const delivery = this.repo.getDelivery(deliveryArg.id);
-    if (!group || group.paused || !delivery || !group.recoveryPolicy?.automaticFallback || delivery.kind !== 'assignment' || !delivery.assignmentId || !delivery.runId) return false;
+    if (!group || group.paused || !delivery || !this.automaticFallbackEnabled(group)
+      || delivery.kind !== 'assignment' || !delivery.assignmentId || !delivery.runId) return false;
     const source = this.repo.getMember(delivery.memberId);
     const assignment = this.repo.getAssignment(delivery.assignmentId);
     const workerRole: GroupMember['role'] = group.mode === 'cowork' ? 'peer' : 'worker';
-    if (!source || source.role !== workerRole || !assignment || assignment.deliveryId !== delivery.id || this.repo.deliverySuccessor(group.id, delivery.id)) return false;
+    if (!source || (source.role !== workerRole && source.role !== 'orchestrator') || !assignment || assignment.deliveryId !== delivery.id
+      || this.repo.deliverySuccessor(group.id, delivery.id)) return false;
     const failure = this.recovery?.failureForRun(delivery.runId);
-    if (!failure || failure.actor !== 'worker' || failure.kind !== 'quota_exhausted') return false;
-    if (failure.outcomeUnknown !== false || failure.dispatchState === 'unknown') {
+    if (!failure || failure.actor !== 'worker' || !this.automaticFallbackFailureEligible(delivery, failure)) return false;
+    if (!this.isFullAccessGroup(group) && (failure.outcomeUnknown !== false || failure.dispatchState === 'unknown')) {
       this.recordFallbackBlocked(group.id, failure, 'Automatic worker fallback is waiting for a human because the provider outcome or dispatch state is unknown.');
       return false;
     }
-    const targetId = group.recoveryPolicy.workerFallbacks?.[source.id];
-    if (!targetId) return false;
-    const target = this.repo.getMember(targetId);
     const task = this.store.getTask(assignment.taskId);
     const sourceSession = this.store.getSession(source.sessionId);
-    const targetSession = target ? this.store.getSession(target.sessionId) : undefined;
-    if (!target || target.groupId !== group.id || target.removedAt || target.held || target.role !== workerRole || !task || task.status === 'done' || task.status === 'running') {
-      this.recordFallbackBlocked(group.id, failure, 'Automatic worker fallback is unavailable: the configured replacement or task is no longer eligible.');
+    if (!sourceSession || !task || task.status === 'done' || task.status === 'running') return false;
+    if (this.automaticFallbackCount(group, assignment.id, task.id) >= MAX_AUTOMATIC_FALLBACKS_PER_TASK) {
+      this.pauseForAutomaticFallback(group, failure, `Task “${clean(task.title, 200)}” exhausted its ${MAX_AUTOMATIC_FALLBACKS_PER_TASK} automatic fallback limit.`);
       return false;
     }
-    if (!sourceSession || this.sessionBusy(sourceSession) || this.repo.memberDeliveries(source.id, ['running']).length) return false;
-    if (!targetSession || this.sessionBusy(targetSession) || this.repo.memberDeliveries(target.id, ['queued', 'running']).length) return false;
+    const configuredId = group.recoveryPolicy?.workerFallbacks?.[source.id];
+    const target = this.fallbackCandidates(group, source, sourceSession.provider, configuredId, true, failure)[0];
+    const targetSession = target ? this.store.getSession(target.sessionId) : undefined;
+    if (!target || !targetSession) {
+      this.pauseForAutomaticFallback(group, failure, `No eligible replacement is available for task “${clean(task.title, 200)}”; all members are held, unavailable, busy, or in cooldown.`);
+      return false;
+    }
+    if (this.sessionBusy(sourceSession) || this.repo.memberDeliveries(source.id, ['running']).length) return false;
+    if (this.sessionBusy(targetSession) || this.repo.memberDeliveries(target.id, ['running']).length) return false;
     if (sourceSession.policy !== targetSession.policy) {
       this.recordFallbackBlocked(group.id, failure, `Automatic reassignment for @${source.handle} was blocked: @${target.handle} does not have the same permission policy.`);
       return false;
     }
-    const pool = this.quotaFallbackPoolCheck(group, failure, targetSession);
+    const pool = failure.kind === 'quota_exhausted' ? this.quotaFallbackPoolCheck(group, failure, targetSession) : { ok: true as const, verification: 'verified-distinct' as const };
     if (!pool.ok) { this.recordFallbackBlocked(group.id, failure, pool.reason); return false; }
     try { this.assertNoTargetTaskConflict(group, target, targetSession.worktreePath, assignment.scope, assignment.id); }
     catch (error) {
@@ -1741,7 +2116,7 @@ export class GroupService {
       let checkpoint: RecoveryCheckpoint;
       try {
         checkpoint = await this.recovery!.capture(sourceSession.id, `Automatic quota handoff for ${delivery.id}`, delivery.runId);
-        this.validateHandoffCheckpoint(checkpoint, sourceSession.id, delivery.runId);
+        // Side-effect uncertainty is conveyed in the handoff rather than becoming a human gate.
       } catch (error) {
         const reason = error instanceof HttpError ? error.message : 'A fresh source recovery checkpoint could not be captured; automatic fallback remains blocked.';
         this.recordFallbackBlocked(group.id, failure, reason);
@@ -1772,23 +2147,27 @@ export class GroupService {
           const currentTargetSession = currentTarget ? this.store.getSession(currentTarget.sessionId) : undefined;
           const currentRequest = this.repo.getRequest(request.id);
           const currentDelivery = this.repo.getDelivery(delivery.id);
-          if (this.closed || !fresh || fresh.paused || !currentDelivery || currentDelivery.status !== 'failed'
-            || this.automaticFallbackFingerprint(group.id, delivery.id, target.id) !== fingerprint || currentFailure?.id !== failure.id
-            || !currentSource || !currentTarget || !currentAssignment || !currentTask || !currentRequest || !currentSourceSession || !currentTargetSession
-            || this.sessionBusy(currentSourceSession) || this.repo.memberDeliveries(currentSource.id, ['running']).length
-            || this.sessionBusy(currentTargetSession) || this.repo.memberDeliveries(currentTarget.id, ['queued', 'running']).length
-            || currentSource.role !== workerRole || currentTarget.role !== workerRole || currentTarget.held
-            || currentSourceSession.policy !== currentTargetSession.policy || currentTask.status === 'done' || currentTask.status === 'running'
-            || this.repo.deliverySuccessor(group.id, currentDelivery.id) || this.existingRecoveryContinuation(group, currentDelivery)) return;
-          this.validateHandoffCheckpoint(checkpoint, currentSourceSession.id, delivery.runId!);
-          const currentPool = this.quotaFallbackPoolCheck(fresh, currentFailure, currentTargetSession);
-          if (!currentPool.ok) { this.setFallbackBlocked(fresh, failure, currentPool.reason); return; }
+          if (this.closed || !fresh || fresh.paused || !currentDelivery || !['failed', 'interrupted'].includes(currentDelivery.status)
+             || this.automaticFallbackFingerprint(group.id, delivery.id, target.id) !== fingerprint || currentFailure?.id !== failure.id
+             || !currentSource || !currentTarget || !currentAssignment || !currentTask || !currentRequest || !currentSourceSession || !currentTargetSession
+             || this.sessionBusy(currentSourceSession) || this.repo.memberDeliveries(currentSource.id, ['running']).length
+             || this.sessionBusy(currentTargetSession) || this.repo.memberDeliveries(currentTarget.id, ['running']).length
+             || (currentSource.role !== workerRole && currentSource.role !== 'orchestrator') || currentTarget.held
+             || currentSourceSession.policy !== currentTargetSession.policy || currentTask.status === 'done' || currentTask.status === 'running'
+             || this.repo.deliverySuccessor(group.id, currentDelivery.id) || this.existingRecoveryContinuation(group, currentDelivery)) return;
+          const currentPool = currentFailure.kind === 'quota_exhausted'
+            ? this.quotaFallbackPoolCheck(fresh, currentFailure, currentTargetSession)
+            : { ok: true as const, verification: 'verified-distinct' as const };
+          if (!currentPool.ok) { this.pauseForAutomaticFallback(fresh, failure, currentPool.reason); return; }
           this.assertNoTargetTaskConflict(fresh, currentTarget, currentTargetSession.worktreePath, currentAssignment.scope, currentAssignment.id);
           const oldText = this.repo.getMessage(currentDelivery.messageId)?.content ?? currentTask.description;
           const dependencies = currentTask.dependsOn.map((id) => `${id} [${this.store.getTask(id)?.status ?? 'missing'}]`).join(', ') || 'none';
-          const sourceContext = this.checkpointHandoffContext(checkpoint, currentTargetSession.worktreePath);
+          const checkpointContext = this.checkpointHandoffContext(checkpoint, currentTargetSession.worktreePath);
+          const sourceContext = this.automaticAssignmentHandoff(currentSource, currentSourceSession, currentDelivery, failure, checkpoint);
+          const title = clean(currentTask.title, 200);
+          const reason = `${failure.kind.replaceAll('_', ' ')}: ${clean(failure.message, 300)}`;
           const message = this.repo.insertMessage({ groupId: fresh.id, senderMemberId: null, recipients: [currentTarget.id], kind: 'assignment', requestId: currentRequest.id,
-            content: truncate(`Automatic quota fallback for task ${currentTask.id}: ${currentTask.title}. Inspect the fresh recovery checkpoint and current workspace before acting; do not repeat completed side effects.\nScope: ${currentAssignment.scope.join(', ')}\nAcceptance criteria: ${clean(currentTask.acceptanceCriteria, 1000)}\nDependencies: ${clean(dependencies, 1000)}\n${sourceContext}${clean(oldText, 6000)}`, 12_000) });
+            content: truncate(`Automatic reassignment for task ${currentTask.id}: ${title}. Inspect the fresh recovery checkpoint and current workspace before acting; do not repeat completed side effects.\nScope: ${currentAssignment.scope.join(', ')}\nAcceptance criteria: ${clean(currentTask.acceptanceCriteria, 1000)}\nDependencies: ${clean(dependencies, 1000)}\nFailure reason: ${reason}\n${checkpointContext}${sourceContext}\nOriginal assignment:\n${clean(oldText, 3000)}`, 12_000) });
           const nextId = deliveryId();
           this.store.updateTask(currentTask.id, { sessionId: currentTarget.sessionId });
           this.repo.insertDelivery({ id: nextId, groupId: fresh.id, requestId: currentRequest.id, messageId: message.id, memberId: currentTarget.id,
@@ -1800,11 +2179,18 @@ export class GroupService {
           this.repo.updateRequest(currentRequest.id, { status: 'active' });
           this.repo.updateGroup(fresh.id, { recoveryState: { status: 'recovering', activeRequestId: currentRequest.id, updatedAt: nowIso() } });
           this.consumeWorkerFallback(fresh, currentSource.id, currentTarget.id);
-          this.event(fresh, 'group.assignment.fallback', `Quota fallback: @${currentSource.handle} → @${currentTarget.handle}`, {
-            assignmentId: currentAssignment.id, failedDeliveryId: currentDelivery.id, replacementDeliveryId: nextId, failureId: failure.id,
-            providerCheckpointId: checkpoint.id, quotaPoolVerification: currentPool.verification,
-            fallbackUncertainty: currentPool.verification === 'unverified' ? 'Distinct provider quota pools were not reported; this single explicitly configured fallback does not assert that the replacement has quota available.' : undefined,
+          this.repo.insertMessage({ groupId: fresh.id, senderMemberId: null, recipients: [], kind: 'status', requestId: currentRequest.id,
+            content: `@${currentSource.handle} failed (${failure.kind.replaceAll('_', ' ')}); reassigned “${title}” to @${currentTarget.handle} with its branch and notes.` });
+          this.event(fresh, 'group.delivery.auto-fallback', `Automatic fallback: @${currentSource.handle} → @${currentTarget.handle}`, {
+            fromMemberId: currentSource.id, toMemberId: currentTarget.id, assignmentId: currentAssignment.id, taskId: currentTask.id,
+            failedDeliveryId: currentDelivery.id, replacementDeliveryId: nextId, failureKind: failure.kind, reason: clean(failure.message, 300),
           }, currentTarget.sessionId);
+          this.event(fresh, 'group.assignment.fallback', `Automatic reassignment: @${currentSource.handle} → @${currentTarget.handle}`, {
+            assignmentId: currentAssignment.id, failedDeliveryId: currentDelivery.id, replacementDeliveryId: nextId, failureId: failure.id,
+             providerCheckpointId: checkpoint.id, quotaPoolVerification: currentPool.verification,
+             fallbackUncertainty: currentPool.verification === 'unverified' ? 'Distinct provider quota pools were not reported; this single explicitly configured fallback does not assert that the replacement has quota available.' : undefined,
+          }, currentTarget.sessionId);
+          this.remoteActivityText.delete(delivery.runId!);
           moved = true;
         });
       } catch (error) {
@@ -2147,6 +2533,12 @@ ${task ? `Task ${task.id}: ${task.title}\nAcceptance: ${task.acceptanceCriteria}
     this.reserved.clear();
     for (const timer of this.safeRetryTimers.values()) clearTimeout(timer);
     this.safeRetryTimers.clear();
+    if (this.stallTimer) clearInterval(this.stallTimer);
+    this.stallTimer = null;
+    this.providerCooldowns.clear();
+    this.deliveryActivity.clear();
+    this.stalledDeliveries.clear();
+    this.remoteActivityText.clear();
     this.fencedCoordinatorDeliveries.clear();
   }
 
@@ -2281,6 +2673,9 @@ ${task ? `Task ${task.id}: ${task.title}\nAcceptance: ${task.acceptanceCriteria}
     const request = this.repo.getRequest(delivery.requestId);
     const session = this.store.getSession(member.sessionId, true);
     const providerFailure = delivery.runId ? this.recovery?.failureForRun(delivery.runId) ?? null : null;
+    this.stalledDeliveries.delete(delivery.id);
+    this.deliveryActivity.delete(delivery.id);
+    if (outcome === 'failed') this.recordProviderCooldown(group, member, providerFailure);
     const failure = outcome === 'failed' ? clean(session?.error ?? 'The run failed', 500) : outcome === 'interrupted' ? 'The run was interrupted' : null;
     const verifiedProgress = this.verifiedProgress(delivery, member);
     const repeatedActionStall = delivery.runId && verifiedProgress.length === 0 ? this.recordRepeatedToolFailures(group, member, delivery) : false;
@@ -2383,9 +2778,10 @@ ${task ? `Task ${task.id}: ${task.title}\nAcceptance: ${task.acceptanceCriteria}
   private shouldAutoRetryFullAccess(
     group: ConversationGroup, member: MemberRow, delivery: DeliveryRow, outcome: Outcome, failure: ProviderFailure | null, safeRetryAt: string | null,
   ): boolean {
+    const stallFailure = this.mayRetryStalledDelivery(delivery, failure);
     if (!this.isFullAccessGroup(group) || group.paused || member.removedAt || safeRetryAt
       || delivery.attempts > MAX_SAFE_RETRIES || this.repo.deliverySuccessor(group.id, delivery.id)
-      || this.repo.deliverySource(group.id, delivery.id)) return false;
+      || this.repo.deliverySource(group.id, delivery.id) && (!stallFailure || this.hasSameMemberRecoveryRetry(delivery))) return false;
     if (outcome === 'interrupted') return true;
     if (outcome !== 'failed' || !failure) return false;
     return failure.retryable || failure.outcomeUnknown === true || failure.dispatchState === 'unknown' || failure.continuationSafety !== 'safe';
@@ -2400,7 +2796,8 @@ ${task ? `Task ${task.id}: ${task.title}\nAcceptance: ${task.acceptanceCriteria}
     const failure = source?.runId ? this.recovery?.failureForRun(source.runId) ?? null : null;
     if (!source || !group || !member || !session || !this.recovery || !this.isFullAccessGroup(group) || group.paused
       || (source.status !== 'failed' && source.status !== 'interrupted') || source.attempts > MAX_SAFE_RETRIES
-      || this.repo.deliverySuccessor(group.id, source.id) || this.repo.deliverySource(group.id, source.id)
+      || this.repo.deliverySuccessor(group.id, source.id)
+      || this.repo.deliverySource(group.id, source.id) && !this.mayRetryStalledDelivery(source, failure)
       || (source.status === 'failed' && (!failure || !(failure.retryable || failure.outcomeUnknown === true
         || failure.dispatchState === 'unknown' || failure.continuationSafety !== 'safe')))) return;
 
@@ -2426,7 +2823,7 @@ ${task ? `Task ${task.id}: ${task.title}\nAcceptance: ${task.acceptanceCriteria}
       if (!current || !currentGroup || !currentMember || !request || current.status !== source.status
         || current.updatedAt !== source.updatedAt || current.runId !== source.runId || !this.isFullAccessGroup(currentGroup)
         || currentGroup.paused || current.attempts > MAX_SAFE_RETRIES || this.repo.deliverySuccessor(currentGroup.id, current.id)
-        || this.repo.deliverySource(currentGroup.id, current.id)
+        || this.repo.deliverySource(currentGroup.id, current.id) && !this.mayRetryStalledDelivery(current, currentFailure)
         || (current.status !== 'failed' && current.status !== 'interrupted')) return;
       if (current.status === 'failed' && (!currentFailure || !(currentFailure.retryable || currentFailure.outcomeUnknown === true
         || currentFailure.dispatchState === 'unknown' || currentFailure.continuationSafety !== 'safe'))) return;
@@ -2591,13 +2988,14 @@ ${task ? `Task ${task.id}: ${task.title}\nAcceptance: ${task.acceptanceCriteria}
     try {
       let group = this.repo.getGroup(groupId);
       if (!group || group.paused) return;
-      if (group.recoveryPolicy?.automaticFallback) {
-        for (const failed of this.repo.deliveries(groupId, ['failed'])) {
+      if (this.automaticFallbackEnabled(group)) {
+        for (const failed of this.repo.deliveries(groupId, ['failed', 'interrupted'])) {
           const moved = await this.attemptAutomaticWorkerFallback(group, failed);
           if (moved) group = this.repo.getGroup(groupId) ?? group;
+          if (this.repo.getGroup(groupId)?.paused) return;
         }
       }
-      if (group.recoveryState?.status === 'degraded' && group.recoveryPolicy?.automaticFallback) {
+      if (group.recoveryState?.status === 'degraded' && this.automaticFallbackEnabled(group)) {
         await this.attemptAutomaticLeadFallback(group);
         group = this.repo.getGroup(groupId);
         if (!group || group.paused) return;
@@ -2849,6 +3247,7 @@ ${task ? `Task ${task.id}: ${task.title}\nAcceptance: ${task.acceptanceCriteria}
       return false;
     }
     this.repo.setDelivery(d.id, { runId });
+    this.deliveryActivity.set(d.id, { fingerprint: this.deliveryActivityFingerprint(this.repo.getDelivery(d.id)!), at: this.now() });
     this.reserved.delete(session.id);
     this.event(group, 'group.delivery.started', `Delivery started: @${member.handle}`, { deliveryId: d.id, runId, kind: d.kind, hop: d.hop }, session.id);
     return true;
