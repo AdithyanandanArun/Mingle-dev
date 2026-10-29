@@ -137,6 +137,7 @@ export interface AppSettings {
   defaultPolicy: Policy; defaultServiceTier?: string; theme: 'dark' | 'light'; claudeExecutable: string; codexExecutable: string;
   antigravityExecutable?: string; opencodeExecutable?: string;
   groupDefaults?: import('./groups').GroupDefaults;
+  autoResumeOnRestart?: boolean;
   autoCompactPercent?: number | null;
   onboardingCompletedVersion?: number;
   browserAgentEnabled?: boolean; browserExecutable?: string;
@@ -202,6 +203,7 @@ export const UpdateSettingsSchema = z.object({
   antigravityExecutable: z.string().max(4096).optional(), opencodeExecutable: z.string().max(4096).optional(),
   groupDefaults: z.lazy(() => GroupDefaultsSchema).optional(),
   autoCompactPercent: z.number().int().min(1).max(95).nullable().optional(),
+  autoResumeOnRestart: z.boolean().optional(),
   onboardingCompletedVersion: z.number().int().min(1).max(1).optional(),
   browserAgentEnabled: z.boolean().optional(), browserExecutable: z.string().max(4096).optional(),
   browserDefaultMode: z.enum(['managed', 'existing']).optional(), browserExistingSourceId: z.string().max(200).optional(),

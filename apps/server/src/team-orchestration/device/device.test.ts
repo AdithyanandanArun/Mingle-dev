@@ -10,7 +10,7 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 import { TeamDeliveryPayloadSchema } from '@mingle/contracts';
 import type { AdapterEvent, TeamDeliveryPayload, TeamStructurePayload } from '@mingle/contracts';
 import { TEAM_CONSENT_DISCLAIMER_VERSION } from '@mingle/contracts';
-import { openDatabase } from '../../db.ts';
+import { openDatabase, SCHEMA_VERSION } from '../../db.ts';
 import { Store } from '../../store.ts';
 import { createDeviceSide } from './index.ts';
 import { makeRepo, runGit, waitFor } from '../../test-utils.ts';
@@ -1242,7 +1242,7 @@ describe('team device migration 21, session base migration 22, and terminal stat
     roots.push(root);
     const file = path.join(root, 'state.sqlite');
     const db = openDatabase(file);
-    expect((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(23);
+    expect((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(SCHEMA_VERSION);
     db.close();
     for (const legacyVersion of [19, 20]) {
       const older = new DatabaseSync(file);
@@ -1250,7 +1250,7 @@ describe('team device migration 21, session base migration 22, and terminal stat
         DROP TABLE mingle_team_device_structures; DROP TABLE mingle_team_device_consents; PRAGMA user_version=${legacyVersion};`);
       older.close();
       const upgraded = openDatabase(file);
-      expect((upgraded.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(23);
+      expect((upgraded.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(SCHEMA_VERSION);
       expect(upgraded.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='mingle_team_device_consents'").get()).toBeTruthy();
       upgraded.close();
     }

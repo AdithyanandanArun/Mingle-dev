@@ -396,6 +396,14 @@ const MIGRATIONS: (string | ((db: DatabaseSync) => void))[] = [
     // Migration 23 keeps terminal owner-device status payloads durable until mailbox enqueue succeeds.
     (db) => addColumn(db, 'mingle_team_device_deliveries', 'terminal_status_json',
       'ALTER TABLE mingle_team_device_deliveries ADD COLUMN terminal_status_json TEXT;'),
+    // Migration 24 persists at-most-once automatic session continuation intents across restarts.
+    `CREATE TABLE session_resume_queue (
+       run_id TEXT PRIMARY KEY REFERENCES session_runs(id), session_id TEXT NOT NULL REFERENCES sessions(id),
+       reason TEXT NOT NULL, created_at TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts BETWEEN 0 AND 1),
+       state TEXT NOT NULL CHECK (state IN ('queued','starting','resumed','skipped')),
+       task_id TEXT, resumed_run_id TEXT, skipped_reason TEXT
+     );
+     CREATE INDEX session_resume_queue_state ON session_resume_queue(state, created_at);`,
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;

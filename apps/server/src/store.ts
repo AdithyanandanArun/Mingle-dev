@@ -13,7 +13,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   defaultProvider: 'codex', defaultCodexModel: 'gpt-6.1-sol', defaultClaudeModel: 'claude-sonnet-5-5', defaultAntigravityModel: 'default', defaultOpencodeModel: 'default', defaultEffort: 'high', defaultIsolated: true,
   defaultPolicy: 'supervised', defaultServiceTier: 'standard', theme: 'dark', claudeExecutable: '', codexExecutable: '', antigravityExecutable: '', opencodeExecutable: '',
   groupDefaults: { maxParallel: 2, maxTurns: 80, maxHops: 6, autonomy: { mode: 'balanced' } },
-  autoCompactPercent: null, onboardingCompletedVersion: undefined, browserAgentEnabled: true, browserExecutable: '', browserDefaultMode: 'managed', browserExistingSourceId: '', browserCdpEndpoint: '',
+  autoCompactPercent: null, autoResumeOnRestart: true, onboardingCompletedVersion: undefined, browserAgentEnabled: true, browserExecutable: '', browserDefaultMode: 'managed', browserExistingSourceId: '', browserCdpEndpoint: '',
 };
 
 export interface NewSession {
@@ -24,6 +24,11 @@ export interface NewSession {
 export interface NewTask { id?: string; projectId: string; title: string; description: string; acceptanceCriteria: string; sessionId: string | null; dependsOn: string[]; status: TaskStatus }
 
 export type ChangeListener = (event: WorkspaceEvent | undefined) => void;
+
+export interface SessionResumeEntry {
+  runId: string; sessionId: string; reason: string; createdAt: string; attempts: number;
+  state: 'queued' | 'starting' | 'resumed' | 'skipped'; taskId: string | null; resumedRunId: string | null; skippedReason: string | null;
+}
 
 const mapProject = (r: Row): Project => ({ id: r.id as string, name: r.name as string, path: r.path as string, createdAt: r.created_at as string, isExample: r.is_example === 1 });
 const mapSession = (r: Row): Session => ({
@@ -398,6 +403,45 @@ export class Store {
   }
   activeRunSessionIds(): string[] {
     return this.all("SELECT DISTINCT session_id FROM session_runs WHERE status = 'running'").map((row) => row.session_id as string);
+  }
+  activeRuns(): SessionRun[] {
+    return this.all(`SELECT ${RUN_FIELDS} FROM session_runs WHERE status = 'running' ORDER BY started_at, rowid`).map((row) => this.mapRun(row));
+  }
+  taskIdForRun(runId: string): string | null {
+    const row = this.get(`SELECT payload FROM events WHERE type = 'session.run.started' AND json_extract(payload, '$.runId') = ? ORDER BY id DESC LIMIT 1`, runId);
+    if (!row) return null;
+    try {
+      const payload = JSON.parse(row.payload as string) as Record<string, unknown>;
+      return typeof payload.taskId === 'string' ? payload.taskId : null;
+    } catch { return null; }
+  }
+  enqueueSessionResume(input: { runId: string; sessionId: string; reason: string; taskId?: string | null }): void {
+    this.run(`INSERT OR IGNORE INTO session_resume_queue(run_id,session_id,reason,created_at,attempts,state,task_id)
+      VALUES(?,?,?,?,0,'queued',?)`, input.runId, input.sessionId, input.reason, nowIso(), input.taskId ?? null);
+  }
+  queuedSessionResumes(): SessionResumeEntry[] {
+    return this.all("SELECT * FROM session_resume_queue WHERE state = 'queued' AND attempts = 0 ORDER BY created_at, rowid").map((row) => ({
+      runId: row.run_id as string, sessionId: row.session_id as string, reason: row.reason as string, createdAt: row.created_at as string,
+      attempts: row.attempts as number, state: row.state as SessionResumeEntry['state'], taskId: (row.task_id as string | null) ?? null,
+      resumedRunId: (row.resumed_run_id as string | null) ?? null, skippedReason: (row.skipped_reason as string | null) ?? null,
+    }));
+  }
+  claimSessionResume(runId: string): boolean {
+    return Number(this.db.prepare("UPDATE session_resume_queue SET state='starting',attempts=1 WHERE run_id=? AND state='queued' AND attempts=0").run(runId).changes) === 1;
+  }
+  finishSessionResume(runId: string, outcome: { resumedRunId: string } | { skippedReason: string }): void {
+    if ('resumedRunId' in outcome) this.run("UPDATE session_resume_queue SET state='resumed',resumed_run_id=?,skipped_reason=NULL WHERE run_id=? AND state='starting'", outcome.resumedRunId, runId);
+    else this.run("UPDATE session_resume_queue SET state='skipped',skipped_reason=? WHERE run_id=? AND state IN ('queued','starting')", outcome.skippedReason, runId);
+  }
+  abandonStartingSessionResumes(): SessionResumeEntry[] {
+    const rows = this.all("SELECT * FROM session_resume_queue WHERE state='starting'");
+    for (const row of rows) this.run("UPDATE session_resume_queue SET state='skipped',skipped_reason='resume-process-restarted' WHERE run_id=? AND state='starting'", row.run_id as string);
+    return rows.map((row) => ({ runId: row.run_id as string, sessionId: row.session_id as string, reason: row.reason as string,
+      createdAt: row.created_at as string, attempts: row.attempts as number, state: 'skipped', taskId: (row.task_id as string | null) ?? null,
+      resumedRunId: (row.resumed_run_id as string | null) ?? null, skippedReason: 'resume-process-restarted' }));
+  }
+  isTeamProxySession(sessionId: string): boolean {
+    return Boolean(this.get('SELECT 1 AS found FROM mingle_team_proxy_sessions WHERE session_id=?', sessionId));
   }
   recoverRuns(): void {
     const at = nowIso();
