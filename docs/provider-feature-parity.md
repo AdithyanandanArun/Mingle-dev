@@ -1,33 +1,35 @@
 # Provider feature coverage
 
-Updated 2026-10-20 using native harness protocols and original Mingle UI. This records the current scope of the provider integration.
+Updated 2026-10-29 using native harness protocols and original Mingle UI. This records the current scope of the provider integration.
 
-| Feature | Codex | Claude |
-| --- | --- | --- |
-| Model discovery | App-server `model/list` | SDK `supportedModels()`; canonical aliases retained |
-| Reasoning | Advertised levels, including Extra High/Max/Ultra when supported | Advertised SDK levels; unavailable controls omitted |
-| Speed | Standard or advertised service tier; explicit standard-speed override | Standard; Fast only when the model reports support |
-| Permissions | Supervised, Auto-accept edits, native Auto reviewer, Full access | Native default, acceptEdits, model-supported auto, bypassPermissions |
-| Saved defaults | Model, effort, permission policy and service tier | Same, validated against selected model |
-| `/` picker | Mingle workspace commands | Mingle commands plus SDK-reported commands and aliases |
-| `$` picker | Native installed skill catalog; explicit skill input items | SDK skill catalog; one selected skill dispatched by name |
-| Skill scope | Scopes returned by Codex `skills/list` | Bundled/project/available plugin skills reported under the project settings source |
-| Catalog refresh | On session/model changes, reconnect or explicit retry; fresh selection validation before a run | Same; metadata RPCs have a bounded deadline and close the CLI afterward |
-| Shared browser | Run-scoped local MCP tools for the visible Chromium tabs | Same, injected through SDK HTTP MCP |
-| Auto-compaction | Native per-thread token threshold from provider capacity metadata | Native percentage environment override |
-| `/usage` | Native quota windows, credit balance, available reset count and grant expiry details when reported | Native five-hour, seven-day and applicable scoped windows; no spendable credit balance or reset-grant count exposed by the SDK |
+| Feature | Codex | Claude | Antigravity | OpenCode |
+| --- | --- | --- | --- | --- |
+| Model discovery | App-server `model/list` | SDK `supportedModels()`; canonical aliases retained | Authenticated ACP configuration | ACP model selector and per-model variants |
+| Reasoning | Advertised levels, including Extra High/Max/Ultra when supported | Advertised SDK levels; unavailable controls omitted | Per-model native thinking levels; unknown values stay Native default | Per-model native variants; unknown values stay Native default |
+| Speed | Standard or advertised service tier; explicit standard-speed override | Standard; Fast only when the model reports support | Standard only | Standard only |
+| Permissions | Supervised, Auto-accept edits, native Auto reviewer, Full access | Native default, acceptEdits, model-supported auto, bypassPermissions | Supervised, Auto-accept edits, Full access through native modes | Supervised, Auto-accept edits, Full access through per-run permission rules; Auto unsupported |
+| Saved defaults | Model, effort, permission policy and service tier | Same, validated against selected model | Model, effort and permission policy; Standard tier | Model, effort and permission policy; Standard tier |
+| `/` picker | Mingle workspace commands; no provider slash-command API | Mingle commands plus SDK-reported commands and aliases | Asynchronously reported ACP commands | ACP commands, including native skills, for the session folder |
+| `$` picker | Native installed skill catalog; explicit skill input items | SDK skill catalog; one selected skill dispatched by name | Unsupported | Unsupported; native skills are available through `/` |
+| Skill scope | Scopes returned by Codex `skills/list` | Bundled/project/available plugin skills reported under the project settings source | Provider-owned skills are not selectable through Mingle | Native ACP command catalog in the opened project folder |
+| Catalog refresh | On session/model changes, reconnect or explicit retry; fresh selection validation before a run | Same; metadata RPCs have a bounded deadline and close the CLI afterward | Native command/model refresh without inference | Metadata-only ACP session; project command discovery uses the opened session folder |
+| Shared browser and team tools | Run-scoped local MCP servers over HTTP | Same, injected through SDK HTTP MCP | ACP HTTP MCP when advertised; otherwise local stdio-to-HTTP bridge | ACP HTTP MCP when advertised; otherwise local stdio-to-HTTP bridge |
+| Progress tools | Run-scoped Mingle status and checklist MCP tools over HTTP | Same over SDK HTTP MCP | ACP HTTP MCP when advertised; otherwise local stdio-to-HTTP bridge | ACP HTTP MCP when advertised; otherwise local stdio-to-HTTP bridge |
+| Subagent rail | `spawnAgent`/`spawn_agent` calls; captures reported child-thread assistant text and tool activity under the spawn call. Requested model is retained when supplied. | `Task`/`Agent`; captures child assistant text and tool activity through `parent_tool_use_id`, with model from tool input when supplied | No dedicated native subagent spawn identity or child-session relationship in the inspected ACP 1.4.1 interface; generic tools are not grouped as subagents | Native `task` launch with reported type/description, prompt, status and result. Child updates attach when ACP supplies a parent tool-call or mapped child-session ID; otherwise the rail shows launch/result only |
+| Auto-compaction | Native per-thread token threshold from provider capacity metadata | Native percentage environment override | Native behavior only; custom threshold unsupported | Native behavior only; custom threshold unsupported |
+| `/usage` | Native quota windows, credit balance, available reset count and grant expiry details when reported | Native five-hour, seven-day and applicable scoped windows; no spendable credit balance or reset-grant count exposed by the SDK | Native maintenance command on the verified runtime version | Unavailable; ACP exposes no account quota or credits |
 
 ## Antigravity
 
 Google's ACP runtime is a third independent provider. Settings includes explicit installation, Google sign-in, cancellation and reconnection. Model choices come from authenticated native configuration metadata; unknown thinking controls remain **Native default**. Supervised, Auto-accept edits and Full access map to ACP modes, with approvals returned to the provider through its permission request protocol. Standard is the only Mingle service tier exposed.
 
-Independent sessions and group agents share the existing runtime, worktree, tool activity and change-summary machinery. Browser and team MCP servers are supplied per session with ephemeral authorization. Native conversation IDs are retained for later turns. Native command metadata is cached without sending discovery prompts.
+Independent sessions and group agents share the existing runtime, worktree, tool activity and change-summary machinery. Browser, team and progress MCP servers are supplied per session with ephemeral authorization. ACP HTTP MCP is preferred; if it is not advertised, a private local stdio bridge forwards to the existing run-scoped HTTP endpoint. Native conversation IDs are retained for later turns. Native command metadata is cached without sending discovery prompts.
 
 Native history import, explicit skill attachments and a custom compaction threshold are unsupported. Quota reads use only the verified runtime's native maintenance command; unknown credit/reset fields remain unreported. An installed runtime is not proof of a valid Google login or account entitlement. See [Antigravity protocol research and limits](provider-antigravity.md).
 
 ## OpenCode
 
-OpenCode's native ACP server (`opencode acp`) is the fourth independent provider. Models are its `provider/model` IDs, reasoning effort is its native model variants with an explicit Native default, and the `/` picker lists the commands (including skills) it advertises for the session folder, discovered without a prompt. Supervised, Auto-accept edits and Full access are enforced with per-run OpenCode permission rules; Auto is unsupported. Browser and team MCP are registered per session. Native history import, usage/quota, the `$` skill picker, a custom compaction threshold and service tiers are unsupported and reported explicitly. See provider-opencode.md for protocol details and verification limits.
+OpenCode's native ACP server (`opencode acp`) is the fourth independent provider. Models are its `provider/model` IDs, reasoning effort is its native model variants with an explicit Native default, and the `/` picker lists the commands (including skills) it advertises for the session folder, discovered without a prompt. Supervised, Auto-accept edits and Full access are enforced with per-run OpenCode permission rules; Auto is unsupported. Browser, team and progress MCP use HTTP when advertised and the local stdio bridge otherwise. OpenCode's `task` tool appears in the subagent rail; child transcript/tool details are linked only when ACP exposes the parent or child-session identity. Native history import, usage/quota, the `$` skill picker, a custom compaction threshold and service tiers are unsupported and reported explicitly. See provider-opencode.md for protocol details and verification limits.
 
 ## Mingle commands
 
