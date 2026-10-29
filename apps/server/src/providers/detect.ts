@@ -47,7 +47,7 @@ export async function detectAntigravity(settings: AppSettings, deps: DetectDeps 
     const authNote = isAntigravityAuthenticated(found.executable.path, env)
       ? ANTIGRAVITY_AUTH_CHECKED
       : ANTIGRAVITY_AUTH_UNVERIFIED;
-    const note = `${isRecord(mcp) && mcp.http === true ? '' : 'ACP did not advertise HTTP MCP; browser/team connections are unavailable. '}${authNote}`;
+    const note = `${isRecord(mcp) && mcp.http === true ? '' : 'ACP did not advertise HTTP MCP; Mingle browser, team and progress tools use stdio instead. '}${authNote}`;
     return { ...antigravityInfo(found.executable.path, runtime.version, cached?.models ?? [ANTIGRAVITY_DEFAULT], true, note), promptCapabilities: acpPromptCapabilities(runtime.capabilities) };
   } catch (error) {
     return antigravityInfo(found.executable.path, null, [ANTIGRAVITY_DEFAULT], false, `Antigravity ACP could not initialize: ${truncate(redactSecrets(errorMessage(error)), 350)}`);

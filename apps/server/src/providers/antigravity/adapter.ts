@@ -8,6 +8,7 @@ import {
 import { AcpRpcError, ACP_INVALID_PARAMS, ACP_METHOD_NOT_FOUND } from './rpc.js';
 import { choices, configuration, mergeAntigravityMetadata, nativeModelValue, nativeModes, object, parseAntigravityMetadata } from './metadata.js';
 import { acpPrompt, acpPromptCapabilities, invocationText } from '../attachments.js';
+import { acpMcpServerConfigs, ensureMcpStdioBridgePath, type HttpMcpConnection } from '../common/mcp-stdio-bridge.js';
 
 export interface AntigravityAdapterDeps { env?: NodeJS.ProcessEnv; spawn?: AntigravitySpawn; timeoutMs?: number }
 const MODE: Record<string, string> = { supervised: 'default', balanced: 'auto_edit', 'full-access': 'yolo' };
@@ -92,12 +93,12 @@ class AntigravityRun {
         notification: (method, params) => this.onNotification(method, params), request: (method, params) => this.onRequest(method, params),
       });
       const { conn, capabilities } = this.runtime;
-      const connections = [this.options.browserMcp && { name: 'mingle_browser', ...this.options.browserMcp }, this.options.teamMcp && { name: 'mingle_team', ...this.options.teamMcp }, this.options.progressMcp && { name: 'mingle_progress', ...this.options.progressMcp }].filter((value): value is { name: string; url: string; token: string } => Boolean(value));
+      const connections = [this.options.browserMcp && { name: 'mingle_browser', ...this.options.browserMcp }, this.options.teamMcp && { name: 'mingle_team', ...this.options.teamMcp }, this.options.progressMcp && { name: 'mingle_progress', ...this.options.progressMcp }].filter((value): value is HttpMcpConnection & { name: string } => Boolean(value));
       const supportsHttpMcp = object(capabilities.mcpCapabilities).http === true;
-      if (connections.some((connection) => connection.name !== 'mingle_progress') && !supportsHttpMcp) throw new ProviderError('The selected Antigravity runtime did not advertise HTTP MCP support. Mingle browser and team tools cannot be connected; no prompt was sent.', { code: 'mcp_unsupported' });
-      if (this.options.progressMcp && !supportsHttpMcp) this.info('This Antigravity runtime does not advertise HTTP MCP support. Mingle progress tools are unavailable; use the native task plan when reported.');
-      const registeredConnections = connections.filter((connection) => supportsHttpMcp || connection.name !== 'mingle_progress');
-      const mcpServers = registeredConnections.map((connection) => ({ type: 'http', name: connection.name, url: connection.url, headers: [{ name: 'Authorization', value: `Bearer ${connection.token}` }] }));
+      const bridgePath = !supportsHttpMcp && connections.length ? await ensureMcpStdioBridgePath(this.env) : undefined;
+      if (!supportsHttpMcp && connections.length) this.info('This Antigravity runtime does not advertise HTTP MCP; Mingle tools are connected through ACP stdio.');
+      const registeredConnections = connections;
+      const mcpServers = acpMcpServerConfigs(registeredConnections, { supportsHttp: supportsHttpMcp, bridgePath });
       const params = { cwd: this.options.session.worktreePath, mcpServers, _meta: { antigravity: { eagerMcpServers: registeredConnections.map((connection) => connection.name), mcpMaxOutputBytes: 64_000 } } };
       const existing = this.options.session.providerSessionId;
       if (existing) {

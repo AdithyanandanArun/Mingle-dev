@@ -42,7 +42,7 @@ export async function detectOpencode(settings: AppSettings, deps: OpencodeDetect
     const notes = [
       `OpenCode ${metadata.version || version} reported ${count} model${count === 1 ? '' : 's'} from ${metadata.providers.join(', ') || 'its configured providers'}.`,
       'Provider sign-in, quota and network access are checked by OpenCode when a run starts; Mingle never reads OpenCode credential files.',
-      metadata.http ? null : 'ACP did not advertise HTTP MCP; browser and team tools are unavailable.',
+      metadata.http ? null : 'ACP did not advertise HTTP MCP; Mingle browser, team and progress tools use stdio instead.',
       metadata.unmeasured ? `${metadata.unmeasured} model${metadata.unmeasured === 1 ? '' : 's'} could not be inspected for reasoning variants within the probe budget; those show Native default only.` : null,
       metadata.failures ? `${metadata.failures} model${metadata.failures === 1 ? '' : 's'} did not confirm selection during inspection and show Native default only.` : null,
     ].filter(Boolean).join(' ');

@@ -41,6 +41,7 @@ function isSubagentLaunch(provider: Session['provider'], call: ToolCall): boolea
   if (call.category !== 'agent' || /mingle_team|team_/i.test(call.name)) return false;
   if (provider === 'claude') return call.name === 'Task' || call.name === 'Agent';
   if (provider === 'codex') return call.name === 'agent:spawnAgent' || call.name === 'agent:spawn_agent';
+  if (provider === 'opencode') return call.name.toLowerCase() === 'task';
   return false;
 }
 

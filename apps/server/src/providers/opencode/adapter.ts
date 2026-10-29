@@ -1,6 +1,7 @@
 import type { AdapterEvent, AgentAdapter, ContextCompactionResult, Policy, RunOptions, ToolActivity, ToolCategory } from '@mingle/contracts';
 import { ProviderError, abortError, errorMessage, isRecord, markDispatched, markNotDispatched, redactSecrets, truncate } from '../common.js';
 import { nativePlanSteps, sessionPlanSteps } from '../plans.js';
+import { acpMcpServerConfigs, ensureMcpStdioBridgePath, type HttpMcpConnection } from '../common/mcp-stdio-bridge.js';
 import { AcpRpcError, ACP_INVALID_PARAMS, ACP_METHOD_NOT_FOUND } from './rpc.js';
 import {
   NATIVE_EFFORT, NATIVE_VARIANT_DEFAULT, OPENCODE_DEFAULT_MODEL, OPENCODE_POLICIES, choices, configuration, currentValue, nativeEfforts, object, parseNativeCommands,
@@ -20,6 +21,9 @@ const TEAM_PREFIX = 'mingle_team_';
 const PROGRESS_PREFIX = 'mingle_progress_';
 const text = (value: unknown): string | undefined => typeof value === 'string' ? value : undefined;
 const json = (value: unknown, max = 20_000): string => { try { return truncate(typeof value === 'string' ? value : JSON.stringify(value) ?? '', max); } catch { return ''; } };
+function taskLaunch(update: Record<string, unknown>): boolean {
+  return text(update.kind)?.toLowerCase() === 'task' || text(update.name)?.toLowerCase() === 'task' || text(update.title)?.toLowerCase() === 'task';
+}
 
 /**
  * OpenCode's default agent allows every tool without asking, so Mingle's permission modes are expressed as OpenCode permission
@@ -100,6 +104,8 @@ class OpencodeRun {
   private commands: ReturnType<typeof parseNativeCommands> = [];
   private promptPromise: Promise<unknown> | null = null;
   private readonly tools = new Map<string, ToolActivity>();
+  private readonly agentLaunches = new Set<string>();
+  private readonly childSessions = new Map<string, string>();
   private readonly cancellation = new AbortController();
   private readonly signal: AbortSignal;
   private rejectInterrupted!: (error: Error) => void;
@@ -149,14 +155,12 @@ class OpencodeRun {
       });
       const { conn, capabilities } = this.runtime;
       const connections = [browserMcp && { name: 'mingle_browser', ...browserMcp }, teamMcp && { name: 'mingle_team', ...teamMcp }, progressMcp && { name: 'mingle_progress', ...progressMcp }]
-        .filter((value): value is { name: string; url: string; token: string } => Boolean(value));
+        .filter((value): value is HttpMcpConnection & { name: string } => Boolean(value));
       const supportsHttpMcp = object(capabilities.mcpCapabilities).http === true;
-      if (connections.some((connection) => connection.name !== 'mingle_progress') && !supportsHttpMcp) {
-        throw new ProviderError('The selected OpenCode runtime did not advertise HTTP MCP support. Mingle browser and team tools cannot be connected; no prompt was sent.', { code: 'mcp_unsupported' });
-      }
-      if (progressMcp && !supportsHttpMcp) this.info('This OpenCode runtime does not advertise HTTP MCP support. Mingle progress tools are unavailable; use the native task plan when reported.');
-      // Per-session ACP registration keeps the capability in this child's memory only; nothing is written to OpenCode configuration.
-      const mcpServers = connections.filter((connection) => supportsHttpMcp || connection.name !== 'mingle_progress').map((connection) => ({ type: 'http', name: connection.name, url: connection.url, headers: [{ name: 'Authorization', value: `Bearer ${connection.token}` }] }));
+      const bridgePath = !supportsHttpMcp && connections.length ? await ensureMcpStdioBridgePath(this.env) : undefined;
+      if (!supportsHttpMcp && connections.length) this.info('This OpenCode runtime does not advertise HTTP MCP; Mingle tools are connected through ACP stdio.');
+      // Per-session ACP registration keeps each capability in this child's memory only; nothing is written to OpenCode configuration.
+      const mcpServers = acpMcpServerConfigs(connections, { supportsHttp: supportsHttpMcp, bridgePath });
       const params = { cwd: session.worktreePath, mcpServers };
       const existing = session.providerSessionId;
       if (existing) {
@@ -348,8 +352,18 @@ class OpencodeRun {
     if (method !== 'session/update' || this.phase === 'done') return;
     const data = object(params);
     const update = object(data.update);
-    if (this.sessionId && data.sessionId !== this.sessionId) return;
     const kind = update.sessionUpdate;
+    const sessionId = text(data.sessionId);
+    const childParent = this.parentLaunchFor(data, update);
+    if (childParent && (kind === 'agent_message_chunk' || kind === 'tool_call' || kind === 'tool_call_update')) {
+      if (this.phase === 'prompt' && !this.signal.aborted) this.subagentUpdate(childParent, sessionId, update);
+      return;
+    }
+    if (this.sessionId && sessionId !== this.sessionId) {
+      const mappedParent = sessionId ? this.childSessions.get(sessionId) : undefined;
+      if (mappedParent && this.phase === 'prompt' && !this.signal.aborted) this.subagentUpdate(mappedParent, sessionId, update);
+      return;
+    }
     if (kind === 'available_commands_update' && Array.isArray(update.availableCommands)) { this.commands = parseNativeCommands(update.availableCommands); return; }
     if (this.phase !== 'prompt' || this.signal.aborted) return; // In particular, suppress native history replay while loading.
     if (kind === 'agent_message_chunk' && object(update.content).type === 'text' && typeof object(update.content).text === 'string') this.emit({ type: 'text', text: String(object(update.content).text) });
@@ -372,30 +386,67 @@ class OpencodeRun {
     // Reasoning chunks are provider-private. usage_update.used is context size, not token usage.
   }
 
-  private tool(update: Record<string, unknown>): void {
-    const id = text(update.toolCallId);
-    if (!id || id.length > 200) return;
+  private parentLaunchFor(data: Record<string, unknown>, update: Record<string, unknown>): string | undefined {
+    for (const source of [update, data]) {
+      for (const key of ['parentToolCallId', 'parent_tool_call_id', 'parentCallId', 'parentId', 'parent_id', 'taskId']) {
+        const candidate = text(source[key]);
+        if (candidate && this.agentLaunches.has(candidate)) return candidate;
+      }
+    }
+    const sessionId = text(data.sessionId);
+    return sessionId ? this.childSessions.get(sessionId) : undefined;
+  }
+
+  private subagentUpdate(parentId: string, sessionId: string | undefined, update: Record<string, unknown>): void {
+    const kind = update.sessionUpdate;
+    if (kind === 'agent_message_chunk' && object(update.content).type === 'text' && typeof object(update.content).text === 'string') {
+      const messageId = text(update.messageId) ?? text(update.id) ?? `child:${sessionId ?? parentId}`;
+      this.emit({ type: 'subagent.text', parentId, messageId, text: String(object(update.content).text) });
+    } else if (kind === 'tool_call' || kind === 'tool_call_update') this.tool(update, { parentId, sessionId });
+  }
+
+  private taskSessionIds(value: unknown, depth = 0): string[] {
+    if (depth > 5 || !value || typeof value !== 'object') return [];
+    const entries = Array.isArray(value) ? value.slice(0, 100).map((item, index) => [String(index), item] as const) : Object.entries(value).slice(0, 100);
+    const ids: string[] = [];
+    for (const [key, item] of entries) {
+      const normalized = key.replace(/[_-]/g, '').toLowerCase();
+      const sessionField = /^(?:child|subagent|task|agent)(?:session|thread)(?:id)?$/.test(normalized);
+      if (sessionField && typeof item === 'string' && item.length <= 200) ids.push(item);
+      else if (sessionField && item && typeof item === 'object' && !Array.isArray(item) && typeof object(item).id === 'string') ids.push(String(object(item).id));
+      if (item && typeof item === 'object') ids.push(...this.taskSessionIds(item, depth + 1));
+    }
+    return [...new Set(ids)];
+  }
+
+  private tool(update: Record<string, unknown>, child?: { parentId: string; sessionId?: string }): void {
+    const nativeId = text(update.toolCallId);
+    if (!nativeId || nativeId.length > 200) return;
+    const isTask = taskLaunch(update);
+    const id = child ? `subagent:${child.sessionId ?? child.parentId}:${nativeId}`.slice(0, 200) : nativeId;
     const prior = this.tools.get(id);
     const title = text(update.title) ?? prior?.summary ?? 'OpenCode tool';
-    const nativeName = text(update.name) ?? prior?.name ?? title;
+    const nativeName = isTask ? 'task' : text(update.name) ?? prior?.name ?? title;
     const input = update.rawInput;
     const raw = object(input);
     const output = object(update.rawOutput);
     const metadata = object(output.metadata);
     let category: ToolCategory = prior?.category ?? 'other';
     if (nativeName.startsWith(TEAM_PREFIX)) category = 'agent';
+    else if (isTask) category = 'agent';
     else if (nativeName.startsWith(BROWSER_PREFIX)) category = 'browser';
     else if (update.kind === 'execute') category = 'command';
     else if (update.kind === 'search' || update.kind === 'fetch') category = 'search';
     else if (['read', 'edit', 'delete', 'move'].includes(String(update.kind))) category = 'file';
     else if (update.kind === 'think') category = 'agent';
     const status = update.status === 'completed' ? 'completed' : update.status === 'failed' ? 'failed' : update.status === 'pending' || update.status === 'in_progress' ? 'running' : prior?.status ?? 'running';
-    const activity: ToolActivity = { ...prior, id, name: nativeName, category, status, summary: truncate(title, 1000) };
+    const activity: ToolActivity = { ...prior, id, name: nativeName, category, status, summary: truncate(title, 1000), ...(child ? { parentId: child.parentId } : {}) };
     if (input !== undefined) activity.input = json(input, 8000);
     const content = Array.isArray(update.content)
       ? update.content.flatMap((entry) => { const value = object(object(entry).content); return value.type === 'text' && typeof value.text === 'string' ? [value.text] : []; }).join('\n')
       : '';
-    const result = content || text(output.output) || text(metadata.output) || text(output.error);
+    const result = content || text(update.rawOutput) || text(output.output) || text(metadata.output) || text(output.error)
+      || (isTask && status === 'completed' && update.rawOutput !== undefined ? json(update.rawOutput, 20_000) : undefined);
     if (result) activity.output = truncate(result, 20_000);
     const command = text(raw.command) ?? text(raw.cmd);
     const cwd = text(raw.cwd) ?? text(raw.workdir);
@@ -404,6 +455,12 @@ class OpencodeRun {
     if (cwd) activity.cwd = truncate(cwd, 4096);
     if (typeof exitCode === 'number' && Number.isFinite(exitCode)) activity.exitCode = exitCode;
     this.tools.set(id, activity);
+    if (isTask) {
+      this.agentLaunches.add(id);
+      for (const childSession of this.taskSessionIds(update)) {
+        if (!this.childSessions.has(childSession) && this.childSessions.size < 256) this.childSessions.set(childSession, id);
+      }
+    }
     this.emit({ type: 'tool.activity', activity });
   }
 }

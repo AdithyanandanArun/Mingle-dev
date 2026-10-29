@@ -39,6 +39,7 @@ function isSubagentLaunch(call: ToolCall, provider: Provider): boolean {
   if (call.category !== 'agent' || /mingle_team|team_/i.test(call.name)) return false;
   if (provider === 'claude') return call.name === 'Task' || call.name === 'Agent';
   if (provider === 'codex') return call.name === 'agent:spawnAgent' || call.name === 'agent:spawn_agent';
+  if (provider === 'opencode') return call.name.toLowerCase() === 'task';
   return false;
 }
 
@@ -59,9 +60,9 @@ export function deriveSubagents(calls: readonly ToolCall[], provider: Provider, 
   const launches = calls.filter((call) => isSubagentLaunch(call, provider));
   return launches.map((parentCall, index) => {
     const input = recordInput(parentCall);
-    const agentType = textField(input, 'subagent_type', 'subagentType', 'agent_type', 'agentType', 'type')
+    const agentType = textField(input, 'subagent_type', 'subagentType', 'agent_type', 'agentType', 'subagent', 'agent', 'type')
       ?? (provider === 'claude' ? 'Agent' : parentCall.name.replace(/^agent:/, ''));
-    const label = textField(input, 'description', 'name', 'subagent_type', 'subagentType', 'agent_type', 'agentType')
+    const label = textField(input, 'description', 'name', 'subagent_type', 'subagentType', 'agent_type', 'agentType', 'subagent', 'agent')
       ?? `Subagent ${index + 1}`;
     const reportedModel = textField(input, 'model', 'model_id', 'modelId');
     return {
