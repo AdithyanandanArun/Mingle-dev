@@ -42,7 +42,7 @@ export type GroupLog = (level: 'info' | 'warn' | 'error', message: string, detai
 export interface GroupRuntime {
   isActive(sessionId: string): boolean;
   isRunLive?(sessionId: string, runId: string): boolean;
-  start(sessionId: string, content: string, options?: { taskId?: string; groupDeliveryId?: string; userMessage?: { content: string; kind?: string }; attachmentOwnerKind?: 'message' | 'group_message'; attachmentOwnerId?: string; invocation?: import('@mingle/contracts').NativeInvocation; context?: string; contextRefs?: MessageContextRef[]; intent?: 'normal' | 'plan'; executionPlanId?: string }): string;
+  start(sessionId: string, content: string, options?: { taskId?: string; groupDeliveryId?: string; runPolicy?: Session['policy']; userMessage?: { content: string; kind?: string }; attachmentOwnerKind?: 'message' | 'group_message'; attachmentOwnerId?: string; invocation?: import('@mingle/contracts').NativeInvocation; context?: string; contextRefs?: MessageContextRef[]; intent?: 'normal' | 'plan'; executionPlanId?: string }): string;
   interrupt(sessionId: string): boolean;
   withSessionsStopped?<T>(sessionIds: string[], action: () => T): Promise<T>;
 }
@@ -152,6 +152,19 @@ export class GroupService {
 
   private requestHopLimit(group: ConversationGroup, request: { autoMaxHops?: number }): number {
     return request.autoMaxHops ?? group.maxHops;
+  }
+
+  private groupRunPolicy(group: ConversationGroup, session: Session): Session['policy'] | undefined {
+    if (!this.isFullAccessGroup(group) || session.policy === 'full-access') return undefined;
+    try {
+      if (this.store.db.prepare('SELECT 1 AS found FROM mingle_team_proxy_sessions WHERE session_id=?').get(session.id)) return undefined;
+      const info = this.providers?.().find((provider) => provider.id === session.provider);
+      return resolveRunConfig(info, { provider: session.provider, model: session.model, effort: session.effort,
+        policy: 'full-access', serviceTier: session.serviceTier }, { policy: true }).policy;
+    } catch {
+      // The group cannot grant a provider policy the adapter does not advertise; retain the member's saved policy.
+      return undefined;
+    }
   }
 
   /** Raises only this request's durable internal thresholds; configured group settings stay unchanged. */
@@ -490,7 +503,13 @@ export class GroupService {
       id: a.id, groupId: a.groupId, requestId: a.requestId, fromMemberId: a.fromMemberId, toMemberId: a.toMemberId, taskId: a.taskId, deliveryId: a.deliveryId, scope: a.scope, createdAt: a.createdAt,
       ...(a.acceptedBy ? { acceptedBy: a.acceptedBy } : {}), ...(a.verificationSummary ? { verificationSummary: a.verificationSummary } : {}),
     }));
-    return { group, members, messages, requests, deliveries, assignments };
+    let teamPermissionLevel: ConversationGroup['teamPermissionLevel'];
+    try {
+      const row = this.store.db.prepare(`SELECT settings_json FROM mingle_team_host_projects WHERE group_id=? AND group_id!=''`).get(group.id) as { settings_json: string } | undefined;
+      const settings = row ? TeamOrchestrationSettingsSchema.safeParse(JSON.parse(row.settings_json)) : undefined;
+      if (settings?.success) teamPermissionLevel = settings.data.permissionLevel;
+    } catch { /* Local groups and older schemas have no team policy. */ }
+    return { group: teamPermissionLevel ? { ...group, teamPermissionLevel } : group, members, messages, requests, deliveries, assignments };
   }
 
   // ---------------------------------------------------------------- lifecycle
@@ -2157,6 +2176,7 @@ ${task ? `Task ${task.id}: ${task.title}\nAcceptance: ${task.acceptanceCriteria}
       title: group.title, mode: group.mode, self: roster.find((r) => r.you)!, roster, canAssign: this.mayAssign(group, member, request.plannerMemberId), leaseHolder: lease,
       requestExcerpt: this.repo.getMessage(request.messageId)?.content ?? '', deliveryKind: delivery.kind, hop: delivery.hop, maxHops: this.requestHopLimit(group, request),
       turnsUsed: request.turnsUsed, maxTurns: this.requestTurnLimit(group, request), unread: this.repo.countAddressedAfter(group.id, member.id, member.lastReadSeq),
+      fullAccessGroup: this.isFullAccessGroup(group),
       crossDeviceWorker: member.role === 'worker' && Boolean(this.store.db.prepare('SELECT 1 AS found FROM mingle_team_proxy_sessions WHERE session_id=?').get(member.sessionId)),
       teamPermissionLevel, integrationBranch,
       assignment: assignment ? { id: assignment.id, taskId: assignment.taskId, scope: assignment.scope } : null,
@@ -2789,7 +2809,10 @@ ${task ? `Task ${task.id}: ${task.title}\nAcceptance: ${task.acceptanceCriteria}
         }
         return this.store.getMessage(messageId);
       });
+      const currentGroup = this.repo.getGroup(group.id) ?? group;
+      const runPolicy = request.intent === 'plan' ? undefined : this.groupRunPolicy(currentGroup, session);
       runId = this.runtime.start(session.id, text, { groupDeliveryId: d.id, taskId: assignment?.taskId ?? d.taskId ?? undefined,
+        ...(runPolicy ? { runPolicy } : {}),
         userMessage: { content: text, kind: 'group-delivery' }, attachmentOwnerKind: 'group_message', attachmentOwnerId, invocation: nativeInvocation, context, contextRefs: contextSourceMessage?.contextRefs,
         intent: request.intent === 'plan' && d.kind === 'request' ? 'plan' : 'normal', executionPlanId: d.kind === 'request' ? request.executionPlanId : undefined });
     } catch (error) {
@@ -3170,6 +3193,7 @@ ${task ? `Task ${task.id}: ${task.title}\nAcceptance: ${task.acceptanceCriteria}
           id, taskId: task.id, from: member.handle, to: recipient.handle, title, objective: input.objective, acceptance: acceptanceCriteria, scope,
           request: this.repo.getMessage(request.messageId)?.content ?? '', dependsOn: dependencies, inputs: inputs.map((i) => ({ ...i, reference: null })),
           crossDeviceWorker: Boolean(this.store.db.prepare('SELECT 1 AS found FROM mingle_team_proxy_sessions WHERE session_id=?').get(recipientSession.id)),
+          fullAccessLocal: this.isFullAccessGroup(group) && !Boolean(this.store.db.prepare('SELECT 1 AS found FROM mingle_team_proxy_sessions WHERE session_id=?').get(recipientSession.id)),
         }),
       });
       this.repo.insertDelivery({ id: deliveryIdValue, groupId: group.id, requestId: request.id, messageId: message.id, memberId: recipient.id, kind: 'assignment', hop, assignmentId: id });
