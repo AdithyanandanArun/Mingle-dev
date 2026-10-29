@@ -3,8 +3,11 @@ import { assignmentText, buildInstructions, LIMITS, type InstructionData } from 
 
 const worker: InstructionData = {
   title: 'Shared project', mode: 'orchestrated',
-  self: { handle: 'owner', role: 'worker', provider: 'opencode', model: 'fake-model', state: 'working', you: true },
-  roster: [{ handle: 'lead', role: 'orchestrator', provider: 'claude', model: 'sonnet', state: 'idle', you: false }],
+  self: { handle: 'owner', role: 'worker', provider: 'opencode', model: 'fake-model', effort: 'high', device: 'this device', load: { running: 1, queued: 0 },
+    health: { memberId: 'owner', handle: 'owner', state: 'ok' }, activeScopes: [], state: 'working', you: true },
+  roster: [{ handle: 'lead', role: 'orchestrator', provider: 'claude', model: 'sonnet', effort: 'medium', device: 'this device', load: { running: 0, queued: 1 },
+    health: { memberId: 'lead', handle: 'lead', state: 'cooldown', until: '2026-10-29T12:00:00.000Z' },
+    activeScopes: [{ taskId: 'task-lead', title: 'Update contracts', paths: ['packages/contracts/src'], status: 'running' }], state: 'idle', you: false }],
   canAssign: false, leaseHolder: null,
   requestExcerpt: 'You are the lead. Delegate the task and review it.', deliveryKind: 'assignment',
   hop: 1, maxHops: 6, turnsUsed: 2, maxTurns: 80, unread: 0,
@@ -69,7 +72,8 @@ it('yields for pending worker integration and waits for the durable result-revie
 it('gives team planners branch-aware integration guidance and keeps non-team groups conservative', () => {
   const team = { ...worker, self: { ...worker.self, role: 'orchestrator' as const }, canAssign: true, deliveryKind: 'request' as const,
     assignment: null, teamPermissionLevel: 'full-access' as const, integrationBranch: 'main',
-    roster: [...worker.roster, { handle: 'owner', role: 'worker' as const, provider: 'codex', model: 'model', state: 'running', you: false, branch: 'mingle/owner/work' }] };
+    roster: [...worker.roster, { ...worker.roster[0]!, handle: 'owner', role: 'worker' as const, provider: 'codex', model: 'model',
+      state: 'running', you: false, branch: 'mingle/owner/work' }] };
   const fullAccess = buildInstructions(team);
   expect(fullAccess).toContain('origin/mingle/owner/work');
   expect(fullAccess).toContain('git fetch origin');
@@ -88,6 +92,20 @@ it('gives team planners branch-aware integration guidance and keeps non-team gro
 
   const nonTeam = buildInstructions({ ...team, teamPermissionLevel: null });
   expect(nonTeam).toContain('Never push or publish, or modify the human-selected checkout, without explicit human authorization');
+});
+
+it('includes compact load, health, device and active scopes for planning within the instruction bound', () => {
+  const instructions = buildInstructions(worker);
+  expect(instructions).toContain('load 0r/1q');
+  expect(instructions).toContain('health cooldown until 2026-10-29T12:00:00.000Z');
+  expect(instructions).toContain('scopes packages/contracts/src');
+  expect(instructions).toContain('this device');
+  expect(instructions.length).toBeLessThanOrEqual(LIMITS.instructions);
+
+  const compact = buildInstructions({ ...worker, roster: Array.from({ length: 64 }, (_, index) => ({
+    ...worker.roster[0]!, handle: `agent${index}`, activeScopes: [{ taskId: `task${index}`, title: 'A large title', paths: Array.from({ length: 40 }, (__, path) => `packages/area${index}/file-${path}.ts`), status: 'running' }],
+  })) });
+  expect(compact.length).toBeLessThanOrEqual(LIMITS.instructions);
 });
 
 it('uses autonomous acceptance and a worker branch commit for full-access local groups only', () => {

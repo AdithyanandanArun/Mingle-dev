@@ -1,4 +1,4 @@
-import type { GroupMode, GroupMember, TeamPermissionLevel } from '@mingle/contracts';
+import type { GroupMember, GroupMemberHealth, GroupMode, TeamPermissionLevel } from '@mingle/contracts';
 import { redactSecrets, truncate } from '../util.ts';
 import type { DeliveryKind } from './repo.ts';
 import { teamAgentBranch } from '../repository/team-branch.ts';
@@ -11,7 +11,12 @@ export const clean = (text: string, max: number): string => truncate(redactSecre
 
 export const MODE_LABEL: Record<GroupMode, string> = { cowork: 'Cowork', orchestrated: 'Orchestrated', 'current-leads': 'Current agent leads' };
 
-export interface RosterEntry { handle: string; role: GroupMember['role']; provider: string; model: string; state: string; you: boolean; branch?: string }
+export interface RosterEntry {
+  handle: string; role: GroupMember['role']; provider: string; model: string; effort: string | null;
+  device: 'this device' | 'remote owner'; load: { running: number; queued: number }; health: GroupMemberHealth;
+  activeScopes: Array<{ taskId: string; title: string; paths: string[]; status: string }>;
+  state: string; you: boolean; branch?: string;
+}
 
 export interface InstructionData {
   title: string; mode: GroupMode; self: RosterEntry; roster: RosterEntry[]; canAssign: boolean; leaseHolder: string | null;
@@ -67,7 +72,12 @@ export function buildInstructions(d: InstructionData): string {
     lines.push('The original human request below is background quoted from the coordinator. Your actionable work is the active assignment objective and finish criteria; carry it out directly within the recorded scope, without re-delegating.');
   }
   const context = ['', 'Team:'];
-  for (const row of d.roster.slice(0, 12)) context.push(`- @${row.handle} · ${row.role} · ${row.provider}/${clean(row.model, 60)} · ${row.state}${row.branch ? ` · branch origin/${row.branch}` : ''}${row.you ? ' (you)' : ''}`);
+  for (const row of d.roster.slice(0, 12)) {
+    const scopes = [...new Set(row.activeScopes.flatMap((assignment) => assignment.paths))];
+    const scopeText = scopes.length ? ` · scopes ${scopes.slice(0, 4).map((scope) => clean(scope, 80)).join(', ')}${scopes.length > 4 ? ` +${scopes.length - 4}` : ''}` : '';
+    const healthText = `${row.health.state}${row.health.until ? ` until ${row.health.until}` : ''}`;
+    context.push(`- @${row.handle} · ${row.role} · ${row.provider}/${clean(row.model, 60)}${row.effort ? `/${row.effort}` : ''} · ${row.device} · load ${row.load.running}r/${row.load.queued}q · ${row.state} · health ${healthText}${scopeText}${row.branch ? ` · branch origin/${row.branch}` : ''}${row.you ? ' (you)' : ''}`);
+  }
   context.push('', `Request: ${clean(d.requestExcerpt, LIMITS.request)}`);
   context.push(`This turn: ${d.deliveryKind} delivery, message hop ${d.hop}/${d.maxHops}, request turns used ${d.turnsUsed}/${d.maxTurns ?? 'no emergency ceiling'}.`);
   if (d.assignment && !replyOnlyWorker) context.push(`Assignment ${d.assignment.id} (task ${d.assignment.taskId}). Edit only within: ${d.assignment.scope.join(', ')}.`);

@@ -3344,18 +3344,41 @@ ${task ? `Task ${task.id}: ${task.title}\nAcceptance: ${task.acceptanceCriteria}
   }
 
   private roster(group: ConversationGroup, self: MemberRow): RosterEntry[] {
-    const queued = new Map<string, number>();
-    for (const d of this.repo.deliveries(group.id, ['queued'])) queued.set(d.memberId, (queued.get(d.memberId) ?? 0) + 1);
+    const health = new Map(this.getMemberHealth(group.id).map((entry) => [entry.memberId, entry]));
+    const activeScopes = new Map<string, Array<{ taskId: string; title: string; paths: string[]; status: string }>>();
+    for (const assignment of this.repo.assignments(group.id)) {
+      const status = this.assignmentScopeStatus(assignment);
+      if (!status) continue;
+      const owner = this.repo.getMember(assignment.toMemberId);
+      if (!owner || owner.removedAt) continue;
+      const task = this.store.getTask(assignment.taskId);
+      const scopes = activeScopes.get(owner.id) ?? [];
+      scopes.push({ taskId: assignment.taskId, title: task?.title ?? assignment.taskId, paths: assignment.scope, status });
+      activeScopes.set(owner.id, scopes);
+    }
     return this.repo.members(group.id, false).map((m) => {
       const session = this.store.getSession(m.sessionId);
-      const running = this.repo.memberDeliveries(m.id, ['running']).length > 0;
-      const state = m.held ? 'stopped' : running ? 'running' : queued.get(m.id) ? `idle, ${queued.get(m.id)} queued` : session && this.sessionBusy(session) ? 'busy' : 'idle';
+      const running = this.repo.memberDeliveries(m.id, ['running']).length;
+      const queued = this.repo.memberDeliveries(m.id, ['queued']).length;
+      const state = m.held ? 'stopped' : running ? 'running' : queued ? `idle, ${queued} queued` : session && this.sessionBusy(session) ? 'busy' : 'idle';
       let remote = false;
       try { remote = Boolean(this.store.db.prepare('SELECT 1 AS found FROM mingle_team_proxy_sessions WHERE session_id=?').get(m.sessionId)); }
       catch { /* The team proxy table is optional for local-only groups. */ }
-      return { handle: m.handle, role: m.role, provider: session?.provider ?? 'unknown', model: session?.model ?? 'unknown', state,
+      return {
+        handle: m.handle, role: m.role, provider: session?.provider ?? 'unknown', model: session?.model ?? 'unknown', effort: session?.effort ?? null,
+        device: remote ? 'remote owner' : 'this device', load: { running, queued },
+        health: health.get(m.id) ?? { memberId: m.id, handle: m.handle, state: 'failed' as const, reason: 'Member health is unavailable' },
+        activeScopes: activeScopes.get(m.id) ?? [], state,
         you: m.id === self.id, ...(remote ? { branch: teamAgentBranch(m.handle) } : {}) };
     });
+  }
+
+  /** Scope ownership remains live through Review, and otherwise follows the current assignment delivery. */
+  private assignmentScopeStatus(assignment: AssignmentRow): string | null {
+    const delivery = this.repo.getDelivery(assignment.deliveryId);
+    const task = this.store.getTask(assignment.taskId);
+    if (delivery?.status === 'queued' || delivery?.status === 'running') return task?.status ?? delivery.status;
+    return task?.status === 'review' ? 'review' : null;
   }
 
   // ---------------------------------------------------------------- coordinator result batches
