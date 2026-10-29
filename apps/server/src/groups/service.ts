@@ -2157,9 +2157,12 @@ export class GroupService {
     const verifiedProgress = this.verifiedProgress(delivery, member);
     const repeatedActionStall = delivery.runId && verifiedProgress.length === 0 ? this.recordRepeatedToolFailures(group, member, delivery) : false;
     const safeRetryAt = outcome === 'failed' && !group.paused && !member.held && !repeatedActionStall ? this.safeRetryAt(providerFailure, delivery) : null;
+    const autoRetry = !member.held && !repeatedActionStall
+      && this.shouldAutoRetryFullAccess(group, member, delivery, outcome, providerFailure, safeRetryAt);
     try {
       this.store.tx(() => {
-        if (!this.repo.transitionDelivery(delivery.id, 'running', outcome, { error: failure, retryable: outcome === 'interrupted' || Boolean(safeRetryAt) })) return;
+        if (!this.repo.transitionDelivery(delivery.id, 'running', outcome, { error: failure,
+          retryable: outcome === 'interrupted' || Boolean(safeRetryAt) || autoRetry })) return;
         const assignment = delivery.assignmentId ? this.repo.getAssignment(delivery.assignmentId) : undefined;
         if (assignment || delivery.taskId) {
           const taskId = assignment?.taskId ?? delivery.taskId!;
@@ -2212,6 +2215,9 @@ export class GroupService {
       this.fencedCoordinatorDeliveries.delete(delivery.id);
     }
     if (safeRetryAt) this.scheduleSafeRetry(delivery.id, safeRetryAt);
+    if (autoRetry) void this.autoRetryFullAccessDelivery(delivery.id).catch((error) => {
+      this.log('warn', `Full-access retry could not be queued for ${delivery.id}`, error);
+    });
     if (outcome === 'completed' || outcome === 'failed' || outcome === 'interrupted') this.notifyCoordinator(delivery.requestId);
     if (outcome === 'completed') this.refreshRecoveryState(group.id);
     this.schedule(group.id);
@@ -2244,6 +2250,100 @@ export class GroupService {
     const retryAt = Date.parse(failure.retryAt);
     const now = Date.now();
     return Number.isFinite(retryAt) && retryAt > now && retryAt <= now + MAX_SAFE_RETRY_DELAY_MS ? new Date(retryAt).toISOString() : null;
+  }
+
+  private shouldAutoRetryFullAccess(
+    group: ConversationGroup, member: MemberRow, delivery: DeliveryRow, outcome: Outcome, failure: ProviderFailure | null, safeRetryAt: string | null,
+  ): boolean {
+    if (!this.isFullAccessGroup(group) || group.paused || member.removedAt || safeRetryAt
+      || delivery.attempts > MAX_SAFE_RETRIES || this.repo.deliverySuccessor(group.id, delivery.id)
+      || this.repo.deliverySource(group.id, delivery.id)) return false;
+    if (outcome === 'interrupted') return true;
+    if (outcome !== 'failed' || !failure) return false;
+    return failure.retryable || failure.outcomeUnknown === true || failure.dispatchState === 'unknown' || failure.continuationSafety !== 'safe';
+  }
+
+  /** Captures and acknowledges one metadata checkpoint, then queues one inspect-before-retry continuation. */
+  private async autoRetryFullAccessDelivery(deliveryIdArg: string): Promise<void> {
+    const source = this.repo.getDelivery(deliveryIdArg);
+    const group = source ? this.repo.getGroup(source.groupId) : undefined;
+    const member = source ? this.repo.getMember(source.memberId) : undefined;
+    const session = member ? this.store.getSession(member.sessionId) : undefined;
+    const failure = source?.runId ? this.recovery?.failureForRun(source.runId) ?? null : null;
+    if (!source || !group || !member || !session || !this.recovery || !this.isFullAccessGroup(group) || group.paused
+      || (source.status !== 'failed' && source.status !== 'interrupted') || source.attempts > MAX_SAFE_RETRIES
+      || this.repo.deliverySuccessor(group.id, source.id) || this.repo.deliverySource(group.id, source.id)
+      || (source.status === 'failed' && (!failure || !(failure.retryable || failure.outcomeUnknown === true
+        || failure.dispatchState === 'unknown' || failure.continuationSafety !== 'safe')))) return;
+
+    let captured: RecoveryCheckpoint;
+    try {
+      captured = await this.recovery.capture(session.id, `Full-access retry checkpoint for ${source.id}`, source.runId ?? undefined);
+    } catch (error) {
+      const reason = clean(`Automatic recovery checkpoint could not be captured: ${errorMessage(error)}`, 500);
+      this.store.tx(() => this.event(group, 'group.recovery.auto-retry-blocked', 'Full-access retry stopped because checkpoint capture failed', {
+        deliveryId: source.id, failureId: failure?.id ?? null, reason,
+      }, session.id));
+      this.log('warn', `Could not capture automatic retry checkpoint for ${source.id}`, error);
+      return;
+    }
+
+    await this.exclusive(async () => {
+      if (this.closed) return;
+      const current = this.repo.getDelivery(source.id);
+      const currentGroup = current ? this.repo.getGroup(current.groupId) : undefined;
+      const currentMember = current ? this.repo.getMember(current.memberId) : undefined;
+      const request = current ? this.repo.getRequest(current.requestId) : undefined;
+      const currentFailure = current?.runId ? this.recovery?.failureForRun(current.runId) ?? null : null;
+      if (!current || !currentGroup || !currentMember || !request || current.status !== source.status
+        || current.updatedAt !== source.updatedAt || current.runId !== source.runId || !this.isFullAccessGroup(currentGroup)
+        || currentGroup.paused || current.attempts > MAX_SAFE_RETRIES || this.repo.deliverySuccessor(currentGroup.id, current.id)
+        || this.repo.deliverySource(currentGroup.id, current.id)
+        || (current.status !== 'failed' && current.status !== 'interrupted')) return;
+      if (current.status === 'failed' && (!currentFailure || !(currentFailure.retryable || currentFailure.outcomeUnknown === true
+        || currentFailure.dispatchState === 'unknown' || currentFailure.continuationSafety !== 'safe'))) return;
+      if (captured.sessionId !== currentMember.sessionId || captured.runId !== current.runId) return;
+
+      const committed = request.turnsUsed + this.repo.requestDeliveries(request.id, ['queued']).length;
+      const budgetRequest = this.extendRequestBudget(currentGroup, request.id, committed + 1, current.hop) ?? request;
+      const turnLimit = this.requestTurnLimit(currentGroup, budgetRequest);
+      const hopLimit = this.requestHopLimit(currentGroup, budgetRequest);
+      if ((turnLimit !== null && committed >= turnLimit) || current.hop > hopLimit) {
+        const reason = current.hop > hopLimit
+          ? `Automatic recovery reached the hard full-access ceiling of ${hopLimit} message hops; the checkpoint is retained for review.`
+          : `Automatic recovery reached the hard full-access ceiling of ${turnLimit} model turns; the checkpoint is retained for review.`;
+        this.holdBudget(currentGroup, request.id, reason, committed + 1, current.hop);
+        return;
+      }
+
+      const actionId = newId('msg');
+      const idempotencyKey = `auto-full-access-retry:${current.id}`.slice(0, 100);
+      this.store.tx(() => {
+        const checkpoint = this.repo.insertRecoveryCheckpoint({
+          id: recoveryCheckpointId(), groupId: currentGroup.id, requestId: request.id, batchId: current.id, kind: 'automatic-retry',
+          reason: 'Full-access automatic recovery checkpoint; inspect current state before continuing.',
+          payload: { deliveryId: current.id, providerCheckpointId: captured.id, failureId: currentFailure?.id ?? null,
+            outcomeUnknown: currentFailure?.outcomeUnknown ?? current.status === 'interrupted' },
+          idempotencyKey,
+        });
+        if (checkpoint.state === 'pending') this.acknowledgeCheckpoint(currentGroup, checkpoint.id);
+        const action: Extract<RecoveryActionRequest, { action: 'retry-delivery' }> = {
+          action: 'retry-delivery', deliveryId: current.id, checkpointId: checkpoint.id,
+          approachNote: 'Full-access continuation: inspect the saved checkpoint and current workspace state first. Determine whether native side effects already occurred; do not repeat completed actions.',
+          idempotencyKey,
+        };
+        this.applyRetryAction(currentGroup, action, actionId);
+        const result: RecoveryActionResult = {
+          actionId, groupId: currentGroup.id, action: 'retry-delivery', status: 'applied', coordinatorEpoch: currentGroup.coordinatorEpoch ?? 1,
+        };
+        this.repo.insertRecoveryAction({ id: actionId, groupId: currentGroup.id, idempotencyKey, action: 'retry-delivery', result });
+        this.event(currentGroup, 'group.recovery.auto-retry', `Full-access continuation queued for @${currentMember.handle}`, {
+          deliveryId: current.id, checkpointId: checkpoint.id, failureId: currentFailure?.id ?? null,
+          attempt: current.attempts, maxRetries: MAX_SAFE_RETRIES,
+        }, currentMember.sessionId);
+      });
+      this.schedule(currentGroup.id);
+    });
   }
 
   private scheduleSafeRetry(deliveryIdArg: string, retryAt: string): void {
