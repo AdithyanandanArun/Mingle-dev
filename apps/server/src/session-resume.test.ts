@@ -147,6 +147,36 @@ describe('automatic session resume after restart', () => {
     expect(restarted.fake.runs).toHaveLength(0);
   });
 
+  it('leaves an interrupted local group delivery to the group recovery queue', async () => {
+    const dir = dataDir();
+    const before = await boot(dir);
+    await before.api('POST', '/api/providers/refresh', {});
+    await before.api('PATCH', `/api/sessions/${EXAMPLE_CONTRACT_SESSION_ID}`, { provider: 'claude', model: 'claude-sonnet-5-5' });
+    const created = await before.api('POST', '/api/groups', {
+      sessionId: EXAMPLE_CONTRACT_SESSION_ID, mode: 'current-leads',
+      agent: { handle: 'resume-worker', isolated: true, configuration: { provider: 'claude', model: 'claude-sonnet-5-5', effort: 'high', policy: 'supervised', serviceTier: 'standard' } },
+    });
+    expect(created.status).toBe(201);
+    before.fake.script = async (options, emit) => {
+      await Promise.race([new Promise<void>((resolve) => options.signal.addEventListener('abort', () => resolve(), { once: true })), new Promise<void>((resolve) => setTimeout(resolve, 5000))]);
+      if (!options.signal.aborted) emit({ type: 'text', text: 'Completed before restart.' });
+    };
+    expect((await before.api('POST', `/api/groups/${created.json.group.id}/messages`, { content: 'Continue the grouped implementation.' })).status).toBe(202);
+    await waitFor(() => before.app.groups.get(created.json.group.id).deliveries.find((delivery) => delivery.status === 'running'));
+    const interrupted = before.app.store.activeRuns()[0]!;
+    await before.cleanup();
+    apps.splice(apps.indexOf(before), 1);
+
+    const restarted = await boot(dir);
+    await waitFor(() => resumeEvents(restarted).some((event) => event.type === 'session.run.resume-skipped'));
+    const snapshot = restarted.app.groups.get(created.json.group.id);
+    expect(resumeEvents(restarted).find((event) => event.type === 'session.run.resume-skipped')?.payload.reason).toBe('group-delivery-managed');
+    const delivery = snapshot.deliveries.find((row) => row.runId === interrupted.id);
+    expect(delivery?.status).toBe('interrupted');
+    expect(restarted.app.store.db.prepare('SELECT retryable FROM group_deliveries WHERE id=?').get(delivery?.id)).toEqual({ retryable: 1 });
+    expect(restarted.fake.runs).toHaveLength(0);
+  });
+
   it('skips an archived session and records the reason', async () => {
     const dir = dataDir();
     const before = await boot(dir);
