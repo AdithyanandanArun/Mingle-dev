@@ -41,9 +41,22 @@ export const ProgressBoardSnapshotSchema = z.object({
   members: z.array(ProgressBoardMemberSchema).max(64), updatedAt: z.string().datetime({ offset: true }),
 }).strict();
 
+export const ProgressBoardResponseSchema = ProgressBoardSnapshotSchema.extend({
+  source: z.enum(['local', 'host']),
+  syncedAt: z.string().datetime({ offset: true }).optional(),
+}).strict().superRefine((board, ctx) => {
+  if (board.source === 'host' && !board.syncedAt) {
+    ctx.addIssue({ code: 'custom', path: ['syncedAt'], message: 'A host-synced board must include its sync time.' });
+  }
+  if (board.source === 'local' && board.syncedAt) {
+    ctx.addIssue({ code: 'custom', path: ['syncedAt'], message: 'A local board cannot include a host sync time.' });
+  }
+});
+
 export type ProgressBoardState = z.infer<typeof ProgressBoardStateSchema>;
 export type ProgressBoardTask = z.infer<typeof ProgressBoardTaskSchema>;
 export type ProgressBoardStep = z.infer<typeof ProgressBoardStepSchema>;
 export type ProgressBoardBranch = z.infer<typeof ProgressBoardBranchSchema>;
 export type ProgressBoardMember = z.infer<typeof ProgressBoardMemberSchema>;
 export type ProgressBoardSnapshot = z.infer<typeof ProgressBoardSnapshotSchema>;
+export type ProgressBoardResponse = z.infer<typeof ProgressBoardResponseSchema>;

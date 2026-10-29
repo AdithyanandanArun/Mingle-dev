@@ -1,4 +1,4 @@
-import type { ProgressBoardMember, ProgressBoardState } from '@mingle/contracts';
+import type { ProgressBoardMember, ProgressBoardResponse, ProgressBoardState, TeamStructureMember } from '@mingle/contracts';
 
 const STATE_LABEL: Record<ProgressBoardState, string> = {
   idle: 'Idle', working: 'Working', 'waiting-approval': 'Needs approval', 'waiting-answer': 'Needs answer',
@@ -47,4 +47,15 @@ export function progressBoardCardModel(member: ProgressBoardMember, now = Date.n
     commitAge: commit ? relativeTime(commit.at, now) : null,
     blockers: member.blockers.slice(0, 3),
   };
+}
+
+export function syncedBoardLabel(board: Pick<ProgressBoardResponse, 'source' | 'syncedAt'>, now = Date.now()): string | null {
+  return board.source === 'host' && board.syncedAt ? `Synced from host · ${relativeTime(board.syncedAt, now)}` : null;
+}
+
+export function boardDeviceLabel(member: ProgressBoardMember, teamMembers: readonly TeamStructureMember[]): string {
+  const teamMember = teamMembers.find((candidate) => candidate.handle === member.handle);
+  if (!teamMember) return member.device;
+  if (teamMember.local) return 'This device';
+  return teamMember.ownerDisplayName.trim() || member.device;
 }

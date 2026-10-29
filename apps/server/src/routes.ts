@@ -41,6 +41,7 @@ import type { TeamChatService } from './team-chat/service.ts';
 import { registerTeamChatRoutes } from './team-chat/routes.ts';
 import type { TeamOrchestrationSubsystem } from './team-orchestration/index.ts';
 import { buildProgressBoard } from './progress-board.ts';
+import { ProgressBoardResponseSchema } from '@mingle/contracts';
 
 export interface Services {
   distributed: DistributedWorkspaceService;
@@ -320,9 +321,21 @@ export function buildRouter(s: Services) {
     };
   });
   add('GET', '/api/groups/:id', (ctx) => s.groups.get(param(ctx, 'id')));
-  add('GET', '/api/groups/:id/board', (ctx) => {
-    const group = s.groups.get(param(ctx, 'id'));
-    return buildProgressBoard({ store: s.store, group });
+  add('GET', '/api/groups/:id/board', async (ctx) => {
+    const groupId = param(ctx, 'id');
+    let group;
+    try { group = s.groups.get(groupId); }
+    catch (error) {
+      if (!(error instanceof HttpError) || error.status !== 404) throw error;
+    }
+    if (group) {
+      const board = await buildProgressBoard({ store: s.store, group });
+      return ProgressBoardResponseSchema.parse({ ...board, source: 'local' });
+    }
+    const projectId = ctx.url.searchParams.get('projectId');
+    if (!projectId || !ID.test(projectId)) throw notFound('Group not found');
+    const synced = await s.teamChat.syncedProgressBoard(projectId, groupId);
+    return ProgressBoardResponseSchema.parse({ ...synced.board, source: 'host', syncedAt: synced.syncedAt });
   });
   add('PATCH', '/api/groups/:id', async (ctx) => s.groups.update(param(ctx, 'id'), await ctx.body(UpdateGroupSchema)));
   add('POST', '/api/groups/:id/agents', async (ctx) => new Reply(201, await s.groups.addAgent(param(ctx, 'id'), await ctx.body(AddGroupAgentSchema))));

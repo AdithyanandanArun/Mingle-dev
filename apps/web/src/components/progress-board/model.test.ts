@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import type { ProgressBoardMember } from '@mingle/contracts';
-import { progressBoardCardModel, relativeTime } from './model';
+import type { ProgressBoardMember, TeamStructureMember } from '@mingle/contracts';
+import { boardDeviceLabel, progressBoardCardModel, relativeTime, syncedBoardLabel } from './model';
 
 const base: ProgressBoardMember = {
   memberId: 'member-1', handle: 'builder', role: 'worker', provider: 'codex', model: 'gpt-6.1-sol', device: 'this device',
@@ -24,5 +24,18 @@ describe('progress board card model', () => {
     expect(progressBoardCardModel({ ...base, step: { label: 'Checking the result' }, blockers: ['A', 'B', 'C', 'D'] }, Date.parse('2026-10-29T09:59:00.000Z')))
       .toMatchObject({ stepLabel: 'Checking the result', commitAge: 'just now', blockers: ['A', 'B', 'C'] });
     expect(relativeTime('not-a-date')).toBe('Time unavailable');
+  });
+
+  it('labels host-synced boards and resolves device labels for local and remote teammates', () => {
+    const now = Date.parse('2026-10-29T10:02:00.000Z');
+    expect(syncedBoardLabel({ source: 'host', syncedAt: '2026-10-29T10:00:00.000Z' }, now)).toBe('Synced from host · 2m ago');
+    expect(syncedBoardLabel({ source: 'local' }, now)).toBeNull();
+    const teammate: TeamStructureMember = {
+      agentId: 'agent-1', name: 'Builder', handle: 'builder', ownerAccountId: 'owner', ownerDisplayName: 'Alex Host',
+      deviceId: 'device-1', deviceName: 'MacBook', local: false, sessionId: null, provider: 'codex', model: 'gpt-6.1-sol',
+      effort: null, role: 'worker', fallbackRank: null, state: 'idle', consent: 'granted', currentTask: null, lastActivityAt: null, failure: null,
+    };
+    expect(boardDeviceLabel(base, [teammate])).toBe('Alex Host');
+    expect(boardDeviceLabel(base, [{ ...teammate, local: true }])).toBe('This device');
   });
 });

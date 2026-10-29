@@ -1,8 +1,9 @@
-import { afterEach, expect, it } from 'vitest';
+import { afterEach, expect, it, vi } from 'vitest';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import type { GroupSnapshot } from '@mingle/contracts';
 import { buildProgressBoard } from './progress-board.ts';
+import { GroupRepo } from './groups/repo.ts';
 import { makeRepo, runGit, startTestApp, type TestApp } from './test-utils.ts';
 
 const apps: TestApp[] = [];
@@ -78,4 +79,29 @@ it('builds a bounded board from a temp integration checkout, worker ref, review 
   expect(member.blockers.join(' ')).toContain('[remote]');
   expect(JSON.stringify(board)).not.toContain('secret.example');
   expect(JSON.stringify(board)).not.toContain('secret detail');
+});
+
+it('serves local group boards and falls back to a synced host board for a remote team session', async () => {
+  const integration = makeRepo(); repos.push(integration);
+  const t = await startTestApp(); apps.push(t);
+  const project = t.app.store.insertProject({ id: 'board-route-project', name: 'Progress board route', path: integration });
+  const anchor = t.app.store.insertSession({ id: 'board-route-anchor', projectId: project.id, name: 'Lead', provider: 'claude', model: 'claude-sonnet-5-5',
+    effort: 'high', policy: 'supervised', isolated: false, worktreePath: integration, branch: 'main' });
+  const groups = new GroupRepo(t.app.store.db);
+  groups.insertGroup({ id: 'board-route-group', projectId: project.id, title: 'Team session', anchorSessionId: anchor.id,
+    mode: 'orchestrated', maxParallel: 2, maxTurns: 20, maxHops: 5 });
+  groups.insertMember({ id: 'board-route-member', groupId: 'board-route-group', sessionId: anchor.id, handle: 'lead', role: 'orchestrator' });
+
+  const local = await t.api('GET', '/api/groups/board-route-group/board');
+  expect(local.status).toBe(200);
+  expect(local.json).toMatchObject({ groupId: 'board-route-group', source: 'local' });
+  expect(local.json.syncedAt).toBeUndefined();
+
+  const board = { ...(await buildProgressBoard({ store: t.app.store, group: t.app.groups.get('board-route-group') })), groupId: 'remote-team-session' };
+  const syncedAt = '2026-10-29T10:00:00.000Z';
+  const syncedBoard = vi.spyOn(t.app.teamChat, 'syncedProgressBoard').mockResolvedValue({ board, syncedAt });
+  const teammate = await t.api('GET', `/api/groups/remote-team-session/board?projectId=${project.id}`);
+  expect(teammate.status).toBe(200);
+  expect(teammate.json).toMatchObject({ groupId: 'remote-team-session', source: 'host', syncedAt });
+  expect(syncedBoard).toHaveBeenCalledWith(project.id, 'remote-team-session');
 });

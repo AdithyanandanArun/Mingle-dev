@@ -1,13 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AlertTriangle, Check, Copy, GitBranch, Loader2, RefreshCw } from 'lucide-react';
-import type { GroupSnapshot, ProgressBoardMember, ProgressBoardSnapshot, Session, TaskStatus, TeamAgentState, TeamStructureMember } from '@mingle/contracts';
+import type { GroupSnapshot, ProgressBoardMember, ProgressBoardResponse, Session, TaskStatus, TeamAgentState, TeamStructureMember } from '@mingle/contracts';
 import { AgentIdentity } from '../group/AgentIdentity';
 import { AgentActivityDrawer, type ActivityAgent } from '../team-orchestration/activity/AgentActivityDrawer';
 import { api, errorMessage } from '../../lib/api';
 import { subscribeToTeamUpdates } from '../../lib/team-live-updates';
 import { useMingle } from '../../store/store';
 import { Button, EmptyState } from '../ui';
-import { progressBoardCardModel, relativeTime } from './model';
+import { boardDeviceLabel, progressBoardCardModel, relativeTime, syncedBoardLabel } from './model';
 import './progress-board.css';
 
 const EMPTY_SESSIONS: Session[] = [];
@@ -30,7 +30,7 @@ function stateWord(state: ProgressBoardMember['state']): string {
 
 function shortSha(sha: string): string { return sha.slice(0, 7); }
 
-function IntegrationHeader({ board, now }: { board: ProgressBoardSnapshot; now: number }) {
+function IntegrationHeader({ board, now }: { board: ProgressBoardResponse; now: number }) {
   const head = board.integration.head;
   const push = board.integration.lastPush;
   return <section className="progress-board__integration" aria-label="Integration branch status">
@@ -109,7 +109,7 @@ export function ProgressBoardPanel({ projectId, groupId, active, onViewChange, r
   group?: GroupSnapshot; teamMembers?: readonly TeamStructureMember[];
 }) {
   const sessions = useMingle((state) => state.boot?.sessions ?? EMPTY_SESSIONS);
-  const [board, setBoard] = useState<ProgressBoardSnapshot | null>(null);
+  const [board, setBoard] = useState<ProgressBoardResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [copyNotice, setCopyNotice] = useState('');
@@ -126,7 +126,7 @@ export function ProgressBoardPanel({ projectId, groupId, active, onViewChange, r
     inFlight.current = true;
     if (!boardRef.current) setLoading(true);
     try {
-      const latest = await api.groupBoard(groupId, signal);
+      const latest = await api.groupBoard(groupId, projectId, signal);
       if (!signal?.aborted) { boardRef.current = latest; setBoard(latest); setError(null); setNow(Date.now()); }
     } catch (cause) {
       if (!signal?.aborted) setError(errorMessage(cause));
@@ -138,7 +138,7 @@ export function ProgressBoardPanel({ projectId, groupId, active, onViewChange, r
         window.setTimeout(() => { void refresh(signal); }, 0);
       }
     }
-  }, [active, groupId]);
+  }, [active, groupId, projectId]);
 
   useEffect(() => {
     if (!active) return;
@@ -175,7 +175,8 @@ export function ProgressBoardPanel({ projectId, groupId, active, onViewChange, r
     window.setTimeout(() => setCopyNotice(''), 2200);
   };
 
-  const cardRows = useMemo(() => board?.members ?? [], [board]);
+  const cardRows = useMemo(() => board?.members.map((member) => ({ ...member, device: boardDeviceLabel(member, teamMembers) })) ?? [], [board, teamMembers]);
+  const syncedLabel = board ? syncedBoardLabel(board, now) : null;
   return <>
     <div className="progress-board-switch" role="group" aria-label="Session view">
       <button type="button" aria-pressed={!active} className={!active ? 'is-active' : ''} onClick={() => onViewChange(false)}>Chat</button>
@@ -186,6 +187,7 @@ export function ProgressBoardPanel({ projectId, groupId, active, onViewChange, r
       {error && !board ? <div className="progress-board__status is-error" role="alert"><span>{error}</span><Button variant="secondary" onClick={() => void refresh()}>Retry</Button></div> : null}
       {error && board ? <div className="progress-board__inline-error" role="status"><span>Showing the last available board · {error}</span><button type="button" onClick={() => void refresh()}>Retry</button></div> : null}
       {board ? <div className="progress-board__scroll">
+        {syncedLabel ? <div className="progress-board__synced" role="status">{syncedLabel}</div> : null}
         <IntegrationHeader board={board} now={now} />
       {cardRows.length ? <div className="progress-board__grid">
           {cardRows.map((member) => <MemberCard key={member.memberId} member={member} now={now} onOpen={openAgent} onCopy={(branch) => void copyBranch(branch)} />)}
