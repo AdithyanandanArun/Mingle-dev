@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const stage = resolve(process.argv[2] ?? 'release/mingle-0.0.1-linux-x64');
+const { version } = JSON.parse(await readFile(new URL('../apps/desktop/package.json', import.meta.url), 'utf8'));
+const stage = resolve(process.argv[2] ?? `release/mingle-${version}-linux-x64`);
 const scratch = await mkdtemp(join(tmpdir(), 'mingle-package-check-'));
 const script = join(scratch, 'check.mjs');
 await writeFile(script, `
