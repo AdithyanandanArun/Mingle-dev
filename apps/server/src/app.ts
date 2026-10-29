@@ -9,7 +9,7 @@ import { HandoffService } from './handoffs.ts';
 import { Hub } from './hub.ts';
 import { ProviderService } from './provider-service.ts';
 import { buildRouter, type Services } from './routes.ts';
-import { SessionRuntime, type RuntimeOptions } from './runtime.ts';
+import { beginProcessShutdown, resetProcessShutdownState, SessionRuntime, type RuntimeOptions } from './runtime.ts';
 import { Security } from './security.ts';
 import { serveStatic } from './static.ts';
 import { Store } from './store.ts';
@@ -158,6 +158,7 @@ export function recoverInterruptedState(store: Store, log: Logger, recovery?: Re
  * temporary `dataDir`, a fake `providers` implementation and `port: 0`.
  */
 export function createApplication(options: ApplicationOptions): MingleApplication {
+  resetProcessShutdownState();
   const log = options.log ?? defaultLogger;
   const config = resolveConfig(options, options.env);
   const store = new Store(openDatabase(path.join(config.dataDir, 'relay.sqlite')));
@@ -353,6 +354,7 @@ export function createApplication(options: ApplicationOptions): MingleApplicatio
     },
     address,
     close() {
+      beginProcessShutdown();
       closing ??= (async () => {
         setupLifecycle.abort();
         await teamOrchestration.close();

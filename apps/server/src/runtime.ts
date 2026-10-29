@@ -36,6 +36,37 @@ interface ToolBuffer { call: ToolCall; output: string; dirty: boolean; tick: num
 const MAX_SUBAGENT_MESSAGES = 30;
 const MAX_SUBAGENT_TEXT_PER_MESSAGE = 8_000;
 const MAX_SUBAGENT_TEXT_TOTAL = 24_000;
+const SHUTDOWN_SIGNAL_GRACE_MS = 5_000;
+
+let processShutdownAt: number | null = null;
+
+/** Called synchronously by process/Electron shutdown handlers before async cleanup begins. */
+export function beginProcessShutdown(): void {
+  processShutdownAt ??= Date.now();
+}
+
+/** A newly constructed application starts a new lifecycle (also supports embedded test apps). */
+export function resetProcessShutdownState(): void {
+  processShutdownAt = null;
+}
+
+function shutdownIsActive(): boolean {
+  return processShutdownAt !== null;
+}
+
+function hasTerminationSignal(error: unknown): boolean {
+  const seen = new Set<object>();
+  let current: unknown = error;
+  for (let depth = 0; depth < 5 && current && typeof current === 'object' && !seen.has(current); depth++) {
+    seen.add(current);
+    const record = current as Record<string, unknown>;
+    if (typeof record.signal === 'string' && ['SIGTERM', 'SIGINT', 'SIGHUP', 'SIGKILL'].includes(record.signal)) return true;
+    const code = typeof record.code === 'number' || typeof record.code === 'string' ? Number(record.code) : NaN;
+    if ([129, 130, 137, 143].includes(code)) return true;
+    current = record.cause;
+  }
+  return false;
+}
 
 function isSubagentLaunch(provider: Session['provider'], call: ToolCall): boolean {
   if (call.category !== 'agent' || /mingle_team|team_/i.test(call.name)) return false;
@@ -85,6 +116,7 @@ interface ActiveRun {
   changeBaseline: RunTreeSnapshot | null;
   dispatchState: DispatchState;
   failureCause?: unknown;
+  shutdownInterruption?: boolean;
   teamRun: boolean;
   teamMcpConnection?: import('@mingle/contracts').TeamMcpConnection;
   onActivity?: (event: AdapterEvent) => void;
@@ -572,6 +604,15 @@ export class SessionRuntime {
       else {
         outcome = 'failed';
         run.failureCause = error;
+        const signaled = hasTerminationSignal(error);
+        const failureAt = Date.now();
+        if (signaled && !shutdownIsActive()) await new Promise((resolve) => setTimeout(resolve, SHUTDOWN_SIGNAL_GRACE_MS));
+        const shutdownWithinGrace = processShutdownAt !== null && processShutdownAt >= failureAt
+          && processShutdownAt - failureAt <= SHUTDOWN_SIGNAL_GRACE_MS;
+        if (shutdownIsActive() || (signaled && shutdownWithinGrace)) {
+          outcome = 'interrupted';
+          run.shutdownInterruption = true;
+        }
         const detail = redactSecrets(errorMessage(error));
         failure = truncate(scrubCapabilities(detail), 4000);
       }
@@ -1279,6 +1320,9 @@ export class SessionRuntime {
         this.closeStream(run, outcome === 'completed' ? null : 'partial');
         this.finishTools(run);
         this.store.setRunChanges(run.id, changes);
+        if (outcome === 'interrupted' && (run.shutdownInterruption || shutdownIsActive())) {
+          this.store.enqueueSessionResume({ runId: run.id, sessionId: run.sessionId, reason: 'application-closed', taskId: run.taskId });
+        }
         this.store.finishRun(run.id, outcome, durationMs, finishedAt);
         const session = this.store.getSession(run.sessionId, true);
         if (!session) return;
@@ -1337,6 +1381,7 @@ export class SessionRuntime {
 
   /** Aborts all native provider work and waits (bounded) for provider cleanup. */
   async shutdown(): Promise<void> {
+    beginProcessShutdown();
     const runs = [...this.active.values()];
     const compactions = [...this.compactions.entries()];
     for (const run of runs) this.interrupt(run.sessionId);

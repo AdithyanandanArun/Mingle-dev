@@ -2,6 +2,7 @@ import { realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { createApplication, type ApplicationOptions, type MingleApplication } from './app.ts';
 import * as providers from './providers/index.ts';
+import { beginProcessShutdown } from './runtime.ts';
 
 export { createApplication, buildServer, type ApplicationOptions, type MingleApplication } from './app.ts';
 export { resolveConfig, SOURCE_ROOT, type ServerConfig } from './config.ts';
@@ -20,6 +21,7 @@ async function main(): Promise<void> {
   let stopping = false;
   const stop = (signal: string) => {
     if (stopping) return;
+    beginProcessShutdown();
     stopping = true;
     console.log(`[mingle] ${signal} received, shutting down`);
     const force = setTimeout(() => process.exit(1), 35_000);

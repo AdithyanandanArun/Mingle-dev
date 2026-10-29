@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { randomUUID } from 'node:crypto';
 import { rmSync } from 'node:fs';
 import type { SessionPlan } from '@mingle/contracts';
+import { recoverInterruptedState } from './app.ts';
 import { EXAMPLE_CONTRACT_SESSION_ID } from './example.ts';
 import { deferred, FakeProviders, startTestApp, tmpDir, waitFor, type TestApp } from './test-utils.ts';
 
@@ -41,6 +42,16 @@ function seedActiveRun(testApp: TestApp, options: { task?: boolean; startedAt?: 
 const resumeEvents = (testApp: TestApp) => testApp.app.store.listEvents().filter((event) => event.type === 'session.run.resumed' || event.type === 'session.run.resume-skipped');
 
 describe('automatic session resume after restart', () => {
+  it('recovers a durable running run as interrupted and queues it on startup', async () => {
+    const before = await boot(dataDir());
+    const run = seedActiveRun(before);
+    recoverInterruptedState(before.app.store, () => undefined);
+    expect(before.app.store.getRun(run.runId)?.status).toBe('interrupted');
+    expect(before.app.store.queuedSessionResumes()).toEqual(expect.arrayContaining([
+      expect.objectContaining({ runId: run.runId, sessionId: EXAMPLE_CONTRACT_SESSION_ID, reason: 'server-restarted' }),
+    ]));
+  });
+
   it('starts one continuation, restores task linkage, and does not repeat it on a second restart', async () => {
     const dir = dataDir();
     const before = await boot(dir);
