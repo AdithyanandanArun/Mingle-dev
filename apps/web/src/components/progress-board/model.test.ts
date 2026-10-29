@@ -17,6 +17,7 @@ describe('progress board card model', () => {
       stepLabel: 'Step 3/7 · Reviewing the implementation',
       branchCommit: 'abcdef0 · Add progress board', commitAge: '1m ago',
       blockers: ['Approval is required', 'One task is blocked'],
+      healthIndicator: null, assignmentHandoffText: null,
     });
   });
 
@@ -24,6 +25,22 @@ describe('progress board card model', () => {
     expect(progressBoardCardModel({ ...base, step: { label: 'Checking the result' }, blockers: ['A', 'B', 'C', 'D'] }, Date.parse('2026-10-29T09:59:00.000Z')))
       .toMatchObject({ stepLabel: 'Checking the result', commitAge: 'just now', blockers: ['A', 'B', 'C'] });
     expect(relativeTime('not-a-date')).toBe('Time unavailable');
+  });
+
+  it('shows health countdowns and recovery handoff transcript lines without duplicate blockers', () => {
+    const now = Date.parse('2026-10-29T10:00:00.000Z');
+    const cooldown = progressBoardCardModel({ ...base,
+      health: { state: 'cooldown', until: '2026-10-29T10:12:00.000Z', reason: 'Provider quota exhausted' },
+      blockers: ['Approval is required', 'Provider quota exhausted', 'One task is blocked'],
+      assignmentHandoff: { action: 'moved', handle: 'backup' },
+    }, now);
+    expect(cooldown.healthIndicator).toEqual({ label: 'Out of usage · back in 12m', tone: 'warning', title: 'Provider quota exhausted' });
+    expect(cooldown.blockers).toEqual(['Approval is required', 'Provider quota exhausted', 'One task is blocked']);
+    expect(cooldown.assignmentHandoffText).toBe('Task moved to @backup (out of usage)');
+    expect(progressBoardCardModel({ ...base, health: { state: 'stalled', reason: 'No recent activity' } }, now).healthIndicator)
+      .toEqual({ label: 'Stalled · no activity', tone: 'error', title: 'No recent activity' });
+    expect(progressBoardCardModel({ ...base, health: { state: 'failed' }, assignmentHandoff: { action: 'took-over', handle: 'builder' } }, now))
+      .toMatchObject({ healthIndicator: { label: 'Failed', tone: 'error' }, assignmentHandoffText: 'Took over from @builder' });
   });
 
   it('labels host-synced boards and resolves device labels for local and remote teammates', () => {

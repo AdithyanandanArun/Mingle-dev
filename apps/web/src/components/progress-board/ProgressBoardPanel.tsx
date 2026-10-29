@@ -66,6 +66,10 @@ function MemberCard({ member, now, onOpen, onCopy }: {
       </span>
       {model.stepLabel ? <span className="progress-board__step">{model.stepLabel}</span> : <span className="progress-board__step is-empty">No current step reported</span>}
     </button>
+    {model.healthIndicator ? <span className={`progress-board__health is-${model.healthIndicator.tone}`} title={model.healthIndicator.title} aria-label={model.healthIndicator.label}>
+      {model.healthIndicator.label}
+    </span> : null}
+    {model.assignmentHandoffText ? <div className="progress-board__handoff">{model.assignmentHandoffText}</div> : null}
     <div className="progress-board__branch-row">
       {member.branch ? <>
         <button type="button" className="progress-board__branch-copy" onClick={() => onCopy(member.branch!.name)} aria-label={`Copy branch ${member.branch.name}`} title="Copy branch name">
@@ -161,6 +165,12 @@ export function ProgressBoardPanel({ projectId, groupId, active, onViewChange, r
     const timer = window.setTimeout(() => void refresh(), 150);
     return () => window.clearTimeout(timer);
   }, [active, refresh, refreshKey]);
+
+  useEffect(() => {
+    if (!active) return;
+    const timer = window.setInterval(() => setNow(Date.now()), 60_000);
+    return () => window.clearInterval(timer);
+  }, [active]);
 
   const openAgent = (member: ProgressBoardMember) => {
     const name = sessions.find((session) => session.id === group?.members.find((row) => row.id === member.memberId)?.sessionId)?.name;

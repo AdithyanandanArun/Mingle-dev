@@ -42,6 +42,10 @@
 .progress-board__task-status.is-done { color: var(--ok); }
 .progress-board__step { min-height: 16px; overflow: hidden; color: var(--fg-2); font-size: var(--text-xs); text-overflow: ellipsis; white-space: nowrap; }
 .progress-board__step.is-empty { color: var(--fg-3); }
+.progress-board__health { align-self: flex-start; padding: 3px 8px; border: 1px solid var(--line); border-radius: 999px; font-size: var(--text-2xs); line-height: 1.4; }
+.progress-board__health.is-warning { border-color: var(--warn-soft); background: color-mix(in srgb, var(--warn-soft) 24%, transparent); color: var(--warn); }
+.progress-board__health.is-error { border-color: var(--err-soft); background: color-mix(in srgb, var(--err-soft) 18%, transparent); color: var(--err); }
+.progress-board__handoff { color: var(--fg-3); font-size: var(--text-xs); }
 .progress-board__branch-row { display: grid; gap: 4px; min-width: 0; padding-top: 7px; border-top: 1px solid var(--line-soft); }
 .progress-board__branch-copy { display: inline-flex; align-items: center; justify-self: start; gap: 6px; min-width: 0; max-width: 100%; padding: 0; border: 0; background: transparent; color: var(--fg-1); cursor: pointer; }
 .progress-board__branch-copy:hover { color: var(--blue-strong); }

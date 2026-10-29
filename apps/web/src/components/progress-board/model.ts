@@ -1,4 +1,4 @@
-import type { ProgressBoardMember, ProgressBoardResponse, ProgressBoardState, TeamStructureMember } from '@mingle/contracts';
+import type { ProgressBoardAssignmentHandoff, ProgressBoardHealth, ProgressBoardMember, ProgressBoardResponse, ProgressBoardState, TeamStructureMember } from '@mingle/contracts';
 
 const STATE_LABEL: Record<ProgressBoardState, string> = {
   idle: 'Idle', working: 'Working', 'waiting-approval': 'Needs approval', 'waiting-answer': 'Needs answer',
@@ -12,6 +12,8 @@ export interface ProgressBoardCardModel {
   branchCommit: string | null;
   commitAge: string | null;
   blockers: string[];
+  healthIndicator: { label: string; tone: 'warning' | 'error'; title?: string } | null;
+  assignmentHandoffText: string | null;
 }
 
 export function relativeTime(value: string, now = Date.now()): string {
@@ -38,14 +40,40 @@ export function boardStepLabel(member: ProgressBoardMember): string | null {
   return `${count}${step.label}`;
 }
 
+export function boardHealthIndicator(health: ProgressBoardHealth | null, now = Date.now()): ProgressBoardCardModel['healthIndicator'] {
+  if (!health || health.state === 'ok') return null;
+  const title = health.reason || undefined;
+  if (health.state === 'cooldown') {
+    const until = health.until ? Date.parse(health.until) : Number.NaN;
+    if (!Number.isFinite(until)) return { label: 'Out of usage', tone: 'warning', title };
+    const minutes = Math.ceil(Math.max(0, until - now) / 60_000);
+    return { label: `Out of usage · back ${minutes ? `in ${minutes}m` : 'now'}`, tone: 'warning', title };
+  }
+  if (health.state === 'stalled') return { label: 'Stalled · no activity', tone: 'error', title };
+  return { label: 'Failed', tone: 'error', title };
+}
+
+export function assignmentHandoffText(handoff: ProgressBoardAssignmentHandoff | undefined): string | null {
+  if (!handoff) return null;
+  return handoff.action === 'moved' ? `Task moved to @${handoff.handle} (out of usage)` : `Took over from @${handoff.handle}`;
+}
+
 export function progressBoardCardModel(member: ProgressBoardMember, now = Date.now()): ProgressBoardCardModel {
   const commit = member.branch?.lastCommit;
+  const blockers = member.blockers.slice(0, 3);
+  const healthReason = member.health?.reason;
+  if (healthReason && !blockers.includes(healthReason)) {
+    if (blockers.length >= 3) blockers.pop();
+    blockers.push(healthReason);
+  }
   return {
     stateLabel: STATE_LABEL[member.state], stateClass: member.state,
     stepLabel: boardStepLabel(member),
     branchCommit: commit ? `${commit.sha.slice(0, 7)} · ${commit.subject}` : null,
     commitAge: commit ? relativeTime(commit.at, now) : null,
-    blockers: member.blockers.slice(0, 3),
+    blockers,
+    healthIndicator: boardHealthIndicator(member.health, now),
+    assignmentHandoffText: assignmentHandoffText(member.assignmentHandoff),
   };
 }
 
