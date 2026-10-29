@@ -49,6 +49,13 @@ export const ProviderFailureSchema = z.object({
 }).strict();
 export type ProviderFailure = z.infer<typeof ProviderFailureSchema>;
 
+export const GroupMemberHealthSchema = z.object({
+  memberId: z.string().min(1).max(100), handle: z.string().min(1).max(32),
+  state: z.enum(['ok', 'cooldown', 'stalled', 'failed']), until: z.string().datetime({ offset: true }).optional(),
+  reason: z.string().max(500).optional(),
+}).strict();
+export type GroupMemberHealth = z.infer<typeof GroupMemberHealthSchema>;
+
 export const RecoveryCheckpointSchema = z.object({
   id: z.string().min(1).max(100), version: z.literal(1), sessionId: z.string().min(1).max(100), runId: z.string().min(1).max(100).optional(),
   reason: z.string().min(1).max(200), capturedAt: z.string().datetime({ offset: true }), objective: z.string().max(1000).nullable(),

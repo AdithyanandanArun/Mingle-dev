@@ -127,6 +127,7 @@ export interface TeamStructureMember {
 export interface TeamLeaderChange {
   id: string; at: string; fromAgentId: string | null; toAgentId: string | null;
   reason: 'manual' | 'fallback-quota' | 'fallback-offline' | 'restored' | 'removed';
+  failureKind?: z.infer<typeof ProviderFailureSchema>['kind'];
   byAccountId: string | null;
 }
 
@@ -221,7 +222,8 @@ export const TeamStructurePayloadSchema = z.object({
   }).strict()).max(64),
   leaderHistory: z.array(z.object({
     id: Id, at: IsoTime, fromAgentId: Id.nullable(), toAgentId: Id.nullable(),
-    reason: z.enum(['manual', 'fallback-quota', 'fallback-offline', 'restored', 'removed']), byAccountId: Uuid.nullable(),
+    reason: z.enum(['manual', 'fallback-quota', 'fallback-offline', 'restored', 'removed']),
+    failureKind: ProviderFailureSchema.shape.kind.optional(), byAccountId: Uuid.nullable(),
   }).strict()).max(50),
   needsLeader: z.boolean(),
   /** Optional so older hosts' broadcasts still validate. */
