@@ -24,5 +24,7 @@ jobs:
       # Multi-app acceptance starts real Git, SQLite and encrypted transport fixtures.
       # Run files serially on the shared runner, matching the verified local suite.
       - run: pnpm --filter @mingle/server exec vitest run --maxWorkers=1
+      - name: Check web state and progress models
+        run: pnpm --filter @mingle/web exec vitest run --maxWorkers=1
       - run: pnpm build
       - run: pnpm smoke
