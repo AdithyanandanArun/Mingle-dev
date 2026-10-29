@@ -40,6 +40,7 @@ import { registerProjectCollaborationRoutes } from './project-collaboration/rout
 import type { TeamChatService } from './team-chat/service.ts';
 import { registerTeamChatRoutes } from './team-chat/routes.ts';
 import type { TeamOrchestrationSubsystem } from './team-orchestration/index.ts';
+import { buildProgressBoard } from './progress-board.ts';
 
 export interface Services {
   distributed: DistributedWorkspaceService;
@@ -319,6 +320,10 @@ export function buildRouter(s: Services) {
     };
   });
   add('GET', '/api/groups/:id', (ctx) => s.groups.get(param(ctx, 'id')));
+  add('GET', '/api/groups/:id/board', (ctx) => {
+    const group = s.groups.get(param(ctx, 'id'));
+    return buildProgressBoard({ store: s.store, group });
+  });
   add('PATCH', '/api/groups/:id', async (ctx) => s.groups.update(param(ctx, 'id'), await ctx.body(UpdateGroupSchema)));
   add('POST', '/api/groups/:id/agents', async (ctx) => new Reply(201, await s.groups.addAgent(param(ctx, 'id'), await ctx.body(AddGroupAgentSchema))));
   add('DELETE', '/api/groups/:id/members/:memberId', (ctx) => s.groups.removeMember(param(ctx, 'id'), param(ctx, 'memberId')));

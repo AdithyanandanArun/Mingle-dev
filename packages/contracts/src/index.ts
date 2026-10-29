@@ -267,3 +267,4 @@ export * from './project-collaboration';
 export * from './team-chat';
 export * from './team-orchestration';
 export * from './progress';
+export * from './progress-board';
