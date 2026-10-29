@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { GroupSnapshot } from '../../../../packages/contracts/src/groups.ts';
-import type { ProgressBoardSnapshot } from '../../../../packages/contracts/src/progress-board.ts';
+import type { GroupMemberHealth, ProgressBoardSnapshot } from '../../../../packages/contracts/src/index.ts';
 import type {
   TeamChatAgent, TeamChatAuthor, TeamChatGroupView, TeamChatMessage, TeamChatPeer, TeamChatSnapshot, TeamChatSyncRequest, TeamChatSyncResponse,
 } from '../../../../packages/contracts/src/team-chat.ts';
@@ -96,6 +96,7 @@ export class TeamChatService {
   private readonly groupViewFlights = new Map<string, Promise<TeamChatGroupView | null>>();
   private readonly groupViewDirty = new Set<string>();
   private readonly groupViewFingerprints = new Map<string, string>();
+  private progressBoardMemberHealthProvider?: (groupId: string) => readonly GroupMemberHealth[];
   private readonly syncRequestedAt = new Map<string, number>();
   private readonly pendingSyncRequests = new Map<string, PendingSyncRequest>();
   private readonly syncRequestRates = new Map<string, number>();
@@ -128,6 +129,11 @@ export class TeamChatService {
       if (!event?.projectId || !/^(?:group\.|task\.|session\.run\.|session\.progress\.|approval\.)/.test(event.type)) return;
       this.scheduleGroupView(event.projectId);
     });
+  }
+
+  /** Injects the host's public group-health read for progress-board sync. */
+  setProgressBoardMemberHealthProvider(provider: (groupId: string) => readonly GroupMemberHealth[]): void {
+    this.progressBoardMemberHealthProvider = provider;
   }
 
   private scheduleGroupView(projectId: string): void {
@@ -194,7 +200,10 @@ export class TeamChatService {
       const key = `${project.teamId}:${project.sharedProjectId}:${snapshot.group.id}`;
       const previous = this.latestGroupView(project.teamId, project.sharedProjectId);
       let board: ProgressBoardSnapshot | undefined;
-      try { board = await buildProgressBoard({ store: this.options.store, group: snapshot }); }
+      try {
+        const memberHealth = this.progressBoardMemberHealthProvider?.(snapshot.group.id);
+        board = await buildProgressBoard({ store: this.options.store, group: snapshot, memberHealth });
+      }
       catch {
         console.warn('[team-chat] Progress board snapshot could not be built for the shared group view.');
         board = previous?.board;

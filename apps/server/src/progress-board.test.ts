@@ -62,17 +62,31 @@ it('builds a bounded board from a temp integration checkout, worker ref, review 
   const integrationHead = runGit(integration, 'rev-parse', 'HEAD').trim();
   t.app.store.recordEvent({ projectId: project.id, type: 'group.integration.pushed', summary: 'Integration pushed',
     payload: { groupId: group.group.id, branch: 'main', commitSha: integrationHead } });
+  t.app.store.recordEvent({ projectId: project.id, sessionId: worker.id, type: 'group.delivery.auto-fallback', summary: 'Automatic fallback',
+    payload: { groupId: group.group.id, fromMemberId: 'board-worker-member', toMemberId: 'board-lead-member', assignmentId: 'board-assignment', taskId: task.id } });
 
-  const board = await buildProgressBoard({ store: t.app.store, group, now: () => Date.parse(at) });
+  const board = await buildProgressBoard({ store: t.app.store, group, memberHealth: [
+    { memberId: 'board-lead-member', handle: 'lead', state: 'stalled', until: at, reason: 'No activity from the current delivery' },
+    { memberId: 'board-worker-member', handle: 'board-worker', state: 'cooldown', until: '2026-10-29T10:12:00.000Z',
+      reason: `Provider quota exhausted at https://secret.example/api api_key=${'x'.repeat(24)} ${'y'.repeat(180)}` },
+  ], now: () => Date.parse(at) });
   const member = board.members.find((item) => item.memberId === 'board-worker-member')!;
+  const leadMember = board.members.find((item) => item.memberId === 'board-lead-member')!;
   expect(board.integration).toMatchObject({ branch: 'main', head: { sha: integrationHead, subject: 'initial' }, lastPush: { sha: integrationHead } });
   expect(member).toMatchObject({
     handle: 'board-worker', provider: 'claude', device: 'Remote owner', state: 'waiting-approval',
     currentTask: { id: task.id, status: 'blocked' },
     step: { label: 'Review worker changes', current: 3, total: 7 },
     branch: { name: workerBranch, lastCommit: { sha: workerSha, subject: 'Board worker result' }, pushed: false, merged: false },
-    health: null,
+    health: { state: 'cooldown', until: '2026-10-29T10:12:00.000Z' },
+    assignmentHandoff: { action: 'moved', handle: 'lead' },
   });
+  expect(member.health?.reason).toContain('[remote]');
+  expect(member.health?.reason).not.toContain('secret.example');
+  expect(member.health?.reason).not.toContain('xxxxxxxx');
+  expect(member.health?.reason?.length).toBeLessThanOrEqual(160);
+  expect(member.blockers).toContain(member.health?.reason);
+  expect(leadMember).toMatchObject({ state: 'stalled', health: { state: 'stalled' }, assignmentHandoff: { action: 'took-over', handle: 'board-worker' } });
   expect(member.blockers).toHaveLength(3);
   expect(member.blockers.join(' ')).toContain('Approval required');
   expect(member.blockers.join(' ')).toContain('blocked');
@@ -91,10 +105,14 @@ it('serves local group boards and falls back to a synced host board for a remote
   groups.insertGroup({ id: 'board-route-group', projectId: project.id, title: 'Team session', anchorSessionId: anchor.id,
     mode: 'orchestrated', maxParallel: 2, maxTurns: 20, maxHops: 5 });
   groups.insertMember({ id: 'board-route-member', groupId: 'board-route-group', sessionId: anchor.id, handle: 'lead', role: 'orchestrator' });
+  vi.spyOn(t.app.groups, 'getMemberHealth').mockReturnValue([
+    { memberId: 'board-route-member', handle: 'lead', state: 'cooldown', until: '2026-10-29T10:12:00.000Z' },
+  ]);
 
   const local = await t.api('GET', '/api/groups/board-route-group/board');
   expect(local.status).toBe(200);
   expect(local.json).toMatchObject({ groupId: 'board-route-group', source: 'local' });
+  expect((local.json as { members: Array<{ health: unknown }> }).members[0]?.health).toMatchObject({ state: 'cooldown', until: '2026-10-29T10:12:00.000Z' });
   expect(local.json.syncedAt).toBeUndefined();
 
   const board = { ...(await buildProgressBoard({ store: t.app.store, group: t.app.groups.get('board-route-group') })), groupId: 'remote-team-session' };

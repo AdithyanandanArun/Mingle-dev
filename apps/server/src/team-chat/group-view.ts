@@ -56,6 +56,13 @@ export function boundSharedProgressBoard(input: ProgressBoardSnapshot): Progress
       device: boardText(member.device, 120) || 'Team device',
       currentTask: member.currentTask ? { ...member.currentTask, title: boardText(member.currentTask.title, 200) } : null,
       step: member.step ? { ...member.step, label: boardText(member.step.label, 200) || 'Current step unavailable' } : null,
+      health: member.health ? {
+        ...member.health,
+        ...(member.health.reason ? { reason: boardText(member.health.reason, 160) } : {}),
+      } : null,
+      ...(member.assignmentHandoff ? { assignmentHandoff: {
+        ...member.assignmentHandoff, handle: boardText(member.assignmentHandoff.handle, 32) || 'teammate',
+      } } : {}),
       branch: member.branch && boardBranch(member.branch.name) ? {
         ...member.branch,
         name: boardBranch(member.branch.name)!,

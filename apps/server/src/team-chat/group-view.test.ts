@@ -295,12 +295,18 @@ it('publishes a scrubbed board with the host group view and serves it on the tea
     addBoardSessions(host, group);
     const localBoard = await (await import('../progress-board.ts')).buildProgressBoard({ store: host.store, group });
     expect(localBoard.members).toHaveLength(2);
+    const healthMember = group.members[0]!;
+    host.service.setProgressBoardMemberHealthProvider(() => [{ memberId: healthMember.id, handle: healthMember.handle, state: 'cooldown',
+      until: '2026-10-29T10:12:00.000Z', reason: 'Quota exhausted at https://secret.example api_key=12345678901234567890' }]);
     host.service.setSharedGroupSnapshotProvider(async () => group);
     await host.service.snapshot(HOST_PROJECT, { limit: 20 });
     const envelope = host.outgoing.find((entry) => entry.kind === 'teamchat.group-view');
     expect(envelope).toBeTruthy();
     const published = decodeGroupView(envelope.payload.body);
     expect(published.board?.members).toHaveLength(2);
+    expect(published.board?.members.find((row) => row.memberId === healthMember.id)?.health).toMatchObject({
+      state: 'cooldown', until: '2026-10-29T10:12:00.000Z', reason: 'Quota exhausted at [remote] api_key=[redacted]',
+    });
     expect(JSON.stringify(published.board)).not.toContain('/home/example/private');
     expect(JSON.stringify(published.board)).not.toContain('secret.example');
 
@@ -440,6 +446,11 @@ it('ignores the board snapshot timestamp when fingerprinting and trims oversized
     const first = projectGroupView(group, host.store, 1, { ...board, updatedAt: '2026-10-29T10:00:00.000Z' });
     const later = { ...first, updatedAt: '2026-10-29T10:01:00.000Z', board: { ...first.board!, updatedAt: '2026-10-29T10:01:00.000Z' } };
     expect(sharedGroupViewFingerprint(first)).toBe(sharedGroupViewFingerprint(later));
+    const withHealth = structuredClone(first);
+    withHealth.board!.members[0]!.health = { state: 'cooldown', until: '2026-10-29T10:12:00.000Z', reason: 'Provider quota exhausted' };
+    const sameHealthLater = { ...withHealth, updatedAt: '2026-10-29T10:02:00.000Z', board: { ...withHealth.board!, updatedAt: '2026-10-29T10:02:00.000Z' } };
+    expect(sharedGroupViewFingerprint(first)).not.toBe(sharedGroupViewFingerprint(withHealth));
+    expect(sharedGroupViewFingerprint(withHealth)).toBe(sharedGroupViewFingerprint(sameHealthLater));
 
     const bounded = boundSharedProgressBoard(board);
     expect(Buffer.byteLength(JSON.stringify(bounded), 'utf8')).toBeLessThanOrEqual(24 * 1024);

@@ -321,6 +321,7 @@ export function buildRouter(s: Services) {
     };
   });
   add('GET', '/api/groups/:id', (ctx) => s.groups.get(param(ctx, 'id')));
+  s.teamChat.setProgressBoardMemberHealthProvider((groupId) => s.groups.getMemberHealth(groupId));
   add('GET', '/api/groups/:id/board', async (ctx) => {
     const groupId = param(ctx, 'id');
     let group;
@@ -329,7 +330,7 @@ export function buildRouter(s: Services) {
       if (!(error instanceof HttpError) || error.status !== 404) throw error;
     }
     if (group) {
-      const board = await buildProgressBoard({ store: s.store, group });
+      const board = await buildProgressBoard({ store: s.store, group, memberHealth: s.groups.getMemberHealth(group.group.id) });
       return ProgressBoardResponseSchema.parse({ ...board, source: 'local' });
     }
     const projectId = ctx.url.searchParams.get('projectId');

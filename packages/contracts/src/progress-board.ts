@@ -25,11 +25,21 @@ export const ProgressBoardBranchSchema = z.object({
   name: z.string().max(200), lastCommit: CommitSchema.nullable(), pushed: z.boolean().nullable(), merged: z.boolean().nullable(),
 }).strict();
 
+export const ProgressBoardHealthSchema = z.object({
+  state: z.enum(['ok', 'cooldown', 'stalled', 'failed']),
+  until: z.string().datetime({ offset: true }).optional(), reason: z.string().max(160).optional(),
+}).strict();
+
+export const ProgressBoardAssignmentHandoffSchema = z.object({
+  action: z.enum(['moved', 'took-over']), handle: z.string().min(1).max(32),
+}).strict();
+
 export const ProgressBoardMemberSchema = z.object({
   memberId: z.string().min(1).max(100), handle: z.string().min(1).max(32), role: z.enum(['peer', 'orchestrator', 'worker']),
   provider: ProviderSchema, model: z.string().min(1).max(150), device: z.string().min(1).max(120),
   state: ProgressBoardStateSchema, currentTask: ProgressBoardTaskSchema.nullable(), step: ProgressBoardStepSchema.nullable(),
-  branch: ProgressBoardBranchSchema.nullable(), blockers: z.array(z.string().max(200)).max(3), health: z.null(),
+  branch: ProgressBoardBranchSchema.nullable(), blockers: z.array(z.string().max(200)).max(3), health: ProgressBoardHealthSchema.nullable(),
+  assignmentHandoff: ProgressBoardAssignmentHandoffSchema.optional(),
   updatedAt: z.string().datetime({ offset: true }),
 }).strict();
 
@@ -57,6 +67,8 @@ export type ProgressBoardState = z.infer<typeof ProgressBoardStateSchema>;
 export type ProgressBoardTask = z.infer<typeof ProgressBoardTaskSchema>;
 export type ProgressBoardStep = z.infer<typeof ProgressBoardStepSchema>;
 export type ProgressBoardBranch = z.infer<typeof ProgressBoardBranchSchema>;
+export type ProgressBoardHealth = z.infer<typeof ProgressBoardHealthSchema>;
+export type ProgressBoardAssignmentHandoff = z.infer<typeof ProgressBoardAssignmentHandoffSchema>;
 export type ProgressBoardMember = z.infer<typeof ProgressBoardMemberSchema>;
 export type ProgressBoardSnapshot = z.infer<typeof ProgressBoardSnapshotSchema>;
 export type ProgressBoardResponse = z.infer<typeof ProgressBoardResponseSchema>;

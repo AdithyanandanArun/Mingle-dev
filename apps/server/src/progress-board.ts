@@ -1,4 +1,4 @@
-import { ProgressBoardSnapshotSchema, type GroupSnapshot, type ProgressBoardMember, type ProgressBoardSnapshot, type Task } from '@mingle/contracts';
+import { ProgressBoardSnapshotSchema, type GroupMemberHealth, type GroupSnapshot, type ProgressBoardAssignmentHandoff, type ProgressBoardMember, type ProgressBoardSnapshot, type Task } from '@mingle/contracts';
 import { teamAgentBranch } from './repository/team-branch.ts';
 import { git } from './git.ts';
 import type { Store } from './store.ts';
@@ -16,6 +16,7 @@ type ReviewBranch = {
   branch: string | null; commit_sha: string | null; review_ref: string | null;
   fetch_failure: string | null; push_failure: string | null; merged_at: string | null; accepted_at: string | null;
 };
+type AssignmentHandoff = { fromMemberId: string; toMemberId: string; at: string };
 
 function cached<T>(key: string, read: () => Promise<T>): Promise<T> {
   const prior = cache.get(key);
@@ -138,6 +139,33 @@ function latestPush(store: Store, group: GroupSnapshot): ProgressBoardSnapshot['
   } catch { return null; }
 }
 
+function latestAssignmentHandoff(store: Store, group: GroupSnapshot): AssignmentHandoff | null {
+  const handoffs: AssignmentHandoff[] = [];
+  try {
+    const row = store.db.prepare(`SELECT payload,created_at FROM events
+      WHERE project_id=? AND type='group.delivery.auto-fallback'
+        AND json_extract(payload,'$.groupId')=? AND json_extract(payload,'$.assignmentId') IS NOT NULL
+      ORDER BY id DESC LIMIT 1`).get(group.group.projectId, group.group.id) as { payload: string; created_at: string } | undefined;
+    if (row && validDate(row.created_at)) {
+      const payload = JSON.parse(row.payload) as Record<string, unknown>;
+      if (typeof payload.fromMemberId === 'string' && typeof payload.toMemberId === 'string'
+        && payload.fromMemberId !== payload.toMemberId) {
+        handoffs.push({ fromMemberId: payload.fromMemberId, toMemberId: payload.toMemberId, at: row.created_at });
+      }
+    }
+  } catch { /* The snapshot delivery linkage below remains available without an event row. */ }
+
+  for (const source of group.deliveries) {
+    if (!source.recoveredByDeliveryId) continue;
+    const successor = group.deliveries.find((delivery) => delivery.id === source.recoveredByDeliveryId);
+    const assignment = group.assignments.find((item) => item.deliveryId === source.recoveredByDeliveryId);
+    if (!successor || !assignment || assignment.toMemberId !== successor.memberId || source.memberId === successor.memberId) continue;
+    const at = validDate(successor.updatedAt) ? successor.updatedAt : source.updatedAt;
+    if (validDate(at)) handoffs.push({ fromMemberId: source.memberId, toMemberId: successor.memberId, at });
+  }
+  return handoffs.sort((left, right) => Date.parse(right.at) - Date.parse(left.at))[0] ?? null;
+}
+
 function latestProgressStatus(store: Store, sessionId: string, runId: string | null): Record<string, unknown> | null {
   if (!runId) return null;
   try {
@@ -219,7 +247,7 @@ function pickTask(store: Store, group: GroupSnapshot, memberId: string, deliveri
 
 /** Build a bounded, read-only group snapshot for the live progress board. */
 export async function buildProgressBoard(input: {
-  store: Store; group: GroupSnapshot; now?: () => number;
+  store: Store; group: GroupSnapshot; memberHealth?: readonly GroupMemberHealth[]; now?: () => number;
 }): Promise<ProgressBoardSnapshot> {
   const { store, group } = input;
   const now = input.now ?? Date.now;
@@ -239,6 +267,8 @@ export async function buildProgressBoard(input: {
   const integrationBranch = integrationPath ? await branchAt(integrationPath) : null;
   const integrationHead = integrationPath ? await commitAt(integrationPath, 'HEAD') : null;
   const lastPush = latestPush(store, group);
+  const healthByMemberId = new Map((input.memberHealth ?? []).map((health) => [health.memberId, health]));
+  const assignmentHandoff = latestAssignmentHandoff(store, group);
   const tasks = store.listTasks(group.group.projectId);
   const runs = new Map(store.activeRuns().map((run) => [run.sessionId, run]));
   const ownerNames = cachedOwnerNames(store, group);
@@ -253,16 +283,24 @@ export async function buildProgressBoard(input: {
     const approvals = store.pendingApprovals(session.id);
     const waitingQuestion = store.listSessionQuestions(session.id, 50).some((question) => question.status === 'pending');
     const failedDelivery = deliveries.find((delivery) => delivery.status === 'failed');
+    const rawHealth = healthByMemberId.get(member.id);
+    const health = rawHealth ? {
+      state: rawHealth.state,
+      ...(rawHealth.state === 'cooldown' && validDate(rawHealth.until) ? { until: rawHealth.until } : {}),
+      ...(rawHealth.reason ? { reason: publicText(rawHealth.reason, 160) } : {}),
+    } : null;
     const task = pickTask(store, group, member.id, group.deliveries);
     const isPaused = Boolean(group.group.paused || member.held || group.requests.some((request) => request.status === 'paused'
       && deliveries.some((delivery) => delivery.requestId === request.id && (delivery.status === 'queued' || delivery.status === 'running'))));
     const failed = Boolean(failedDelivery || session.status === 'error' || member.failure);
-    const state: ProgressBoardMember['state'] = approvals.length ? 'waiting-approval'
+    const state: ProgressBoardMember['state'] = health?.state === 'stalled' ? 'stalled'
+      : approvals.length ? 'waiting-approval'
       : waitingQuestion ? 'waiting-answer'
         : isPaused ? 'paused'
           : failed ? 'failed'
             : liveDelivery?.status === 'running' || session.status === 'running' || session.status === 'waiting' ? 'working' : 'idle';
     const blockers: string[] = [];
+    if (health?.reason) addBlocker(blockers, health.reason);
     if (group.group.paused) addBlocker(blockers, group.group.pauseReason ?? 'The group is paused.');
     if (member.held) addBlocker(blockers, 'This agent is held.');
     if (approvals.length) addBlocker(blockers, `Approval required: ${publicText(approvals[0]!.tool, 80) || 'provider action'}.`);
@@ -282,10 +320,19 @@ export async function buildProgressBoard(input: {
       .filter(validDate).sort().at(-1) ?? new Date(now()).toISOString();
     const branch = await branchInfo({ store, sessionId: session.id, handle: member.handle, worktreePath: session.worktreePath,
       savedBranch: session.branch, isRemote, review, integrationPath, integrationHead: integrationHead?.sha ?? null });
+    let memberHandoff: ProgressBoardAssignmentHandoff | undefined;
+    if (assignmentHandoff?.fromMemberId === member.id) {
+      const other = group.members.find((candidate) => candidate.id === assignmentHandoff.toMemberId);
+      if (other) memberHandoff = { action: 'moved', handle: other.handle };
+    } else if (assignmentHandoff?.toMemberId === member.id) {
+      const other = group.members.find((candidate) => candidate.id === assignmentHandoff.fromMemberId);
+      if (other) memberHandoff = { action: 'took-over', handle: other.handle };
+    }
     return {
       memberId: member.id, handle: member.handle, role: member.role, provider: session.provider, model: session.model,
       device: isRemote ? ownerNames.get(session.id) || 'Remote owner' : 'this device',
-      state, currentTask, step: progress, branch, blockers: blockers.slice(0, 3), health: null, updatedAt: latestUpdatedAt,
+      state, currentTask, step: progress, branch, blockers: blockers.slice(0, 3), health,
+      ...(memberHandoff ? { assignmentHandoff: memberHandoff } : {}), updatedAt: latestUpdatedAt,
     };
   }));
 
