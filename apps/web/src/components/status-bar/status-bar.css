@@ -23,6 +23,7 @@
 .status-bar__stop { flex: none; padding: 0 12px; border: 0; border-left: 1px solid var(--line-soft); background: transparent; color: var(--fg-2); font: inherit; font-size: var(--text-xs, 12px); cursor: pointer; }
 .status-bar__stop:hover { color: var(--fg-0); background: var(--bg-hover); }
 .status-bar__steps { display: grid; gap: 1px; max-height: 220px; overflow: auto; margin: 0; padding: 5px 8px 8px; border-top: 1px solid var(--line-soft); list-style: none; animation: fade-up var(--motion-ui, 180ms) var(--ease-out, ease-out) both; }
+.status-bar__steps[hidden] { display: none; }
 .status-bar__step { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 5px 5px; color: var(--fg-3); font-size: var(--text-xs, 12px); }
 .status-bar__step svg { flex: none; }
 .status-bar__step.is-in_progress { color: var(--accent); }

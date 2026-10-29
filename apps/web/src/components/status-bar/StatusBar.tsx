@@ -1,5 +1,5 @@
 import { Ban, Check, ChevronDown, Circle, CircleDot } from 'lucide-react';
-import { useState } from 'react';
+import { useId, useState } from 'react';
 import type { StatusBarState, StatusBarStepStatus } from './deriveStatusBarState';
 import './status-bar.css';
 
@@ -14,13 +14,14 @@ function StepIcon({ status }: { status: StatusBarStepStatus }) {
 
 export function StatusBar({ state, onStop }: { state: StatusBarState | null; onStop?: () => void | Promise<void> }) {
   const [expanded, setExpanded] = useState(false);
+  const checklistId = useId();
   if (!state) return null;
   const hasChecklist = state.steps.length > 0;
 
   return (
     <div className={`status-bar${expanded ? ' is-expanded' : ''}`} onKeyDown={(event) => { if (event.key === 'Escape' && expanded) { event.preventDefault(); setExpanded(false); } }}>
       <div className="status-bar__row">
-        {hasChecklist ? <button type="button" className="status-bar__toggle" aria-expanded={expanded} aria-controls="status-bar-checklist"
+        {hasChecklist ? <button type="button" className="status-bar__toggle" aria-expanded={expanded} aria-controls={checklistId}
           aria-label={expanded ? 'Collapse progress checklist' : 'Expand progress checklist'} onClick={() => setExpanded((value) => !value)}>
           <span className={`status-bar__dot${state.running ? ' is-running' : ''}`} aria-hidden="true" />
           <strong className="status-bar__primary" aria-live="polite">{state.primary}</strong>
@@ -33,7 +34,7 @@ export function StatusBar({ state, onStop }: { state: StatusBarState | null; onS
         </div>}
         {state.running && onStop ? <button type="button" className="status-bar__stop" onClick={() => void onStop()}>Stop</button> : null}
       </div>
-      {hasChecklist && expanded ? <ul className="status-bar__steps" id="status-bar-checklist" aria-label="Plan steps">
+      {hasChecklist ? <ul className="status-bar__steps" id={checklistId} aria-label="Plan steps" hidden={!expanded}>
         {state.steps.map((step) => <li key={step.id} className={`status-bar__step is-${step.status}`}>
           <StepIcon status={step.status} />
           <span className="status-bar__step-title">{step.title}</span>

@@ -61,10 +61,10 @@ function MemberCard({ member, now, onOpen, onCopy }: {
       </span>
       <span className="progress-board__card-meta"><span>{member.role}</span><span>{member.device}</span><span>{member.provider} · {member.model}</span></span>
       <span className="progress-board__task">
-        <strong>{member.currentTask?.title ?? 'No active task'}</strong>
+        <strong title={member.currentTask?.title}>{member.currentTask?.title ?? 'No active task'}</strong>
         {member.currentTask ? <span className={`progress-board__task-status is-${member.currentTask.status}`}>{TASK_STATUS[member.currentTask.status]}</span> : null}
       </span>
-      {model.stepLabel ? <span className="progress-board__step">{model.stepLabel}</span> : <span className="progress-board__step is-empty">No current step reported</span>}
+      {model.stepLabel ? <span className="progress-board__step" title={model.stepLabel}>{model.stepLabel}</span> : <span className="progress-board__step is-empty">No current step reported</span>}
     </button>
     {model.healthIndicator ? <span className={`progress-board__health is-${model.healthIndicator.tone}`} title={model.healthIndicator.title} aria-label={model.healthIndicator.label}>
       {model.healthIndicator.label}

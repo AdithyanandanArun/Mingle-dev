@@ -36,5 +36,5 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .single-subagents__spinner { animation-duration: 2.4s; }
+  .single-subagents__spinner { animation: none; }
 }
