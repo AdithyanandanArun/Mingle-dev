@@ -194,6 +194,24 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
         continue;
       }
       if (!liveDelivery(row.status)) continue;
+      const group = this.groupOrNull(row.group_id);
+      const groupDelivery = group?.deliveries.find((delivery) => delivery.id === row.delivery_id);
+      const host = this.readHost(row.team_id, row.shared_project_id);
+      if (host && this.settings(host).permissionLevel === 'full-access' && groupDelivery?.status === 'interrupted'
+        && groupDelivery.error === 'Interrupted because Mingle restarted') {
+        // The host-side queue has already made a bounded continuation. Interrupt the old owner run
+        // before releasing the proxy slot so the new delivery cannot race its persistent worktree.
+        this.active.set(row.session_id, { runId: row.run_id, controller: new AbortController() });
+        this.armDeliveryTimeout(row.delivery_id);
+        this.options.teamMcp.revoke(row.run_id);
+        const payload = TeamInterruptPayloadSchema.parse({ sharedProjectId: row.shared_project_id,
+          deliveryId: row.delivery_id, reason: 'Mingle restarted; stop this old turn before its continuation starts.' });
+        this.track(this.options.transport.send({ teamId: row.team_id, toDeviceId: row.owner_device_id,
+          kind: 'teamgroup.interrupt', payload, idempotencyKey: `teamgroup-interrupt:${row.delivery_id}`.slice(0, 200) })
+          .then(() => this.options.transport.sync())
+          .catch(() => undefined));
+        continue;
+      }
       // The owner device continues independently of the host process. Keep its durable delivery
       // live and resume the persisted idle deadline rather than interrupting valid remote work.
       this.active.set(row.session_id, { runId: row.run_id, controller: new AbortController() });
@@ -2704,6 +2722,7 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
     }
     if (message && outcome !== 'completed') this.options.store.insertMessage({ sessionId: delivery.session_id, runId: delivery.run_id, role: 'system', kind: 'error', content: redactSecrets(message).slice(0, 1000) });
     if (delivery.request_id && delivery.group_id) this.options.groups.onRunFinished(delivery.session_id, delivery.run_id, outcome);
+    if (delivery.group_id) this.options.groups.pumpTeamGroup(delivery.group_id);
     this.options.store.recordEvent({ projectId: this.options.store.getSession(delivery.session_id, true)?.projectId ?? null, sessionId: delivery.session_id,
       type: `team.delivery.${outcome}`, summary: `Remote team delivery ${outcome}`, payload: { deliveryId, agentId: delivery.agent_id, failure: failure ?? null } });
     this.options.store.touch();

@@ -1478,6 +1478,55 @@ it('fetches permanent worker branches and merges diverging results locally for f
   expect(runGit(fx.project.path, 'rev-list', '--parents', '-n', '1', finalHead).trim().split(' ')).toHaveLength(3);
 });
 
+it('interrupts an old owner turn before re-dispatching a full-access restart continuation', async () => {
+  const fx = fixture();
+  const group = await addRemoteToSession(fx);
+  await fx.host.update(PROJECT, { expectedVersion: 1, permissionLevel: 'full-access' });
+  await grantRemote(fx, 2, { permissionLevel: 'full-access' });
+  const worker = group.members.find((member) => member.sessionId.startsWith('proxy_'))!;
+  const session = fx.store.getSession(worker.sessionId)!;
+  const deliveryId = 'restart-old-delivery';
+  const requestId = 'restart-request';
+  const runId = 'restart-old-host-run';
+  group.deliveries.push({ id: deliveryId, groupId: group.group.id, requestId, messageId: 'restart-source-message', memberId: worker.id,
+    status: 'running', runId, hop: 0, error: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), kind: 'assignment' });
+  const userMessage = fx.store.insertMessage({ sessionId: session.id, role: 'user', content: 'Continue the assigned feature.', runId, kind: 'group-delivery' });
+  fx.store.insertRun({ id: runId, sessionId: session.id, userMessageId: userMessage.id, provider: 'codex', model: session.model, startedAt: new Date().toISOString() });
+  fx.host.start({ session, runId, content: 'Original work turn', options: { groupDeliveryId: deliveryId },
+    context: { groupId: group.group.id, memberId: worker.id, requestId, deliveryId, hop: 0, instructions: 'Team instructions' } });
+  await waitFor(() => fx.outgoing.some((entry) => entry.kind === 'teamgroup.delivery' && (entry.payload as { deliveryId?: string }).deliveryId === deliveryId));
+
+  const successorId = 'restart-successor-delivery';
+  const original = group.deliveries.find((delivery) => delivery.id === deliveryId)!;
+  original.status = 'interrupted';
+  original.error = 'Interrupted because Mingle restarted';
+  original.recoveredByDeliveryId = successorId;
+  group.deliveries.push({ id: successorId, groupId: group.group.id, requestId, messageId: 'restart-continuation-message', memberId: worker.id,
+    status: 'queued', runId: null, hop: 0, error: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), kind: 'result' });
+  group.group.paused = true;
+  group.group.pauseReason = 'Waiting for provider availability before full-access restart continuation.';
+  fx.restartHost();
+  await waitFor(() => fx.outgoing.some((entry) => entry.kind === 'teamgroup.interrupt' && (entry.payload as { deliveryId?: string }).deliveryId === deliveryId));
+  expect(fx.host.isActive(session.id)).toBe(true);
+
+  await fx.incoming('teamgroup.delivery.status', { sharedProjectId: SHARED, deliveryId, agentId: REMOTE_AGENT,
+    status: 'interrupted', runId: 'owner-old-run', at: new Date().toISOString() });
+  expect(fx.host.isActive(session.id)).toBe(false);
+  expect(fx.pumpCount()).toBeGreaterThan(0);
+
+  group.group.paused = false;
+  const nextRunId = 'restart-successor-host-run';
+  const nextMessage = fx.store.insertMessage({ sessionId: session.id, role: 'user', content: 'Inspect partial work and continue only what remains.', runId: nextRunId, kind: 'group-delivery' });
+  fx.store.insertRun({ id: nextRunId, sessionId: session.id, userMessageId: nextMessage.id, provider: 'codex', model: session.model, startedAt: new Date().toISOString() });
+  group.deliveries.find((delivery) => delivery.id === successorId)!.status = 'running';
+  group.deliveries.find((delivery) => delivery.id === successorId)!.runId = nextRunId;
+  fx.host.start({ session, runId: nextRunId, content: 'Inspect the persistent worktree before continuing.', options: { groupDeliveryId: successorId },
+    context: { groupId: group.group.id, memberId: worker.id, requestId, deliveryId: successorId, hop: 0, instructions: 'Restart continuation' } });
+  await waitFor(() => fx.outgoing.some((entry) => entry.kind === 'teamgroup.delivery' && (entry.payload as { deliveryId?: string }).deliveryId === successorId));
+  expect(fx.outgoing.find((entry) => entry.kind === 'teamgroup.delivery' && (entry.payload as { deliveryId?: string }).deliveryId === successorId)?.payload)
+    .toMatchObject({ agentId: REMOTE_AGENT, content: expect.stringContaining('Inspect the persistent worktree') });
+});
+
 it('queues one review wake for a remote worker request but not when the completing member is the orchestrator', async () => {
   const completeDirectRequest = async (fx: ReturnType<typeof fixture>, remoteIsOrchestrator: boolean) => {
     const group = await addRemoteToSession(fx);

@@ -85,6 +85,7 @@ const MAX_SAFE_RETRIES = 1;
 const MAX_SAFE_RETRY_DELAY_MS = 24 * 60 * 60 * 1000;
 const MAX_AUTONOMOUS_TURNS = 200;
 const MAX_AUTONOMOUS_HOPS = 24;
+const RESTART_RESUME_PAUSE_REASON = 'Waiting for provider availability before full-access restart continuation.';
 function isSafeBranchName(value: string): boolean {
   return value.length <= 200 && /^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(value) && !value.includes('..')
     && !value.includes('//') && !value.includes('@{') && !value.endsWith('/')
@@ -124,6 +125,7 @@ export class GroupService {
   /** Deliveries whose runtime.start call is in flight, keyed by session. Closed by the same synchronous turn. */
   private readonly reserved = new Map<string, string>();
   private readonly deletingGroups = new Set<string>();
+  private readonly restartResumeGroups = new Set<string>();
   private teamDispatchGuard?: (sessionId: string, groupId: string) => Promise<boolean>;
   private teamRunFinishedHook?: (input: { sessionId: string; runId: string; outcome: Outcome; groupId: string; deliveryId: string }) => void;
 
@@ -1995,30 +1997,120 @@ export class GroupService {
     catch (error) { this.log('warn', `Could not interrupt ${member.sessionId}`, error); }
   }
 
-  /** Startup recovery. Marks unfinished work interrupted and pauses; never starts a model run. */
+  private queueRestartContinuation(group: ConversationGroup, source: DeliveryRow): boolean {
+    if (source.status !== 'interrupted' || source.error !== 'Interrupted because Mingle restarted'
+      || source.attempts > MAX_SAFE_RETRIES || this.repo.deliverySuccessor(group.id, source.id)
+      || this.repo.deliverySource(group.id, source.id)) return false;
+    const member = this.repo.getMember(source.memberId);
+    const request = this.repo.getRequest(source.requestId);
+    if (!member || member.removedAt || member.held || !request || request.status === 'completed') return false;
+    const assignment = source.assignmentId ? this.repo.getAssignment(source.assignmentId) : undefined;
+    const task = assignment ? this.store.getTask(assignment.taskId) : source.taskId ? this.store.getTask(source.taskId) : undefined;
+    if (task?.status === 'done') return false;
+    const queued = this.repo.requestDeliveries(request.id, ['queued']);
+    const committed = request.turnsUsed + queued.length;
+    const budgetRequest = this.extendRequestBudget(group, request.id, committed + 1, source.hop) ?? request;
+    const turnLimit = this.requestTurnLimit(group, budgetRequest);
+    const hopLimit = this.requestHopLimit(group, budgetRequest);
+    if ((turnLimit !== null && committed >= turnLimit) || source.hop > hopLimit) {
+      const reason = source.hop > hopLimit
+        ? `Restart continuation reached the hard full-access ceiling of ${hopLimit} message hops; pending work is retained for review.`
+        : `Restart continuation reached the hard full-access ceiling of ${turnLimit} model turns; pending work is retained for review.`;
+      this.holdBudgetRecord(group, request.id, reason);
+      return false;
+    }
+    const previous = this.repo.getMessage(source.messageId)?.content ?? this.repo.getMessage(request.messageId)?.content ?? '';
+    const continuation = truncate(`Mingle restarted while this delivery was running. Continue from the persistent workspace and inspect the saved recovery checkpoint and current state first. Determine whether any native side effects already occurred; do not repeat completed actions.
+${task ? `Task ${task.id}: ${task.title}\nAcceptance: ${task.acceptanceCriteria}\n` : ''}Original delivery context:\n${clean(previous, 6000)}`, 12_000);
+    const message = this.repo.insertMessage({ groupId: group.id, senderMemberId: null, recipients: [member.id],
+      kind: assignment ? 'assignment' : 'status', requestId: request.id, content: continuation });
+    const successorId = deliveryId();
+    this.repo.insertDelivery({ id: successorId, groupId: group.id, requestId: request.id, messageId: message.id, memberId: member.id,
+      kind: assignment ? 'assignment' : 'result', hop: source.hop, assignmentId: source.assignmentId, taskId: source.taskId,
+      coordinatorEpoch: group.coordinatorEpoch });
+    if (assignment) this.repo.reassignAssignment(assignment.id, member.id, successorId);
+    this.linkRecoverySuccessor(group, source, successorId);
+    this.repo.setDelivery(source.id, { retryable: false });
+    this.repo.updateMember(member.id, { held: false });
+    this.repo.updateRequest(request.id, { status: 'active' });
+    this.repo.updateGroup(group.id, { recoveryState: { status: 'recovering', activeRequestId: request.id, updatedAt: nowIso() } });
+    this.event(group, 'group.delivery.restart-retry', `Restart continuation queued for @${member.handle}`, {
+      deliveryId: source.id, successorDeliveryId: successorId, attempt: source.attempts, maxRetries: MAX_SAFE_RETRIES,
+    }, member.sessionId);
+    return true;
+  }
+
+  /** Startup recovery. Full-access continuations are queued only; provider discovery starts them after listen(). */
   recover(): void {
     for (const group of this.repo.listGroups()) {
       try {
         this.store.tx(() => {
+          const wasPaused = group.paused;
+          const fullAccess = !wasPaused && this.isFullAccessGroup(group);
+          const interrupted: DeliveryRow[] = [];
           let touched = 0;
           for (const d of this.repo.deliveries(group.id, ['running'])) {
             this.repo.transitionDelivery(d.id, 'running', 'interrupted', { error: 'Interrupted because Mingle restarted', retryable: true });
             const assignment = d.assignmentId ? this.repo.getAssignment(d.assignmentId) : undefined;
             if (assignment || d.taskId) this.tasks.finishRun(assignment?.taskId ?? d.taskId!, 'interrupted');
+            const recovered = this.repo.getDelivery(d.id);
+            if (recovered) interrupted.push(recovered);
             touched++;
           }
+          let requeued = 0;
+          if (fullAccess) for (const delivery of interrupted) if (this.queueRestartContinuation(group, delivery)) requeued++;
           const waiting = this.repo.deliveries(group.id).filter((d) => d.status === 'queued' || ((d.status === 'failed' || d.status === 'interrupted') && d.retryable));
-          if (waiting.length && !group.paused) {
-            this.repo.updateGroup(group.id, { paused: true, pauseReason: 'Mingle restarted with unfinished work. Resume to continue; nothing was restarted automatically.' });
+          if (waiting.length && !wasPaused && !this.repo.getGroup(group.id)?.paused) {
+            if (fullAccess && this.repo.deliveries(group.id, ['queued']).length) {
+              this.repo.updateGroup(group.id, { paused: true, pauseReason: RESTART_RESUME_PAUSE_REASON });
+              this.restartResumeGroups.add(group.id);
+            } else {
+              this.repo.updateGroup(group.id, { paused: true, pauseReason: 'Mingle restarted with unfinished work. Resume to continue; nothing was restarted automatically.' });
+            }
           }
           if (waiting.length || touched) {
             for (const request of this.repo.requestsWithStatus(group.id, 'active')) this.refreshRequest(request.id, true);
-            this.event(group, 'group.recovered', 'Group work paused after restart', { interrupted: touched, waiting: waiting.length });
+            this.event(group, 'group.recovered', fullAccess && requeued
+              ? 'Full-access group continuation queued after restart' : 'Group work paused after restart', { interrupted: touched, waiting: waiting.length, requeued });
           }
         });
       } catch (error) {
         this.log('error', `Group recovery failed for ${group.id}`, error);
       }
+    }
+  }
+
+  hasRestartResumeWork(): boolean { return this.restartResumeGroups.size > 0; }
+
+  /** Releases full-access restart continuations after provider availability has been refreshed. */
+  resumeAfterRestart(availableProviders: string[]): void {
+    const available = new Set(availableProviders);
+    for (const groupId of this.restartResumeGroups) {
+      const group = this.repo.getGroup(groupId);
+      if (!group || !group.paused || group.pauseReason !== RESTART_RESUME_PAUSE_REASON) continue;
+      const unavailable = this.repo.deliveries(group.id, ['queued']).find((delivery) => {
+        const member = this.repo.getMember(delivery.memberId);
+        const session = member ? this.store.getSession(member.sessionId) : undefined;
+        if (!member || !session || this.store.isTeamProxySession(session.id)) return false;
+        return !available.has(session.provider);
+      });
+      if (unavailable) {
+        const member = this.repo.getMember(unavailable.memberId);
+        this.event(group, 'group.recovery.restart-resume-skipped', `Restart continuation waits for provider availability${member ? `: @${member.handle}` : ''}`, {
+          deliveryId: unavailable.id, provider: member ? this.store.getSession(member.sessionId)?.provider ?? null : null,
+        });
+        this.restartResumeGroups.delete(groupId);
+        continue;
+      }
+      this.store.tx(() => {
+        this.repo.updateGroup(group.id, { paused: false, pauseReason: null });
+        for (const request of this.repo.requestsWithStatus(group.id, 'paused')) this.refreshRequest(request.id);
+        this.event(group, 'group.recovery.restart-resumed', 'Full-access group continuation resumed after provider discovery', {
+          queued: this.repo.deliveries(group.id, ['queued']).length,
+        });
+      });
+      this.restartResumeGroups.delete(groupId);
+      this.schedule(group.id);
     }
   }
 
@@ -2109,6 +2201,15 @@ export class GroupService {
       if (task?.status === 'ready') {
         this.tasks.markRunning(task);
         this.tasks.finishRun(task.id, 'completed');
+      }
+      const successorId = this.repo.deliverySuccessor(group.id, delivery.id);
+      const successor = successorId ? this.repo.getDelivery(successorId) : undefined;
+      if (successor?.status === 'queued') {
+        this.repo.setDelivery(successor.id, { status: 'cancelled', retryable: false, error: 'Cancelled because the original remote delivery completed after restart.' });
+        if (successor.assignmentId) this.repo.reassignAssignment(successor.assignmentId, member.id, delivery.id);
+        this.event(group, 'group.delivery.restart-retry-cancelled', 'The original remote delivery completed before its restart continuation started', {
+          deliveryId: delivery.id, successorDeliveryId: successor.id,
+        }, sessionId);
       }
       this.event(group, 'group.delivery.completed', `Late remote result completed: @${member.handle}`, {
         deliveryId: delivery.id, runId, kind: delivery.kind, afterIdleTimeout: true,

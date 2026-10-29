@@ -40,13 +40,14 @@ export class SessionResumeService {
   start(signal: AbortSignal): void {
     if (this.started) return;
     this.started = true;
-    if (!this.store.queuedSessionResumes().length) return;
+    if (!this.store.queuedSessionResumes().length && !this.groups.hasRestartResumeWork()) return;
     void this.run(signal).catch((error) => this.log('warn', 'Automatic session resume could not be completed', error));
   }
 
   private async run(signal: AbortSignal): Promise<void> {
     const detected = await this.providers.list();
     if (signal.aborted) return;
+    this.groups.resumeAfterRestart(detected.filter((provider) => provider.available).map((provider) => provider.id));
     const entries = this.store.queuedSessionResumes();
     let cursor = 0;
     let nextStartAt = Date.now();
