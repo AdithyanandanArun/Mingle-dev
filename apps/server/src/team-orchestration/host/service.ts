@@ -1824,12 +1824,7 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
           const head = (await git(integrationPath, ['rev-parse', '--verify', 'HEAD'])).stdout.trim();
           if (/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(head)) baseRevision = head;
         } catch { /* A delivery can proceed without a transfer base when Git state is unavailable. */ }
-        try {
-          const branchResult = await git(integrationPath, ['symbolic-ref', '--quiet', '--short', 'HEAD'], { allowFailure: true });
-          const branchName = branchResult.code === 0 ? branchResult.stdout.trim() : '';
-          const branchRef = branchName ? await git(integrationPath, ['check-ref-format', `refs/heads/${branchName}`], { allowFailure: true }) : null;
-          if (branchName && branchRef?.code === 0 && isSafeGitBranchName(branchName)) integrationBranch = branchName;
-        } catch { /* A detached or unavailable integration worktree has no branch hint. */ }
+        if (isSafeGitBranchName(settings.integrationTarget)) integrationBranch = settings.integrationTarget;
         const trustedScope = assignment?.scope.length ? normalizeScopes(assignment.scope) : null;
         const trustedTaskId = assignment?.taskId ?? basePayload.taskId ?? null;
         this.hostRows.prepare(`INSERT INTO mingle_team_host_artifact_authority(delivery_id,team_id,shared_project_id,group_id,session_id,
