@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { ArrowDown, FolderPlus } from 'lucide-react';
 import type { Session, SessionPlan, SessionRun, ToolCall, UserQuestion } from '@mingle/contracts';
 import { useMingle, useProject, useActiveSession, useActiveGroup } from '../store/store';
@@ -14,6 +14,10 @@ import { appendContextReference } from './MessageContextControls';
 import { TeamSessionView } from './team-chat/TeamSessionView';
 import { useTeamStructure } from '../lib/team-structure-context';
 import { TeamConsentBanner } from './team-orchestration/settings/TeamConsentBanner';
+import { deriveSubagents } from '../lib/subagents';
+import { SubagentChatView } from './subagents/SubagentChatView';
+import { SubagentRail } from './subagents/SubagentRail';
+import { SubagentTranscriptLinks } from './subagents/SubagentTranscriptLinks';
 
 const EMPTY_RUNS: SessionRun[] = [];
 const EMPTY_TOOL_CALLS: ToolCall[] = [];
@@ -73,6 +77,8 @@ function SingleSessionPane() {
   const allRuns = useMingle((s) => s.boot?.runs ?? EMPTY_RUNS);
   const runs = useMemo(() => allRuns.filter(run => run.sessionId === session?.id), [allRuns, session?.id]);
   const allToolCalls = useMingle((s) => s.boot?.toolCalls ?? EMPTY_TOOL_CALLS);
+  const sessionToolCalls = useMemo(() => allToolCalls.filter((call) => call.sessionId === session?.id), [allToolCalls, session?.id]);
+  const subagents = useMemo(() => session ? deriveSubagents(sessionToolCalls, session.provider, session.model) : [], [sessionToolCalls, session?.provider, session?.model]);
   const allPlans = useMingle((s) => s.boot?.plans ?? EMPTY_PLANS);
   const allQuestions = useMingle((s) => s.boot?.questions ?? EMPTY_QUESTIONS);
   const toolCallsByRun = useMemo(() => {
@@ -125,6 +131,9 @@ function SingleSessionPane() {
   }, [allQuestions, session?.id]);
   const { openDialog } = useMingle.getState();
   const creatingSession = useMingle((s) => s.creatingSession);
+  const [selectedSubagentId, setSelectedSubagentId] = useState<string | null>(null);
+  const selectedSubagent = subagents.find((subagent) => subagent.id === selectedSubagentId);
+  const closeSubagent = useCallback(() => setSelectedSubagentId(null), []);
 
   const scroller = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
@@ -135,6 +144,7 @@ function SingleSessionPane() {
   const sig = `${session?.id}|${messages.length}|${last?.content.length ?? 0}|${pending.length}|${activitySig}|${allToolCalls.length}|${planningSig}`;
 
   useEffect(() => { stick.current = true; setAway(false); }, [session?.id]);
+  useEffect(() => { setSelectedSubagentId(null); }, [session?.id]);
   useLayoutEffect(() => {
     const el = scroller.current;
     if (el && stick.current) el.scrollTop = el.scrollHeight;
@@ -162,6 +172,10 @@ function SingleSessionPane() {
   return (
     <div className="chat">
       {project ? <TeammateConsentBanner projectId={project.id} /> : null}
+      {selectedSubagent ? <>
+        <SubagentChatView key={selectedSubagent.id} subagent={selectedSubagent} provider={session.provider} calls={sessionToolCalls} onBack={closeSubagent} />
+        <SubagentRail subagents={subagents} provider={session.provider} onOpen={setSelectedSubagentId} />
+      </> : <>
       <div className="chat__history">
       <div
         className="chat__scroll" ref={scroller} role="log" aria-live="polite" aria-label={`Conversation with ${session.name}`}
@@ -192,17 +206,23 @@ function SingleSessionPane() {
             }
             if (m.role === 'user' && (m.kind === 'group-delivery' || m.kind === 'team-delivery')) return <Fragment key={m.id}>
               <InternalDeliveryDisclosure message={m} />
-              {(runsByUserMessage.get(m.id) ?? []).map(run => <RunActivity key={run.id} run={run} initialCalls={toolCallsByRun.get(run.id) ?? EMPTY_TOOL_CALLS} />)}
+              {(runsByUserMessage.get(m.id) ?? []).map(run => <Fragment key={run.id}>
+                <RunActivity run={run} initialCalls={toolCallsByRun.get(run.id) ?? EMPTY_TOOL_CALLS} />
+                <SubagentTranscriptLinks subagents={subagents.filter((subagent) => subagent.runId === run.id)} onOpen={setSelectedSubagentId} />
+              </Fragment>)}
             </Fragment>;
             return (
               <Fragment key={m.id}>
                 <MessageRow m={m} provider={session.provider} onAskAboutThis={(quote) => appendContextReference(session.id, quote)} />
-                {m.role === 'user' ? (runsByUserMessage.get(m.id) ?? []).map(run => <RunActivity key={run.id} run={run} initialCalls={toolCallsByRun.get(run.id) ?? EMPTY_TOOL_CALLS} />) : null}
+                {m.role === 'user' ? (runsByUserMessage.get(m.id) ?? []).map(run => <Fragment key={run.id}>
+                  <RunActivity run={run} initialCalls={toolCallsByRun.get(run.id) ?? EMPTY_TOOL_CALLS} />
+                  <SubagentTranscriptLinks subagents={subagents.filter((subagent) => subagent.runId === run.id)} onOpen={setSelectedSubagentId} />
+                </Fragment>) : null}
                 {(changesAfterMessage.get(index) ?? []).filter(run => run.status !== 'running').map(run => <RunChanges key={run.id} runId={run.id} summary={run.changes} />)}
               </Fragment>
             );
           })}
-           {unplacedRuns.map(run => <Fragment key={run.id}><RunActivity run={run} initialCalls={toolCallsByRun.get(run.id) ?? EMPTY_TOOL_CALLS} />{run.status !== 'running' ? <RunChanges runId={run.id} summary={run.changes} /> : null}</Fragment>)}
+           {unplacedRuns.map(run => <Fragment key={run.id}><RunActivity run={run} initialCalls={toolCallsByRun.get(run.id) ?? EMPTY_TOOL_CALLS} /><SubagentTranscriptLinks subagents={subagents.filter((subagent) => subagent.runId === run.id)} onOpen={setSelectedSubagentId} />{run.status !== 'running' ? <RunChanges runId={run.id} summary={run.changes} /> : null}</Fragment>)}
           {session.status === 'running' && !runs.some(run => run.status === 'running') ? (
             <div className="working" role="status"><span className="activity-shimmer">{PROVIDER_NAME[session.provider]} is working…</span></div>
           ) : null}
@@ -218,7 +238,9 @@ function SingleSessionPane() {
         </button>
       ) : null}
       </div>
+      <SubagentRail subagents={subagents} provider={session.provider} onOpen={setSelectedSubagentId} />
       <Composer key={session.id} session={session} />
+      </>}
     </div>
   );
 }
