@@ -31,6 +31,7 @@ import {
 } from './prompt.ts';
 import { RESERVED_HANDLES, extractMentions, normalizeScopes, safeArtifactPath, scopesOverlap } from './routing.ts';
 import { pushTeamIntegrationBranch, teamAgentBranch } from '../repository/team-branch.ts';
+import { identityArgs } from '../repository/identity.ts';
 
 function resolveProviderSkill(provider: Session['provider'], skills: ProviderSkill[], id: string, name: string): ProviderSkill | undefined {
   const eligible = nativeActionSkills(provider, skills).some((skill) => skill.id === id && skill.name === name);
@@ -4015,7 +4016,18 @@ ${task ? `Task ${task.id}: ${task.title}\nAcceptance: ${task.acceptanceCriteria}
     });
     if (otherActiveWriter) throw conflict('Another group agent is still running in the integration worktree. Wait for it to finish before accepting this branch.');
 
-    const merged = await git(integrationPath, ['-c', 'commit.gpgSign=false', 'merge', '--no-ff', '--no-edit', workerBranch], { allowFailure: true, timeoutMs: 120_000 });
+    let identity: string[];
+    try {
+      const account = this.store.db.prepare(`SELECT account_id,snapshot_json FROM mingle_project_team_read_model WHERE local_project_id=?`)
+        .get(group.projectId) as { account_id: string; snapshot_json: string } | undefined;
+      const snapshot = account ? JSON.parse(account.snapshot_json) as { members?: Array<{ accountId?: unknown; displayName?: unknown; email?: unknown }> } : null;
+      const owner = snapshot?.members?.find((candidate) => candidate.accountId === account?.account_id);
+      identity = await identityArgs(integrationPath, { name: typeof owner?.displayName === 'string' ? owner.displayName : undefined,
+        email: typeof owner?.email === 'string' ? owner.email : undefined });
+    } catch (error) {
+      throw conflict(error instanceof Error ? error.message : 'Set your Git name and email (git config --global user.name/user.email), then retry.');
+    }
+    const merged = await git(integrationPath, [...identity, '-c', 'commit.gpgSign=false', 'merge', '--no-ff', '--no-edit', workerBranch], { allowFailure: true, timeoutMs: 120_000 });
     if (merged.code !== 0) {
       await git(integrationPath, ['merge', '--abort'], { allowFailure: true });
       throw conflict(`The worker branch conflicts with the group integration branch. Resolve ${workerBranch} manually in ${integrationPath}, then retry team_accept.`);
