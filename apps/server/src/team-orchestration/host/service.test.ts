@@ -1347,7 +1347,7 @@ it('imports remote artifacts into isolated refs and includes those ref names in 
   expect(assistant?.content).toContain('Artifact import/integration failures');
 });
 
-it('fetches permanent worker branches and merges diverging results locally for full-access acceptance', async () => {
+it('fetches permanent worker branches and fast-forwards the integration branch for full-access acceptance', async () => {
   const fx = fixture();
   const originRoot = tmpDir('mingle-team-host-origin-'); paths.push(originRoot);
   const origin = path.join(originRoot, 'origin.git');
@@ -1421,9 +1421,8 @@ it('fetches permanent worker branches and merges diverging results locally for f
   expect(fx.store.getTask(taskId)?.status).toBe('done');
   expect(group.assignments[0]).toMatchObject({ acceptedBy: 'orchestrator', verificationSummary: 'Tests pass and I inspected the diff.' });
   const mergedHead = runGit(fx.project.path, 'rev-parse', 'HEAD').trim();
-  expect(mergedHead).not.toBe(commitSha);
-  expect(() => runGit(fx.project.path, 'merge-base', '--is-ancestor', commitSha, mergedHead)).not.toThrow();
-  expect(runGit(fx.project.path, 'rev-list', '--parents', '-n', '1', mergedHead).trim().split(' ')).toHaveLength(3);
+  // The integration branch has not moved since the worker's base, so acceptance fast-forwards instead of creating a merge commit.
+  expect(mergedHead).toBe(commitSha);
   expect(accepted).toMatchObject({ integrationBranch: 'main', integrationHead: mergedHead, integrationPush: { branch: 'main', commitSha: mergedHead } });
   expect(runGit(origin, 'rev-parse', 'refs/heads/main').trim()).toBe(mergedHead);
   expect(fx.integrationPublications).toContainEqual({ branch: 'main', commitSha: mergedHead });
