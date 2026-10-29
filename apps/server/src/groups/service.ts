@@ -30,7 +30,7 @@ import {
   LIMITS, MODE_LABEL, assignmentText, buildInstructions, clean, deriveAcceptanceCriteria, messageDeliveryText, requestDeliveryText, resultText, type ResultLine, type RosterEntry,
 } from './prompt.ts';
 import { RESERVED_HANDLES, extractMentions, normalizeScopes, safeArtifactPath, scopesOverlap } from './routing.ts';
-import { teamAgentBranch } from '../repository/team-branch.ts';
+import { pushTeamIntegrationBranch, teamAgentBranch } from '../repository/team-branch.ts';
 
 function resolveProviderSkill(provider: Session['provider'], skills: ProviderSkill[], id: string, name: string): ProviderSkill | undefined {
   const eligible = nativeActionSkills(provider, skills).some((skill) => skill.id === id && skill.name === name);
@@ -140,6 +140,11 @@ export class GroupService {
       }
     } catch { /* An ordinary local group has no team policy row. */ }
     return group.autonomy?.mode === 'extended';
+  }
+
+  private isTeamGroup(group: ConversationGroup): boolean {
+    try { return Boolean(this.store.db.prepare(`SELECT 1 AS found FROM mingle_team_host_projects WHERE group_id=? AND group_id!=''`).get(group.id)); }
+    catch { return false; }
   }
 
   private requestTurnLimit(group: ConversationGroup, request: { autoTurnLimit?: number }): number | null {
@@ -3354,9 +3359,21 @@ ${task ? `Task ${task.id}: ${task.title}\nAcceptance: ${task.acceptanceCriteria}
         { taskId: next.id, status: 'done', acceptedBy: 'orchestrator', verificationSummary }, session.id);
       return next;
     });
+    let integrationPush: { branch: string; commitSha: string } | undefined;
+    let pushFailure: string | undefined;
+    if (integration && !this.isTeamGroup(group) && integration.integrationBranch && integration.integrationHead) {
+      try {
+        integrationPush = await pushTeamIntegrationBranch({ worktreePath: integration.integrationWorktree,
+          branch: integration.integrationBranch, expectedHead: integration.integrationHead });
+      } catch (error) {
+        pushFailure = clean(errorMessage(error), 1_500);
+      }
+      this.recordIntegrationPublication(ctx, { branch: integration.integrationBranch, commitSha: integration.integrationHead, ...(pushFailure ? { error: pushFailure } : {}) });
+      if (integrationPush) this.notifyIntegrationBranch(ctx, integrationPush);
+    }
     this.schedule(group.id);
     return { taskId: accepted.id, status: accepted.status, acceptedBy: 'orchestrator', verificationSummary,
-      ...(integration ? { ...integration } : {}) };
+      ...(integration ? { ...integration } : {}), ...(integrationPush ? { integrationPush } : {}), ...(pushFailure ? { pushFailure } : {}) };
   }
 
   private async integrateLocalAssignment(

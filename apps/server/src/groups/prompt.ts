@@ -86,7 +86,7 @@ export function buildInstructions(d: InstructionData): string {
       ? `Do not edit files or report task status during this clarification turn. Resume implementation and task_status/team_artifact only in the active scoped assignment delivery.${d.crossDeviceWorker ? ' If the sender explicitly asks for Git synchronization or publication, limit it to your own permanent branch.' : ''}`
       : d.canAssign
          ? d.teamPermissionLevel ? teamIntegrationGuidance(d)
-          : d.fullAccessGroup ? 'Full-access local group: inspect each worker branch, run the applicable checks, then use team_accept with a verification summary. Mingle merges accepted worker branches into the group integration worktree and marks accepted tasks done. Do not publish the repository unless the human explicitly authorized it.'
+          : d.fullAccessGroup ? 'Full-access local group: inspect each worker branch, run the applicable checks, then use team_accept with a verification summary. Mingle merges accepted worker branches into the group integration worktree, marks accepted tasks done and pushes that integration branch normally. If you manually merge instead, push the integration branch after checks without force or tags. Report any push failure; the local merge remains.'
           : 'You may prepare integration in your own scoped worktree under the selected permission policy. Never push or publish, or modify the human-selected checkout, without explicit human authorization.'
         : d.crossDeviceWorker
           ? `Keep edits inside your assignment and owner-device worktree. ${workerCompletion}`

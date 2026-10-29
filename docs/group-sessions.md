@@ -53,7 +53,7 @@ During a recorded group run, Codex and Claude receive the same host-authenticate
 
 Only the designated orchestrator or Cowork's temporary request planner can schedule assignments. Peer messaging does not grant delegation authority. Tool results confirm queueing or recording, not successful completion. Plain model output containing an `@handle` is never executed as a dispatch command.
 
-Task dependencies normally require Done. An assignment can explicitly name an expected artifact dependency; the corresponding verified committed artifact can unblock that consumer while its producer remains in Review. In full access, only the active coordinator can accept after supplying verification evidence; local acceptance merges the worker branch before marking the task Done. Supervised and balanced groups keep human acceptance. Referencing a commit does not merge it into another worktree. Publishing local-only group work remains a separate repository action.
+Task dependencies normally require Done. An assignment can explicitly name an expected artifact dependency; the corresponding verified committed artifact can unblock that consumer while its producer remains in Review. In full access, only the active coordinator can accept after supplying verification evidence; local acceptance merges the worker branch before marking the task Done and pushes the group integration branch normally. Supervised and balanced groups keep human acceptance. Referencing a commit does not merge it into another worktree.
 
 ## Limits, interruption and recovery
 

@@ -1,5 +1,6 @@
 import { afterEach, expect, it } from 'vitest';
-import { readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { makeRepo, runGit, startTestApp, waitFor, type TestApp } from '../test-utils.ts';
 
@@ -12,6 +13,13 @@ afterEach(async () => {
 
 it('merges a local worker branch into the group integration worktree before full-access acceptance', async () => {
   const projectPath = makeRepo(); repos.push(projectPath);
+  const originRoot = path.join(path.dirname(projectPath), `local-group-origin-${Date.now()}`);
+  const origin = path.join(originRoot, 'origin.git');
+  mkdirSync(originRoot);
+  repos.push(originRoot);
+  execFileSync('git', ['init', '-q', '--bare', '--initial-branch=main', origin]);
+  runGit(projectPath, 'remote', 'add', 'origin', origin);
+  runGit(projectPath, 'push', '-u', 'origin', 'main');
   runGit(projectPath, 'config', 'user.name', 'Mingle integration test');
   runGit(projectPath, 'config', 'user.email', 'mingle-integration@example.invalid');
   const t = await startTestApp(); apps.push(t);
@@ -69,10 +77,11 @@ it('merges a local worker branch into the group integration worktree before full
 
   expect(t.fake.runs).toHaveLength(3);
   expect(accepted).toMatchObject({ taskId, status: 'done', acceptedBy: 'orchestrator', workerBranch: expect.any(String),
-    integrationBranch: 'main', merged: true });
+    integrationBranch: 'main', merged: true, integrationPush: { branch: 'main', commitSha: expect.any(String) } });
   expect(t.app.store.getTask(taskId!)?.status).toBe('done');
   expect(readFileSync(path.join(projectPath, 'feature.txt'), 'utf8')).toBe('merged from the local worker\n');
   const integrationHead = runGit(projectPath, 'rev-parse', 'HEAD').trim();
+  expect(runGit(origin, 'rev-parse', 'refs/heads/main').trim()).toBe(integrationHead);
   const workerHead = runGit(t.app.store.getSession(worker.sessionId)!.worktreePath, 'rev-parse', 'HEAD').trim();
   expect(() => runGit(projectPath, 'merge-base', '--is-ancestor', workerHead, integrationHead)).not.toThrow();
 }, 20_000);
