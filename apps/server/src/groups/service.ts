@@ -243,7 +243,7 @@ export class GroupService {
       if (this.repo.activeAssignments(group.id).some((assignment) => assignment.toMemberId === candidate.id
         && this.repo.getDelivery(assignment.deliveryId)?.status === 'queued')) return false;
       if (scope) {
-        try { this.assertNoTargetTaskConflict(group, candidate, session.worktreePath, scope, exceptAssignmentId); }
+        try { this.assertNoTargetTaskConflict(group, candidate, scope, exceptAssignmentId); }
         catch { return false; }
       }
       if (!this.memberProviderAvailable(candidate, session)) return false;
@@ -1401,7 +1401,7 @@ export class GroupService {
     if (sourceSession.worktreePath !== targetSession.worktreePath && !action.checkpointId) throw conflict('Reassignment to a different worktree requires an acknowledged source recovery checkpoint');
     const checkpoint = this.recoveryCheckpoint(group, action.checkpointId, failure, delivery.requestId, delivery.id);
     if (this.existingRecoveryContinuation(group, delivery)) throw conflict('A queued or running successor already owns this assignment');
-    this.assertNoTargetTaskConflict(group, target, targetSession.worktreePath, assignment.scope, assignment.id);
+    this.assertNoTargetTaskConflict(group, target, assignment.scope, assignment.id);
     const request = this.repo.getRequest(delivery.requestId);
     if (!request) throw conflict('The assignment request no longer exists');
     const limit = this.requestTurnLimit(group, request);
@@ -1428,13 +1428,12 @@ export class GroupService {
     this.event(group, 'group.assignment.reassigned', `Assignment moved from @${source.handle} to @${target.handle}`, { assignmentId: assignment.id, deliveryId: delivery.id, replacementDeliveryId: nextId, actionId, checkpointId: checkpoint?.id ?? null }, target.sessionId);
   }
 
-  private assertNoTargetTaskConflict(group: ConversationGroup, target: MemberRow, worktreePath: string, scope: string[], exceptAssignmentId: string): void {
+  private assertNoTargetTaskConflict(group: ConversationGroup, target: MemberRow, scope: string[], exceptAssignmentId: string): void {
     for (const assignment of this.repo.activeAssignments(group.id)) {
       if (assignment.id === exceptAssignmentId) continue;
       const delivery = this.repo.getDelivery(assignment.deliveryId);
       const owner = this.repo.getMember(assignment.toMemberId);
-      const ownerSession = owner ? this.store.getSession(owner.sessionId) : undefined;
-      if (!delivery || !owner || !ownerSession || ownerSession.worktreePath !== worktreePath) continue;
+      if (!delivery || !owner) continue;
       const task = this.store.getTask(assignment.taskId);
       if (assignment.toMemberId === target.id && (OPEN_DELIVERY.includes(delivery.status) || delivery.retryable || task?.status === 'running')) {
         throw conflict(`@${target.handle} already owns live or retryable task work; settle or cancel it before reassignment`);
@@ -1481,7 +1480,7 @@ export class GroupService {
         || this.repo.requestDeliveries(request.id, ['queued', 'running']).some((row) => row.memberId === target.id)) {
         throw conflict(`@${target.handle} must be idle before taking this request's planning lease`);
       }
-      this.assertNoTargetTaskConflict(group, target, targetSession.worktreePath, [], '');
+      this.assertNoTargetTaskConflict(group, target, [], '');
       const oldRequestDeliveries = this.repo.requestDeliveries(request.id, ['running']).filter((row) => row.memberId === old.id);
       if (sourceBusy && (automatic || sourceSession.worktreePath === targetSession.worktreePath)) throw conflict(`Wait for @${old.handle} to finish cleanup before changing this request's planning lease`);
       const failed = this.repo.requestDeliveries(request.id, ['failed', 'interrupted']).filter((row) => row.memberId === old.id && row.runId).at(-1);
@@ -1527,7 +1526,7 @@ export class GroupService {
     if (!sourceSession || (sourceBusy && (automatic || sourceSession.worktreePath === targetSession.worktreePath))) {
       throw conflict(`Wait for @${old.handle} to finish provider cleanup before replacing the coordinator in this worktree`);
     }
-    this.assertNoTargetTaskConflict(group, target, targetSession.worktreePath, [], '');
+      this.assertNoTargetTaskConflict(group, target, [], '');
     const lastFailureDelivery = this.repo.memberDeliveries(old.id, ['failed', 'interrupted']).filter((row) => row.runId).at(-1);
     const activeOld = this.repo.memberDeliveries(old.id, ['running']).at(-1);
     const contextDelivery = lastFailureDelivery ?? activeOld;
@@ -2104,7 +2103,7 @@ export class GroupService {
     }
     const pool = failure.kind === 'quota_exhausted' ? this.quotaFallbackPoolCheck(group, failure, targetSession) : { ok: true as const, verification: 'verified-distinct' as const };
     if (!pool.ok) { this.recordFallbackBlocked(group.id, failure, pool.reason); return false; }
-    try { this.assertNoTargetTaskConflict(group, target, targetSession.worktreePath, assignment.scope, assignment.id); }
+    try { this.assertNoTargetTaskConflict(group, target, assignment.scope, assignment.id); }
     catch (error) {
       if (error instanceof HttpError) this.recordFallbackBlocked(group.id, failure, error.message);
       return false;
@@ -2163,7 +2162,7 @@ export class GroupService {
             ? this.quotaFallbackPoolCheck(fresh, currentFailure, currentTargetSession)
             : { ok: true as const, verification: 'verified-distinct' as const };
           if (!currentPool.ok) { this.pauseForAutomaticFallback(fresh, failure, currentPool.reason); return; }
-          this.assertNoTargetTaskConflict(fresh, currentTarget, currentTargetSession.worktreePath, currentAssignment.scope, currentAssignment.id);
+          this.assertNoTargetTaskConflict(fresh, currentTarget, currentAssignment.scope, currentAssignment.id);
           const oldText = this.repo.getMessage(currentDelivery.messageId)?.content ?? currentTask.description;
           const dependencies = currentTask.dependsOn.map((id) => `${id} [${this.store.getTask(id)?.status ?? 'missing'}]`).join(', ') || 'none';
           const checkpointContext = this.checkpointHandoffContext(checkpoint, currentTargetSession.worktreePath);
@@ -3381,6 +3380,26 @@ ${task ? `Task ${task.id}: ${task.title}\nAcceptance: ${task.acceptanceCriteria}
     return task?.status === 'review' ? 'review' : null;
   }
 
+  private assertNoAssignmentScopeConflict(
+    group: ConversationGroup, requesting: MemberRow, recipient: MemberRow, scope: string[], eventSessionId: string,
+  ): void {
+    for (const assignment of this.repo.assignments(group.id)) {
+      if (assignment.toMemberId === recipient.id || !this.assignmentScopeStatus(assignment)) continue;
+      const requestedPath = scope.find((requested) => assignment.scope.some((owned) => scopesOverlap([requested], [owned])));
+      if (!requestedPath) continue;
+      const ownedPath = assignment.scope.find((owned) => scopesOverlap([requestedPath], [owned]))!;
+      const owner = this.repo.getMember(assignment.toMemberId);
+      if (!owner || owner.removedAt) continue;
+      const task = this.store.getTask(assignment.taskId);
+      const overlappingPaths = [requestedPath, ownedPath];
+      this.event(group, 'group.assignment.scope-conflict', 'Assignment blocked by an active edit-scope conflict', {
+        requestingMemberId: requesting.id, conflictingMemberId: owner.id, assignmentId: assignment.id,
+        taskId: assignment.taskId, overlappingPaths,
+      }, eventSessionId);
+      throw conflict(`@${owner.handle} owns task “${clean(task?.title ?? assignment.taskId, 120)}” (${assignment.taskId}) in ${ownedPath}; requested path ${requestedPath} overlaps it. Assign this work to @${owner.handle} or wait for that assignment to finish.`);
+    }
+  }
+
   // ---------------------------------------------------------------- coordinator result batches
 
   /** Once per finished delegation batch, hand the delegating coordinator one compact result delivery. */
@@ -3596,15 +3615,9 @@ ${task ? `Task ${task.id}: ${task.title}\nAcceptance: ${task.acceptanceCriteria}
         status: priorDelivery?.status ?? 'unavailable', deduplicated: true,
       };
     }
+    this.assertNoAssignmentScopeConflict(group, member, recipient, scope, session.id);
     const checkpoint = this.assignmentCheckpointRequired(group, request.id, delivery, scope);
     if (checkpoint) return { status: 'awaiting-human-ack', checkpointId: checkpoint.id, reason: checkpoint.reason, queued: false };
-    for (const other of active) {
-      const otherMember = this.repo.getMember(other.toMemberId);
-      const otherSession = otherMember ? this.store.getSession(otherMember.sessionId) : undefined;
-      if (!otherSession || otherSession.worktreePath !== recipientSession.worktreePath) continue;
-      const clash = scopesOverlap(scope, other.scope);
-      if (clash) throw conflict(`Scope "${clash}" overlaps active assignment ${other.id} for @${otherMember?.handle ?? 'unknown'} in the same workspace. Narrow the scope or wait for it to finish.`);
-    }
 
     const created = this.store.tx(() => {
       const current = this.live(ctx);
