@@ -82,6 +82,41 @@ describe('codex adapter', () => {
     expect(child.closed).toBe(true);
   });
 
+  it('captures spawned Codex thread messages and tools under the spawning call only', async () => {
+    const run = makeRun({ prompt: 'Investigate the auth flow' });
+    const { child, adapter } = setup(server((message, c) => {
+      if (message.method !== 'turn/start') return;
+      c.notify('item/started', { threadId: 'thr_1', turnId: 'turn_1', item: {
+        type: 'collabAgentToolCall', id: 'spawn-1', tool: 'spawnAgent', status: 'inProgress', senderThreadId: 'thr_1',
+        receiverThreadIds: ['thr_child'], agentsStates: {}, prompt: 'Inspect auth', model: 'gpt-6.1-sol-mini',
+      } });
+      c.notify('item/agentMessage/delta', { threadId: 'thr_child', turnId: 'turn_child', itemId: 'child-message', delta: 'Auth code is in ' });
+      c.notify('item/agentMessage/delta', { threadId: 'thr_child', turnId: 'turn_child', itemId: 'child-message', delta: 'the session service.' });
+      c.notify('item/started', { threadId: 'thr_child', turnId: 'turn_child', item: { type: 'commandExecution', id: 'child-command', command: 'rg auth', cwd: '/workspace', status: 'inProgress' } });
+      c.notify('item/commandExecution/outputDelta', { threadId: 'thr_child', turnId: 'turn_child', itemId: 'child-command', delta: 'src/session.ts\n' });
+      c.notify('item/completed', { threadId: 'thr_child', turnId: 'turn_child', item: { type: 'commandExecution', id: 'child-command', command: 'rg auth', cwd: '/workspace', status: 'completed', exitCode: 0, aggregatedOutput: 'src/session.ts\n' } });
+      c.notify('item/completed', { threadId: 'thr_child', turnId: 'turn_child', item: { type: 'agentMessage', id: 'child-message', text: 'Auth code is in the session service.' } });
+      c.notify('item/completed', { threadId: 'thr_1', turnId: 'turn_1', item: { type: 'collabAgentToolCall', id: 'spawn-1', tool: 'spawnAgent', status: 'completed', senderThreadId: 'thr_1', receiverThreadIds: ['thr_child'], agentsStates: {}, prompt: 'Inspect auth', model: 'gpt-6.1-sol-mini', output: 'Auth flow located.' } });
+      c.notify('item/agentMessage/delta', { threadId: 'thr_1', turnId: 'turn_1', itemId: 'root-message', delta: 'Parent summary.' });
+      c.notify('turn/completed', completed());
+    }));
+
+    await adapter.run(run.options);
+
+    expect(text(run.events)).toBe('Parent summary.');
+    expect(run.events.filter((event) => event.type === 'subagent.text')).toEqual([
+      { type: 'subagent.text', parentId: 'spawn-1', messageId: 'thr_child:child-message', text: 'Auth code is in ' },
+      { type: 'subagent.text', parentId: 'spawn-1', messageId: 'thr_child:child-message', text: 'the session service.' },
+    ]);
+    expect(run.events.filter((event) => event.type === 'tool.activity').map((event) => event.activity)).toContainEqual(expect.objectContaining({
+      id: 'thr_child:child-command', name: 'shell', category: 'command', status: 'completed', parentId: 'spawn-1', output: 'src/session.ts\n',
+    }));
+    expect(run.events.filter((event) => event.type === 'tool.output')).toContainEqual({ type: 'tool.output', id: 'thr_child:child-command', delta: 'src/session.ts\n' });
+    expect(run.events.filter((event) => event.type === 'tool.activity').map((event) => event.activity)).toContainEqual(expect.objectContaining({
+      id: 'spawn-1', category: 'agent', input: expect.stringContaining('gpt-6.1-sol-mini'), output: 'Auth flow located.',
+    }));
+  });
+
   it('uses the read-only sandbox for supervised sessions', async () => {
     const run = makeRun({ session: { policy: 'supervised' } });
     const { child, adapter } = setup(server((m, c) => { if (m.method === 'turn/start') c.notify('turn/completed', completed()); }));

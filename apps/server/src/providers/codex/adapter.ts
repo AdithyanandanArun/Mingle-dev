@@ -129,6 +129,8 @@ class CodexRun {
   private violation: Error | null = null;
   private lastError: string | null = null;
   private readonly textByItem = new Map<string, string>();
+  private readonly subagentThreads = new Map<string, string>();
+  private readonly subagentTextByItem = new Map<string, string>();
   private lastTextItem: string | null = null;
   private emittedText = false;
   private readonly changesByItem = new Map<string, FileChangeSummary[]>();
@@ -394,7 +396,10 @@ class CodexRun {
     if (this.phase === 'compact') {
       // Compact success must be tied to this exact resumed thread; legacy broadcasts without identity are not evidence.
       if (!this.compactRequestSent || typeof params.threadId !== 'string' || params.threadId !== this.threadId) return;
-    } else if (!this.isOurThread(params)) return;
+    } else if (!this.isOurThread(params)) {
+      this.onSubagentNotification(method, params);
+      return;
+    }
     switch (method) {
       case 'turn/plan/updated': {
         if (typeof params.turnId !== 'string' || (this.turnId && params.turnId !== this.turnId)) break;
@@ -457,6 +462,59 @@ class CodexRun {
     this.emit({ type: 'text', text: separator + delta });
   }
 
+  /** Child-thread messages are persisted on the spawning call and never enter the parent transcript. */
+  private appendSubagentText(parentId: string, threadId: string, itemId: string, delta: string): void {
+    if (!delta) return;
+    const messageId = `${threadId}:${itemId}`;
+    this.subagentTextByItem.set(messageId, (this.subagentTextByItem.get(messageId) ?? '') + delta);
+    this.emit({ type: 'subagent.text', parentId, messageId, text: delta });
+  }
+
+  private onSubagentNotification(method: string, params: Record<string, unknown>): void {
+    const threadId = typeof params.threadId === 'string' ? params.threadId : null;
+    const parentId = threadId ? this.subagentThreads.get(threadId) : undefined;
+    if (!threadId || !parentId) return;
+    if (method === 'item/agentMessage/delta') {
+      if (typeof params.itemId === 'string' && typeof params.delta === 'string') {
+        this.appendSubagentText(parentId, threadId, params.itemId, params.delta);
+      }
+      return;
+    }
+    if (method === 'item/started' || method === 'item/completed') {
+      if (!isRecord(params.item)) return;
+      const item = params.item;
+      const id = typeof item.id === 'string' ? item.id : null;
+      const phase = method === 'item/started' ? 'started' : 'completed';
+      if (item.type === 'agentMessage') {
+        if (phase === 'completed' && id && typeof item.text === 'string') {
+          const messageId = `${threadId}:${id}`;
+          const streamed = this.subagentTextByItem.get(messageId) ?? '';
+          if (!streamed) this.appendSubagentText(parentId, threadId, id, item.text);
+          else if (item.text.length > streamed.length && item.text.startsWith(streamed)) this.appendSubagentText(parentId, threadId, id, item.text.slice(streamed.length));
+        }
+        return;
+      }
+      if (!id) return;
+      const activity = itemToolActivity({ ...item, id: `${threadId}:${id}` }, phase);
+      if (activity) this.emit({ type: 'tool.activity', activity: { ...activity, parentId } });
+      return;
+    }
+    if (method === 'item/commandExecution/outputDelta' && typeof params.itemId === 'string' && typeof params.delta === 'string' && params.delta) {
+      this.emit({ type: 'tool.output', id: `${threadId}:${params.itemId}`, delta: params.delta });
+    }
+  }
+
+  private mapSubagentThreads(item: Record<string, unknown>): void {
+    if (item.type !== 'collabAgentToolCall' || !['spawnAgent', 'spawn_agent'].includes(String(item.tool))) return;
+    const parentId = typeof item.id === 'string' ? item.id : null;
+    if (!parentId) return;
+    const receiverIds = Array.isArray(item.receiverThreadIds) ? item.receiverThreadIds.filter((id): id is string => typeof id === 'string') : [];
+    const agentThreadId = typeof item.agentThreadId === 'string' ? [item.agentThreadId] : [];
+    for (const threadId of [...receiverIds, ...agentThreadId]) {
+      if (threadId && (this.subagentThreads.has(threadId) || this.subagentThreads.size < 256)) this.subagentThreads.set(threadId, parentId);
+    }
+  }
+
   private onItem(item: Record<string, unknown>, phase: 'started' | 'completed', turnId: string | null = null): void {
     const id = typeof item.id === 'string' ? item.id : null;
     if (item.type === 'contextCompaction') {
@@ -476,6 +534,7 @@ class CodexRun {
       } else if (phase === 'completed') this.emit({ type: 'info', content: describeCodexCompaction(this.compaction) });
       return;
     }
+    this.mapSubagentThreads(item);
     if (item.type === 'agentMessage') {
       if (phase === 'completed' && id && typeof item.text === 'string') {
         const streamed = this.textByItem.get(id) ?? '';
