@@ -22,7 +22,7 @@ export class ProjectInvitationCloudFixture {
   }>();
   readonly wakeTimings: Array<{ sentAt: number; deliveredAt: number | null }> = [];
 
-  constructor(private readonly options: { realtime?: boolean; wakeDelayMs?: number } = {}) {}
+  constructor(private readonly options: { realtime?: boolean; wakeDelayMs?: number; onCloudCall?: () => void } = {}) {}
 
   get cloudCalls(): number { return this.calls; }
 
@@ -58,7 +58,7 @@ export class ProjectInvitationCloudFixture {
     const channelsByTopic = new Map<string, { state: { name: string; listeners: Map<string, (message: { payload: unknown }) => void>;
       status: ((state: string) => void) | null; subscribed: boolean }; channel: any }>();
     const client = {
-      from: (table: string) => { this.calls++; return new FixtureQuery(this, userId, table); },
+      from: (table: string) => { this.calls++; this.options.onCloudCall?.(); return new FixtureQuery(this, userId, table); },
       ...(this.options.realtime ? {
         // Simulates payload-free wakes and sealed live envelopes. Authorization and the durable
         // copy still go through the real encrypted mailbox and PostgreSQL policies.
@@ -119,6 +119,7 @@ export class ProjectInvitationCloudFixture {
       } : {}),
       rpc: async (name: string, args: Row = {}) => {
         this.calls++;
+        this.options.onCloudCall?.();
         try {
           return await this.asUser(userId, async () => {
             const parameters = Object.entries(args);

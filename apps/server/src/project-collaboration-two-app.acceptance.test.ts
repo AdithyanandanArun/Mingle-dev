@@ -1,4 +1,5 @@
 import { rmSync } from 'node:fs';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import type { SupabaseClient, User } from '@supabase/supabase-js';
 import { expect, it, vi } from 'vitest';
 import { AccountService } from './account/service.ts';
@@ -10,11 +11,14 @@ it.each([false, true])('invites and joins through two real HTTP applications, Po
     { id: '21000000-0000-4000-8000-000000000001', email: 'leader@example.test' },
     { id: '21000000-0000-4000-8000-000000000002', email: 'teammate@example.test' },
   ];
-  const cloud = new ProjectInvitationCloudFixture({ realtime, wakeDelayMs: 25 });
+  const requestMetrics = new AsyncLocalStorage<{ cloudCalls: number; accountLookups: number }>();
+  const cloud = new ProjectInvitationCloudFixture({ realtime, wakeDelayMs: 25, onCloudCall: () => {
+    const metrics = requestMetrics.getStore();
+    if (metrics) metrics.cloudCalls++;
+  } });
   const accounts = new Map<string, typeof users[number]>();
   const apps: TestApp[] = [], repos: string[] = [];
   let invitationToken = '';
-  let accountLookups = 0;
   try {
     await cloud.initialize(users);
     const nativeSnapshot = AccountService.prototype.snapshot;
@@ -24,7 +28,8 @@ it.each([false, true])('invites and joins through two real HTTP applications, Po
       return user ? { ...state, configured: true, status: 'signed-in', user: { id: user.id, email: user.email, name: 'Example account' } } : state;
     });
     vi.spyOn(AccountService.prototype, 'withAuthenticatedClient').mockImplementation((async function<T>(this: AccountService, work: (client: SupabaseClient, user: User) => Promise<T>) {
-      accountLookups++;
+      const metrics = requestMetrics.getStore();
+      if (metrics) metrics.accountLookups++;
       const user = accounts.get(Reflect.get(this, 'dataDir'));
       if (!user) throw new Error('Explicit fixture account required');
       return work(cloud.client(user.id), { ...user, aud: 'authenticated', created_at: '2026-01-01T00:00:00Z', email_confirmed_at: '2026-01-01T00:00:00Z', is_anonymous: false, app_metadata: { providers: ['google'] }, user_metadata: { full_name: 'Example account' } } as User);
@@ -131,16 +136,31 @@ it.each([false, true])('invites and joins through two real HTTP applications, Po
       stable = cloud.cloudCalls === last ? stable + 1 : 0;
       last = cloud.cloudCalls;
     }
-    const cloudBaseline = cloud.cloudCalls;
-    const lookupBaseline = accountLookups;
-    const cachedReads = await Promise.all(teamReadPaths.map(async (route) => {
-      const startedAt = performance.now();
-      const result = await leader.api('GET', route);
-      return { result, elapsedMs: performance.now() - startedAt };
-    }));
+    // Attribute work to the actual HTTP handler. Realtime acknowledgements and
+    // periodic device heartbeats can overlap this window without being endpoint I/O.
+    const probes = new Map(teamReadPaths.map((route) => [route, { cloudCalls: 0, accountLookups: 0 }]));
+    const handlers = leader.app.server.listeners('request');
+    leader.app.server.removeAllListeners('request');
+    leader.app.server.on('request', (req, res) => {
+      const probe = probes.get(String(req.headers['x-example-cache-probe'] ?? ''));
+      const dispatch = () => { for (const handler of handlers) Reflect.apply(handler, leader.app.server, [req, res]); };
+      if (probe) requestMetrics.run(probe, dispatch);
+      else dispatch();
+    });
+    let cachedReads;
+    try {
+      cachedReads = await Promise.all(teamReadPaths.map(async (route) => {
+        const startedAt = performance.now();
+        const result = await leader.api('GET', route, undefined, { 'x-example-cache-probe': route });
+        return { result, elapsedMs: performance.now() - startedAt };
+      }));
+    } finally {
+      leader.app.server.removeAllListeners('request');
+      for (const handler of handlers) leader.app.server.on('request', handler as (req: import('node:http').IncomingMessage, res: import('node:http').ServerResponse) => void);
+    }
     expect(cachedReads.map((read) => read.result.status), JSON.stringify(cachedReads.map((read) => read.result.json))).toEqual([200, 200, 200]);
-    expect(cloud.cloudCalls - cloudBaseline, 'cached team endpoints must not issue PostgREST or RPC calls').toBe(0);
-    expect(accountLookups - lookupBaseline, 'cached team endpoints must not revalidate Supabase auth').toBe(0);
+    expect([...probes.values()].map((probe) => probe.cloudCalls), 'cached team endpoints must not issue PostgREST or RPC calls').toEqual([0, 0, 0]);
+    expect([...probes.values()].map((probe) => probe.accountLookups), 'cached team endpoints must not revalidate Supabase auth').toEqual([0, 0, 0]);
     expect(cachedReads.every((read) => read.elapsedMs < 150), `Cached endpoint timings: ${cachedReads.map((read) => Math.round(read.elapsedMs)).join(', ')}ms`).toBe(true);
     console.info(`Example cached endpoint timings (structure/agents/collaboration): ${cachedReads.map((read) => Math.round(read.elapsedMs)).join('/')}ms; zero Supabase calls`);
 
