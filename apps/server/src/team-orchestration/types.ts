@@ -60,6 +60,8 @@ export interface TeamOrchestrationGroups {
   contextForRun(sessionId: string, runId: string): import('@mingle/contracts').GroupRunContext | undefined;
   onRunFinished(sessionId: string, runId: string, outcome: 'completed' | 'failed' | 'interrupted'): void;
   acceptTask(context: GroupRunContext, input: TeamAcceptTask): unknown;
+  recordIntegrationPublication?(context: GroupRunContext, input: { branch: string; commitSha: string; error?: string }): void;
+  notifyIntegrationBranch?(context: GroupRunContext, input: { branch: string; commitSha: string }): string[];
   setTeamDispatchGuard(guard: (sessionId: string, groupId: string) => Promise<boolean>): void;
   setTeamRunFinishedHook(hook: (input: { sessionId: string; runId: string; outcome: 'completed' | 'failed' | 'interrupted'; groupId: string; deliveryId: string }) => void): void;
   holdTeamMember(sessionId: string, reason: string): void;

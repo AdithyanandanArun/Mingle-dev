@@ -29,7 +29,7 @@ import type { ProjectCollaborationSnapshot } from '../../../../../packages/contr
 import { KeyedLock } from '../../repository/lock.ts';
 import { normalizeScopes, safeArtifactPath } from '../../groups/routing.ts';
 import { isDeniedName } from '../../paths.ts';
-import { fetchTeamCompletionBranch, teamAgentBranch } from '../../repository/team-branch.ts';
+import { fetchTeamCompletionBranch, pushTeamIntegrationBranch, teamAgentBranch } from '../../repository/team-branch.ts';
 
 type Row = Record<string, unknown>;
 type HostRow = {
@@ -221,12 +221,12 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
 
   setTeamChat(chat: TeamOrchestrationChat): void { this.chat = chat; }
 
-  /** Full-access orchestrator acceptance; branch merges stay local and require the supplied verification evidence. */
+  /** Full-access orchestrator acceptance; Mingle merges locally and publishes the integration branch normally. */
   async acceptTask(context: import('@mingle/contracts').GroupRunContext, sessionId: string, rawInput: TeamAcceptTask): Promise<unknown> {
     const input = TeamAcceptTaskSchema.parse(rawInput);
     const group = this.options.groups.get(context.groupId);
     const host = this.hostRows.prepare(`SELECT * FROM mingle_team_host_projects WHERE group_id=? AND group_id!=''`).get(context.groupId) as HostRow | undefined;
-    if (!host) throw new HttpError(403, 'This task is not part of a host-authorized cross-device team session.');
+    if (!host) return this.options.groups.acceptTask(context, input);
     if (this.settings(host).permissionLevel !== 'full-access') throw new HttpError(403, 'Orchestrator acceptance is available only while the team permission level is full-access.');
     const caller = group.members.find((member) => member.id === context.memberId && !member.removedAt);
     const assignment = group.assignments.find((row) => row.taskId === input.taskId);
@@ -256,9 +256,13 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
         .get(delivery.delivery_id) as { branch: string | null; commit_sha: string | null; base_commit_sha: string | null; review_ref: string | null; fetch_failure: string | null } | undefined;
       let merged = false;
       let mergedRef: string | undefined;
+      let integrationWorktree: string | null = null;
+      let integrationBranch: string | null = null;
+      let integrationHead: string | null = null;
       if (review?.review_ref && review.branch && review.commit_sha) {
         const workspace = this.groupWorkspace(group.group.id);
         if (!workspace) throw new HttpError(409, 'The team integration worktree is unavailable for the accepted worker branch.');
+        integrationWorktree = workspace.worktreePath;
         if (!/^refs\/mingle\/team\/review\/[0-9a-f]{24}$/.test(review.review_ref)
           || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(review.commit_sha)) {
           throw new HttpError(409, 'The saved worker review ref is invalid.');
@@ -271,8 +275,9 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
         const dirty = await git(workspace.worktreePath, ['status', '--porcelain=v1', '--untracked-files=all'], { maxBuffer: 8 * 1024 * 1024 });
         if (dirty.stdout.trim()) throw new HttpError(409, 'The team integration worktree has uncommitted changes. Commit or move them before accepting this branch.');
         const head = (await git(workspace.worktreePath, ['rev-parse', '--verify', 'HEAD'])).stdout.trim();
-        const integrationBranch = await git(workspace.worktreePath, ['symbolic-ref', '--quiet', '--short', 'HEAD'], { allowFailure: true });
-        if (integrationBranch.code !== 0 || !integrationBranch.stdout.trim()) throw new HttpError(409, 'The team integration worktree is detached and cannot accept a worker branch.');
+        const branchResult = await git(workspace.worktreePath, ['symbolic-ref', '--quiet', '--short', 'HEAD'], { allowFailure: true });
+        if (branchResult.code !== 0 || !branchResult.stdout.trim()) throw new HttpError(409, 'The team integration worktree is detached and cannot accept a worker branch.');
+        this.assertSafeIntegrationBranch(branchResult.stdout.trim());
         const alreadyIntegrated = await git(workspace.worktreePath, ['merge-base', '--is-ancestor', review.review_ref, head], { allowFailure: true });
         if (alreadyIntegrated.code !== 0) {
           const mergedResult = await git(workspace.worktreePath,
@@ -283,17 +288,43 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
           }
           merged = true;
         }
+        integrationBranch = branchResult.stdout.trim();
+        integrationHead = (await git(workspace.worktreePath, ['rev-parse', '--verify', 'HEAD'])).stdout.trim();
         mergedRef = review.review_ref;
         this.hostRows.prepare(`UPDATE mingle_team_host_review_branches SET merged_at=COALESCE(merged_at,?) WHERE delivery_id=?`)
           .run(new Date(this.now()).toISOString(), delivery.delivery_id);
       }
-      const result = this.options.groups.acceptTask(context, { taskId: input.taskId, verificationSummary });
+      const result = await this.options.groups.acceptTask(context, { taskId: input.taskId, verificationSummary });
       this.hostRows.prepare(`UPDATE mingle_team_host_review_branches SET accepted_at=?,verification_summary=? WHERE delivery_id=?`)
         .run(new Date(this.now()).toISOString(), verificationSummary, delivery.delivery_id);
-      return { ...(result && typeof result === 'object' ? result as Record<string, unknown> : {}), acceptedBy: 'orchestrator',
-        verificationSummary, ...(review?.branch ? { branch: review.branch } : {}), ...(review?.commit_sha ? { commitSha: review.commit_sha } : {}),
-        ...(mergedRef ? { localRef: mergedRef, integrationWorktree: this.groupWorkspace(group.group.id)?.worktreePath ?? null, merged } : {}) };
+      const acceptedResult = result && typeof result === 'object' ? result as Record<string, unknown> : {};
+      integrationWorktree ??= typeof acceptedResult.integrationWorktree === 'string' ? acceptedResult.integrationWorktree : null;
+      integrationBranch ??= typeof acceptedResult.integrationBranch === 'string' ? acceptedResult.integrationBranch : null;
+      integrationHead ??= typeof acceptedResult.integrationHead === 'string' ? acceptedResult.integrationHead : null;
+      merged ||= acceptedResult.merged === true;
+
+      let pushed: { branch: string; commitSha: string } | undefined;
+      let pushFailure: string | undefined;
+      if (integrationWorktree && integrationBranch && integrationHead) {
+        try {
+          pushed = await pushTeamIntegrationBranch({ worktreePath: integrationWorktree, branch: integrationBranch, expectedHead: integrationHead });
+        } catch (error) {
+          pushFailure = safeRemoteText(error instanceof Error ? error.message : 'The integration branch push failed.').slice(0, 1_500);
+        }
+        this.options.groups.recordIntegrationPublication?.({ ...context }, { branch: integrationBranch, commitSha: integrationHead, ...(pushFailure ? { error: pushFailure } : {}) });
+        if (pushed) this.options.groups.notifyIntegrationBranch?.({ ...context }, pushed);
+      }
+      return { ...acceptedResult, acceptedBy: 'orchestrator', verificationSummary,
+        ...(review?.branch ? { branch: review.branch } : {}), ...(review?.commit_sha ? { commitSha: review.commit_sha } : {}),
+        ...(mergedRef ? { localRef: mergedRef } : {}), ...(integrationWorktree ? { integrationWorktree } : {}),
+        ...(integrationBranch ? { integrationBranch } : {}), ...(integrationHead ? { integrationHead } : {}),
+        ...(mergedRef || acceptedResult.integrationBranch ? { merged } : {}), ...(pushed ? { integrationPush: pushed } : {}),
+        ...(pushFailure ? { pushFailure } : {}) };
     }));
+  }
+
+  private assertSafeIntegrationBranch(branch: string): void {
+    if (!isSafeGitBranchName(branch)) throw new HttpError(409, 'The team integration worktree branch is invalid.');
   }
 
   private track(work: Promise<unknown>): void {

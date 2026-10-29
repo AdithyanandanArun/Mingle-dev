@@ -123,6 +123,32 @@ export async function pushTeamCompletionBranch(input: {
   return { branch, commitSha: head };
 }
 
+/** Publishes only the integration worktree's current branch as a normal non-force push; default branches are allowed. */
+export async function pushTeamIntegrationBranch(input: {
+  worktreePath: string; branch: string; expectedHead: string; signal?: AbortSignal;
+}): Promise<{ branch: string; commitSha: string }> {
+  const { worktreePath, branch, expectedHead, signal } = input;
+  if (!SAFE_BRANCH.test(branch) || branch.includes('..') || branch.includes('//') || branch.includes('@{')
+    || branch.endsWith('/') || branch.split('/').some((part) => !part || part === '.' || part === '..' || part.endsWith('.lock'))
+    || !FULL_SHA.test(expectedHead)) throw new Error('The integration branch or commit revision is invalid.');
+  const format = await git(worktreePath, ['check-ref-format', `refs/heads/${branch}`], { allowFailure: true, signal });
+  if (format.code !== 0) throw new Error('The integration branch is not a valid Git branch name.');
+  const [headResult, branchResult] = await Promise.all([
+    git(worktreePath, ['rev-parse', '--verify', 'HEAD'], { signal }),
+    git(worktreePath, ['symbolic-ref', '--quiet', '--short', 'HEAD'], { allowFailure: true, signal }),
+  ]);
+  const head = headResult.stdout.trim();
+  if (head.toLowerCase() !== expectedHead.toLowerCase() || branchResult.stdout.trim() !== branch) {
+    throw new Error('The team integration worktree changed before Mingle could publish its branch.');
+  }
+  await assertOriginSafe(worktreePath, 'push', signal);
+  const result = await git(worktreePath,
+    ['push', '--no-follow-tags', '--recurse-submodules=no', '--', 'origin', `refs/heads/${branch}:refs/heads/${branch}`],
+    { network: true, allowFailure: true, signal, timeoutMs: 120_000 });
+  if (result.code !== 0) throw new Error(safeRemoteDiagnostic(result.stderr.trim()).slice(0, 1_500) || 'The origin rejected the integration branch push.');
+  return { branch, commitSha: head };
+}
+
 /** Fetches a worker branch into a delivery-specific review ref without checking it out or moving HEAD. */
 export async function fetchTeamCompletionBranch(input: {
   worktreePath: string; branch: string; commitSha: string; deliveryId: string; signal?: AbortSignal;

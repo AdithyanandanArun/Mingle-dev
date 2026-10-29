@@ -3,7 +3,7 @@ import { mkdirSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import { afterEach, expect, it } from 'vitest';
 import { makeRepo, runGit, tmpDir } from '../test-utils.ts';
-import { fetchTeamCompletionBranch, pushTeamCompletionBranch, teamAgentBranch, teamCompletionBranch } from './team-branch.ts';
+import { fetchTeamCompletionBranch, pushTeamCompletionBranch, pushTeamIntegrationBranch, teamAgentBranch, teamCompletionBranch } from './team-branch.ts';
 
 const roots: string[] = [];
 afterEach(() => { while (roots.length) rmSync(roots.pop()!, { recursive: true, force: true }); });
@@ -40,6 +40,21 @@ it('pushes only the dedicated mingle branch to origin without changing main or c
   expect(runGit(origin, 'rev-parse', 'refs/heads/main').trim()).toBe(base);
   expect(runGit(origin, 'rev-parse', `refs/heads/${branch}`).trim()).toBe(expectedHead);
   expect(runGit(origin, 'tag', '--list').trim()).toBe('');
+});
+
+it('pushes the current integration branch normally, including a user-authorized default branch, without tags', async () => {
+  const repo = makeRepo(); roots.push(repo);
+  const { origin, base } = bareOrigin(repo);
+  runGit(repo, 'config', 'user.name', 'Host integration');
+  runGit(repo, 'config', 'user.email', 'host-integration@example.test');
+  runGit(repo, 'commit', '--allow-empty', '-m', 'accepted team work');
+  const expectedHead = runGit(repo, 'rev-parse', 'HEAD').trim();
+
+  expect(await pushTeamIntegrationBranch({ worktreePath: repo, branch: 'main', expectedHead }))
+    .toEqual({ branch: 'main', commitSha: expectedHead });
+  expect(runGit(origin, 'rev-parse', 'refs/heads/main').trim()).toBe(expectedHead);
+  expect(runGit(origin, 'tag', '--list').trim()).toBe('');
+  expect(expectedHead).not.toBe(base);
 });
 
 it('pushes the permanent agent branch repeatedly using fast-forward updates', async () => {

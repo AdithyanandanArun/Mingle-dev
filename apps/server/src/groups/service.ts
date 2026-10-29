@@ -1,4 +1,6 @@
 import { createHash } from 'node:crypto';
+import { realpathSync } from 'node:fs';
+import path from 'node:path';
 import {
   nativeActionCommands, nativeActionSkills, TeamOrchestrationSettingsSchema,
 } from '@mingle/contracts';
@@ -3285,9 +3287,10 @@ ${task ? `Task ${task.id}: ${task.title}\nAcceptance: ${task.acceptanceCriteria}
     return { taskId: result.id, status: result.status };
   }
 
-  /** Host-authorized full-access acceptance after the team orchestrator has inspected the result. */
-  acceptTask(ctx: GroupRunContext, input: TeamAcceptTask): unknown {
+  /** Full-access coordinator acceptance after inspecting the result; local worker branches are integrated first. */
+  async acceptTask(ctx: GroupRunContext, input: TeamAcceptTask): Promise<unknown> {
     const { group, member, session, delivery } = this.live(ctx);
+    if (!this.isFullAccessGroup(group)) throw forbidden('Task acceptance is available only in full-access groups and teams.');
     const request = this.repo.getRequest(delivery.requestId);
     if (!request || !this.mayAssign(group, member, request.plannerMemberId)) throw forbidden('Only this request’s current orchestrator may accept a worker task.');
     const assignment = this.repo.assignmentByTask(group.id, input.taskId);
@@ -3304,6 +3307,12 @@ ${task ? `Task ${task.id}: ${task.title}\nAcceptance: ${task.acceptanceCriteria}
     }
     const verificationSummary = clean(input.verificationSummary, 4_000).trim();
     if (verificationSummary.length < 8) throw unprocessable('Provide a meaningful verification summary before accepting this task.');
+    const worker = this.repo.getMember(assignment.toMemberId);
+    const workerSession = worker ? this.store.getSession(worker.sessionId) : undefined;
+    if (!worker || !workerSession) throw conflict('The assigned worker session is no longer available.');
+    const isRemoteProxy = Boolean(this.store.db.prepare('SELECT 1 AS found FROM mingle_team_proxy_sessions WHERE session_id=?').get(workerSession.id));
+    const integration = isRemoteProxy ? null : await this.integrateLocalAssignment(group, assignment, workerSession);
+
     const accepted = this.store.tx(() => {
       this.live(ctx);
       const current = this.store.getTask(task.id);
@@ -3322,7 +3331,101 @@ ${task ? `Task ${task.id}: ${task.title}\nAcceptance: ${task.acceptanceCriteria}
       return next;
     });
     this.schedule(group.id);
-    return { taskId: accepted.id, status: accepted.status, acceptedBy: 'orchestrator', verificationSummary };
+    return { taskId: accepted.id, status: accepted.status, acceptedBy: 'orchestrator', verificationSummary,
+      ...(integration ? { ...integration } : {}) };
+  }
+
+  private async integrateLocalAssignment(
+    group: ConversationGroup, assignment: AssignmentRow, workerSession: Session,
+  ): Promise<{ workerBranch: string | null; integrationBranch: string | null; integrationHead: string | null; integrationWorktree: string; merged: boolean }> {
+    const integrationSession = this.store.getSession(group.anchorSessionId);
+    if (!integrationSession || integrationSession.projectId !== group.projectId) throw conflict('The group integration worktree is unavailable.');
+    const integrationPath = integrationSession.worktreePath;
+    const integrationBranchResult = await git(integrationPath, ['symbolic-ref', '--quiet', '--short', 'HEAD'], { allowFailure: true });
+    const integrationBranch = integrationBranchResult.code === 0 ? integrationBranchResult.stdout.trim() : null;
+    if (!integrationBranch || !isSafeBranchName(integrationBranch)) throw conflict('The group integration worktree is detached or has an invalid branch.');
+    const integrationHead = (await git(integrationPath, ['rev-parse', '--verify', 'HEAD'])).stdout.trim();
+
+    if (workerSession.worktreePath === integrationPath) {
+      return { workerBranch: workerSession.branch, integrationBranch, integrationHead, integrationWorktree: integrationPath, merged: false };
+    }
+    const workerBranchResult = await git(workerSession.worktreePath, ['symbolic-ref', '--quiet', '--short', 'HEAD'], { allowFailure: true });
+    const workerBranch = workerBranchResult.code === 0 ? workerBranchResult.stdout.trim() : null;
+    if (!workerBranch || !isSafeBranchName(workerBranch) || (workerSession.branch && workerSession.branch !== workerBranch)) {
+      throw conflict('The worker worktree is detached or no longer on its saved branch. Switch back to the worker branch before acceptance.');
+    }
+    const workerHead = (await git(workerSession.worktreePath, ['rev-parse', '--verify', 'HEAD'])).stdout.trim();
+    const [workerDirty, integrationDirty, workerCommon, integrationCommon] = await Promise.all([
+      git(workerSession.worktreePath, ['status', '--porcelain=v1', '--untracked-files=all'], { maxBuffer: 8 * 1024 * 1024 }),
+      git(integrationPath, ['status', '--porcelain=v1', '--untracked-files=all'], { maxBuffer: 8 * 1024 * 1024 }),
+      git(workerSession.worktreePath, ['rev-parse', '--git-common-dir']),
+      git(integrationPath, ['rev-parse', '--git-common-dir']),
+    ]);
+    if (workerDirty.stdout.trim()) throw conflict(`@${this.repo.getMember(assignment.toMemberId)?.handle ?? 'worker'} has uncommitted changes. Commit and review them before Mingle can merge the worker branch.`);
+    if (integrationDirty.stdout.trim()) throw conflict('The group integration worktree has uncommitted changes. Commit or move them before accepting this branch.');
+    const commonPath = (worktree: string, value: string) => realpathSync(path.resolve(worktree, value.trim()));
+    if (commonPath(workerSession.worktreePath, workerCommon.stdout) !== commonPath(integrationPath, integrationCommon.stdout)) {
+      throw conflict('The worker and integration worktrees do not share a Git repository. Mingle cannot merge local group work between them.');
+    }
+
+    const base = await git(integrationPath, ['merge-base', integrationHead, workerHead], { allowFailure: true });
+    if (base.code !== 0) throw conflict('The worker branch and group integration branch have no common Git history.');
+    const changed = await git(workerSession.worktreePath, ['diff', '--name-only', '-z', '--no-renames', base.stdout.trim(), workerHead], { maxBuffer: 8 * 1024 * 1024 });
+    const outOfScope = changed.stdout.split('\0').filter(Boolean).filter((file) =>
+      !assignment.scope.some((scope) => file === scope || file.startsWith(`${scope}/`)));
+    if (outOfScope.length) throw conflict(`The worker branch contains changes outside its assigned scope: ${outOfScope.slice(0, 5).join(', ')}.`);
+
+    const alreadyIntegrated = await git(integrationPath, ['merge-base', '--is-ancestor', workerHead, integrationHead], { allowFailure: true });
+    if (alreadyIntegrated.code === 0) {
+      return { workerBranch, integrationBranch, integrationHead, integrationWorktree: integrationPath, merged: false };
+    }
+    const otherActiveWriter = this.repo.members(group.id, false).some((candidate) => {
+      if (candidate.id === assignment.fromMemberId) return false;
+      const session = this.store.getSession(candidate.sessionId);
+      return session?.worktreePath === integrationPath && this.runtime.isActive(session.id);
+    });
+    if (otherActiveWriter) throw conflict('Another group agent is still running in the integration worktree. Wait for it to finish before accepting this branch.');
+
+    const merged = await git(integrationPath, ['-c', 'commit.gpgSign=false', 'merge', '--no-ff', '--no-edit', workerBranch], { allowFailure: true, timeoutMs: 120_000 });
+    if (merged.code !== 0) {
+      await git(integrationPath, ['merge', '--abort'], { allowFailure: true });
+      throw conflict(`The worker branch conflicts with the group integration branch. Resolve ${workerBranch} manually in ${integrationPath}, then retry team_accept.`);
+    }
+    const mergedHead = (await git(integrationPath, ['rev-parse', '--verify', 'HEAD'])).stdout.trim();
+    this.event(group, 'group.assignment.integrated', `Accepted worker branch ${workerBranch} into ${integrationBranch}`, {
+      assignmentId: assignment.id, taskId: assignment.taskId, workerBranch, integrationBranch, integrationHead: mergedHead,
+    }, integrationSession.id);
+    return { workerBranch, integrationBranch, integrationHead: mergedHead, integrationWorktree: integrationPath, merged: true };
+  }
+
+  recordIntegrationPublication(ctx: GroupRunContext, input: { branch: string; commitSha: string; error?: string }): void {
+    const { group, member, request, delivery, session } = this.live(ctx);
+    if (!this.mayAssign(group, member, request.plannerMemberId)) throw forbidden('Only the active request coordinator can record integration publication.');
+    const failed = Boolean(input.error);
+    const content = failed
+      ? `Mingle merged the worker result locally, but could not push integration branch ${clean(input.branch, 200)} at ${clean(input.commitSha, 64)}: ${clean(input.error!, 1000)}. The local merge remains in the integration worktree; review the failure and retry publishing.`
+      : `Mingle pushed integration branch ${clean(input.branch, 200)} to origin at ${clean(input.commitSha, 64)} after accepting the worker result.`;
+    this.repo.insertMessage({ groupId: group.id, senderMemberId: member.id, recipients: [member.id], kind: 'status', requestId: request.id,
+      content: clean(content, 2_000), sourceRunId: delivery.runId });
+    this.event(group, failed ? 'group.integration.push-failed' : 'group.integration.pushed', failed
+      ? 'Integration branch push failed after the local merge' : 'Integration branch pushed to origin', {
+      requestId: request.id, branch: input.branch, commitSha: input.commitSha, error: input.error ?? null,
+    }, session.id);
+  }
+
+  /** Durable inbox notices only; no delivery is inserted, so remote workers are never woken. */
+  notifyIntegrationBranch(ctx: GroupRunContext, input: { branch: string; commitSha: string }): string[] {
+    const { group, member, request, delivery, session } = this.live(ctx);
+    if (!this.mayAssign(group, member, request.plannerMemberId)) throw forbidden('Only the active request coordinator can notify workers about integration.');
+    const workers = this.repo.members(group.id, false).filter((candidate) => candidate.role === 'worker'
+      && Boolean(this.store.db.prepare('SELECT 1 AS found FROM mingle_team_proxy_sessions WHERE session_id=?').get(candidate.sessionId)));
+    const content = `Integration branch ${clean(input.branch, 200)} is at ${clean(input.commitSha, 64)}; Mingle will merge it into your branch at the start of your next turn.`;
+    for (const worker of workers) this.repo.insertMessage({ groupId: group.id, senderMemberId: member.id, recipients: [worker.id], kind: 'agent',
+      requestId: request.id, content, sourceRunId: delivery.runId });
+    if (workers.length) this.event(group, 'group.integration.workers-notified', 'Remote workers notified about the published integration branch', {
+      requestId: request.id, branch: input.branch, commitSha: input.commitSha, workerMemberIds: workers.map((worker) => worker.id), wakesWorkers: false,
+    }, session.id);
+    return workers.map((worker) => worker.handle);
   }
 
   async artifact(ctx: GroupRunContext, input: TeamArtifact): Promise<unknown> {

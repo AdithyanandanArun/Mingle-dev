@@ -170,6 +170,8 @@ function fixture(options: { deviceId?: string; accountId?: string; role?: 'leade
   const finished: Array<{ sessionId: string; runId: string; outcome: string }> = [];
   const enqueued: Array<{ content: string; recipients?: string[]; clientMessageId: string }> = [];
   const remoteCompletionNotices: Array<{ groupId: string; deliveryId: string; content: string }> = [];
+  const integrationPublications: Array<{ branch: string; commitSha: string; error?: string }> = [];
+  const integrationNotifications: Array<{ branch: string; commitSha: string }> = [];
   const groupService = {
     createTeamGroup(input: { id: string; projectId: string; title: string; orchestratorSessionId: string; mode?: 'cowork' | 'orchestrated' | 'current-leads'; members: Array<{ sessionId: string; handle: string; role: 'orchestrator' | 'worker' | 'idle'; held: boolean }> }) {
       // Mirrors GroupService.createTeamGroup: cowork groups have only peers and no orchestrator.
@@ -226,6 +228,8 @@ function fixture(options: { deviceId?: string; accountId?: string; role?: 'leade
       hook?.(sessionId, runId, outcome);
     },
     notifyRemoteCompletion(input: typeof remoteCompletionNotices[number]) { remoteCompletionNotices.push(input); return true; },
+    recordIntegrationPublication(_context: any, input: typeof integrationPublications[number]) { integrationPublications.push(input); },
+    notifyIntegrationBranch(_context: any, input: typeof integrationNotifications[number]) { integrationNotifications.push(input); return ['retry-worker']; },
     acceptTask(_context: any, input: { taskId: string; verificationSummary: string }) {
       const task = store.getTask(input.taskId);
       if (!task || task.status !== 'review') throw new HttpError(409, 'Task is not ready for acceptance.');
@@ -265,7 +269,7 @@ function fixture(options: { deviceId?: string; accountId?: string; role?: 'leade
   };
   let host = makeHost();
   const fx = {
-    store, project, local, get host() { return host; }, outgoing, finished, enqueued, remoteCompletionNotices, artifactImports, artifactDiscards, artifactIntegrations, remoteToolCalls, agents, group: () => group,
+    store, project, local, get host() { return host; }, outgoing, finished, enqueued, remoteCompletionNotices, integrationPublications, integrationNotifications, artifactImports, artifactDiscards, artifactIntegrations, remoteToolCalls, agents, group: () => group,
     authenticatedCalls: () => authenticatedCalls, collaborationRefreshCalls: () => collaborationRefreshes,
     authorizeCalls: () => authorizeCalls, maxConcurrentCloudQueries: () => maxConcurrentCloudQueries,
     cloudQueryTables: () => [...cloudQueryTables],
@@ -1420,7 +1424,10 @@ it('fetches permanent worker branches and merges diverging results locally for f
   expect(mergedHead).not.toBe(commitSha);
   expect(() => runGit(fx.project.path, 'merge-base', '--is-ancestor', commitSha, mergedHead)).not.toThrow();
   expect(runGit(fx.project.path, 'rev-list', '--parents', '-n', '1', mergedHead).trim().split(' ')).toHaveLength(3);
-  expect(runGit(origin, 'rev-parse', 'refs/heads/main').trim()).toBe(baseRevision);
+  expect(accepted).toMatchObject({ integrationBranch: 'main', integrationHead: mergedHead, integrationPush: { branch: 'main', commitSha: mergedHead } });
+  expect(runGit(origin, 'rev-parse', 'refs/heads/main').trim()).toBe(mergedHead);
+  expect(fx.integrationPublications).toContainEqual({ branch: 'main', commitSha: mergedHead });
+  expect(fx.integrationNotifications).toContainEqual({ branch: 'main', commitSha: mergedHead });
 
   const secondAgentId = 'remote-published-agent-two';
   const secondSessionId = 'owner-session-remote-two';
@@ -1454,7 +1461,7 @@ it('fetches permanent worker branches and merges diverging results locally for f
   const secondOwnerClone = path.join(secondOwnerRoot, 'repo');
   execFileSync('git', ['clone', '-q', origin, secondOwnerClone]);
   const secondBranch = teamAgentBranch(secondWorker.handle);
-  runGit(secondOwnerClone, 'switch', '-c', secondBranch);
+  runGit(secondOwnerClone, 'switch', '-c', secondBranch, baseRevision);
   mkdirSync(path.join(secondOwnerClone, 'src/features'), { recursive: true });
   writeFileSync(path.join(secondOwnerClone, 'src/features/another.ts'), 'export const another = true;\n');
   runGit(secondOwnerClone, 'add', '--', 'src/features/another.ts');
@@ -1469,13 +1476,20 @@ it('fetches permanent worker branches and merges diverging results locally for f
     deliveryId: secondDeliveryId, hop: 1, instructions: 'Review the second result' };
   expect(() => runGit(fx.project.path, 'merge-base', '--is-ancestor', commitSha, secondCommitSha)).toThrow();
   expect(() => runGit(fx.project.path, 'merge-base', '--is-ancestor', secondCommitSha, commitSha)).toThrow();
+  const rejectedPush = path.join(originRoot, 'rejected-push.git');
+  mkdirSync(rejectedPush);
+  execFileSync('git', ['init', '-q', '--bare', '--initial-branch=main', rejectedPush]);
+  runGit(fx.project.path, 'remote', 'set-url', '--push', 'origin', rejectedPush);
   const secondAccepted = await fx.host.acceptTask(secondContext, fx.local.id,
     { taskId: secondTaskId, verificationSummary: 'The second diff is correct and checks passed.' });
-  expect(secondAccepted).toMatchObject({ acceptedBy: 'orchestrator', taskId: secondTaskId, merged: true });
+  expect(secondAccepted).toMatchObject({ acceptedBy: 'orchestrator', taskId: secondTaskId, merged: true,
+    pushFailure: expect.stringContaining('destinations differ') });
+  expect(fx.integrationPublications.at(-1)).toMatchObject({ branch: 'main', error: expect.stringContaining('destinations differ') });
   const finalHead = runGit(fx.project.path, 'rev-parse', 'HEAD').trim();
   expect(() => runGit(fx.project.path, 'merge-base', '--is-ancestor', commitSha, finalHead)).not.toThrow();
   expect(() => runGit(fx.project.path, 'merge-base', '--is-ancestor', secondCommitSha, finalHead)).not.toThrow();
   expect(runGit(fx.project.path, 'rev-list', '--parents', '-n', '1', finalHead).trim().split(' ')).toHaveLength(3);
+  expect(runGit(origin, 'rev-parse', 'refs/heads/main').trim()).toBe(mergedHead);
 });
 
 it('interrupts an old owner turn before re-dispatching a full-access restart continuation', async () => {
