@@ -1,7 +1,9 @@
 import { createHash } from 'node:crypto';
 import { deflateRawSync, inflateRawSync } from 'node:zlib';
-import type { GroupSnapshot, Task, TaskStatus, TeamChatGroupView } from '../../../../packages/contracts/src/index.ts';
+import type { GroupSnapshot, ProgressBoardSnapshot, Task, TaskStatus, TeamChatGroupView } from '../../../../packages/contracts/src/index.ts';
+import { ProgressBoardSnapshotSchema } from '../../../../packages/contracts/src/progress-board.ts';
 import { TeamChatGroupViewSchema } from '../../../../packages/contracts/src/team-chat.ts';
+import { canonicalJson } from '../distributed/crypto.ts';
 import type { Store } from '../store.ts';
 import { redactSecrets } from '../util.ts';
 
@@ -9,6 +11,7 @@ const MAX_PACKED_BODY = 18_000;
 const MAX_UNPACKED_BYTES = 160_000;
 const GROUP_VIEW_PREFIX = 'team-group-view:';
 const GROUP_VIEW_BODY_PREFIX = 'team-group-view:v1:';
+const MAX_SHARED_BOARD_BYTES = 24 * 1024;
 
 export function groupViewSourceId(groupId: string): string {
   return `${GROUP_VIEW_PREFIX}${createHash('sha256').update(groupId).digest('hex').slice(0, 32)}`;
@@ -17,6 +20,60 @@ export function groupViewSourceId(groupId: string): string {
 function bounded(value: string, limit: number): string {
   const safe = redactSecrets(value).trim();
   return safe.length > limit ? `${safe.slice(0, limit).trimEnd()}…` : safe;
+}
+
+function boardText(value: string, limit: number): string {
+  return redactSecrets(value)
+    .replace(/\b(?:https?|ssh|git|file):\/\/[^\s'"<>]+/gi, '[remote]')
+    .replace(/\b[A-Za-z0-9_.-]+@[A-Za-z0-9.-]+:[^\s'"<>]+/g, '[remote]')
+    .replace(/(^|[\s("'=])~[\\/][^\s'"<>]*/g, '$1[path]')
+    .replace(/(^|[\s("'=])(?:[A-Za-z]:[\\/]|\\\\[^\\/\s]+[\\/][^\\/\s]+[\\/])[^\s'"<>]*/g, '$1[path]')
+    .replace(/(^|[\s("'=])\/(?:[^\s/'"<>]+\/)*[^\s'"<>]*/g, '$1[path]')
+    .replace(/[\u0000-\u001f\u007f]/g, ' ').trim().slice(0, limit);
+}
+
+function boardBranch(value: string | null): string | null {
+  if (!value) return null;
+  if (/^(?:\/|[A-Za-z]:[\\/]|\\\\)|\b(?:https?|ssh|git|file):\/\//i.test(value)) return null;
+  return value.replace(/[\u0000-\u001f\u007f]/g, '').slice(0, 200) || null;
+}
+
+/** Remove host-local metadata and keep the complete public snapshot below its transport budget. */
+export function boundSharedProgressBoard(input: ProgressBoardSnapshot): ProgressBoardSnapshot {
+  const board = ProgressBoardSnapshotSchema.parse(input);
+  const boundedBoard = ProgressBoardSnapshotSchema.parse({
+    ...board,
+    integration: {
+      branch: boardBranch(board.integration.branch),
+      head: board.integration.head ? { ...board.integration.head, subject: boardText(board.integration.head.subject, 120) } : null,
+      lastPush: board.integration.lastPush ? {
+        ...board.integration.lastPush,
+        ...(board.integration.lastPush.failure ? { failure: boardText(board.integration.lastPush.failure, 200) } : {}),
+      } : null,
+    },
+    members: board.members.slice(0, 64).map((member) => ({
+      ...member,
+      device: boardText(member.device, 120) || 'Team device',
+      currentTask: member.currentTask ? { ...member.currentTask, title: boardText(member.currentTask.title, 200) } : null,
+      step: member.step ? { ...member.step, label: boardText(member.step.label, 200) || 'Current step unavailable' } : null,
+      branch: member.branch && boardBranch(member.branch.name) ? {
+        ...member.branch,
+        name: boardBranch(member.branch.name)!,
+        lastCommit: member.branch.lastCommit ? { ...member.branch.lastCommit, subject: boardText(member.branch.lastCommit.subject, 120) } : null,
+      } : null,
+      blockers: member.blockers.slice(0, 3).map((blocker) => boardText(blocker, 200)).filter(Boolean),
+    })),
+  });
+
+  while (Buffer.byteLength(JSON.stringify(boundedBoard), 'utf8') > MAX_SHARED_BOARD_BYTES) {
+    const blockerMember = [...boundedBoard.members].reverse().find((member) => member.blockers.length > 0);
+    if (blockerMember) { blockerMember.blockers.pop(); continue; }
+    if (boundedBoard.members.length > 1) { boundedBoard.members.pop(); continue; }
+    // Contract field limits make a single member substantially smaller than the board cap.
+    if (boundedBoard.members.length === 1) { boundedBoard.members.pop(); continue; }
+    throw new Error('The bounded shared progress board exceeds its transport limit.');
+  }
+  return boundedBoard;
 }
 
 function relativeChangedPath(value: string): string | null {
@@ -134,7 +191,7 @@ function resultFor(snapshot: GroupSnapshot, store: Store): TeamChatGroupView['re
   return { requestId: request.id, status, title, summary, facts, changedPaths };
 }
 
-export function projectGroupView(snapshot: GroupSnapshot, store: Store, version: number): TeamChatGroupView {
+export function projectGroupView(snapshot: GroupSnapshot, store: Store, version: number, board?: ProgressBoardSnapshot): TeamChatGroupView {
   // Member-origin chat requests have a distinct group message ID. Resolve the durable
   // routing identity only inside this project's collaboration binding, never by text.
   const routedHumanRows = store.db.prepare(`SELECT g.id,c.id AS source_id
@@ -206,8 +263,18 @@ export function projectGroupView(snapshot: GroupSnapshot, store: Store, version:
   return TeamChatGroupViewSchema.parse({
     version, group: { id: snapshot.group.id, title: bounded(snapshot.group.title, 100), mode: snapshot.group.mode, paused: snapshot.group.paused },
     routing: { mode: snapshot.group.mode, defaultRecipientHandles }, members, messages, requests, deliveries, assignments,
+    ...(board ? { board: boundSharedProgressBoard(board) } : {}),
     result: resultFor(snapshot, store), updatedAt,
   });
+}
+
+export function sharedGroupViewFingerprint(view: TeamChatGroupView): string {
+  return createHash('sha256').update(canonicalJson({
+    ...view,
+    version: 0,
+    updatedAt: '',
+    ...(view.board ? { board: { ...view.board, updatedAt: '' } } : {}),
+  })).digest('hex');
 }
 
 export function encodeGroupView(view: TeamChatGroupView): string {
@@ -218,6 +285,13 @@ export function encodeGroupView(view: TeamChatGroupView): string {
     return { packed: `${GROUP_VIEW_BODY_PREFIX}${compressed}`, unpackedBytes: unpacked.byteLength };
   };
   const trimOldest = (): boolean => {
+    if (boundedView.board) {
+      const board = boundedView.board;
+      const blockerMember = [...board.members].reverse().find((member) => member.blockers.length > 0);
+      if (blockerMember) { blockerMember.blockers.pop(); return true; }
+      if (board.members.length > 1) { board.members.pop(); return true; }
+      if (board.members.length) { board.members.pop(); return true; }
+    }
     if (boundedView.messages.length > 1) { boundedView.messages.shift(); return true; }
     if (boundedView.assignments.length > 1) { boundedView.assignments.shift(); return true; }
     if (boundedView.deliveries.length > 1) { boundedView.deliveries.shift(); return true; }
@@ -247,7 +321,11 @@ export function encodeGroupView(view: TeamChatGroupView): string {
 
 export function decodeGroupView(body: string): TeamChatGroupView {
   if (!body.startsWith(GROUP_VIEW_BODY_PREFIX) || body.length > MAX_PACKED_BODY) throw new Error('The shared group view payload is invalid.');
-  const compressed = Buffer.from(body.slice(GROUP_VIEW_BODY_PREFIX.length), 'base64');
+  const encoded = body.slice(GROUP_VIEW_BODY_PREFIX.length);
+  if (!encoded || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(encoded)) {
+    throw new Error('The shared group view payload is invalid.');
+  }
+  const compressed = Buffer.from(encoded, 'base64');
   const unpacked = inflateRawSync(compressed, { maxOutputLength: MAX_UNPACKED_BYTES });
   return TeamChatGroupViewSchema.parse(JSON.parse(unpacked.toString('utf8')));
 }

@@ -1,9 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import { rmSync } from 'node:fs';
 import { inflateRawSync } from 'node:zlib';
-import { expect, it } from 'vitest';
+import { expect, it, vi } from 'vitest';
 import type { SupabaseClient, User } from '@supabase/supabase-js';
-import type { GroupSnapshot, RunChanges } from '../../../../packages/contracts/src/index.ts';
+import type { GroupSnapshot, ProgressBoardSnapshot, RunChanges } from '../../../../packages/contracts/src/index.ts';
 import { TeamChatMessageSchema } from '../../../../packages/contracts/src/team-chat.ts';
 import { canonicalJson, generateDeviceKeyMaterial, signDevicePayload } from '../distributed/crypto.ts';
 import { openDatabase } from '../db.ts';
@@ -14,7 +14,7 @@ import type { AccountService } from '../account/service.ts';
 import type { DistributedWorkspaceService } from '../distributed/service.ts';
 import type { ProjectCollaborationService } from '../project-collaboration/service.ts';
 import { TeamChatService } from './service.ts';
-import { decodeGroupView, encodeGroupView, projectGroupView } from './group-view.ts';
+import { boundSharedProgressBoard, decodeGroupView, encodeGroupView, projectGroupView, sharedGroupViewFingerprint } from './group-view.ts';
 
 const HOST_ACCOUNT = '10000000-0000-4000-8000-000000000001';
 const MEMBER_ACCOUNT = '10000000-0000-4000-8000-000000000002';
@@ -197,6 +197,21 @@ function sharedGroup(host: ReturnType<typeof node>): GroupSnapshot {
   };
 }
 
+function addBoardSessions(host: ReturnType<typeof node>, group: GroupSnapshot): void {
+  group.deliveries[0]!.status = 'running';
+  for (const member of group.members) {
+    host.store.insertSession({ id: member.sessionId, projectId: host.project.id, name: member.handle, provider: 'claude', model: 'example-model',
+      effort: 'high', policy: 'supervised', isolated: true,
+      worktreePath: member.role === 'orchestrator' ? host.project.path : '/home/example/private/worker-worktree',
+      branch: member.role === 'orchestrator' ? 'main' : 'mingle/barista/work' });
+  }
+  host.store.updateTask('example-shared-task', {
+    title: 'Review /home/example/private/worker-worktree https://secret.example/repo.git',
+  });
+  host.store.recordEvent({ projectId: host.project.id, sessionId: 'private-worker', type: 'session.progress.status', summary: 'Example progress update',
+    payload: { runId: 'example-shared-run', status: { step: 'Inspect /home/example/private/worker-worktree https://secret.example/repo.git' } } });
+}
+
 it('projects member-origin human mirror IDs only from the same bound shared project', async () => {
   const host = node({ projectId: HOST_PROJECT, accountId: HOST_ACCOUNT, deviceId: HOST_DEVICE, role: 'host' });
   try {
@@ -269,6 +284,43 @@ it('publishes only bounded shared group routing, assignment, task, result and re
     memberActive = true;
     await Promise.all([host.close(), member.close()]);
   }
+});
+
+it('publishes a scrubbed board with the host group view and serves it on the teammate device', async () => {
+  memberActive = true;
+  const host = node({ projectId: HOST_PROJECT, accountId: HOST_ACCOUNT, deviceId: HOST_DEVICE, role: 'host' });
+  const member = node({ projectId: MEMBER_PROJECT, accountId: MEMBER_ACCOUNT, deviceId: MEMBER_DEVICE, role: 'member' });
+  try {
+    const group = sharedGroup(host);
+    addBoardSessions(host, group);
+    const localBoard = await (await import('../progress-board.ts')).buildProgressBoard({ store: host.store, group });
+    expect(localBoard.members).toHaveLength(2);
+    host.service.setSharedGroupSnapshotProvider(async () => group);
+    await host.service.snapshot(HOST_PROJECT, { limit: 20 });
+    const envelope = host.outgoing.find((entry) => entry.kind === 'teamchat.group-view');
+    expect(envelope).toBeTruthy();
+    const published = decodeGroupView(envelope.payload.body);
+    expect(published.board?.members).toHaveLength(2);
+    expect(JSON.stringify(published.board)).not.toContain('/home/example/private');
+    expect(JSON.stringify(published.board)).not.toContain('secret.example');
+
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const malformed = { ...envelope.payload, body: `team-group-view:v1:${'x'.repeat(18_001)}` };
+    await expect(member.receive({ ...envelope, payload: malformed })).rejects.toThrow(/malformed or exceeds its size limit/i);
+    expect(warn).toHaveBeenCalledWith('[team-chat] Rejected malformed or oversized shared group-view payload.');
+    expect(warn.mock.calls.flat().join(' ')).not.toContain('/home/example/private');
+    warn.mockRestore();
+
+    await member.receive(envelope);
+    const synced = await member.service.syncedProgressBoard(MEMBER_PROJECT, group.group.id);
+    expect(synced.board.members).toHaveLength(2);
+    expect(synced.syncedAt).toBe(envelope.payload.createdAt);
+    expect(synced.board.members.find((row) => row.handle === 'barista')).toMatchObject({
+      currentTask: { title: 'Review [path] [remote]' }, step: { label: 'Inspect [path] [remote]' },
+    });
+    expect(JSON.stringify(synced.board)).not.toContain('/home/example/private');
+    expect(JSON.stringify(synced.board)).not.toContain('secret.example');
+  } finally { await Promise.all([host.close(), member.close()]); }
 });
 
 it('preserves request-level failed/interrupted outcomes even when recorded deliveries completed', async () => {
@@ -361,6 +413,39 @@ it('bounds both compressed body size and inflated UTF-8 bytes while preserving l
     expect(decoded.messages.at(-1)).toMatchObject({ id: 'maximum-history-48', content: repeatedMultibyteText });
     expect(decoded.routing).toEqual(view.routing);
     expect(decoded.result).toEqual(view.result);
+  } finally { await host.close(); }
+});
+
+it('ignores the board snapshot timestamp when fingerprinting and trims oversized board snapshots', async () => {
+  const host = node({ projectId: HOST_PROJECT, accountId: HOST_ACCOUNT, deviceId: HOST_DEVICE, role: 'host' });
+  try {
+    const group = sharedGroup(host);
+    addBoardSessions(host, group);
+    const boardMember = (await import('../progress-board.ts')).buildProgressBoard({ store: host.store, group }).then((board) => board.members[0]!);
+    const member = await boardMember;
+    const board: ProgressBoardSnapshot = {
+      groupId: group.group.id, updatedAt: group.group.updatedAt,
+      integration: { branch: 'main', head: null, lastPush: null },
+      members: Array.from({ length: 64 }, (_, index) => ({
+        ...member,
+        memberId: `member-${index}`,
+        handle: `worker-${index}`,
+        model: 'm'.repeat(150), device: 'd'.repeat(120),
+        currentTask: { id: `task-${index}`, title: 't'.repeat(200), status: 'running' },
+        step: { label: 's'.repeat(200), current: 1, total: 2 },
+        branch: { name: `branch/${index}`, lastCommit: { sha: 'a'.repeat(40), subject: 'c'.repeat(120), at: group.group.updatedAt }, pushed: false, merged: false },
+        blockers: ['b'.repeat(200), 'x'.repeat(200), 'y'.repeat(200)],
+      })),
+    };
+    const first = projectGroupView(group, host.store, 1, { ...board, updatedAt: '2026-10-29T10:00:00.000Z' });
+    const later = { ...first, updatedAt: '2026-10-29T10:01:00.000Z', board: { ...first.board!, updatedAt: '2026-10-29T10:01:00.000Z' } };
+    expect(sharedGroupViewFingerprint(first)).toBe(sharedGroupViewFingerprint(later));
+
+    const bounded = boundSharedProgressBoard(board);
+    expect(Buffer.byteLength(JSON.stringify(bounded), 'utf8')).toBeLessThanOrEqual(24 * 1024);
+    expect(bounded.members.length).toBeLessThan(64);
+    expect(bounded.members.every((row) => row.blockers.length <= 3)).toBe(true);
+    expect(decodeGroupView(encodeGroupView(projectGroupView(group, host.store, 1, board))).board).toBeDefined();
   } finally { await host.close(); }
 });
 

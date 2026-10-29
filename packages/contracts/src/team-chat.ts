@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { ProviderSchema } from './provider-config';
+import { ProgressBoardSnapshotSchema } from './progress-board';
 
 export const TeamChatAgentAuthorSchema = z.object({
   kind: z.literal('agent'), agentId: z.string().trim().min(1).max(100), agentName: z.string().trim().min(1).max(100),
@@ -56,6 +57,8 @@ export const TeamChatGroupViewSchema = z.object({
     title: z.string().trim().min(1).max(200), taskStatus: TeamChatGroupTaskStatusSchema, scope: z.array(z.string().trim().min(1).max(500)).max(40),
     createdAt: z.string().datetime({ offset: true }),
   }).strict()).max(100),
+  /** Optional for backwards compatibility; host-authored, path-free live group progress. */
+  board: ProgressBoardSnapshotSchema.optional(),
   result: z.object({
     requestId: z.string().trim().min(1).max(100), status: TeamChatGroupResultStatusSchema, title: z.string().trim().min(1).max(100),
     summary: z.string().trim().min(1).max(500), facts: z.array(z.string().trim().min(1).max(120)).max(12),

@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { GroupSnapshot } from '../../../../packages/contracts/src/groups.ts';
+import type { ProgressBoardSnapshot } from '../../../../packages/contracts/src/progress-board.ts';
 import type {
   TeamChatAgent, TeamChatAuthor, TeamChatGroupView, TeamChatMessage, TeamChatPeer, TeamChatSnapshot, TeamChatSyncRequest, TeamChatSyncResponse,
 } from '../../../../packages/contracts/src/team-chat.ts';
@@ -14,10 +15,15 @@ import type { ProjectCollaborationService } from '../project-collaboration/servi
 import type { TeamChatOrchestrationMessage } from '../team-orchestration/types.ts';
 import { HttpError, notFound, nowIso, redactSecrets } from '../util.ts';
 import { canonicalJson, fingerprintForPublicKeys, verifyDevicePayload } from '../distributed/crypto.ts';
-import { decodeGroupView, encodeGroupView, groupViewSourceId, projectGroupView } from './group-view.ts';
+import { buildProgressBoard } from '../progress-board.ts';
+import { decodeGroupView, encodeGroupView, groupViewSourceId, projectGroupView, sharedGroupViewFingerprint } from './group-view.ts';
 
 type DbRow = Record<string, unknown>;
 type SharedSnapshot = Awaited<ReturnType<ProjectCollaborationService['snapshot']>>;
+
+function warnInvalidGroupView(): void {
+  console.warn('[team-chat] Rejected malformed or oversized shared group-view payload.');
+}
 
 const SYNC_BYTE_LIMIT = 180 * 1024;
 const SYNC_MESSAGE_LIMIT = 200;
@@ -119,7 +125,7 @@ export class TeamChatService {
     this.groupViewTimers.clear();
     this.sharedGroupSnapshotProvider = provider;
     this.unsubscribeGroupViews = this.options.store.subscribe((event) => {
-      if (!event?.projectId || !/^(?:group\.|task\.|session\.run\.|approval\.)/.test(event.type)) return;
+      if (!event?.projectId || !/^(?:group\.|task\.|session\.run\.|session\.progress\.|approval\.)/.test(event.type)) return;
       this.scheduleGroupView(event.projectId);
     });
   }
@@ -186,19 +192,24 @@ export class TeamChatService {
         || !after.members.some((member) => member.accountId === accountId && member.role === 'leader' && member.status === 'active')) return null;
 
       const key = `${project.teamId}:${project.sharedProjectId}:${snapshot.group.id}`;
-      const candidate = projectGroupView(snapshot, this.options.store, 1);
+      const previous = this.latestGroupView(project.teamId, project.sharedProjectId);
+      let board: ProgressBoardSnapshot | undefined;
+      try { board = await buildProgressBoard({ store: this.options.store, group: snapshot }); }
+      catch {
+        console.warn('[team-chat] Progress board snapshot could not be built for the shared group view.');
+        board = previous?.board;
+      }
+      const candidate = projectGroupView(snapshot, this.options.store, 1, board);
       const candidateBody = encodeGroupView(candidate);
       const boundedCandidate = decodeGroupView(candidateBody);
-      const fingerprintFor = (view: TeamChatGroupView) => createHash('sha256').update(canonicalJson({ ...view, version: 0, updatedAt: '' })).digest('hex');
-      const fingerprint = fingerprintFor(boundedCandidate);
-      const previous = this.latestGroupView(project.teamId, project.sharedProjectId);
-      const previousFingerprint = previous ? fingerprintFor(previous) : null;
+      const fingerprint = sharedGroupViewFingerprint(boundedCandidate);
+      const previousFingerprint = previous ? sharedGroupViewFingerprint(previous) : null;
       if (fingerprint === this.groupViewFingerprints.get(key) || fingerprint === previousFingerprint) {
         this.groupViewFingerprints.set(key, fingerprint);
         return previous ?? boundedCandidate;
       }
       const version = Math.max(previous?.version ?? 0, Number(this.options.store.getMeta(`team-chat-group-view:${project.sharedProjectId}:${snapshot.group.id}`) ?? 0)) + 1;
-      const unboundedView = projectGroupView(snapshot, this.options.store, version);
+      const unboundedView = projectGroupView(snapshot, this.options.store, version, board);
       const body = encodeGroupView(unboundedView);
       const view = decodeGroupView(body);
       const sourceMessageId = groupViewSourceId(snapshot.group.id);
@@ -410,7 +421,32 @@ export class TeamChatService {
     const message = this.rowMessage(row);
     if (message.kind !== 'group-view') return null;
     try { return TeamChatGroupViewSchema.parse(decodeGroupView(message.body)); }
-    catch { return null; }
+    catch { warnInvalidGroupView(); return null; }
+  }
+
+  /** Return only the authenticated host's latest bounded board for this locally bound shared project. */
+  async syncedProgressBoard(projectId: string, groupId: string): Promise<{ board: ProgressBoardSnapshot; syncedAt: string }> {
+    const { shared } = await this.binding(projectId);
+    const accountId = this.localAccountId();
+    const project = shared.project;
+    if (!project || !shared.members.some((member) => member.accountId === accountId && member.status === 'active')) {
+      throw new HttpError(403, 'This account is not an active member of the shared project.');
+    }
+    const row = this.options.store.db.prepare(`SELECT * FROM team_chat_messages WHERE team_id=? AND shared_project_id=?
+      AND json_extract(author_json,'$.kind')='system' AND source_session_id='team-group-view'
+      ORDER BY created_at DESC,id DESC LIMIT 1`).get(project.teamId, project.sharedProjectId) as DbRow | undefined;
+    if (!row) throw notFound('The host has not synced a progress board for this project yet.');
+    const message = this.rowMessage(row);
+    if (message.kind !== 'group-view') throw notFound('The host has not synced a progress board for this project yet.');
+    let view: TeamChatGroupView;
+    try { view = TeamChatGroupViewSchema.parse(decodeGroupView(message.body)); }
+    catch {
+      warnInvalidGroupView();
+      throw notFound('The latest host progress board is unavailable.');
+    }
+    if (view.group.id !== groupId || !view.board) throw notFound('The host has not synced a progress board for this team session yet.');
+    const syncedAt = typeof row.created_at === 'string' && Number.isFinite(Date.parse(row.created_at)) ? row.created_at : message.createdAt;
+    return { board: view.board, syncedAt };
   }
 
   async snapshot(projectId: string, page: { limit: number; before?: string }): Promise<TeamChatSnapshot> {
@@ -1092,7 +1128,12 @@ export class TeamChatService {
       if (message.teamId !== envelope.teamId || message.kind !== 'group-view' || message.author.kind !== 'system') {
         throw new HttpError(400, 'The shared group-view message is invalid.');
       }
-      const view = decodeGroupView(message.body);
+      let view: TeamChatGroupView;
+      try { view = decodeGroupView(message.body); }
+      catch {
+        warnInvalidGroupView();
+        throw new HttpError(400, 'The shared group-view payload is malformed or exceeds its size limit.');
+      }
       if (message.source?.sessionId !== 'team-group-view' || message.source.messageId !== groupViewSourceId(view.group.id)) {
         throw new HttpError(400, 'The shared group-view identity does not match its group.');
       }
