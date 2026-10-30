@@ -58,7 +58,11 @@ export function createEmbeddedBrowserHost({ electron, ws, log = () => undefined 
     ses.setPermissionCheckHandler((_wc, permission) => allowed(permission));
     ses.on('will-download', (_event, item) => item.cancel());
     ses.setUserAgent(stripUserAgent(ses.getUserAgent()));
-    if (!hostWindow || hostWindow.isDestroyed()) hostWindow = new electron.BrowserWindow({ show: false, paintWhenInitiallyHidden: true, webPreferences: { backgroundThrottling: false } });
+    if (!hostWindow || hostWindow.isDestroyed()) {
+      hostWindow = new electron.BrowserWindow({ show: false, paintWhenInitiallyHidden: true, webPreferences: { backgroundThrottling: false } });
+      hostWindow.setPosition?.(-2000, -2000);
+      hostWindow.showInactive?.();
+    }
     const state = { id, partition, ses, views: new Map(), events: new Set(), relay: null, ws: null, path, wsUrl: `ws://127.0.0.1:${port}${path}` };
     const createView = async url => {
       const view = new electron.WebContentsView({ webPreferences: { partition, sandbox: true, contextIsolation: true, nodeIntegration: false, webSecurity: true, backgroundThrottling: false, preload: new URL('./guest-preload.cjs', import.meta.url).pathname } });
@@ -79,6 +83,8 @@ export function createEmbeddedBrowserHost({ electron, ws, log = () => undefined 
       });
       view.webContents.on('destroyed', () => { state.views.delete(item.targetId); state.relay?.onViewClosed(item); });
       await view.webContents.loadURL(url);
+      view.webContents.startPainting?.();
+      view.webContents.invalidate?.();
       return item;
     };
     state.relay = createRelay({ createView, closeView: async targetId => { const item = state.views.get(targetId); if (!item) return; state.views.delete(targetId); item.webContentsView.webContents.close(); }, listViews: () => [...state.views.values()], version: electron.app.getVersion(), userAgent: ses.getUserAgent() });

@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, shell, safeStorage, session } from 'electron';
+import { app, BrowserWindow, WebContentsView, dialog, ipcMain, shell, safeStorage, session } from 'electron';
 import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync } from 'node:fs';
 import { createServer } from 'node:net';
@@ -201,7 +201,7 @@ async function openWorkspace() {
   const getAccountKey = createAccountKeyManager({ userData, workspaceDataDir, safeStorage });
   const serverRequire = createRequire(join(serverRoot, 'package.json'));
   const ws = serverRequire('ws');
-  embeddedBrowserHost = createEmbeddedBrowserHost({ electron: { app, BrowserWindow, ipcMain, session }, ws });
+  embeddedBrowserHost = createEmbeddedBrowserHost({ electron: { app, BrowserWindow, WebContentsView, ipcMain, session }, ws });
   const embeddedUrl = await embeddedBrowserHost.ready;
   // Canonical values override any legacy environment inherited from another local server.
   const environment = {

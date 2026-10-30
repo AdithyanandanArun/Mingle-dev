@@ -25,6 +25,14 @@ test('routes browser, page and child session messages', async () => {
   view.debugger.emit('message', {}, 'Runtime.executionContextCreated', { context: {} }, 'child-1');
   await f.call('Runtime.evaluate', { expression: '1' }, 'child-1'); assert.equal(view.debugger.calls.at(-1)[2], 'child-1');
 });
+test('browser target session can attach a page session', async () => {
+  const f = fixture(); const view = f.makeView();
+  await f.call('Target.attachToBrowserTarget'); const browserSession = f.sent.at(-1).result.sessionId;
+  await f.call('Target.attachToTarget', { targetId: view.targetId }, browserSession);
+  const pageSession = f.sent.at(-1).result.sessionId;
+  await f.call('Page.startScreencast', {}, pageSession);
+  assert.equal(view.debugger.calls.at(-1)[0], 'Page.startScreencast');
+});
 test('auto attach announces targets created later', async () => {
   const f = fixture(); await f.call('Target.setAutoAttach', { autoAttach: true });
   const created = await f.call('Target.createTarget', { url: 'https://example.com' });

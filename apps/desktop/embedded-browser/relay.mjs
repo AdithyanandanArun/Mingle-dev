@@ -5,6 +5,7 @@ const unsupported = method => ({ code: -32000, message: `Not supported by Mingle
 export function createRelay({ createView, closeView, listViews, version, userAgent }) {
   const pageSessions = new Map();
   const childSessions = new Map();
+  const browserSessions = new Set();
   const listeners = new Map();
   let socket;
   let discover = false;
@@ -16,10 +17,10 @@ export function createRelay({ createView, closeView, listViews, version, userAge
     if (discover) send({ method: 'Target.targetCreated', params: { targetInfo: targetInfo(view) } });
     if (autoAttach) attach(view);
   }
-  function attach(view) {
+  function attach(view, emitEvent = true) {
     let sessionId = [...pageSessions].find(([, item]) => item === view)?.[0];
     if (!sessionId) { sessionId = randomUUID(); pageSessions.set(sessionId, view); }
-    send({ method: 'Target.attachedToTarget', params: { sessionId, targetInfo: targetInfo(view), waitingForDebugger: false } });
+    if (emitEvent) send({ method: 'Target.attachedToTarget', params: { sessionId, targetInfo: targetInfo(view), waitingForDebugger: false } });
     return sessionId;
   }
   function unbindView(view) {
@@ -50,7 +51,7 @@ export function createRelay({ createView, closeView, listViews, version, userAge
     const respond = result => send({ id, result: result ?? {}, ...(sessionId ? { sessionId } : {}) });
     const fail = error => send({ id, error: typeof error === 'string' ? unsupported(error) : error, ...(sessionId ? { sessionId } : {}) });
     try {
-      if (sessionId) {
+      if (sessionId && !browserSessions.has(sessionId)) {
         let view = pageSessions.get(sessionId);
         const child = childSessions.has(sessionId);
         if (child) view = childSessions.get(sessionId);
@@ -63,8 +64,10 @@ export function createRelay({ createView, closeView, listViews, version, userAge
         case 'Browser.getVersion': return respond({ protocolVersion: '1.3', product: `Chrome/${version}`, revision: '', userAgent, jsVersion: '' });
         case 'Target.setDiscoverTargets': discover = Boolean(params.discover); if (discover) views().forEach(view => send({ method: 'Target.targetCreated', params: { targetInfo: targetInfo(view) } })); return respond({});
         case 'Target.getTargets': return respond({ targetInfos: views().map(targetInfo) });
+        case 'Target.getTargetInfo': { const view = views().find(item => !params.targetId || item.targetId === params.targetId); return respond(view ? { targetInfo: targetInfo(view) } : { targetInfo: { targetId: '', type: 'browser', title: '', url: '', attached: false, canAccessOpener: false, browserContextId: 'mingle-default' } }); }
         case 'Target.setAutoAttach': autoAttach = Boolean(params.autoAttach); if (autoAttach) views().forEach(attach); return respond({});
-        case 'Target.attachToTarget': { const view = views().find(item => item.targetId === params.targetId); if (!view) return respond({ sessionId: '' }); return respond({ sessionId: attach(view) }); }
+        case 'Target.attachToTarget': { const view = views().find(item => item.targetId === params.targetId); if (!view) return respond({ sessionId: '' }); return respond({ sessionId: attach(view, false) }); }
+        case 'Target.attachToBrowserTarget': { const browserSession = randomUUID(); browserSessions.add(browserSession); return respond({ sessionId: browserSession }); }
         case 'Target.detachFromTarget': pageSessions.delete(params.sessionId); send({ method: 'Target.detachedFromTarget', params: { sessionId: params.sessionId } }); return respond({});
       case 'Target.createTarget': { const view = await createView(params.url ?? 'about:blank'); if (!listeners.has(view)) bindView(view); return respond({ targetId: view.targetId }); }
         case 'Target.closeTarget': await closeView(params.targetId); return respond({ success: true });
@@ -84,7 +87,7 @@ export function createRelay({ createView, closeView, listViews, version, userAge
   function close() {
     closed = true;
     for (const view of new Set([...pageSessions.values(), ...childSessions.values()])) unbindView(view);
-    pageSessions.clear(); childSessions.clear();
+    pageSessions.clear(); childSessions.clear(); browserSessions.clear();
     for (const [view, { message, detach }] of listeners) {
       view.debugger.removeListener?.('message', message);
       view.debugger.removeListener?.('detach', detach);
