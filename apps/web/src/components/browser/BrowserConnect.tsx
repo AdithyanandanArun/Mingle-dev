@@ -31,13 +31,14 @@ export function BrowserConnect({ sessionId, state, onState }: { sessionId: strin
   const usable = discovery?.sources.find((s) => s.id === sourceId && s.debuggingAvailable);
   const existingReady = Boolean(manual || usable);
   const existingFirst = settings?.browserDefaultMode === 'existing';
+  const embeddedFirst = settings?.browserDefaultMode === 'embedded';
   const notices = [...(state?.notices ?? []), ...(discovery?.notices ?? [])];
   const shownError = error ?? (state?.status === 'error' ? state.error : null) ?? discoveryError;
 
   const managed = (
     <section className="browser-card" aria-labelledby="browser-managed-title">
-      <header><Globe size={15} aria-hidden="true" /><h3 id="browser-managed-title">Mingle browser</h3></header>
-      <p>A separate Chromium that Mingle opens for this session. It starts without your personal logins.</p>
+      <header><Globe size={15} aria-hidden="true" /><h3 id="browser-managed-title">Mingle-managed Chromium</h3></header>
+      <p>A separate Chromium download that Mingle opens for this session. It starts without your personal logins.</p>
       {discovery?.managedExecutable ? <code className="browser-card__path" title={discovery.managedExecutable}>{discovery.managedExecutable}</code> : null}
       {discovery && !discovery.managedAvailable ? (
         <div className="browser-card__actions">
@@ -73,6 +74,14 @@ export function BrowserConnect({ sessionId, state, onState }: { sessionId: strin
     </section>
   );
 
+  const embedded = discovery?.embeddedAvailable ? (
+    <section className="browser-card browser-card--recommended" aria-labelledby="browser-embedded-title">
+      <header><Globe size={15} aria-hidden="true" /><h3 id="browser-embedded-title">Built-in browser <span className="browser-card__hint">(recommended)</span></h3></header>
+      <p>Runs inside Mingle. Nothing to download, works on every Linux, and you can click and type in it directly.</p>
+      <div className="browser-card__actions"><Button size="sm" variant="primary" disabled={busy !== null} busy={busy === 'embedded'} onClick={() => void connect({ mode: 'embedded' })}>Use built-in browser</Button>{busy === 'embedded' ? <span className="browser-card__hint" role="status">Connecting to the built-in browser…</span> : null}</div>
+    </section>
+  ) : null;
+
   return (
     <div className="browser-connect">
       <div className="browser-connect__head">
@@ -83,7 +92,7 @@ export function BrowserConnect({ sessionId, state, onState }: { sessionId: strin
       {shownError ? <InlineError>{shownError}</InlineError> : null}
       {discovery ? <BrowserSandboxCard discovery={discovery} refresh={refresh} onUseBrowser={async (executable) => { await api.updateSettings({ browserExecutable: executable }); await refresh(); }} /> : null}
       {notices.length ? <ul className="browser-notices">{notices.map((n) => <li key={n}>{n}</li>)}</ul> : null}
-      {existingFirst ? <>{existing}{managed}</> : <>{managed}{existing}</>}
+      {embeddedFirst ? <>{embedded}{managed}{existing}</> : existingFirst ? <>{existing}{managed}</> : <>{embedded}{managed}{existing}</>}
     </div>
   );
 }
