@@ -143,10 +143,10 @@ async function perform(entry: TabEntry, action: BrowserAction): Promise<unknown>
 export async function runAction(entry: TabEntry, action: BrowserAction, actor?: { kind: 'agent' | 'human'; id: string }): Promise<unknown> {
   if (actor?.kind === 'agent') {
     let point: { x: number; y: number } | null = null;
-    const targeted = ['click', 'hover', 'type', 'select'].includes(action.type) && 'selector' in action && hasTarget(action);
+    const targeted = (action.type === 'click' || action.type === 'hover' || action.type === 'type' || action.type === 'select') && hasTarget(action);
     if (action.type === 'click' && action.x !== undefined && action.y !== undefined) point = { x: action.x, y: action.y };
     else if (action.type === 'scroll') point = { x: action.x ?? entry.viewport.width / 2, y: action.y ?? entry.viewport.height / 2 };
-    else if (targeted && ('selector' in action || 'ref' in action || 'role' in action)) {
+    else if (targeted) {
       const locator = await resolveLocator(entry, action).catch(() => null);
       const box = locator ? await withTimeout(locator.boundingBox(), 500, 'Reading target bounds timed out.').catch(() => null) : null;
       if (box) point = { x: box.x + box.width / 2, y: box.y + box.height / 2 };

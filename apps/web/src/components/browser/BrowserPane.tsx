@@ -8,6 +8,7 @@ import { resolveTab, useBrowserStore } from '../../store/browser';
 import { useMingle } from '../../store/store';
 import { Button, EmptyState, IconButton, InlineError, Spinner } from '../ui';
 import { BrowserConnect } from './BrowserConnect';
+import { BrowserSignInButton, BrowserSigningInBanner } from './BrowserSignIn';
 import { BrowserHost } from './BrowserHost';
 import { BrowserSurface } from './BrowserSurface';
 import { canOpenBrowserPopout, dockBrowserPopout, focusBrowserPopout, isBrowserPopoutOpen, onBrowserPopoutClosed, openBrowserPopout } from './desktopBridge';
@@ -184,6 +185,7 @@ export function BrowserPane({ session, active, popout = false }: { session: Sess
     );
     if (!state) return stateError ? <div className="pane-pad"><InlineError onRetry={refresh}>{stateError}</InlineError></div> : <div className="browser-center"><Spinner label="Loading browser" /></div>;
     if (state.status === 'connecting') return <ConnectingView state={state} />;
+    if (state.status === 'signing-in') return <div className="browser-center"><BrowserSigningInBanner sessionId={session.id} /></div>;
     if (state.status !== 'connected') return <BrowserConnect sessionId={session.id} state={state} onState={apply} />;
     return (
       <>
@@ -232,11 +234,16 @@ export function BrowserPane({ session, active, popout = false }: { session: Sess
             <div className="browser-viewport"><BrowserSurface stream={stream} tab={tab} canvasRef={canvasRef} canInput={canInput} /></div>
             <div className="browser-status">
               {stream.status === 'live'
-                ? <span className="browser-status__who" role="status" aria-live="polite" aria-label={ownership.description} title={ownership.description}>{ownsLease ? tab?.control.lease === 'hold' ? 'You have control' : `You’re driving · agent resumes in ${leaseSeconds}s` : ownership.label}</span>
+                ? <>
+                  {/* The countdown is visual only; screen readers hear one announcement per control change. */}
+                  <span className="browser-status__who" aria-hidden="true" title={ownership.description}>{ownsLease ? tab?.control.lease === 'hold' ? 'You have control' : `You’re driving · agent resumes in ${leaseSeconds}s` : ownership.label}</span>
+                  <span className="sr-only" role="status" aria-live="polite">{ownership.description}</span>
+                </>
                 : <span className="browser-status__who" role="status">{stream.status === 'closed' ? 'Disconnected' : 'Connecting…'}</span>}
               {stream.status === 'closed' ? <Button size="sm" onClick={stream.reconnect}>Reconnect</Button>
                 : ownsLease && tab?.control.lease === 'hold' ? <Button size="sm" data-browser-focus-exit onClick={() => stream.setControl('agent')}>Hand back to agent</Button>
                   : ownsLease ? <Button size="sm" onClick={() => stream.setControl('human')}>Keep control</Button> : null}
+              {state.mode === 'managed' ? <BrowserSignInButton sessionId={session.id} /> : null}
             </div>
             {canInput ? <p className="browser-hint">Keys and clicks go to the page. Alt+Shift+Esc moves focus back to Mingle. Paste with {navigator.platform.includes('Mac') ? '⌘' : 'Ctrl'}+V.</p> : null}
             {stream.error ? <div className="browser-stream-error"><InlineError>{stream.error}</InlineError><button type="button" className="link-btn" onClick={stream.dismissError}>Dismiss</button></div> : null}

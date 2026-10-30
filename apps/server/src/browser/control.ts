@@ -67,7 +67,13 @@ export class TabControl {
   }
   releaseIfOwner(clientId: string): Promise<void> { return this.holder === clientId ? this.handoff() : Promise.resolve(); }
 
-  private extend(): void { this.expiry = Date.now() + BROWSER_TOUCH_IDLE_MS; this.arm(); this.onChange(); }
+  /** Pushes state only when the visible deadline moves by a quarter second or more, not on every pointer move. */
+  private extend(): void {
+    const previous = this.expiry ?? 0;
+    this.expiry = Date.now() + BROWSER_TOUCH_IDLE_MS;
+    this.arm();
+    if (this.expiry - previous >= 250) this.onChange();
+  }
   private arm(): void {
     this.clearTimer();
     if (this.leaseValue !== 'touch' || this.pressedValue) return;
