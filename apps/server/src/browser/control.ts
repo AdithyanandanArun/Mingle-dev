@@ -60,6 +60,15 @@ export class TabControl {
     this.holder = clientId; this.leaseValue = 'hold'; this.expiry = null; this.epoch++; this.clearTimer(); this.onChange();
   }
 
+  claimTouch(holderId: string): boolean {
+    if (this.holder !== null && this.holder !== holderId) return false;
+    if (this.holder === null) {
+      this.holder = holderId; this.leaseValue = 'touch'; this.expiry = Date.now() + BROWSER_TOUCH_IDLE_MS; this.epoch++;
+      this.arm(); this.onChange();
+    } else if (this.leaseValue === 'touch') this.extend();
+    return true;
+  }
+
   release(clientId: string): Promise<void> {
     if (this.holder === null) return Promise.resolve();
     if (this.holder !== clientId) return Promise.reject(new BrowserError(403, 'Only the person holding control can hand it back.'));

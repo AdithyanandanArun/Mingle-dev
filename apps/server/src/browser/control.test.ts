@@ -32,6 +32,14 @@ describe('TabControl', () => {
     await vi.advanceTimersByTimeAsync(BROWSER_TOUCH_IDLE_MS * 4); expect(control.lease).toBe('hold');
     await control.release('a'); expect(control.ownerId).toBeNull();
   });
+  it('claims a native touch lease and extends only for its holder', async () => {
+    vi.useFakeTimers(); const control = new TabControl();
+    expect(control.claimTouch('desktop-native')).toBe(true);
+    expect(control.ownerId).toBe('desktop-native'); expect(control.lease).toBe('touch');
+    await vi.advanceTimersByTimeAsync(100);
+    expect(control.claimTouch('desktop-native')).toBe(true);
+    expect(control.claimTouch('another')).toBe(false);
+  });
   it('gives agent actionable touch and hold errors', async () => {
     const control = new TabControl(); await control.run({ kind: 'human', id: 'a' }, async () => undefined);
     await expect(control.run({ kind: 'agent', id: 'run' }, async () => undefined)).rejects.toThrow('2.5 s');
