@@ -53,6 +53,8 @@ export class TabEntry {
       managed: this.managed,
       viewport: { ...this.viewport },
       controlOwner: this.control.ownerId,
+      control: { owner: this.control.ownerId ? 'human' : 'agent', holderId: this.control.ownerId, lease: this.control.ownerId ? 'hold' : null, expiresAt: null },
+      agentPointer: null,
       dialog: this.dialog ? { type: this.dialog.type, message: this.dialog.message } : null,
     };
   }

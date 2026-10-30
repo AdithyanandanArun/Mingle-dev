@@ -72,7 +72,7 @@ export class BrowserService {
     if (sources.length > 0 && !sources.some((source) => source.debuggingAvailable)) {
       notices.push('To share an existing browser, open chrome://inspect/#remote-debugging in it and turn remote debugging on. Mingle only attaches after you approve.');
     }
-    return { sources, managedAvailable: executable.path !== null, managedExecutable: executable.path, installing: this.installer.installing, notices };
+    return { sources, managedAvailable: executable.path !== null, managedExecutable: executable.path, installing: this.installer.installing, notices, sandbox: null, systemBrowsers: [] };
   }
 
   /** Downloads Playwright's pinned Chromium. Only runs on explicit request; concurrent calls share one download. */
