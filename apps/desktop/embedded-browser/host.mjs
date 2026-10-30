@@ -185,7 +185,8 @@ export function createEmbeddedBrowserHost({ electron, ws, log = () => undefined,
     const state = [...sessions.values()].find(candidate => [...candidate.views.values()].some(item => item.webContentsView.webContents === event.sender));
     const item = [...(state?.views.values() ?? [])].find(entry => entry.webContentsView.webContents === event.sender);
     if (!state || !item) return;
-    const data = `data: ${JSON.stringify({ type: 'human-input', targetId: item.targetId, kind: detail.kind })}\n\n`;
+    const phase = detail.kind === 'pointer' && ['down', 'up'].includes(detail.phase) ? detail.phase : undefined;
+    const data = `data: ${JSON.stringify({ type: 'human-input', targetId: item.targetId, kind: detail.kind, ...(phase ? { phase } : {}) })}\n\n`;
     for (const client of state.events) client.write(data);
   }
   function isHumanInputEvent(event) { return event?.isTrusted === true && Number.isFinite(event.timeStamp) && event.timeStamp > 0; }

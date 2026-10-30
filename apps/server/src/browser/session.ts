@@ -383,7 +383,9 @@ export class BrowserSessionRuntime {
     const abort = new AbortController(); this.embeddedAbort = abort;
     void client.events(this.deps.sessionId, event => {
       const entry = [...this.tabs.values()].find(tab => tab.targetId === event.targetId);
-      entry?.control.claimTouch(NATIVE_HOLDER);
+      if (entry?.control.claimTouch(NATIVE_HOLDER) && event.kind === 'pointer' && (event.phase === 'down' || event.phase === 'up')) {
+        entry.control.pointer(event.phase);
+      }
     }, abort.signal);
   }
 

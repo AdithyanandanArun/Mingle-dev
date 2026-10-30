@@ -1,7 +1,7 @@
 /** Holder id for input from a built-in tab shown natively in the desktop app. */
 export const NATIVE_HOLDER = 'desktop-native';
 
-export interface HumanInputEvent { type: 'human-input'; targetId: string; kind: 'pointer' | 'key' | 'wheel' }
+export interface HumanInputEvent { type: 'human-input'; targetId: string; kind: 'pointer' | 'key' | 'wheel'; phase?: 'down' | 'up' }
 
 /** Authenticated client for the Electron-owned embedded browser. */
 export class EmbeddedBrowserClient {
