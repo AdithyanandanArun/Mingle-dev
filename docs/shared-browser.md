@@ -1,19 +1,32 @@
 # Shared browser
 
-Mingle's browser is a real Chromium controlled by the local Node server. React displays its JPEG screencast over a separate WebSocket; human input and provider tools operate the same page. This implementation is original. T3 Code was researched for its browser host, streaming, ownership and provider integration architecture, without copying its implementation or adding it as a dependency.
+Mingle's shared browser lets you and agents operate the same page. The desktop app can display sandboxed Chromium directly inside Mingle; the web shell uses a WebSocket screencast. The Node server owns agent actions separately from the UI. This implementation is original; T3 Code is an architectural and UX reference, without copied implementation or a dependency on it.
 
 ## Use it
 
 Open a session, show the context pane, then select **Browser**. Choose one of:
 
-- **Mingle browser:** a separate Chromium profile for that session. Install the pinned browser from the pane or **Settings → Browser**, or configure an absolute executable path. Its profile persists under the Mingle data directory. It starts with none of your personal browser's logins; logins you make here remain in this dedicated profile.
+- **Built-in browser (desktop):** uses Electron's own sandboxed Chromium in an isolated, persistent partition for the session. No second Chromium download is required. The page accepts your keyboard and mouse directly. Main-window, floating, full-view and popout presentations share the same tabs; overlapping Mingle menus use a streamed fallback.
+- **Mingle-managed Chromium:** a separately installed browser with its own persistent profile for the session. Install the pinned browser from the pane or **Settings → Browser**, or configure an absolute executable path. It starts without your personal browser's logins.
 - **Your running browser:** share existing logins and open web tabs by connecting to a running Chromium browser. Enable remote debugging in that browser, select the detected browser or enter its loopback CDP endpoint, and explicitly connect. An agent cannot attach to a personal browser by itself.
+
+New installations prefer the built-in option. Settings → Browser lets you change the default; an already saved choice is preserved. Automatic tab opening honors this preference. In a web-only runtime without an Electron host, the built-in preference falls back to managed Chromium. Attaching to your personal running browser always requires an explicit connection.
 
 For Chrome 144 or newer, open `chrome://inspect/#remote-debugging`, enable remote debugging and approve Chrome's connection prompt. Availability varies among Chromium derivatives and versions. Browsers that do not provide that consent flow need an already configured loopback CDP endpoint. Chrome 136+ refuses the old debugging-port approach with its default user-data directory; Mingle does not relaunch or modify that profile to work around it. See [Chrome's auto-connect documentation](https://developer.chrome.com/docs/devtools/agents/use-cases/auto-connect) and [debugging-port change](https://developer.chrome.com/blog/remote-debugging-port).
 
-A connection shares web tabs and the logged-in browser session. It does not copy cookie databases, decrypt passwords, or import profile files. Disconnecting an existing browser detaches Mingle and leaves the browser and its tabs open. Closing a shared tab closes the actual tab; the UI asks before closing an existing-browser tab.
+A connection to a running browser shares its web tabs and logged-in session without copying them. Disconnect leaves that browser open. Closing a shared tab closes the actual tab; the UI asks before closing a tab in an attached personal browser.
 
-Use **Take control** to click, type, paste, scroll and navigate. **Release to agent** lets tools write again. Watching does not take control. The agent can inspect while you hold control, but its writes fail with a clear handoff message. Expand the viewer for more space. Keyboard input is captured only while the page is focused; Alt+Shift+Esc returns focus to Mingle. Paste forwards the text you explicitly paste, without automatically reading the system clipboard.
+Click, type or scroll to step in immediately. A short touch lease renews while you interact and returns control about 2.5 seconds after activity stops. **Keep control** pins the lease until **Hand back to agent**. Watching alone does not take control. Agent inspection remains available while you drive; writes receive a clear retry/handoff message. Keyboard input is captured only while the page is focused. Alt+Shift+Esc returns focus to Mingle. Paste forwards text you explicitly paste, without automatically reading the system clipboard.
+
+## Ubuntu sandbox and sign-ins
+
+The built-in browser uses the sandbox already available to the running desktop app. It avoids the additional Playwright Chromium installation that AppArmor may block on Ubuntu. It does not disable Electron or Chromium sandboxing, and it cannot promise compatibility with every distribution's security policy.
+
+For the separate managed browser, Mingle reports Linux user-namespace restrictions and offers an explicit administrator-authorized AppArmor profile for the selected Chromium path, when supported. You can inspect the proposed commands or use an installed compatible browser instead. No global AppArmor policy is disabled automatically. The real Ubuntu administrator flow still needs device acceptance; local tests simulate its detection and profile generation.
+
+Google and other sites may refuse embedded or automated browsers. **Use my sign-ins…** explicitly imports selected sites' cookies from a chosen local profile into the Mingle session. Sites include their subdomains; this grants agents access to those signed-in sites, so import only what you intend to share. The browser connection alone does not import anything. Cookie values never enter API responses or logs; temporary database copies are private and removed after use. Reload the site after import. No passwords or complete profiles are copied.
+
+Firefox cookie import is supported. Chromium import supports known Linux and macOS formats; Linux encrypted cookies may require `secret-tool`, and macOS may ask for Keychain access. KWallet and Windows Chromium app-bound encryption are unsupported; the UI reports those limitations. A separate managed sign-in window is available, but it cannot guarantee Google accepts a login. No live Google account was used for automated acceptance.
 
 ## Agent access
 
@@ -29,7 +42,7 @@ Connections use ephemeral random bearer capabilities stored hashed in memory, bo
 
 ## Scope and platform limits
 
-The same server and viewer are used in the web and Electron shells. Browser discovery contains native Linux, macOS and Windows locations, but this implementation was exercised on Linux; other platforms still need device verification. Playwright's [CDP connection](https://playwright.dev/docs/api/class-browsertype#browser-type-connect-over-cdp) supports Chromium only and has lower fidelity than its native transport.
+The desktop native view and web screencast share the server's action and ownership model. Discovery includes Linux, macOS and Windows locations, but native acceptance was exercised on Arch Linux; Ubuntu/AppArmor, Windows and macOS still need device verification. Playwright's [CDP connection](https://playwright.dev/docs/api/class-browsertype#browser-type-connect-over-cdp) supports Chromium only and has lower fidelity than its native transport.
 
 This first version does not add file uploads, download management, recording, browser extension management, or profile copying. Browser-internal pages and file URLs are excluded from navigation. Native browser permission prompts still need the user. Page JavaScript that starts timers or promises cannot have its earlier side effects undone; timed-out evaluations report that limitation. Synchronous scripts have an execution deadline and termination handling, without closing personal tabs. Closing Mingle closes its managed browser; attached personal browsers are detached. The session's dedicated managed profile remains on disk.
 
@@ -39,3 +52,5 @@ This first version does not add file uploads, download management, recording, br
 - [Chrome DevTools MCP](https://github.com/ChromeDevTools/chrome-devtools-mcp), `BrowserManager.ts`: consent-enabled Chrome discovery uses the selected browser's `DevToolsActivePort` metadata. Mingle implements its own bounded parser.
 - [Chrome DevTools screencast protocol](https://chromedevtools.github.io/devtools-protocol/tot/Page/#method-startScreencast).
 - [Playwright browser lifecycle](https://playwright.dev/docs/api/class-browser#browser-close): closing a connected browser disconnects it; closing a launched browser quits it.
+
+See [shared-browser acceptance](shared-browser-acceptance.md) for the local checks and native-device validation limits.
