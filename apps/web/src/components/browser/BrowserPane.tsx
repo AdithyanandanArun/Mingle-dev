@@ -11,7 +11,8 @@ import { BrowserConnect } from './BrowserConnect';
 import { BrowserSignInButton, BrowserSigningInBanner } from './BrowserSignIn';
 import { BrowserHost } from './BrowserHost';
 import { BrowserSurface } from './BrowserSurface';
-import { canOpenBrowserPopout, dockBrowserPopout, focusBrowserPopout, isBrowserPopoutOpen, onBrowserPopoutClosed, openBrowserPopout } from './desktopBridge';
+import { canOpenBrowserPopout, canShowEmbedded, dockBrowserPopout, focusBrowserPopout, isBrowserPopoutOpen, onBrowserPopoutClosed, openBrowserPopout } from './desktopBridge';
+import { NativeBrowserView } from './NativeBrowserView';
 import { useBrowserState, usePageVisible } from './useBrowserState';
 import { useBrowserStream } from './useBrowserStream';
 
@@ -231,7 +232,9 @@ export function BrowserPane({ session, active, popout = false }: { session: Sess
             </form>
             {addressError ? <p className="browser-addr-error" role="alert">{addressError}</p> : null}
             {pageDialogPresent && pageDialogSnapshot.current ? <PageDialog key={pageDialogKey} tab={pageDialogSnapshot.current.tab} canInput={pageDialogSnapshot.current.canInput} act={pageDialogSnapshot.current.act} closing={pageDialogClosing} /> : null}
-            <div className="browser-viewport"><BrowserSurface stream={stream} tab={tab} canvasRef={canvasRef} canInput={canInput} /></div>
+            <div className="browser-viewport">{state.mode === 'embedded' && canShowEmbedded() && tab.embeddedTargetId
+              ? <NativeBrowserView sessionId={session.id} targetId={tab.embeddedTargetId} active={visible && pageVisible && !detached} stream={stream} tab={tab} canvasRef={canvasRef} canInput={canInput} />
+              : <BrowserSurface stream={stream} tab={tab} canvasRef={canvasRef} canInput={canInput} />}</div>
             <div className="browser-status">
               {stream.status === 'live'
                 ? <>
