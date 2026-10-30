@@ -18,7 +18,7 @@ import { execFile, spawn, type ChildProcess } from 'node:child_process';
 import { buildSignInArgv, validateSignInUrl } from './sign-in.ts';
 import { detectSandbox } from './sandbox.ts';
 import type { BrowserAction } from '@mingle/contracts';
-import type { EmbeddedBrowserClient } from './embedded.ts';
+import { NATIVE_HOLDER, type EmbeddedBrowserClient } from './embedded.ts';
 
 export interface ExistingTarget {
   wsUrl: string;
@@ -383,7 +383,7 @@ export class BrowserSessionRuntime {
     const abort = new AbortController(); this.embeddedAbort = abort;
     void client.events(this.deps.sessionId, event => {
       const entry = [...this.tabs.values()].find(tab => tab.targetId === event.targetId);
-      entry?.control.claimTouch('desktop-native');
+      entry?.control.claimTouch(NATIVE_HOLDER);
     }, abort.signal);
   }
 
@@ -492,6 +492,7 @@ export class BrowserSessionRuntime {
       return null;
     }
     const entry = new TabEntry(page, this.mode === 'managed' || this.mode === 'embedded', targetId, this.mode === 'embedded');
+    entry.onControlChange = () => this.deps.notify();
       // A blank tab may be recycled by open() only if Mingle made it; never one the user already had open.
     entry.reusable = this.mode !== 'existing' || options.created === true;
     this.tabs.set(entry.id, entry);

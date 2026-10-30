@@ -22,6 +22,8 @@ export class TabEntry {
   readonly id = `tab_${randomBytes(6).toString('hex')}`;
   readonly control: TabControl;
   agentPointer: BrowserAgentPointer | null = null;
+  /** Session-level listener for control changes; viewers without a stream (native built-in tabs) read the session state. */
+  onControlChange: (() => void) | null = null;
   title = '';
   reusable = false;
   viewport: { width: number; height: number } = { ...DEFAULT_VIEWPORT };
@@ -43,7 +45,7 @@ export class TabEntry {
   private ended = false;
 
   constructor(readonly page: Page, readonly managed: boolean, readonly targetId: string | null, readonly embedded = false) {
-    this.control = new TabControl(() => this.releaseInput(), () => this.touch());
+    this.control = new TabControl(() => this.releaseInput(), () => { this.touch(); this.onControlChange?.(); });
     const size = page.viewportSize();
     if (size) this.viewport = { ...size };
   }

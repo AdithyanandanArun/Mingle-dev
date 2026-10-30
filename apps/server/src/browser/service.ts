@@ -22,7 +22,7 @@ import { BrowserStreamServer } from './stream-server.ts';
 import type { TabEntry } from './tab.ts';
 import { TargetRegistry } from './targets.ts';
 import { listImportSources, readImportedCookies } from './import/index.ts';
-import { EmbeddedBrowserClient } from './embedded.ts';
+import { EmbeddedBrowserClient, NATIVE_HOLDER } from './embedded.ts';
 
 export interface BrowserServiceOptions {
   dataDir: string;
@@ -204,7 +204,11 @@ export class BrowserService {
       const parsed = BrowserActionSchema.safeParse(action);
       if (!parsed.success) throw new BrowserError(400, parsed.error.issues[0]?.message ?? 'Invalid browser action.');
       if ((actor.kind !== 'agent' && actor.kind !== 'human') || !actor.id || actor.id.length > 200) throw new BrowserError(400, 'Invalid actor.');
-      if (actor.kind === 'human' && !this.stream.hasViewer(sessionId, tabId, actor.id)) {
+      // The desktop may send address-bar actions without a stream, but only after its authenticated
+      // embedded input event has claimed this exact tab's native touch lease.
+      const nativeInput = actor.kind === 'human' && actor.id === NATIVE_HOLDER && entry.embedded &&
+        entry.control.ownerId === NATIVE_HOLDER && entry.control.lease === 'touch';
+      if (actor.kind === 'human' && !nativeInput && !this.stream.hasViewer(sessionId, tabId, actor.id)) {
         throw new BrowserError(403, 'Open the live view of this tab first; only a connected viewer can send input.');
       }
       return runtime.act(entry, parsed.data, { kind: actor.kind, id: actor.id });
@@ -217,7 +221,10 @@ export class BrowserService {
     const { runtime, entry } = this.locate(sessionId, tabId);
     if (!clientId || clientId.length > 200) throw new BrowserError(400, 'Invalid client id.');
     // Only a connected viewer of this very tab may take control. Releasing stays possible for the holder so a stale lock can always be cleared.
-    if (owner === 'human' && !this.stream.hasViewer(sessionId, tabId, clientId)) {
+    // Native controls are available only to the holder established by authenticated host input;
+    // the public id by itself never grants a lease or permits takeover.
+    const nativeHolder = clientId === NATIVE_HOLDER && entry.embedded && entry.control.ownerId === NATIVE_HOLDER && entry.control.lease === 'touch';
+    if (owner === 'human' && !nativeHolder && !this.stream.hasViewer(sessionId, tabId, clientId)) {
       throw new BrowserError(403, 'Open the live view of this tab first; only a connected viewer can take control.');
     }
     try {
