@@ -6,7 +6,7 @@ import { createEmbeddedBrowserHost, cdpCookieToElectron, electronCookieToCdp } f
 function fakeElectron() {
   const ipcMain = new EventEmitter();
   const session = { fromPartition() { return { setPermissionRequestHandler() {}, setPermissionCheckHandler() {}, on() {}, getUserAgent: () => 'Mozilla/5.0 Chrome/120.0.0.0 Electron/44.0.0' , setUserAgent() {} }; } };
-  return { ipcMain, session, app: { getVersion: () => '0.0.8' }, BrowserWindow: class { constructor() { this.contentView = { addChildView() {} }; } isDestroyed() { return false; } destroy() {} } };
+  return { ipcMain, session, app: { getVersion: () => '0.0.8' }, BrowserWindow: class { constructor() { this.contentView = { addChildView() {}, removeChildView() {} }; } static getAllWindows() { return []; } isDestroyed() { return false; } destroy() {} } };
 }
 
 test('HTTP host requires token, rejects Origin and invalid session ids', async () => {
@@ -18,6 +18,32 @@ test('HTTP host requires token, rejects Origin and invalid session ids', async (
     const origin = await fetch(`${base}/sessions/good/browser`, { method: 'POST', headers: { authorization: `Bearer ${host.token}`, origin: 'http://localhost' } }); assert.equal(origin.status, 403);
     const badId = await fetch(`${base}/sessions/%2Fbad/browser`, { method: 'POST', headers: { authorization: `Bearer ${host.token}` } }); assert.equal(badId.status, 400);
     const good = await fetch(`${base}/sessions/valid_1/browser`, { method: 'POST', headers: { authorization: `Bearer ${host.token}` } }); assert.equal(good.status, 200); assert.match((await good.json()).wsUrl, /^ws:\/\/127\.0\.0\.1:/);
+  } finally { await host.dispose(); }
+});
+
+test('authenticated presentation route tracks exact presented target and fails closed', async () => {
+  const host = createEmbeddedBrowserHost({ electron: fakeElectron(), ws: { WebSocketServer: class { close() {} } } });
+  try {
+    const base = await host.ready;
+    const headers = { authorization: `Bearer ${host.token}` };
+    const get = async (sessionId, targetId, extraHeaders = {}) => fetch(`${base}/sessions/${sessionId}/browser/targets/${targetId}/presentation`, { headers: { ...headers, ...extraHeaders } });
+    assert.deepEqual(await (await get('unknown', 'target')).json(), { visible: false });
+    await fetch(`${base}/sessions/present_1/browser`, { method: 'POST', headers });
+    const state = host.getSession('present_1');
+    const contents = { isDestroyed: () => false };
+    const window = { isDestroyed: () => false, contentView: { addChildView() {}, removeChildView() {} } };
+    const view = { webContents: contents, parentWindow: null, setBounds() {} };
+    state.views.set('target_1', { targetId: 'target_1', webContentsView: view });
+    assert.deepEqual(await (await get('present_1', 'missing')).json(), { visible: false });
+    assert.deepEqual(await (await get('present_1', 'target_1')).json(), { visible: false });
+    assert.equal(host.setPresented('present_1', 'target_1', window, view, { x: 0, y: 0, width: 10, height: 10 }), true);
+    assert.deepEqual(await (await get('present_1', 'target_1')).json(), { visible: true });
+    host.park(view);
+    assert.deepEqual(await (await get('present_1', 'target_1')).json(), { visible: false });
+    assert.equal(host.setPresented('present_1', 'target_1', window, view, { x: 0, y: 0, width: 10, height: 10 }), true);
+    contents.isDestroyed = () => true;
+    assert.deepEqual(await (await get('present_1', 'target_1')).json(), { visible: false });
+    assert.equal((await get('present_1', 'target_1', { origin: 'http://localhost' })).status, 403);
   } finally { await host.dispose(); }
 });
 

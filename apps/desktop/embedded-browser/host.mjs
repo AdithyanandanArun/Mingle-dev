@@ -63,8 +63,20 @@ export function createEmbeddedBrowserHost({ electron, ws, log = () => undefined,
     const addr = http.address(); const port = addr && typeof addr !== 'string' ? addr.port : 0;
     if (!authenticated(req, port)) return reply(res, req.headers.origin === undefined ? 401 : 403, { error: 'Unauthorized' });
     const path = new URL(req.url, 'http://127.0.0.1').pathname;
+    const presentationMatch = /^\/sessions\/([^/]+)\/browser\/targets\/([^/]+)\/presentation$/.exec(path);
     const match = /^\/sessions\/([^/]+)\/browser(?:\/(events))?$/.exec(path);
-    if (!match || !sessionPattern.test(match[1])) return reply(res, 400, { error: 'Invalid session id or path' });
+    if (!presentationMatch && (!match || !sessionPattern.test(match[1]))) return reply(res, 400, { error: 'Invalid session id or path' });
+    if (presentationMatch && (!sessionPattern.test(presentationMatch[1]) || !/^[A-Za-z0-9_-]{1,128}$/.test(presentationMatch[2]))) return reply(res, 400, { error: 'Invalid session id or target id' });
+    if (presentationMatch) {
+      if (req.method !== 'GET') return reply(res, 404, { error: 'Not found' });
+      const [, id, targetId] = presentationMatch;
+      const state = sessions.get(id);
+      const item = state?.views.get(targetId);
+      const view = item?.webContentsView;
+      const contents = view?.webContents;
+      const visible = Boolean(state && item && contents && !contents.isDestroyed?.() && state.presentedTargetId === targetId && state.presentedView === view && state.presentedWindow && view.parentWindow === state.presentedWindow && !state.presentedWindow.isDestroyed?.());
+      return reply(res, 200, { visible });
+    }
     const [, id, events] = match;
     if (req.method === 'GET' && events) {
       const state = sessions.get(id); if (!state) return reply(res, 404, { error: 'Session not found' });
@@ -93,6 +105,9 @@ export function createEmbeddedBrowserHost({ electron, ws, log = () => undefined,
   }
   /** Moves a view beneath the parking window's own content (index 0), at the background size. */
   function park(view) {
+    const owner = view.parentWindow;
+    const ownerState = [...sessions.values()].find(state => state.presentedView === view);
+    if (ownerState) { ownerState.presentedView = null; ownerState.presentedTargetId = null; ownerState.presentedWindow = null; }
     const target = parkingWindow();
     view.parentWindow = target;
     for (const window of electron.BrowserWindow.getAllWindows()) if (window !== target && !window.isDestroyed()) { try { window.contentView.removeChildView(view); } catch {} }
@@ -100,11 +115,14 @@ export function createEmbeddedBrowserHost({ electron, ws, log = () => undefined,
     view.setBounds(PARKED_BOUNDS);
   }
   /** Shows a view on top of `window`'s content at `rect` (CSS px of that window). */
-  function present(window, view, rect) {
+  function present(window, view, rect, state, targetId) {
     for (const other of electron.BrowserWindow.getAllWindows()) if (other !== window && !other.isDestroyed()) { try { other.contentView.removeChildView(view); } catch {} }
     window.contentView.addChildView(view);
     view.parentWindow = window;
     view.setBounds(rect);
+    state.presentedView = view;
+    state.presentedTargetId = targetId;
+    state.presentedWindow = window;
   }
   function makeSession(id, path, port) {
     const partition = `persist:mingle-browser-${createHash('sha256').update(id).digest('hex').slice(0, 20)}`;
@@ -114,7 +132,7 @@ export function createEmbeddedBrowserHost({ electron, ws, log = () => undefined,
     ses.setPermissionCheckHandler((_wc, permission) => allowed(permission));
     ses.on('will-download', (_event, item) => item.cancel());
     ses.setUserAgent(stripUserAgent(ses.getUserAgent()));
-    const state = { id, partition, ses, views: new Map(), events: new Set(), relay: null, ws: null, path, wsUrl: `ws://127.0.0.1:${port}${path}` };
+    const state = { id, partition, ses, views: new Map(), events: new Set(), relay: null, ws: null, path, wsUrl: `ws://127.0.0.1:${port}${path}`, presentedView: null, presentedTargetId: null, presentedWindow: null };
     const createView = async url => {
       const view = new electron.WebContentsView({ webPreferences: { partition, sandbox: true, contextIsolation: true, nodeIntegration: false, webSecurity: true, backgroundThrottling: false, preload: fileURLToPath(new URL('./guest-preload.cjs', import.meta.url)) } });
       view.webContents.setBackgroundThrottling(false);
@@ -172,5 +190,5 @@ export function createEmbeddedBrowserHost({ electron, ws, log = () => undefined,
   }
   electron.ipcMain.on('mingle.embedded.human-input', humanInput);
   const ready = new Promise((resolve, reject) => { http.once('error', reject); http.listen(0, '127.0.0.1', () => resolve(`http://127.0.0.1:${http.address().port}`)); });
-  return { token, url: ready, ready, getSession: id => sessions.get(id), park, present, async dispose() { if (disposed) return; disposed = true; electron.ipcMain.removeListener('mingle.embedded.human-input', humanInput); await Promise.all([...sessions.values()].map(closeSession)); wss.close(); await new Promise(resolve => http.close(resolve)); if (hostWindow && !hostWindow.isDestroyed()) hostWindow.destroy(); void log; } };
+  return { token, url: ready, ready, getSession: id => sessions.get(id), park, present, setPresented(sessionId, targetId, window, view, rect) { const state = sessions.get(sessionId); if (!state || state.views.get(targetId)?.webContentsView !== view || !view?.webContents || view.webContents.isDestroyed?.() || !window || window.isDestroyed?.()) return false; present(window, view, rect, state, targetId); return true; }, async dispose() { if (disposed) return; disposed = true; electron.ipcMain.removeListener('mingle.embedded.human-input', humanInput); await Promise.all([...sessions.values()].map(closeSession)); wss.close(); await new Promise(resolve => http.close(resolve)); if (hostWindow && !hostWindow.isDestroyed()) hostWindow.destroy(); void log; } };
 }

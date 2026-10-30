@@ -295,7 +295,7 @@ ipcMain.handle('mingle.browser.embedded.show', (event, sessionId, targetId, rect
   const attached = embeddedViewsByWindow.get(window) ?? new Set();
   for (const view of attached) if (view !== item.webContentsView) embeddedBrowserHost.park(view);
   attached.clear();
-  embeddedBrowserHost.present(window, item.webContentsView, rect);
+  if (!embeddedBrowserHost.setPresented(sessionId, targetId, window, item.webContentsView, rect)) return false;
   attached.add(item.webContentsView);
   embeddedViewsByWindow.set(window, attached);
   return true;
