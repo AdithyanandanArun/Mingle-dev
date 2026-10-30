@@ -36,9 +36,11 @@ const tabLabel = (tab: BrowserTab): string => {
 };
 
 function controlLabel(tab: BrowserTab, clientId: string | null): { label: string; description: string } {
-  if (tab.controlOwner === null) return { label: 'Agent control', description: 'The agent can control this tab. You are watching.' };
-  if (tab.controlOwner === clientId) return { label: 'You control', description: 'You are in control of this tab.' };
-  return { label: 'Watching', description: 'Another viewer is in control of this tab. You are watching.' };
+  if (tab.control.holderId === null) return { label: 'Agent is driving · click or type to step in', description: 'The agent is driving. Click or type to step in.' };
+  if (tab.control.holderId === clientId) return tab.control.lease === 'hold'
+    ? { label: 'You have control', description: 'You have control of this tab.' }
+    : { label: 'You’re driving', description: 'You are driving this tab.' };
+  return { label: 'Someone else is driving', description: 'Another person is driving this tab.' };
 }
 
 export function BrowserPane({ session, active, popout = false }: { session: Session; active: boolean; popout?: boolean }) {
@@ -54,7 +56,11 @@ export function BrowserPane({ session, active, popout = false }: { session: Sess
   const stream = useBrowserStream(session.id, current?.id, visible && pageVisible && Boolean(current) && !detached, canvasRef);
   const tab = current && stream.tab && stream.tab.id === current.id ? stream.tab : current;
   const ownership = tab ? controlLabel(tab, stream.clientId) : { label: 'Watching', description: 'You are watching this tab.' };
-  const canInput = Boolean(tab && stream.status === 'live' && stream.clientId && tab.controlOwner === stream.clientId);
+  const canInput = Boolean(tab && stream.status === 'live' && stream.clientId && (tab.control.holderId === null || tab.control.holderId === stream.clientId));
+  const [leaseNow, setLeaseNow] = useState(Date.now());
+  useEffect(() => { const timer = window.setInterval(() => setLeaseNow(Date.now()), 250); return () => window.clearInterval(timer); }, []);
+  const ownsLease = Boolean(tab && tab.control.holderId === stream.clientId);
+  const leaseSeconds = tab?.control.expiresAt ? Math.max(0, Math.ceil((tab.control.expiresAt - leaseNow) / 1000)) : 0;
 
   useEffect(() => {
     if (popout || !canOpenBrowserPopout()) return;
@@ -108,7 +114,7 @@ export function BrowserPane({ session, active, popout = false }: { session: Sess
   }, [confirmClose]);
   const closeTab = (tabId: string) => run('close', async () => {
     setConfirmClose(null);
-    if (!canInput || tabId !== tab?.id || !stream.clientId) throw new Error('Take control of this tab before closing it.');
+    if (!canInput || tabId !== tab?.id || !stream.clientId) throw new Error('Wait until the browser stream is live.');
     await api.browserAction(session.id, tabId, { type: 'close' }, stream.clientId);
     if (tabId === selectedId) useBrowserStore.getState().select(session.id, null);
     refresh();
@@ -137,7 +143,7 @@ export function BrowserPane({ session, active, popout = false }: { session: Sess
     } catch (cause) { setActionError(errorMessage(cause)); }
   };
   const act = (action: BrowserAction) => {
-    if (!canInput) { toast('info', 'Take control of this tab first.'); return; }
+    if (!canInput) { toast('info', 'Someone else is driving this tab.'); return; }
     if (!stream.sendInput(action)) setActionError('The browser stream is not connected. Reconnect and try again.');
   };
   const pageDialogIdentity = tab?.dialog ? `${tab.id}:${tab.dialog.type}:${tab.dialog.message}` : null;
@@ -186,7 +192,7 @@ export function BrowserPane({ session, active, popout = false }: { session: Sess
             <div key={t.id} className={cx('browser-tab', t.id === tab?.id && 'is-active')} role="presentation">
               <button type="button" role="tab" aria-selected={t.id === tab?.id} title={`${tabLabel(t)}\n${t.url}`} onClick={() => useBrowserStore.getState().select(session.id, t.id)}>{tabLabel(t)}</button>
               <button type="button" className="browser-tab__close" aria-label={`Close tab ${tabLabel(t)}`} disabled={busy === 'close' || !(canInput && t.id === tab?.id)}
-                title={t.id !== tab?.id ? 'Select this tab and take control to close it' : !canInput ? 'Take control to close this tab' : t.managed ? 'Close tab' : 'Close this tab in your own browser'}
+                title={t.id !== tab?.id ? 'Select this tab first' : !canInput ? 'Another person is driving this tab' : t.managed ? 'Close tab' : 'Close this tab in your own browser'}
                 onClick={(event) => {
                   if (t.managed) void closeTab(t.id);
                   else { confirmOpener.current = event.currentTarget; setConfirmClose(t.id); }
@@ -205,13 +211,13 @@ export function BrowserPane({ session, active, popout = false }: { session: Sess
         {tab ? (
           <>
             <form className="browser-bar" onSubmit={submitAddress}>
-              <IconButton label="Back" disabled={!canInput} why="Take control first" onClick={() => act({ type: 'back' })}><ArrowLeft size={14} /></IconButton>
-              <IconButton label="Forward" disabled={!canInput} why="Take control first" onClick={() => act({ type: 'forward' })}><ArrowRight size={14} /></IconButton>
-              <IconButton label="Reload" disabled={!canInput} why="Take control first" onClick={() => act({ type: 'reload' })}><RefreshCw size={13} /></IconButton>
+              <IconButton label="Back" disabled={!canInput} onClick={() => act({ type: 'back' })}><ArrowLeft size={14} /></IconButton>
+              <IconButton label="Forward" disabled={!canInput} onClick={() => act({ type: 'forward' })}><ArrowRight size={14} /></IconButton>
+              <IconButton label="Reload" disabled={!canInput} onClick={() => act({ type: 'reload' })}><RefreshCw size={13} /></IconButton>
               <label htmlFor="browser-address" className="sr-only">Address</label>
               <input
                 id="browser-address" className="input input--mono browser-bar__url" value={draft ?? tab.url} readOnly={!canInput} spellCheck={false} autoComplete="off"
-                title={canInput ? undefined : 'Take control to change the address'} aria-invalid={addressError ? true : undefined}
+                title={canInput ? undefined : 'Another person is driving this tab'} aria-invalid={addressError ? true : undefined}
                 onFocus={(e) => { setDraft(tab.url); e.currentTarget.select(); }} onBlur={() => { setDraft(null); setAddressError(null); }} onChange={(e) => setDraft(e.target.value)}
               />
               {canInput ? <IconButton label="Fit page viewport to this window" onClick={fitViewport}><Scan size={14} /></IconButton> : null}
@@ -226,11 +232,11 @@ export function BrowserPane({ session, active, popout = false }: { session: Sess
             <div className="browser-viewport"><BrowserSurface stream={stream} tab={tab} canvasRef={canvasRef} canInput={canInput} /></div>
             <div className="browser-status">
               {stream.status === 'live'
-                ? <span className="browser-status__who" role="status" aria-label={ownership.description} title={ownership.description}>{ownership.label}</span>
+                ? <span className="browser-status__who" role="status" aria-live="polite" aria-label={ownership.description} title={ownership.description}>{ownsLease ? tab?.control.lease === 'hold' ? 'You have control' : `You’re driving · agent resumes in ${leaseSeconds}s` : ownership.label}</span>
                 : <span className="browser-status__who" role="status">{stream.status === 'closed' ? 'Disconnected' : 'Connecting…'}</span>}
               {stream.status === 'closed' ? <Button size="sm" onClick={stream.reconnect}>Reconnect</Button>
-                : canInput ? <Button size="sm" data-browser-focus-exit onClick={() => stream.setControl('agent')}>Release to agent</Button>
-                  : <Button size="sm" variant="primary" disabled={stream.status !== 'live'} why="Waiting for the stream" onClick={() => stream.setControl('human')}>Take control</Button>}
+                : ownsLease && tab?.control.lease === 'hold' ? <Button size="sm" data-browser-focus-exit onClick={() => stream.setControl('agent')}>Hand back to agent</Button>
+                  : ownsLease ? <Button size="sm" onClick={() => stream.setControl('human')}>Keep control</Button> : null}
             </div>
             {canInput ? <p className="browser-hint">Keys and clicks go to the page. Alt+Shift+Esc moves focus back to Mingle. Paste with {navigator.platform.includes('Mac') ? '⌘' : 'Ctrl'}+V.</p> : null}
             {stream.error ? <div className="browser-stream-error"><InlineError>{stream.error}</InlineError><button type="button" className="link-btn" onClick={stream.dismissError}>Dismiss</button></div> : null}
@@ -281,8 +287,8 @@ function PageDialog({ tab, canInput, act, closing }: { tab: BrowserTab; canInput
       <p><strong>This page shows a {dialog.type}:</strong> {dialog.message}</p>
       {dialog.type === 'prompt' ? <input className="input" aria-label="Prompt response" value={text} disabled={!canInput} onChange={(e) => setText(e.target.value)} /> : null}
       <div>
-        <Button size="sm" variant="primary" disabled={!canInput} why="Take control first" onClick={() => act({ type: 'dialog', accept: true, ...(dialog.type === 'prompt' ? { promptText: text } : {}) })}>{dialog.type === 'alert' ? 'OK' : 'Accept'}</Button>
-        {dialog.type === 'alert' ? null : <Button size="sm" disabled={!canInput} why="Take control first" onClick={() => act({ type: 'dialog', accept: false })}>Dismiss</Button>}
+        <Button size="sm" variant="primary" disabled={!canInput} onClick={() => act({ type: 'dialog', accept: true, ...(dialog.type === 'prompt' ? { promptText: text } : {}) })}>{dialog.type === 'alert' ? 'OK' : 'Accept'}</Button>
+        {dialog.type === 'alert' ? null : <Button size="sm" disabled={!canInput} onClick={() => act({ type: 'dialog', accept: false })}>Dismiss</Button>}
       </div>
     </div>
   );

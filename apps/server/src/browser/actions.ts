@@ -96,8 +96,8 @@ async function perform(entry: TabEntry, action: BrowserAction): Promise<unknown>
       await ensureInViewport(entry, action.x, action.y);
       const button = action.button ?? 'left';
       if (action.phase === 'move') await page.mouse.move(action.x, action.y);
-      else if (action.phase === 'down') { await page.mouse.move(action.x, action.y); entry.pressed.add(button); await page.mouse.down({ button }); }
-      else { await page.mouse.move(action.x, action.y); await page.mouse.up({ button }); entry.pressed.delete(button); }
+      else if (action.phase === 'down') { await page.mouse.move(action.x, action.y); entry.pressed.add(button); entry.control.pointer('down'); await page.mouse.down({ button }); }
+      else { await page.mouse.move(action.x, action.y); await page.mouse.up({ button }); entry.pressed.delete(button); entry.control.pointer('up'); }
       return done;
     }
     case 'resize':
@@ -140,7 +140,23 @@ async function perform(entry: TabEntry, action: BrowserAction): Promise<unknown>
  * Runs one write action. Every action is bounded to ~10s. If an action causes a JavaScript dialog the call returns
  * as soon as it appears (reporting the dialog) instead of hanging behind it; accept or dismiss it with a dialog action.
  */
-export async function runAction(entry: TabEntry, action: BrowserAction): Promise<unknown> {
+export async function runAction(entry: TabEntry, action: BrowserAction, actor?: { kind: 'agent' | 'human'; id: string }): Promise<unknown> {
+  if (actor?.kind === 'agent') {
+    let point: { x: number; y: number } | null = null;
+    const targeted = ['click', 'hover', 'type', 'select'].includes(action.type) && 'selector' in action && hasTarget(action);
+    if (action.type === 'click' && action.x !== undefined && action.y !== undefined) point = { x: action.x, y: action.y };
+    else if (action.type === 'scroll') point = { x: action.x ?? entry.viewport.width / 2, y: action.y ?? entry.viewport.height / 2 };
+    else if (targeted && ('selector' in action || 'ref' in action || 'role' in action)) {
+      const locator = await resolveLocator(entry, action).catch(() => null);
+      const box = locator ? await withTimeout(locator.boundingBox(), 500, 'Reading target bounds timed out.').catch(() => null) : null;
+      if (box) point = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+    }
+    if (point) {
+      const kind = action.type === 'click' ? 'click' : action.type === 'type' ? 'type' : action.type === 'scroll' ? 'scroll' : 'move';
+      entry.agentPointer = { ...point, kind, at: Date.now() };
+      entry.touch();
+    }
+  }
   if (entry.dialog && action.type !== 'dialog' && action.type !== 'close') {
     throw new BrowserError(409, `A JavaScript ${entry.dialog.type} dialog is open ("${entry.dialog.message.slice(0, 200)}"). Accept or dismiss it with the dialog action first.`);
   }

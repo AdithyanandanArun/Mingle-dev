@@ -38,7 +38,7 @@ function isHighRate(action: BrowserAction): boolean {
 
 /**
  * /ws/browser?sessionId&tabId: JPEG frames out (JSON header, then a binary frame), JSON control and input in.
- * Viewers can watch freely; only the viewer that explicitly took control can send input.
+ * Viewers can watch freely; the first viewer input claims a short touch lease automatically.
  */
 export class BrowserStreamServer {
   private readonly wss = new WebSocketServer({ noServer: true, maxPayload: STREAM_MAX_PAYLOAD, perMessageDeflate: false });

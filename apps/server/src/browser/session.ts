@@ -199,7 +199,7 @@ export class BrowserSessionRuntime {
         : await entry.control.run(actor, () => {
           // The page may have navigated while this write was queued.
           this.assertShareable(entry);
-          return runAction(entry, action);
+          return runAction(entry, action, actor);
         });
       if (actor.kind === 'agent' && action.type !== 'close') this.markActive(entry);
       return result;
@@ -232,7 +232,7 @@ export class BrowserSessionRuntime {
   async takeControl(entry: TabEntry, clientId: string): Promise<void> {
     this.requireConnected();
     this.assertShareable(entry);
-    await entry.control.take(clientId, this.handoffCleanup(entry));
+    entry.control.take(clientId);
     // Only an explicit takeover may raise the tab; merely watching never steals window focus.
     await withTimeout(entry.page.bringToFront(), 3000, 'bringToFront timed out').catch(() => undefined);
     entry.touch();
@@ -240,7 +240,7 @@ export class BrowserSessionRuntime {
   }
 
   async releaseControl(entry: TabEntry, clientId: string): Promise<void> {
-    await entry.control.release(clientId, this.handoffCleanup(entry));
+    await entry.control.release(clientId);
     entry.touch();
     this.deps.notify();
   }
@@ -249,7 +249,7 @@ export class BrowserSessionRuntime {
   async dropClient(tabId: string, clientId: string): Promise<void> {
     const entry = this.tabs.get(tabId);
     if (!entry) return;
-    await entry.control.releaseIfOwner(clientId, this.handoffCleanup(entry));
+    await entry.control.releaseIfOwner(clientId);
     entry.touch();
     this.deps.notify();
   }

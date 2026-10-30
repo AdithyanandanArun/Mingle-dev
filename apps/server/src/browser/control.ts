@@ -1,37 +1,45 @@
+import { BROWSER_TOUCH_IDLE_MS } from '@mingle/contracts';
 import { BrowserError } from './errors.ts';
 
 export interface Actor { kind: 'agent' | 'human'; id: string }
+export type BrowserLease = 'touch' | 'hold' | null;
 
-/**
- * One owner per tab: the human viewer that took control (identified by its stream client id) or, when nobody
- * holds it, the agent. Writes run one at a time in arrival order. Each write remembers the epoch it was admitted
- * in; a hand-off bumps the epoch, so writes queued under the previous owner are rejected instead of running.
- * Reads (snapshots) never go through this queue.
- */
+/** Per-tab writer lease. Claims are synchronous so the first human event is never lost. */
 export class TabControl {
-  private owner: string | null = null;
+  private holder: string | null = null;
+  private leaseValue: BrowserLease = null;
+  private expiry: number | null = null;
   private epoch = 0;
-  private changing = false;
+  private pressedValue = false;
+  private timer: NodeJS.Timeout | null = null;
   private tail: Promise<unknown> = Promise.resolve();
-  private handoffs: Promise<unknown> = Promise.resolve();
 
-  get ownerId(): string | null {
-    return this.owner;
-  }
+  constructor(private readonly cleanup: () => Promise<void> = async () => undefined, private readonly onChange: () => void = () => undefined) {}
+  get ownerId(): string | null { return this.holder; }
+  get lease(): BrowserLease { return this.leaseValue; }
+  get expiresAt(): number | null { return this.expiry; }
+  get pressed(): boolean { return this.pressedValue; }
+  get epochValue(): number { return this.epoch; }
 
-  /** Checks that `actor` may write right now. Synchronous so ordering matches the order callers arrive in. */
   authorize(actor: Actor): void {
-    if (this.changing) throw new BrowserError(409, 'Control of this tab is changing hands. Wait a moment, take a fresh snapshot and retry.');
     if (actor.kind === 'agent') {
-      if (this.owner !== null) throw new BrowserError(409, 'A person is controlling this tab right now, so the agent cannot act on it. Snapshots still work; wait for them to release control.');
+      if (this.holder !== null) throw new BrowserError(409, this.leaseValue === 'touch'
+        ? 'A person is using this tab right now. Control comes back to you about 2.5 s after they stop. Wait, take a fresh snapshot, then retry.'
+        : 'A person is holding control of this tab. Snapshots still work; wait until they hand it back.');
       return;
     }
-    if (this.owner !== actor.id) throw new BrowserError(403, 'Take control of the tab before sending input.');
+    if (this.holder !== null && this.holder !== actor.id) throw new BrowserError(409, 'Another person is using this tab right now.');
   }
 
-  /** Queues a write. The authorization failure surfaces as a rejected promise, never as a synchronous throw. */
   run<T>(actor: Actor, task: () => Promise<T>): Promise<T> {
-    try { this.authorize(actor); } catch (error) { return Promise.reject(error); }
+    try {
+      this.authorize(actor);
+      if (actor.kind === 'human' && this.holder === null) {
+        this.holder = actor.id; this.leaseValue = 'touch'; this.expiry = Date.now() + BROWSER_TOUCH_IDLE_MS; this.epoch++;
+        this.arm(); this.onChange();
+      }
+      if (actor.kind === 'human' && this.leaseValue === 'touch') this.extend();
+    } catch (error) { return Promise.reject(error); }
     const admittedIn = this.epoch;
     const result = this.tail.then(() => {
       if (this.epoch !== admittedIn) throw new BrowserError(409, 'Control of this tab changed while this action was queued, so it was not run. Take a fresh snapshot and retry.');
@@ -41,45 +49,47 @@ export class TabControl {
     return result;
   }
 
-  /** A human takes control. Fails if another person already holds it. */
-  take(clientId: string, beforeSwitch?: () => Promise<void>): Promise<void> {
-    return this.handoff(() => {
-      if (this.owner === clientId) return null;
-      if (this.owner !== null) throw new BrowserError(409, 'Another viewer is controlling this tab. They need to release control first.');
-      return { next: clientId, beforeSwitch };
-    });
+  pointer(phase: 'down' | 'up'): void {
+    this.pressedValue = phase === 'down';
+    if (this.leaseValue === 'touch') this.extend();
   }
 
-  /** Releases control back to the agent. Only the current owner may release. */
-  release(clientId: string, beforeSwitch?: () => Promise<void>): Promise<void> {
-    return this.handoff(() => {
-      if (this.owner === null) return null;
-      if (this.owner !== clientId) throw new BrowserError(403, 'Only the viewer that holds control can release it.');
-      return { next: null, beforeSwitch };
-    });
+  take(clientId: string): void {
+    if (this.holder === clientId) { this.leaseValue = 'hold'; this.expiry = null; this.clearTimer(); this.epoch++; this.onChange(); return; }
+    if (this.holder !== null) throw new BrowserError(409, 'Another person is using this tab right now.');
+    this.holder = clientId; this.leaseValue = 'hold'; this.expiry = null; this.epoch++; this.clearTimer(); this.onChange();
   }
 
-  /** Releases control if `clientId` holds it; used when a viewer disconnects. */
-  releaseIfOwner(clientId: string, beforeSwitch?: () => Promise<void>): Promise<void> {
-    return this.handoff(() => (this.owner === clientId ? { next: null, beforeSwitch } : null));
+  release(clientId: string): Promise<void> {
+    if (this.holder === null) return Promise.resolve();
+    if (this.holder !== clientId) return Promise.reject(new BrowserError(403, 'Only the person holding control can hand it back.'));
+    return this.handoff();
   }
+  releaseIfOwner(clientId: string): Promise<void> { return this.holder === clientId ? this.handoff() : Promise.resolve(); }
 
-  private handoff(plan: () => { next: string | null; beforeSwitch?: (() => Promise<void>) | undefined } | null): Promise<void> {
-    const run = async () => {
-      const decision = plan();
-      if (!decision) return;
-      this.changing = true;
-      this.epoch++;
-      try {
-        await this.tail;
-        await decision.beforeSwitch?.().catch(() => undefined);
-        this.owner = decision.next;
-      } finally {
-        this.changing = false;
-      }
-    };
-    const result = this.handoffs.then(run);
-    this.handoffs = result.catch(() => undefined);
+  private extend(): void { this.expiry = Date.now() + BROWSER_TOUCH_IDLE_MS; this.arm(); this.onChange(); }
+  private arm(): void {
+    this.clearTimer();
+    if (this.leaseValue !== 'touch' || this.pressedValue) return;
+    const delay = Math.max(0, (this.expiry ?? Date.now()) - Date.now());
+    this.timer = setTimeout(() => {
+      this.timer = null;
+      if (this.leaseValue !== 'touch') return;
+      if (this.pressedValue) return;
+      if ((this.expiry ?? 0) > Date.now()) return this.arm();
+      void this.handoff();
+    }, delay);
+    this.timer.unref();
+  }
+  private clearTimer(): void { if (this.timer) clearTimeout(this.timer); this.timer = null; }
+  private handoff(): Promise<void> {
+    if (this.holder === null) return Promise.resolve();
+    const admitted = this.tail;
+    this.clearTimer(); this.epoch++;
+    this.holder = null; this.leaseValue = null; this.expiry = null; this.pressedValue = false;
+    const work = async () => { await admitted.catch(() => undefined); await this.cleanup().catch(() => undefined); this.onChange(); };
+    const result = Promise.resolve().then(work);
+    this.tail = result.catch(() => undefined);
     return result;
   }
 }

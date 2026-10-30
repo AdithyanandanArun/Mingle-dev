@@ -77,7 +77,7 @@ export class BrowserMcpBridge {
   private tools(binding: Binding, requestSignal: AbortSignal): McpServer {
     const ensureRequest = () => { this.ensure(binding); if (requestSignal.aborted) throw new Error('This browser request was cancelled'); };
     const server = new McpServer({ name: 'mingle-browser', version: '0.0.1' }, {
-      instructions: 'These tools operate Mingle’s collaborative browser. The user sees the same tabs. Start with browser_status, then browser_open or browser_snapshot. Use snapshot refs or role/name targets; ambiguous targets fail. Human control pauses agent writes: ask the user to release control, never bypass it. Existing-browser connections are made by the user in Mingle. Never extract cookies or credentials. Use browser_evaluate only for page JavaScript. Browser actions must follow the user’s task and authorization.',
+      instructions: 'These tools operate Mingle’s collaborative browser. The user sees the same tabs and may step in at any time by clicking or typing. Start with browser_status, then browser_open or browser_snapshot. Use snapshot refs or role/name targets; ambiguous targets fail. If a person steps in, wait for touch control to return, then take a fresh snapshot before retrying; a held lease requires them to hand control back. Existing-browser connections are made by the user in Mingle. Never extract cookies or credentials. Use browser_evaluate only for page JavaScript. Browser actions must follow the user’s task and authorization.',
     });
     const output = (value: unknown) => ({ content: [{ type: 'text' as const, text: truncate(redactSecrets(JSON.stringify(value) ?? 'null'), 64_000) }] });
     const register = (name: string, description: string, shape: z.ZodRawShape, readOnly: boolean, operation: (args: Record<string, unknown>) => Promise<unknown> | unknown) => {
@@ -91,7 +91,19 @@ export class BrowserMcpBridge {
       const { tabId: requested, ...input } = args;
       const id = this.current(binding, requested as string | undefined);
       const action = BrowserActionSchema.parse({ ...input, type });
-      const result = await this.browser.act(binding.session.id, id, action, { kind: 'agent', id: binding.runId });
+      let result: unknown;
+      try { result = await this.browser.act(binding.session.id, id, action, { kind: 'agent', id: binding.runId }); }
+      catch (error) {
+        if (!errorMessage(error).startsWith('A person is using this tab right now.')) throw error;
+        const until = Date.now() + 20_000;
+        while (Date.now() < until) {
+          ensureRequest();
+          const currentTab = this.browser.status(binding.session.id).tabs.find((row) => row.id === id);
+          if (!currentTab?.control.holderId) throw new Error('A person just used the page. Take a fresh snapshot before retrying the action.');
+          await new Promise((resolve) => setTimeout(resolve, 250));
+        }
+        throw error;
+      }
       this.show(binding, id);
       return result ?? { ok: true, tabId: id };
     };
@@ -120,8 +132,8 @@ export class BrowserMcpBridge {
       } catch (error) { return { content: [{ type: 'text', text: truncate(redactSecrets(errorMessage(error)), 1000) }], isError: true }; }
     });
     register('browser_navigate', 'Navigate a shared tab to an HTTP(S) URL; internal browser and file URLs are refused.', { tabId, url: z.string().min(1).max(4096) }, false, (args) => act(args, 'navigate'));
-    register('browser_click', 'Click one target using a snapshot ref, role/name, strict Playwright selector, or viewport x/y coordinates. Prefer semantic targets.', { tabId, ...target, x: z.number().optional(), y: z.number().optional(), button: z.enum(['left', 'middle', 'right']).optional() }, false, (args) => act(args, 'click'));
-    register('browser_type', 'Enter text in one form target. clear=true replaces its contents; do not include credentials unless the user explicitly requested it.', { tabId, ...target, text: z.string().max(10000), clear: z.boolean().optional() }, false, (args) => act(args, 'type'));
+    register('browser_click', 'Click one target using a snapshot ref, role/name, strict Playwright selector, or viewport x/y coordinates. Prefer semantic targets. A person may step in at any time.', { tabId, ...target, x: z.number().optional(), y: z.number().optional(), button: z.enum(['left', 'middle', 'right']).optional() }, false, (args) => act(args, 'click'));
+    register('browser_type', 'Enter text in one form target. A person may step in at any time. clear=true replaces its contents; do not include credentials unless the user explicitly requested it.', { tabId, ...target, text: z.string().max(10000), clear: z.boolean().optional() }, false, (args) => act(args, 'type'));
     register('browser_hover', 'Hover over one semantic target or strict selector.', { tabId, ...target }, false, (args) => act(args, 'hover'));
     register('browser_select', 'Select option values in one native select element.', { tabId, ...target, values: z.array(z.string().max(500)).min(1).max(30) }, false, (args) => act(args, 'select'));
     register('browser_press', 'Press a browser key, e.g. Enter, ArrowDown, Control+A, Meta+A or Escape.', { tabId, key: z.string().min(1).max(100) }, false, (args) => act(args, 'press'));

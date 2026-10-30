@@ -33,6 +33,18 @@ export function BrowserSurface({ stream, tab, canvasRef, canInput }: { stream: B
   const move = useRef<{ last: number; timer: number; pending: BrowserAction | null }>({ last: 0, timer: 0, pending: null });
   const pressed = useRef<{ button: (typeof BUTTONS)[number]; x: number; y: number } | null>(null);
   const wheel = useRef<{ timer: number; dx: number; dy: number; x: number; y: number }>({ timer: 0, dx: 0, dy: 0, x: 0, y: 0 });
+  const pointer = tab.agentPointer;
+  const pointerVisible = pointer !== null && Date.now() - pointer.at < 2000 && stream.frameSize !== null;
+  let pointerStyle: React.CSSProperties | undefined;
+  if (pointerVisible && pointer && stream.frameSize) {
+    const rect = stageRef.current?.getBoundingClientRect();
+    if (rect) {
+      const aspect = stream.frameSize.width / stream.frameSize.height;
+      let width = rect.width; let height = rect.height;
+      if (width / height > aspect) width = height * aspect; else height = width / aspect;
+      pointerStyle = { left: `${(rect.width - width) / 2 + pointer.x / tab.viewport.width * width}px`, top: `${(rect.height - height) / 2 + pointer.y / tab.viewport.height * height}px` };
+    }
+  }
 
   const flushMove = () => {
     const m = move.current;
@@ -58,7 +70,7 @@ export function BrowserSurface({ stream, tab, canvasRef, canInput }: { stream: B
     if (!stage) return;
     const onWheel = (e: WheelEvent) => {
       const { canInput: ok, frame, viewport } = live.current;
-      if (!ok) return;
+      if (!ok || stream.status !== 'live') return;
       e.preventDefault();
       const point = mapPoint(stage, e.clientX, e.clientY, frame, viewport);
       if (!point.inside) return;
@@ -79,7 +91,7 @@ export function BrowserSurface({ stream, tab, canvasRef, canInput }: { stream: B
   }, []);
 
   const onPointerMove = (e: PointerEvent<HTMLDivElement>) => {
-    if (!canInput) return;
+    if (!canInput || tab.control.holderId === null) return;
     const p = mapPoint(e.currentTarget, e.clientX, e.clientY, stream.frameSize, tab.viewport);
     if (!p.inside && !pressed.current) return;
     const m = move.current;
@@ -138,7 +150,7 @@ export function BrowserSurface({ stream, tab, canvasRef, canInput }: { stream: B
   return (
     <div
       ref={stageRef} className={cx('browser-stage', canInput && 'is-controlled')} tabIndex={0} role="application"
-      aria-label={canInput ? 'Shared browser page. You are in control; keys and clicks go to the page.' : 'Shared browser page, view only. Take control to click and type.'}
+      aria-label={canInput ? 'Shared browser page. The agent is driving until you click or type; your input takes control.' : 'Shared browser page. Another person is driving.'}
       onPointerMove={onPointerMove} onPointerDown={onPointerDown} onPointerUp={onPointerUp}
       onLostPointerCapture={() => { if (pressed.current) releaseAll(); }}
       onContextMenu={(e) => { if (canInput) e.preventDefault(); }}
@@ -150,6 +162,7 @@ export function BrowserSurface({ stream, tab, canvasRef, canInput }: { stream: B
           {stream.status === 'closed' ? 'Stream disconnected.' : <><Spinner label="Connecting to the browser" /><span>{stream.status === 'live' ? 'Waiting for the first frame…' : 'Connecting to the browser…'}</span></>}
         </div>
       ) : null}
+      {pointerVisible && pointerStyle ? <div className={`browser-agent-pointer${pointer.kind === 'click' ? ' is-click' : ''}`} style={pointerStyle} aria-hidden="true"><span className="browser-agent-pointer__ring" /><span className="browser-agent-pointer__dot" /><span className="browser-agent-pointer__label">Agent</span></div> : null}
     </div>
   );
 }

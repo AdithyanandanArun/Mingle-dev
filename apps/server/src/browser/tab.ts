@@ -1,5 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import type { BrowserTab } from '@mingle/contracts';
+import type { BrowserAgentPointer } from '@mingle/contracts';
 import { TabControl } from './control.ts';
 import { DEFAULT_VIEWPORT, DETACH_TIMEOUT_MS } from './limits.ts';
 import type { Dialog, Page } from './playwright.ts';
@@ -19,7 +20,8 @@ export interface ViewerHandle {
 /** Everything Mingle tracks for one browser page. */
 export class TabEntry {
   readonly id = `tab_${randomBytes(6).toString('hex')}`;
-  readonly control = new TabControl();
+  readonly control: TabControl;
+  agentPointer: BrowserAgentPointer | null = null;
   title = '';
   reusable = false;
   viewport: { width: number; height: number } = { ...DEFAULT_VIEWPORT };
@@ -41,6 +43,7 @@ export class TabEntry {
   private ended = false;
 
   constructor(readonly page: Page, readonly managed: boolean, readonly targetId: string | null) {
+    this.control = new TabControl(() => this.releaseInput(), () => this.touch());
     const size = page.viewportSize();
     if (size) this.viewport = { ...size };
   }
@@ -53,8 +56,8 @@ export class TabEntry {
       managed: this.managed,
       viewport: { ...this.viewport },
       controlOwner: this.control.ownerId,
-      control: { owner: this.control.ownerId ? 'human' : 'agent', holderId: this.control.ownerId, lease: this.control.ownerId ? 'hold' : null, expiresAt: null },
-      agentPointer: null,
+      control: { owner: this.control.ownerId ? 'human' : 'agent', holderId: this.control.ownerId, lease: this.control.lease, expiresAt: this.control.expiresAt },
+      agentPointer: this.agentPointer,
       dialog: this.dialog ? { type: this.dialog.type, message: this.dialog.message } : null,
     };
   }
