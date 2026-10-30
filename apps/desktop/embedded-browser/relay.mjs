@@ -102,7 +102,7 @@ export function createRelay({ createView, closeView, listViews, version, userAge
           const view = pageSessions.get(params.sessionId);
           pageSessions.delete(params.sessionId);
           if (autoAttachSessions.get(view) === params.sessionId) autoAttachSessions.delete(view);
-          send({ method: 'Target.detachedFromTarget', params: { sessionId: params.sessionId, ...(view ? { targetId: view.targetId } : {}) } });
+          send({ method: 'Target.detachedFromTarget', params: { sessionId: params.sessionId, ...(view ? { targetId: view.targetId } : {}) }, ...(sessionId ? { sessionId } : {}) });
           return respond({});
         }
         case 'Target.createTarget': { const view = await createView(params.url ?? 'about:blank'); if (!listeners.has(view)) bindView(view); return respond({ targetId: view.targetId }); }

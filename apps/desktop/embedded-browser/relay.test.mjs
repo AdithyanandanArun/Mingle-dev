@@ -46,6 +46,17 @@ test('multiple explicit page sessions are independent when one detaches', async 
   assert.ok(f.sent.some(item => item.method === 'Page.loadEventFired' && item.sessionId === second));
   assert.equal(f.sent.some(item => item.method === 'Page.loadEventFired' && item.sessionId === first), false);
 });
+test('detaching an explicit session reports on its browser parent only', async () => {
+  const f = fixture(); const view = f.makeView();
+  await f.call('Target.attachToTarget', { targetId: view.targetId }); const retained = f.sent.at(-1).result.sessionId;
+  await f.call('Target.attachToBrowserTarget'); const browserSession = f.sent.at(-1).result.sessionId;
+  await f.call('Target.attachToTarget', { targetId: view.targetId }, browserSession); const detached = f.sent.at(-1).result.sessionId;
+  await f.call('Target.detachFromTarget', { sessionId: detached }, browserSession);
+  const notification = f.sent.find(item => item.method === 'Target.detachedFromTarget' && item.params.sessionId === detached);
+  assert.equal(notification.sessionId, browserSession);
+  await f.call('Page.navigate', { url: 'data:text/html,ok' }, retained);
+  assert.equal(view.debugger.calls.at(-1)[0], 'Page.navigate');
+});
 test('auto attach announces targets created later', async () => {
   const f = fixture(); await f.call('Target.setAutoAttach', { autoAttach: true });
   const created = await f.call('Target.createTarget', { url: 'https://example.com' });
