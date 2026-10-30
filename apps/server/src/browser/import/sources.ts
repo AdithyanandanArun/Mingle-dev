@@ -22,7 +22,7 @@ function chromiumDefinitions(platform: NodeJS.Platform, env: NodeJS.ProcessEnv, 
 function firefoxRoot(platform: NodeJS.Platform, env: NodeJS.ProcessEnv, home: string): string {
   if (platform === 'win32') return path.join(env.APPDATA ?? path.join(home,'AppData/Roaming'),'Mozilla','Firefox');
   if (platform === 'darwin') return path.join(home,'Library/Application Support/Firefox');
-  return path.join(env.XDG_CONFIG_HOME ?? path.join(home,'.config'), '..', 'mozilla','firefox');
+  return path.join(env.XDG_CONFIG_HOME ?? home, env.XDG_CONFIG_HOME ? 'mozilla/firefox' : '.mozilla/firefox');
 }
 
 const profileId = (p: string) => Buffer.from(p).toString('base64url');
