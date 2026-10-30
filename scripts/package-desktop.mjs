@@ -80,6 +80,7 @@ await mkdir(appDir, { recursive: true });
 await copyFile(join(root, 'apps/desktop/main.mjs'), join(appDir, 'main.mjs'));
 await copyFile(join(root, 'apps/desktop/browser-preload.cjs'), join(appDir, 'browser-preload.cjs'));
 await copyFile(join(root, 'apps/desktop/project-invitation.mjs'), join(appDir, 'project-invitation.mjs'));
+await cp(join(root, 'apps/desktop/embedded-browser'), join(appDir, 'embedded-browser'), { recursive: true, filter: source => !source.endsWith('.test.mjs') && !source.endsWith('/smoke.mjs') });
 await cp(join(root, 'apps/desktop/account-storage'), join(appDir, 'account-storage'), {
   recursive: true, filter: source => !source.endsWith('.test.mjs'),
 });

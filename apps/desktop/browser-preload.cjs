@@ -4,6 +4,7 @@ const sessionPattern = /^[A-Za-z0-9_-]{1,80}$/;
 const listeners = new Set();
 const projectInvitationTokenPattern = /^[A-Za-z0-9_-]{43,128}$/;
 const maxPendingProjectInvitations = 16;
+const targetPattern = /^[A-Za-z0-9_-]{1,128}$/;
 const projectInvitationListeners = new Set();
 const pendingProjectInvitations = [];
 const pendingProjectInvitationTokens = new Set();
@@ -43,6 +44,13 @@ contextBridge.exposeInMainWorld('mingleBrowserDesktop', Object.freeze({
   dockPopout: (sessionId) => sessionId === undefined || sessionPattern.test(sessionId)
     ? ipcRenderer.invoke('mingle.browser.dock-popout', sessionId)
     : Promise.resolve(false),
+  embedded: Object.freeze({
+    show: (sessionId, targetId, rect) => sessionPattern.test(sessionId) && targetPattern.test(targetId)
+      && rect && typeof rect === 'object' && ['x', 'y', 'width', 'height'].every(key => Number.isFinite(rect[key]) && rect[key] >= 0)
+      ? ipcRenderer.invoke('mingle.browser.embedded.show', sessionId, targetId, rect)
+      : Promise.resolve(false),
+    hide: sessionId => sessionPattern.test(sessionId) ? ipcRenderer.invoke('mingle.browser.embedded.hide', sessionId) : Promise.resolve(false),
+  }),
   onPopoutClosed: (listener) => {
     if (typeof listener !== 'function') return () => undefined;
     listeners.add(listener);

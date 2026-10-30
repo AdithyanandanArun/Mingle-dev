@@ -6,7 +6,8 @@
   "main": "main.mjs",
   "scripts": {
     "start": "node start.mjs",
-    "typecheck": "node --check main.mjs && node --check browser-preload.cjs && node --check start.mjs && node --check account-storage/account-key.mjs && node --check account-storage/account-key-ipc.mjs && node --check account-storage/linux-backend.mjs",
+    "typecheck": "node --check main.mjs && node --check browser-preload.cjs && node --check start.mjs && node --check account-storage/account-key.mjs && node --check account-storage/account-key-ipc.mjs && node --check account-storage/linux-backend.mjs && node --check embedded-browser/relay.mjs && node --check embedded-browser/host.mjs && node --check embedded-browser/user-agent.mjs && node --check embedded-browser/guest-preload.cjs",
+    "smoke:embedded": "electron embedded-browser/smoke.mjs",
     "test": "node --test"
   },
   "devDependencies": { "electron": "^44.9.0" }

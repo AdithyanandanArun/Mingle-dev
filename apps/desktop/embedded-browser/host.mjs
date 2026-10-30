@@ -107,5 +107,5 @@ export function createEmbeddedBrowserHost({ electron, ws, log = () => undefined 
   }
   electron.ipcMain.on('mingle.embedded.human-input', humanInput);
   const ready = new Promise((resolve, reject) => { http.once('error', reject); http.listen(0, '127.0.0.1', () => resolve(`http://127.0.0.1:${http.address().port}`)); });
-  return { token, url: ready, ready, async dispose() { if (disposed) return; disposed = true; electron.ipcMain.removeListener('mingle.embedded.human-input', humanInput); await Promise.all([...sessions.values()].map(closeSession)); wss.close(); await new Promise(resolve => http.close(resolve)); if (hostWindow && !hostWindow.isDestroyed()) hostWindow.destroy(); void log; } };
+  return { token, url: ready, ready, getSession: id => sessions.get(id), get hostWindow() { return hostWindow; }, async dispose() { if (disposed) return; disposed = true; electron.ipcMain.removeListener('mingle.embedded.human-input', humanInput); await Promise.all([...sessions.values()].map(closeSession)); wss.close(); await new Promise(resolve => http.close(resolve)); if (hostWindow && !hostWindow.isDestroyed()) hostWindow.destroy(); void log; } };
 }

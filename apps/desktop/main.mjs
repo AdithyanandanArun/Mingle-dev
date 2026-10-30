@@ -1,13 +1,15 @@
-import { app, BrowserWindow, dialog, ipcMain, shell, safeStorage } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, shell, safeStorage, session } from 'electron';
 import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync } from 'node:fs';
 import { createServer } from 'node:net';
+import { createRequire } from 'node:module';
 import { dirname, delimiter, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createAccountKeyManager } from './account-storage/account-key.mjs';
 import { createAccountKeyIpcHandler } from './account-storage/account-key-ipc.mjs';
 import { configureLinuxPasswordStore } from './account-storage/linux-backend.mjs';
 import { createProjectInvitationDispatcher, focusProjectInvitationWindow, isProjectInvitationWorkspaceUrl } from './project-invitation.mjs';
+import { createEmbeddedBrowserHost } from './embedded-browser/host.mjs';
 
 const root = app.isPackaged ? join(process.resourcesPath, 'workspace') : fileURLToPath(new URL('../../', import.meta.url));
 const serverRoot = join(root, 'apps/server');
@@ -38,6 +40,8 @@ let quitting = false;
 let shutdownPending = false;
 let mainWindow;
 let workspaceUrl;
+let embeddedBrowserHost;
+const embeddedViewsByWindow = new Map();
 const browserWindows = new Map();
 const SESSION_ID_PATTERN = /^[A-Za-z0-9_-]{1,80}$/;
 
@@ -195,12 +199,18 @@ async function openWorkspace() {
   const dataOverride = process.env.MINGLE_DATA_DIR !== undefined ? process.env.MINGLE_DATA_DIR : process.env.RELAY_DATA_DIR;
   const workspaceDataDir = dataOverride?.trim() || join(userData, 'workspace');
   const getAccountKey = createAccountKeyManager({ userData, workspaceDataDir, safeStorage });
+  const serverRequire = createRequire(join(serverRoot, 'package.json'));
+  const ws = serverRequire('ws');
+  embeddedBrowserHost = createEmbeddedBrowserHost({ electron: { app, BrowserWindow, ipcMain, session }, ws });
+  const embeddedUrl = await embeddedBrowserHost.ready;
   // Canonical values override any legacy environment inherited from another local server.
   const environment = {
     ...process.env, NODE_ENV: 'production', MINGLE_HOST: '127.0.0.1',
     MINGLE_PORT: String(port), PORT: String(port), MINGLE_DATA_DIR: workspaceDataDir,
     MINGLE_WEB_DIST: join(root, 'apps/web/dist'), MINGLE_ALLOWED_ORIGINS: '',
     MINGLE_ACCOUNT_IPC: '1',
+    MINGLE_EMBEDDED_BROWSER_URL: embeddedUrl,
+    MINGLE_EMBEDDED_BROWSER_TOKEN: embeddedBrowserHost.token,
   };
   delete environment.ELECTRON_RUN_AS_NODE;
   delete environment.NODE_OPTIONS;
@@ -255,6 +265,53 @@ async function openWorkspace() {
   focusMainWindow();
   projectInvitationDispatcher.markWorkspaceReady();
 }
+
+function rectIsValid(rect, window) {
+  if (!rect || typeof rect !== 'object' || !['x', 'y', 'width', 'height'].every(key => Number.isFinite(rect[key]) && rect[key] >= 0)) return false;
+  const size = window.getContentSize();
+  return rect.width > 0 && rect.height > 0 && rect.x + rect.width <= size[0] && rect.y + rect.height <= size[1];
+}
+
+function embeddedWindowForSender(sender) {
+  if (isLiveWindow(mainWindow) && sender === mainWindow.webContents && isWorkspaceFrame({ sender, senderFrame: sender.mainFrame })) return mainWindow;
+  for (const window of browserWindows.values()) if (isLiveWindow(window) && sender === window.webContents) return window;
+  return null;
+}
+
+ipcMain.handle('mingle.browser.embedded.show', (event, sessionId, targetId, rect) => {
+  const window = embeddedWindowForSender(event.sender);
+  if (!window || !SESSION_ID_PATTERN.test(sessionId) || typeof targetId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(targetId) || !rectIsValid(rect, window)) return false;
+  const state = embeddedBrowserHost?.getSession(sessionId);
+  const item = state?.views.get(targetId);
+  if (!item || window.isDestroyed()) return false;
+  for (const [attachedWindow, attached] of embeddedViewsByWindow) {
+    if (attachedWindow !== window) continue;
+    for (const view of attached) attachedWindow.contentView.removeChildView(view);
+    attached.clear();
+  }
+  const view = item.webContentsView;
+  const host = embeddedBrowserHost.hostWindow;
+  try { host?.contentView.removeChildView(view); } catch {}
+  window.contentView.addChildView(view); view.setBounds(rect);
+  const attached = embeddedViewsByWindow.get(window) ?? new Set(); attached.add(view); embeddedViewsByWindow.set(window, attached);
+  return true;
+});
+
+ipcMain.handle('mingle.browser.embedded.hide', (event, sessionId) => {
+  const window = embeddedWindowForSender(event.sender);
+  if (!window || !SESSION_ID_PATTERN.test(sessionId)) return false;
+  const attached = embeddedViewsByWindow.get(window);
+  if (!attached) return true;
+  const state = embeddedBrowserHost?.getSession(sessionId);
+  const targetViews = new Set([...(state?.views.values() ?? [])].map(item => item.webContentsView));
+  for (const view of [...attached]) {
+    if (!targetViews.has(view)) continue;
+    window.contentView.removeChildView(view);
+    embeddedBrowserHost?.hostWindow?.contentView.addChildView(view);
+    view.setBounds({ x: 0, y: 0, width: 1280, height: 800 });
+  }
+  attached.clear(); return true;
+});
 
 function receiveProjectInvitation(value) {
   projectInvitationDispatcher.accept(value);
