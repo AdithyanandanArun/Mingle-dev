@@ -24,6 +24,8 @@ export interface BrowserDiscovery {
   installing: boolean; notices: string[];
   sandbox: BrowserSandboxStatus | null;
   systemBrowsers: SystemBrowser[];
+  /** The desktop app can host tabs itself (no download, Electron's own sandbox). False in a plain web browser or server-only run. */
+  embeddedAvailable: boolean;
 }
 /** Idle time after a person's last input before a touch claim hands the tab back to the agent. */
 export const BROWSER_TOUCH_IDLE_MS = 2500;
@@ -48,12 +50,15 @@ export interface BrowserTab {
   controlOwner: string | null;
   control: BrowserControl;
   agentPointer: BrowserAgentPointer | null;
+  /** CDP target id of a tab hosted by the desktop app ('embedded' mode), used to show it natively; null otherwise. */
+  embeddedTargetId: string | null;
   dialog: { type: string; message: string } | null;
 }
 export interface BrowserSessionState {
   /** 'signing-in': automation is paused while a normal, non-automated browser window is open on this session's profile. */
   sessionId: string; status: 'disconnected' | 'connecting' | 'connected' | 'signing-in' | 'error';
-  mode: 'managed' | 'existing' | null; tabs: BrowserTab[]; activeTabId: string | null;
+  /** 'embedded': tabs hosted by Mingle's desktop window. 'managed': a Chromium Mingle launched. 'existing': the user's own browser. */
+  mode: 'embedded' | 'managed' | 'existing' | null; tabs: BrowserTab[]; activeTabId: string | null;
   error: string | null; notices: string[];
 }
 export interface BrowserSnapshot {
@@ -61,6 +66,7 @@ export interface BrowserSnapshot {
   screenshot?: { data: string; mimeType: 'image/png' };
 }
 export const BrowserConnectSchema = z.discriminatedUnion('mode', [
+  z.object({ mode: z.literal('embedded') }).strict(),
   z.object({ mode: z.literal('managed') }).strict(),
   z.object({ mode: z.literal('existing'), sourceId: z.string().min(1).max(200).optional(), endpoint: z.string().min(1).max(2048).optional(), consent: z.literal(true) }).strict(),
 ]);
@@ -104,5 +110,23 @@ export type BrowserServerMessage =
 /** Opens a normal (non-automated, headed) browser window on the session's managed profile so a person can sign in to sites that block automated browsers. */
 export const BrowserSignInSchema = z.object({ url: z.string().min(1).max(4096).optional() }).strict();
 export type BrowserSignIn = z.infer<typeof BrowserSignInSchema>;
+/** A browser profile on this computer whose sign-ins (cookies) can be copied into a Mingle browser session. */
+export interface BrowserImportProfile { id: string; name: string }
+export interface BrowserImportSource {
+  id: string; name: string; engine: 'chromium' | 'firefox';
+  profiles: BrowserImportProfile[];
+  /** False when this OS keeps the cookies unreadable for other apps (e.g. Chrome's app-bound encryption on Windows). */
+  supported: boolean;
+  /** Plain-language reason when unsupported, or what will happen (e.g. "Your keyring may ask for permission"). */
+  note: string | null;
+}
+const hostname = z.string().min(1).max(253).regex(/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/u, 'Use a site name such as google.com.');
+/** Copies the cookies of the chosen sites only (each domain and its subdomains). Never imports everything. */
+export const BrowserImportSchema = z.object({
+  sourceId: z.string().min(1).max(100), profileId: z.string().min(1).max(500),
+  domains: z.array(hostname).min(1).max(50),
+}).strict();
+export type BrowserImport = z.infer<typeof BrowserImportSchema>;
+export interface BrowserImportResult { imported: number; skipped: number; domains: string[] }
 /** Ephemeral capability supplied only to a provider process; never persisted or exposed in bootstrap. */
 export interface BrowserMcpConnection { url: string; token: string }

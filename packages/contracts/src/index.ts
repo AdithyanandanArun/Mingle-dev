@@ -141,7 +141,7 @@ export interface AppSettings {
   autoCompactPercent?: number | null;
   onboardingCompletedVersion?: number;
   browserAgentEnabled?: boolean; browserExecutable?: string;
-  browserDefaultMode?: 'managed' | 'existing'; browserExistingSourceId?: string; browserCdpEndpoint?: string;
+  browserDefaultMode?: 'embedded' | 'managed' | 'existing'; browserExistingSourceId?: string; browserCdpEndpoint?: string;
 }
 export interface Bootstrap { projects: Project[]; sessions: Session[]; messages: Message[]; tasks: Task[]; events: WorkspaceEvent[]; approvals: Approval[]; plans: import('./planning').SessionPlan[]; questions: import('./planning').UserQuestion[]; providers: ProviderInfo[]; settings: AppSettings; version: string; runs: SessionRun[]; toolCalls: ToolCall[]; groups?: import('./groups').GroupSnapshot[] }
 export interface GitFile { path: string; status: string }
@@ -206,7 +206,7 @@ export const UpdateSettingsSchema = z.object({
   autoResumeOnRestart: z.boolean().optional(),
   onboardingCompletedVersion: z.number().int().min(1).max(1).optional(),
   browserAgentEnabled: z.boolean().optional(), browserExecutable: z.string().max(4096).optional(),
-  browserDefaultMode: z.enum(['managed', 'existing']).optional(), browserExistingSourceId: z.string().max(200).optional(),
+  browserDefaultMode: z.enum(['embedded', 'managed', 'existing']).optional(), browserExistingSourceId: z.string().max(200).optional(),
   browserCdpEndpoint: z.string().max(2048).optional(),
 });
 export const ApprovalDecisionSchema = z.object({ decision: z.enum(['approved', 'denied']) });

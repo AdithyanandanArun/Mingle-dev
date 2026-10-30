@@ -77,7 +77,7 @@ export class BrowserService {
       notices.push('To share an existing browser, open chrome://inspect/#remote-debugging in it and turn remote debugging on. Mingle only attaches after you approve.');
     }
     if (sandbox && !sandbox.managedReady) notices.push('Chromium’s sandbox is blocked by this computer’s Linux security settings. Allow Chromium or choose an installed browser that is ready.');
-    return { sources, managedAvailable: executable.path !== null, managedExecutable: executable.path, installing: this.installer.installing, notices, sandbox, systemBrowsers };
+    return { sources, managedAvailable: executable.path !== null, managedExecutable: executable.path, installing: this.installer.installing, notices, sandbox, systemBrowsers, embeddedAvailable: false };
   }
 
   async fixSandbox(): Promise<BrowserDiscovery> {
@@ -116,6 +116,8 @@ export class BrowserService {
     const parsed = BrowserConnectSchema.safeParse(input);
     if (!parsed.success) throw new BrowserError(400, parsed.error.issues[0]?.message ?? 'Invalid browser connection request.');
     const request = parsed.data;
+    // Placeholder until the embedded engine is wired to the server.
+    if (request.mode === 'embedded') throw new BrowserError(503, 'The built-in browser is not available yet.');
     const runtime = this.runtime(sessionId);
     try {
       await runtime.connect(request.mode, () => (request.mode === 'managed' ? Promise.resolve(null) : this.resolveExisting(request)));

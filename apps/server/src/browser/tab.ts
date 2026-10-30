@@ -58,6 +58,7 @@ export class TabEntry {
       controlOwner: this.control.ownerId,
       control: { owner: this.control.ownerId ? 'human' : 'agent', holderId: this.control.ownerId, lease: this.control.lease, expiresAt: this.control.expiresAt },
       agentPointer: this.agentPointer,
+      embeddedTargetId: null,
       dialog: this.dialog ? { type: this.dialog.type, message: this.dialog.message } : null,
     };
   }
