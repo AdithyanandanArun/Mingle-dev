@@ -56,6 +56,9 @@ export function NativeBrowserView({ sessionId, targetId, active, stream, tab, ca
         if (!active || document.hidden || !element) { hide(); return; }
         const rect = element.getBoundingClientRect();
         const overlay = [...document.querySelectorAll<HTMLElement>(OVERLAYS)].some((item) => {
+          // Full-view/float browser containers can themselves be dialogs. They host this
+          // native page; only a separate overlay covering the page needs a stream fallback.
+          if (item.contains(element)) return false;
           if (item.closest('[aria-hidden="true"]') || item.closest('[inert]')) return false;
           const style = getComputedStyle(item);
           if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity) === 0) return false;
