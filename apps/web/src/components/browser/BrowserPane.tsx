@@ -58,6 +58,7 @@ export function BrowserPane({ session, active, popout = false }: { session: Sess
   const stream = useBrowserStream(session.id, current?.id, visible && pageVisible && Boolean(current) && !detached, canvasRef);
   const tab = current && stream.tab && stream.tab.id === current.id ? stream.tab : current;
   const ownership = tab ? controlLabel(tab, stream.clientId) : { label: 'Watching', description: 'You are watching this tab.' };
+  const embeddedNative = Boolean(state?.mode === 'embedded' && canShowEmbedded() && tab?.embeddedTargetId);
   const canInput = Boolean(tab && stream.status === 'live' && stream.clientId && (tab.control.holderId === null || tab.control.holderId === stream.clientId));
   const [leaseNow, setLeaseNow] = useState(Date.now());
   useEffect(() => { const timer = window.setInterval(() => setLeaseNow(Date.now()), 250); return () => window.clearInterval(timer); }, []);
@@ -236,7 +237,11 @@ export function BrowserPane({ session, active, popout = false }: { session: Sess
               ? <NativeBrowserView sessionId={session.id} targetId={tab.embeddedTargetId} active={visible && pageVisible && !detached} stream={stream} tab={tab} canvasRef={canvasRef} canInput={canInput} />
               : <BrowserSurface stream={stream} tab={tab} canvasRef={canvasRef} canInput={canInput} />}</div>
             <div className="browser-status">
-              {stream.status === 'live'
+              {embeddedNative && tab?.control.holderId === 'desktop-native'
+                ? <span className="browser-status__who">You’re using the page · agent resumes in {leaseSeconds}s</span>
+                : embeddedNative && tab?.control.holderId === null
+                  ? <span className="browser-status__who">Agent is driving · click the page to step in</span>
+                  : stream.status === 'live'
                 ? <>
                   {/* The countdown is visual only; screen readers hear one announcement per control change. */}
                   <span className="browser-status__who" aria-hidden="true" title={ownership.description}>{ownsLease ? tab?.control.lease === 'hold' ? 'You have control' : `You’re driving · agent resumes in ${leaseSeconds}s` : ownership.label}</span>
@@ -248,7 +253,7 @@ export function BrowserPane({ session, active, popout = false }: { session: Sess
                   : ownsLease ? <Button size="sm" onClick={() => stream.setControl('human')}>Keep control</Button> : null}
               {state.mode === 'managed' ? <BrowserSignInButton sessionId={session.id} /> : null}
             </div>
-            {canInput ? <p className="browser-hint">Keys and clicks go to the page. Alt+Shift+Esc moves focus back to Mingle. Paste with {navigator.platform.includes('Mac') ? '⌘' : 'Ctrl'}+V.</p> : null}
+            {canInput ? <p className="browser-hint">Keys and clicks go to the page. Alt+Shift+Escape moves focus back to Mingle. Paste with {navigator.platform.includes('Mac') ? '⌘' : 'Ctrl'}+V.</p> : null}
             {stream.error ? <div className="browser-stream-error"><InlineError>{stream.error}</InlineError><button type="button" className="link-btn" onClick={stream.dismissError}>Dismiss</button></div> : null}
           </>
         ) : (

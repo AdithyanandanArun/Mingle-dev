@@ -62,5 +62,10 @@ export function NativeBrowserView({ sessionId, targetId, active, stream, tab, ca
     };
   }, [sessionId, targetId, active]);
 
-  return <><div ref={placeholder} className="browser-native-placeholder" tabIndex={0} aria-label="Web page (built-in browser). Click to use it. Press Alt+Shift+Escape to return to Mingle." />{fallback ? <BrowserSurface stream={stream} tab={tab} canvasRef={canvasRef} canInput={canInput} /> : null}</>;
+  return <><div ref={placeholder} className="browser-native-placeholder" tabIndex={0} role="application" aria-label="Web page (built-in browser). Click to use it. Press Alt+Shift+Escape to return to Mingle." onKeyDown={(event) => {
+    if (event.altKey && event.shiftKey && event.key === 'Escape') {
+      event.preventDefault();
+      document.getElementById('browser-address')?.focus({ preventScroll: true });
+    }
+  }} />{fallback ? <BrowserSurface stream={stream} tab={tab} canvasRef={canvasRef} canInput={canInput} /> : null}</>;
 }
