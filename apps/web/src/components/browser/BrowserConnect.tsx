@@ -8,7 +8,7 @@ import { BrowserSourcePicker, ChromeSetupHelp } from './BrowserSources';
 import { useBrowserDiscovery } from './useBrowserDiscovery';
 import { BrowserSandboxCard } from './BrowserSandboxCard';
 
-type Mode = 'managed' | 'existing';
+type Mode = 'embedded' | 'managed' | 'existing';
 
 /** Choose how this session gets a browser. Nothing connects, launches or downloads until a button here is pressed. */
 export function BrowserConnect({ sessionId, state, onState }: { sessionId: string; state?: BrowserSessionState; onState(next: BrowserSessionState): void }) {
