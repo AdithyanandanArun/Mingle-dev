@@ -55,7 +55,10 @@ export function BrowserPane({ session, active, popout = false }: { session: Sess
   const current = resolveTab(state, selectedId);
   const pageVisible = usePageVisible();
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const stream = useBrowserStream(session.id, current?.id, visible && pageVisible && Boolean(current) && !detached, canvasRef);
+  const [nativeFallback, setNativeFallback] = useState(false);
+  // A natively shown built-in tab needs no screencast unless an overlay forces the fallback surface.
+  const nativeCandidate = Boolean(state?.mode === 'embedded' && canShowEmbedded() && current?.embeddedTargetId);
+  const stream = useBrowserStream(session.id, current?.id, visible && pageVisible && Boolean(current) && !detached && (!nativeCandidate || nativeFallback), canvasRef);
   const tab = current && stream.tab && stream.tab.id === current.id ? stream.tab : current;
   const ownership = tab ? controlLabel(tab, stream.clientId) : { label: 'Watching', description: 'You are watching this tab.' };
   const embeddedNative = Boolean(state?.mode === 'embedded' && canShowEmbedded() && tab?.embeddedTargetId);
@@ -234,7 +237,7 @@ export function BrowserPane({ session, active, popout = false }: { session: Sess
             {addressError ? <p className="browser-addr-error" role="alert">{addressError}</p> : null}
             {pageDialogPresent && pageDialogSnapshot.current ? <PageDialog key={pageDialogKey} tab={pageDialogSnapshot.current.tab} canInput={pageDialogSnapshot.current.canInput} act={pageDialogSnapshot.current.act} closing={pageDialogClosing} /> : null}
             <div className="browser-viewport">{state.mode === 'embedded' && canShowEmbedded() && tab.embeddedTargetId
-              ? <NativeBrowserView sessionId={session.id} targetId={tab.embeddedTargetId} active={visible && pageVisible && !detached} stream={stream} tab={tab} canvasRef={canvasRef} canInput={canInput} />
+              ? <NativeBrowserView sessionId={session.id} targetId={tab.embeddedTargetId} active={visible && pageVisible && !detached} stream={stream} tab={tab} canvasRef={canvasRef} canInput={canInput} onFallbackChange={setNativeFallback} />
               : <BrowserSurface stream={stream} tab={tab} canvasRef={canvasRef} canInput={canInput} />}</div>
             <div className="browser-status">
               {embeddedNative && tab?.control.holderId === 'desktop-native'

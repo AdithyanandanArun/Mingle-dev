@@ -4,6 +4,7 @@ import type { BrowserStream } from './useBrowserStream';
 import type { BrowserTab } from '@mingle/contracts';
 import type { RefObject } from 'react';
 import { hideEmbedded, showEmbedded } from './desktopBridge';
+import { cx } from '../../lib/format';
 
 const OVERLAYS = '[role="dialog"], [role="alertdialog"], [role="menu"], [role="listbox"], [data-radix-popper-content-wrapper], .toast, [data-overlay], .browser-confirm';
 
@@ -11,16 +12,31 @@ function intersects(a: DOMRect, b: DOMRect) {
   return a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
 }
 
-export function NativeBrowserView({ sessionId, targetId, active, stream, tab, canvasRef, canInput }: {
+export function NativeBrowserView({ sessionId, targetId, active, stream, tab, canvasRef, canInput, onFallbackChange }: {
   sessionId: string; targetId: string; active: boolean; stream: BrowserStream; tab: BrowserTab;
   canvasRef: RefObject<HTMLCanvasElement | null>; canInput: boolean;
+  /** Tells the pane when the screencast is needed (an overlay covers the native view), so the stream runs only then. */
+  onFallbackChange?: (fallback: boolean) => void;
 }) {
   const placeholder = useRef<HTMLDivElement>(null);
   const [fallback, setFallback] = useState(false);
+  const fallbackListener = useRef(onFallbackChange);
+  fallbackListener.current = onFallbackChange;
+  useEffect(() => { fallbackListener.current?.(fallback); }, [fallback]);
+  useEffect(() => () => fallbackListener.current?.(false), []);
 
   useEffect(() => {
     let frame = 0;
-    const hide = () => { void hideEmbedded(sessionId); };
+    // The body observer fires on most UI updates; only tell the desktop app when what it shows actually changes.
+    let shown: string | null = null;
+    let hidden = false;
+    const hide = () => { if (hidden) return; hidden = true; shown = null; void hideEmbedded(sessionId); };
+    const show = (rect: { x: number; y: number; width: number; height: number }) => {
+      const key = `${targetId}:${rect.x}:${rect.y}:${rect.width}:${rect.height}`;
+      if (key === shown) return;
+      shown = key; hidden = false;
+      void showEmbedded(sessionId, targetId, rect);
+    };
     const measure = () => {
       cancelAnimationFrame(frame);
       frame = requestAnimationFrame(() => {
@@ -43,7 +59,7 @@ export function NativeBrowserView({ sessionId, targetId, active, stream, tab, ca
         const width = Math.min(Math.round(rect.width), Math.round(maxWidth));
         const height = Math.min(Math.round(rect.height), Math.round(maxHeight));
         if (overlay || width < 40 || height < 40) { hide(); return; }
-        void showEmbedded(sessionId, targetId, { x: Math.round(x * zoom), y: Math.round(y * zoom), width: Math.round(width * zoom), height: Math.round(height * zoom) });
+        show({ x: Math.round(x * zoom), y: Math.round(y * zoom), width: Math.round(width * zoom), height: Math.round(height * zoom) });
       });
     };
     const observer = new ResizeObserver(measure);
@@ -58,11 +74,12 @@ export function NativeBrowserView({ sessionId, targetId, active, stream, tab, ca
       cancelAnimationFrame(frame); observer.disconnect(); mutation.disconnect();
       window.removeEventListener('resize', measure); window.removeEventListener('scroll', measure, true);
       document.removeEventListener('visibilitychange', measure);
+      hidden = false;
       hide();
     };
   }, [sessionId, targetId, active]);
 
-  return <><div ref={placeholder} className="browser-native-placeholder" tabIndex={0} role="application" aria-label="Web page (built-in browser). Click to use it. Press Alt+Shift+Escape to return to Mingle." onKeyDown={(event) => {
+  return <><div ref={placeholder} className={cx('browser-native-placeholder', fallback && 'is-fallback')} tabIndex={0} role="application" aria-label="Web page (built-in browser). Click to use it. Press Alt+Shift+Escape to return to Mingle." onKeyDown={(event) => {
     if (event.altKey && event.shiftKey && event.key === 'Escape') {
       event.preventDefault();
       document.getElementById('browser-address')?.focus({ preventScroll: true });

@@ -92,7 +92,7 @@ export function BrowserConnect({ sessionId, state, onState }: { sessionId: strin
       {shownError ? <InlineError>{shownError}</InlineError> : null}
       {discovery ? <BrowserSandboxCard discovery={discovery} refresh={refresh} onUseBrowser={async (executable) => { await api.updateSettings({ browserExecutable: executable }); await refresh(); }} /> : null}
       {notices.length ? <ul className="browser-notices">{notices.map((n) => <li key={n}>{n}</li>)}</ul> : null}
-      {embeddedFirst ? <>{embedded}{managed}{existing}</> : existingFirst ? <>{existing}{managed}</> : <>{embedded}{managed}{existing}</>}
+      {embeddedFirst ? <>{embedded}{managed}{existing}</> : existingFirst ? <>{existing}{embedded}{managed}</> : <>{embedded}{managed}{existing}</>}
     </div>
   );
 }
