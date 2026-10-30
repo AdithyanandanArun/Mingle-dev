@@ -177,7 +177,9 @@ export class BrowserService {
         throw new BrowserError(409, 'Connect to your existing browser first. Choose it in the Browser panel and approve the connection.');
       }
       try {
-        await runtime.connect('managed', () => Promise.resolve(null));
+        const preferred = this.options.getSettings().browserDefaultMode;
+        const mode = preferred !== 'managed' && this.embedded ? 'embedded' : 'managed';
+        await runtime.connect(mode, () => Promise.resolve(null));
       } catch (error) {
         throw toBrowserError(error);
       }

@@ -35,12 +35,16 @@ export function BrowserSettings({ settings, disabled, update }: Props) {
   };
 
   return <div className="settings-page__section">
-    <div className="settings-page__section-head"><h2>Agent access</h2><p>Let sessions open and operate a shared browser that you can watch and take over. Mingle never imports cookies or passwords.</p></div>
+    <div className="settings-page__section-head"><h2>Agent access</h2><p>Watch agents browse and step in whenever you want. Sign-in import is optional and site-specific; passwords are never imported.</p></div>
     <SettingRow title="Let agents use the browser" description="Allow agents to inspect and operate shared tabs. Turning this off blocks their access immediately. You can still browse yourself." htmlFor="st-browser-agent">
       <button id="st-browser-agent" type="button" role="switch" aria-checked={agentEnabled} className={cx('switch', agentEnabled && 'is-on')} disabled={disabled} onClick={() => void update({ browserAgentEnabled: !agentEnabled }, 'browser-agent')}><i /></button>
     </SettingRow>
     <SettingRow title="Default browser" description="Preferred connection option. Existing browsers require an explicit connection." htmlFor="st-browser-mode">
-      <SelectMenu id="st-browser-mode" label="Default browser" value={settings.browserDefaultMode ?? 'managed'} disabled={disabled} options={[{ value: 'managed', label: 'Mingle browser', description: 'A separate Chromium without your logins.' }, { value: 'existing', label: 'Your running browser', description: 'Attach to a browser you are already signed in to.' }]} onChange={(value) => void update({ browserDefaultMode: value as 'managed' | 'existing' }, 'browser-mode')} />
+      <SelectMenu id="st-browser-mode" label="Default browser" value={settings.browserDefaultMode ?? 'embedded'} disabled={disabled} options={[
+        { value: 'embedded', label: 'Built-in browser', description: discovery?.embeddedAvailable ? 'Uses Mingle’s desktop browser. No download.' : 'Uses the desktop browser when available, otherwise managed Chromium.' },
+        { value: 'managed', label: 'Managed Chromium', description: 'A separate Chromium without your logins.' },
+        { value: 'existing', label: 'Your running browser', description: 'Attach to a browser you are already signed in to.' },
+      ]} onChange={(value) => void update({ browserDefaultMode: value as 'embedded' | 'managed' | 'existing' }, 'browser-mode')} />
     </SettingRow>
 
     <div className="settings-page__section-head settings-page__section-head--next"><h2>Mingle browser</h2><p>A Chromium that Mingle manages for sessions.</p></div>

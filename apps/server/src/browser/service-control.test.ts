@@ -30,6 +30,23 @@ function connectedService(embedded: boolean, isPresented: (sessionId: string, ta
 describe('BrowserService native action authorization', () => {
   afterEach(() => vi.useRealTimers());
 
+  it.each([
+    ['embedded', true, 'embedded'],
+    ['embedded', false, 'managed'],
+    ['managed', true, 'managed'],
+  ] as const)('opens with preference %s and desktop availability %s', async (preference, available, expected) => {
+    const { service, runtime } = connectedService(true);
+    const connect = vi.fn(async () => undefined);
+    const open = vi.fn(async () => ({ id: 'opened' }));
+    Object.assign(runtime, { isConnected: false, connect, open });
+    const internal = service as unknown as { options: { getSettings(): AppSettings }; embedded: unknown };
+    internal.options.getSettings = () => ({ ...settings, browserDefaultMode: preference });
+    if (!available) internal.embedded = null;
+    await expect(service.open('session_test')).resolves.toEqual({ id: 'opened' });
+    expect(connect).toHaveBeenCalledWith(expected, expect.any(Function));
+    await service.close();
+  });
+
   it('allows initial native toolbar actions only with authenticated exact-target presentation proof', async () => {
     const proof = vi.fn(async (sessionId: string, targetId: string) => sessionId === 'session_test' && targetId === 'native-target');
     const { service, entry, runtime } = connectedService(true, proof);
