@@ -101,6 +101,7 @@ async function perform(entry: TabEntry, action: BrowserAction): Promise<unknown>
       return done;
     }
     case 'resize':
+      if (entry.embedded) throw new BrowserError(400, 'The built-in browser uses the native tab size and cannot be resized by the agent.');
       await page.setViewportSize({ width: action.width, height: action.height });
       entry.setViewport(action.width, action.height);
       return done;

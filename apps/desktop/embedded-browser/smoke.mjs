@@ -24,6 +24,9 @@ async function run() {
   const { chromium } = requireServer('playwright');
   browser = await chromium.connectOverCDP(wsUrl, { headers: { Authorization: `Bearer ${host.token}` } });
   const context = browser.contexts()[0];
+  await context.addCookies([{ name: 'a', value: 'b', url: 'https://example.com' }]);
+  const cookies = await context.cookies('https://example.com');
+  if (!cookies.some(cookie => cookie.name === 'a' && cookie.value === 'b')) throw new Error('Cookie round-trip failed');
   const page = await context.newPage();
   const markup = '<input id="input"><button id="button" onclick="document.querySelector(\'#out\').textContent=document.querySelector(\'#input\').value">Write</button><div id="out"></div>';
   await page.goto(`data:text/html,${encodeURIComponent(markup)}`);
@@ -48,7 +51,7 @@ async function run() {
   await framePromise;
   await cdp.send('Page.stopScreencast');
   await page.close();
-  const summary = { wsUrl, value, screenshotBytes: screenshot.length, ariaSnapshot: aria, screencastFrames: frames };
+  const summary = { wsUrl, value, screenshotBytes: screenshot.length, ariaSnapshot: aria, screencastFrames: frames, cookieRoundTrip: true };
   process.stdout.write(`${JSON.stringify(summary)}\n`);
   await browser.close(); browser = null;
   await host.dispose(); host = null;

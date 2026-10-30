@@ -50,3 +50,15 @@ test('detach event is forwarded', async () => {
   assert.ok(f.sent.some(item => item.method === 'Target.targetDestroyed'));
   assert.ok(f.sent.some(item => item.method === 'Target.detachedFromTarget'));
 });
+
+test('delegates browser cookie storage calls', async () => {
+  const cookies = [{ name: 'a', value: 'b' }]; let set = null; let cleared = false;
+  const sent = [];
+  const relay = createRelay({ createView: async () => {}, closeView: async () => {}, listViews: () => [], version: '1', userAgent: 'ua',
+    getCookies: async () => cookies, setCookies: async value => { set = value; }, clearCookies: async () => { cleared = true; } });
+  relay.attachSocket({ readyState: 1, send: value => sent.push(JSON.parse(value)), on() {}, close() {} });
+  const call = async (id, method, params = {}) => { await relay.handle(JSON.stringify({ id, method, params })); return sent.at(-1); };
+  assert.deepEqual((await call(1, 'Storage.getCookies')).result.cookies, cookies);
+  await call(2, 'Storage.setCookies', { cookies }); assert.deepEqual(set, cookies);
+  await call(3, 'Storage.clearCookies'); assert.equal(cleared, true);
+});

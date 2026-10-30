@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 
 const unsupported = method => ({ code: -32000, message: `Not supported by Mingle's built-in browser: ${method}` });
 
-export function createRelay({ createView, closeView, listViews, version, userAgent }) {
+export function createRelay({ createView, closeView, listViews, version, userAgent, getCookies, setCookies, clearCookies }) {
   const pageSessions = new Map();
   const childSessions = new Map();
   const browserSessions = new Set();
@@ -65,6 +65,9 @@ export function createRelay({ createView, closeView, listViews, version, userAge
       }
       switch (method) {
         case 'Browser.getVersion': return respond({ protocolVersion: '1.3', product: `Chrome/${version}`, revision: '', userAgent, jsVersion: '' });
+        case 'Storage.getCookies': return respond({ cookies: getCookies ? await getCookies() : [] });
+        case 'Storage.setCookies': if (setCookies) await setCookies(params.cookies ?? []); return respond({});
+        case 'Storage.clearCookies': if (clearCookies) await clearCookies(); return respond({});
         case 'Target.setDiscoverTargets': discover = Boolean(params.discover); if (discover) views().forEach(view => send({ method: 'Target.targetCreated', params: { targetInfo: targetInfo(view) } })); return respond({});
         case 'Target.getTargets': return respond({ targetInfos: views().map(targetInfo) });
         case 'Target.getTargetInfo': { const view = views().find(item => !params.targetId || item.targetId === params.targetId); return respond(view ? { targetInfo: targetInfo(view) } : { targetInfo: { targetId: '', type: 'browser', title: '', url: '', attached: false, canAccessOpener: false, browserContextId: 'mingle-default' } }); }

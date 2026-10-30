@@ -390,7 +390,7 @@ export class BrowserSessionRuntime {
   private browserGone(generation: number, reason: string): void {
     if (generation !== this.generation) return;
     this.generation++;
-    void this.teardown(false).then(() => {
+    void this.teardown(true).then(() => {
       this.status = 'error';
       this.mode = null;
       this.error = reason;

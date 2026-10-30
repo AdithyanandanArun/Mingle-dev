@@ -5,6 +5,20 @@ import { fileURLToPath } from 'node:url';
 import { createRelay } from './relay.mjs';
 import { stripUserAgent } from './user-agent.mjs';
 
+export function electronCookieToCdp(cookie) {
+  return { name: cookie.name, value: cookie.value, domain: cookie.domain, path: cookie.path, expires: cookie.expirationDate ?? -1,
+    httpOnly: cookie.httpOnly, secure: cookie.secure, sameSite: cookie.sameSite === 'strict' ? 'Strict' : cookie.sameSite === 'no_restriction' ? 'None' : cookie.sameSite === 'lax' ? 'Lax' : undefined };
+}
+export function cdpCookieToElectron(cookie) {
+  const domain = String(cookie.domain ?? '').replace(/^\./, '');
+  const secure = Boolean(cookie.secure);
+  const path = cookie.path || '/';
+  const url = `${secure ? 'https' : 'http'}://${domain}${path.startsWith('/') ? path : `/${path}`}`;
+  return { url, name: cookie.name, value: cookie.value, path, ...(cookie.domain ? { domain: cookie.domain } : {}), secure,
+    httpOnly: Boolean(cookie.httpOnly), ...(Number.isFinite(cookie.expires) && cookie.expires >= 0 ? { expirationDate: cookie.expires } : {}),
+    ...(cookie.sameSite ? { sameSite: cookie.sameSite === 'Strict' ? 'strict' : cookie.sameSite === 'None' ? 'no_restriction' : 'lax' } : {}) };
+}
+
 const sessionPattern = /^[A-Za-z0-9_-]{1,80}$/;
 const wsPathPattern = /^\/devtools\/browser\/[A-Za-z0-9-]{8,80}$/;
 
@@ -70,6 +84,7 @@ export function createEmbeddedBrowserHost({ electron, ws, log = () => undefined,
   /** Moves a view beneath the parking window's own content (index 0), at the background size. */
   function park(view) {
     const target = parkingWindow();
+    view.parentWindow = target;
     for (const window of electron.BrowserWindow.getAllWindows()) if (window !== target && !window.isDestroyed()) { try { window.contentView.removeChildView(view); } catch {} }
     target.contentView.addChildView(view, 0);
     view.setBounds(PARKED_BOUNDS);
@@ -78,6 +93,7 @@ export function createEmbeddedBrowserHost({ electron, ws, log = () => undefined,
   function present(window, view, rect) {
     for (const other of electron.BrowserWindow.getAllWindows()) if (other !== window && !other.isDestroyed()) { try { other.contentView.removeChildView(view); } catch {} }
     window.contentView.addChildView(view);
+    view.parentWindow = window;
     view.setBounds(rect);
   }
   function makeSession(id, path, port) {
@@ -96,6 +112,12 @@ export function createEmbeddedBrowserHost({ electron, ws, log = () => undefined,
       view.webContents.debugger.attach('1.3');
       const info = await view.webContents.debugger.sendCommand('Target.getTargetInfo');
       const item = { targetId: info.targetInfo.targetId, url: () => view.webContents.getURL(), title: () => view.webContents.getTitle(), debugger: view.webContents.debugger, webContentsView: view, agentInputAt: 0, markAgentInput() { item.agentInputAt = Date.now(); } };
+      view.webContents.on('before-input-event', (event, input) => {
+        if (input.type === 'keyDown' && input.key === 'Escape' && input.alt && input.shift) {
+          event.preventDefault();
+          (view.parentWindow ?? getHostWindow())?.webContents?.focus?.();
+        }
+      });
       state.views.set(item.targetId, item);
       view.webContents.setWindowOpenHandler(({ url: target, features }) => {
         let parsed; try { parsed = new URL(target); } catch { return { action: 'deny' }; }
@@ -111,7 +133,10 @@ export function createEmbeddedBrowserHost({ electron, ws, log = () => undefined,
       view.webContents.invalidate?.();
       return item;
     };
-    state.relay = createRelay({ createView, closeView: async targetId => { const item = state.views.get(targetId); if (!item) return; state.views.delete(targetId); item.webContentsView.webContents.close(); }, listViews: () => [...state.views.values()], version: process.versions.chrome, userAgent: ses.getUserAgent() });
+    state.relay = createRelay({ createView, closeView: async targetId => { const item = state.views.get(targetId); if (!item) return; state.views.delete(targetId); item.webContentsView.webContents.close(); }, listViews: () => [...state.views.values()], version: process.versions.chrome, userAgent: ses.getUserAgent(),
+      getCookies: async () => (await ses.cookies.get({})).map(electronCookieToCdp),
+      setCookies: async cookies => { for (const cookie of cookies) await ses.cookies.set(cdpCookieToElectron(cookie)); },
+      clearCookies: async () => { await ses.clearStorageData({ storages: ['cookies'] }); } });
     state.relay.createViewFromOpen = createView;
     return state;
   }
