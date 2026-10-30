@@ -66,7 +66,7 @@ export function createRelay({ createView, closeView, listViews, version, userAge
         case 'Target.setAutoAttach': autoAttach = Boolean(params.autoAttach); if (autoAttach) views().forEach(attach); return respond({});
         case 'Target.attachToTarget': { const view = views().find(item => item.targetId === params.targetId); if (!view) return respond({ sessionId: '' }); return respond({ sessionId: attach(view) }); }
         case 'Target.detachFromTarget': pageSessions.delete(params.sessionId); send({ method: 'Target.detachedFromTarget', params: { sessionId: params.sessionId } }); return respond({});
-        case 'Target.createTarget': { const view = await createView(params.url ?? 'about:blank'); bindView(view); return respond({ targetId: view.targetId }); }
+      case 'Target.createTarget': { const view = await createView(params.url ?? 'about:blank'); if (!listeners.has(view)) bindView(view); return respond({ targetId: view.targetId }); }
         case 'Target.closeTarget': await closeView(params.targetId); return respond({ success: true });
         case 'Target.activateTarget': case 'Browser.setDownloadBehavior': case 'Browser.grantPermissions': case 'Browser.resetPermissions': return respond({});
         case 'Target.getBrowserContexts': return respond({ browserContextIds: [] });
@@ -85,7 +85,10 @@ export function createRelay({ createView, closeView, listViews, version, userAge
     closed = true;
     for (const view of new Set([...pageSessions.values(), ...childSessions.values()])) unbindView(view);
     pageSessions.clear(); childSessions.clear();
-    for (const { message, detach } of listeners.values()) { /* debugger listeners are removed with the view */ void message; void detach; }
+    for (const [view, { message, detach }] of listeners) {
+      view.debugger.removeListener?.('message', message);
+      view.debugger.removeListener?.('detach', detach);
+    }
     listeners.clear(); socket?.close(); socket = undefined;
   }
   return { attachSocket, handle, close, announce, onViewClosed: unbindView, get closed() { return closed; } };
