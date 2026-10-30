@@ -46,6 +46,9 @@ function controlLabel(tab: BrowserTab, clientId: string | null): { label: string
   return { label: 'Someone else is driving', description: 'Another person is driving this tab.' };
 }
 
+/** Holder id the server uses for input from a natively shown built-in tab (see the desktop embedded host). */
+const NATIVE_HOLDER = 'desktop-native';
+
 export function BrowserPane({ session, active, popout = false }: { session: Session; active: boolean; popout?: boolean }) {
   const [expanded, setExpanded] = useState(false);
   const [floating, setFloating] = useState(false);
@@ -60,13 +63,15 @@ export function BrowserPane({ session, active, popout = false }: { session: Sess
   // A natively shown built-in tab needs no screencast unless an overlay forces the fallback surface.
   const nativeCandidate = Boolean(state?.mode === 'embedded' && canShowEmbedded() && current?.embeddedTargetId);
   const stream = useBrowserStream(session.id, current?.id, visible && pageVisible && Boolean(current) && !detached && (!nativeCandidate || nativeFallback), canvasRef);
-  const tab = current && stream.tab && stream.tab.id === current.id ? stream.tab : current;
-  const ownership = tab ? controlLabel(tab, stream.clientId) : { label: 'Watching', description: 'You are watching this tab.' };
-  const embeddedNative = Boolean(state?.mode === 'embedded' && canShowEmbedded() && tab?.embeddedTargetId);
-  const canInput = Boolean(tab && stream.status === 'live' && stream.clientId && (tab.control.holderId === null || tab.control.holderId === stream.clientId));
+  const tab = current && stream.status === 'live' && stream.tab && stream.tab.id === current.id ? stream.tab : current;
+  const embeddedNative = nativeCandidate && !nativeFallback;
+  // Native toolbar input and page touches share one holder. The overlay fallback uses its own live viewer instead.
+  const inputId = embeddedNative ? NATIVE_HOLDER : stream.clientId;
+  const canInput = Boolean(tab && (embeddedNative || stream.status === 'live') && inputId && (tab.control.holderId === null || tab.control.holderId === inputId));
+  const ownership = tab ? controlLabel(tab, inputId) : { label: 'Watching', description: 'You are watching this tab.' };
   const [leaseNow, setLeaseNow] = useState(Date.now());
   useEffect(() => { const timer = window.setInterval(() => setLeaseNow(Date.now()), 250); return () => window.clearInterval(timer); }, []);
-  const ownsLease = Boolean(tab && tab.control.holderId === stream.clientId);
+  const ownsLease = Boolean(tab && inputId && tab.control.holderId === inputId);
   const leaseSeconds = tab?.control.expiresAt ? Math.max(0, Math.ceil((tab.control.expiresAt - leaseNow) / 1000)) : 0;
 
   useEffect(() => {
@@ -121,8 +126,8 @@ export function BrowserPane({ session, active, popout = false }: { session: Sess
   }, [confirmClose]);
   const closeTab = (tabId: string) => run('close', async () => {
     setConfirmClose(null);
-    if (!canInput || tabId !== tab?.id || !stream.clientId) throw new Error('Wait until the browser stream is live.');
-    await api.browserAction(session.id, tabId, { type: 'close' }, stream.clientId);
+    if (!canInput || tabId !== tab?.id || !inputId) throw new Error('Wait until the browser stream is live.');
+    await api.browserAction(session.id, tabId, { type: 'close' }, inputId);
     if (tabId === selectedId) useBrowserStore.getState().select(session.id, null);
     refresh();
   });
@@ -151,7 +156,16 @@ export function BrowserPane({ session, active, popout = false }: { session: Sess
   };
   const act = (action: BrowserAction) => {
     if (!canInput) { toast('info', 'Someone else is driving this tab.'); return; }
+    if (embeddedNative && tab) {
+      void api.browserAction(session.id, tab.id, action, NATIVE_HOLDER).then(refresh, (cause) => setActionError(errorMessage(cause)));
+      return;
+    }
     if (!stream.sendInput(action)) setActionError('The browser stream is not connected. Reconnect and try again.');
+  };
+  const setControl = (owner: 'human' | 'agent') => {
+    if (embeddedNative && tab && inputId) {
+      void api.browserControl(session.id, tab.id, owner, inputId).then(refresh, (cause) => setActionError(errorMessage(cause)));
+    } else if (!stream.setControl(owner)) setActionError('The browser stream is not connected. Reconnect and try again.');
   };
   const pageDialogIdentity = tab?.dialog ? `${tab.id}:${tab.dialog.type}:${tab.dialog.message}` : null;
   const { present: pageDialogPresent, closing: pageDialogClosing, key: pageDialogKey } = useRetainedPresence(pageDialogIdentity);
@@ -228,7 +242,7 @@ export function BrowserPane({ session, active, popout = false }: { session: Sess
                 title={canInput ? undefined : 'Another person is driving this tab'} aria-invalid={addressError ? true : undefined}
                 onFocus={(e) => { setDraft(tab.url); e.currentTarget.select(); }} onBlur={() => { setDraft(null); setAddressError(null); }} onChange={(e) => setDraft(e.target.value)}
               />
-              {canInput ? <IconButton label="Fit page viewport to this window" onClick={fitViewport}><Scan size={14} /></IconButton> : null}
+              {canInput && state.mode !== 'embedded' ? <IconButton label="Fit page viewport to this window" onClick={fitViewport}><Scan size={14} /></IconButton> : null}
               {!popout && !floating ? <Button size="sm" variant="ghost" className="browser-pip-trigger" onClick={() => setFloating(true)}>Float</Button> : null}
               {!popout && canOpenBrowserPopout() ? <IconButton label="Open browser in a separate desktop window" onClick={() => void openDesktopWindow()}><ExternalLink size={14} /></IconButton> : null}
               {popout ? <IconButton label="Dock browser back to Mingle" onClick={() => void dockBrowserPopout()}><ArrowDownToLine size={14} /></IconButton> : null}
@@ -241,20 +255,16 @@ export function BrowserPane({ session, active, popout = false }: { session: Sess
               ? <NativeBrowserView sessionId={session.id} targetId={tab.embeddedTargetId} active={visible && pageVisible && !detached} stream={stream} tab={tab} canvasRef={canvasRef} canInput={canInput} onFallbackChange={setNativeFallback} />
               : <BrowserSurface stream={stream} tab={tab} canvasRef={canvasRef} canInput={canInput} />}</div>
             <div className="browser-status">
-              {embeddedNative && tab?.control.holderId === 'desktop-native'
-                ? <span className="browser-status__who">You’re using the page · agent resumes in {leaseSeconds}s</span>
-                : embeddedNative && tab?.control.holderId === null
-                  ? <span className="browser-status__who">Agent is driving · click the page to step in</span>
-                  : stream.status === 'live'
+              {embeddedNative || stream.status === 'live'
                 ? <>
                   {/* The countdown is visual only; screen readers hear one announcement per control change. */}
                   <span className="browser-status__who" aria-hidden="true" title={ownership.description}>{ownsLease ? tab?.control.lease === 'hold' ? 'You have control' : `You’re driving · agent resumes in ${leaseSeconds}s` : ownership.label}</span>
                   <span className="sr-only" role="status" aria-live="polite">{ownership.description}</span>
                 </>
                 : <span className="browser-status__who" role="status">{stream.status === 'closed' ? 'Disconnected' : 'Connecting…'}</span>}
-              {stream.status === 'closed' ? <Button size="sm" onClick={stream.reconnect}>Reconnect</Button>
-                : ownsLease && tab?.control.lease === 'hold' ? <Button size="sm" data-browser-focus-exit onClick={() => stream.setControl('agent')}>Hand back to agent</Button>
-                  : ownsLease ? <Button size="sm" onClick={() => stream.setControl('human')}>Keep control</Button> : null}
+              {!embeddedNative && stream.status === 'closed' ? <Button size="sm" onClick={stream.reconnect}>Reconnect</Button>
+                : ownsLease && tab?.control.lease === 'hold' ? <Button size="sm" data-browser-focus-exit onClick={() => setControl('agent')}>Hand back to agent</Button>
+                  : ownsLease ? <Button size="sm" onClick={() => setControl('human')}>Keep control</Button> : null}
               {state.mode === 'managed' ? <BrowserSignInButton sessionId={session.id} /> : null}
               {state.mode !== 'existing' ? <BrowserImportButton sessionId={session.id} /> : null}
             </div>

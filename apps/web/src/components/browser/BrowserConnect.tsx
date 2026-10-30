@@ -77,7 +77,7 @@ export function BrowserConnect({ sessionId, state, onState }: { sessionId: strin
   const embedded = discovery?.embeddedAvailable ? (
     <section className="browser-card browser-card--recommended" aria-labelledby="browser-embedded-title">
       <header><Globe size={15} aria-hidden="true" /><h3 id="browser-embedded-title">Built-in browser <span className="browser-card__hint">(recommended)</span></h3></header>
-      <p>Runs inside Mingle. Nothing to download, works on every Linux, and you can click and type in it directly.</p>
+      <p>Uses Mingle’s sandboxed desktop browser. No separate Chromium download. Click and type directly in the page.</p>
       <div className="browser-card__actions"><Button size="sm" variant="primary" disabled={busy !== null} busy={busy === 'embedded'} onClick={() => void connect({ mode: 'embedded' })}>Use built-in browser</Button>{busy === 'embedded' ? <span className="browser-card__hint" role="status">Connecting to the built-in browser…</span> : null}</div>
     </section>
   ) : null;

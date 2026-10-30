@@ -276,6 +276,8 @@ export const api = {
   /** `clientId` is the viewer id from the stream's hello message; the server checks it against the tab's control owner. */
   browserAction: (sessionId: string, tabId: string, action: BrowserAction, clientId?: string) =>
     json<unknown>(`${browserBase(sessionId)}/tabs/${encodeURIComponent(tabId)}/action`, 'POST', clientId ? { action, clientId } : { action }),
+  browserControl: (sessionId: string, tabId: string, owner: 'human' | 'agent', clientId: string) =>
+    json<BrowserTab>(`${browserBase(sessionId)}/tabs/${encodeURIComponent(tabId)}/control`, 'POST', { owner, clientId }),
 };
 
 export const errorMessage = (e: unknown): string => (e instanceof Error ? e.message : String(e));

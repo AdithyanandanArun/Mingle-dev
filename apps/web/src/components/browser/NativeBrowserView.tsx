@@ -27,6 +27,8 @@ export function NativeBrowserView({ sessionId, targetId, active, stream, tab, ca
 
   useEffect(() => {
     let frame = 0;
+    let disposed = false;
+    let bridgeFailed = false;
     // The body observer fires on most UI updates; only tell the desktop app when what it shows actually changes.
     let shown: string | null = null;
     let hidden = false;
@@ -35,7 +37,17 @@ export function NativeBrowserView({ sessionId, targetId, active, stream, tab, ca
       const key = `${targetId}:${rect.x}:${rect.y}:${rect.width}:${rect.height}`;
       if (key === shown) return;
       shown = key; hidden = false;
-      void showEmbedded(sessionId, targetId, rect);
+      void showEmbedded(sessionId, targetId, rect).then((ok) => {
+        if (disposed || ok) return;
+        bridgeFailed = true;
+        hide();
+        setFallback(true);
+      }, () => {
+        if (disposed) return;
+        bridgeFailed = true;
+        hide();
+        setFallback(true);
+      });
     };
     const measure = () => {
       cancelAnimationFrame(frame);
@@ -50,16 +62,15 @@ export function NativeBrowserView({ sessionId, targetId, active, stream, tab, ca
           const box = item.getBoundingClientRect();
           return box.width > 0 && box.height > 0 && intersects(rect, box);
         });
-        setFallback(overlay);
-        const zoom = Number.parseFloat(getComputedStyle(document.documentElement).zoom) || 1;
+        setFallback(overlay || bridgeFailed);
         const maxWidth = Math.max(0, window.innerWidth - Math.max(0, rect.left));
         const maxHeight = Math.max(0, window.innerHeight - Math.max(0, rect.top));
         const x = Math.max(0, Math.round(rect.left));
         const y = Math.max(0, Math.round(rect.top));
         const width = Math.min(Math.round(rect.width), Math.round(maxWidth));
         const height = Math.min(Math.round(rect.height), Math.round(maxHeight));
-        if (overlay || width < 40 || height < 40) { hide(); return; }
-        show({ x: Math.round(x * zoom), y: Math.round(y * zoom), width: Math.round(width * zoom), height: Math.round(height * zoom) });
+        if (overlay || bridgeFailed || width < 40 || height < 40) { hide(); return; }
+        show({ x, y, width, height });
       });
     };
     const observer = new ResizeObserver(measure);
@@ -71,6 +82,7 @@ export function NativeBrowserView({ sessionId, targetId, active, stream, tab, ca
     document.addEventListener('visibilitychange', measure);
     measure();
     return () => {
+      disposed = true;
       cancelAnimationFrame(frame); observer.disconnect(); mutation.disconnect();
       window.removeEventListener('resize', measure); window.removeEventListener('scroll', measure, true);
       document.removeEventListener('visibilitychange', measure);
