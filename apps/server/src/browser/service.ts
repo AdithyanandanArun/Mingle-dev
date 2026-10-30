@@ -2,7 +2,7 @@ import type { IncomingMessage } from 'node:http';
 import type { Duplex } from 'node:stream';
 import {
   BrowserActionSchema, BrowserConnectSchema, type AppSettings, type BrowserAction, type BrowserConnect, type BrowserDiscovery, type BrowserSessionState,
-  type BrowserSnapshot, type BrowserTab,
+  type BrowserSnapshot, type BrowserTab, BrowserImportSchema, type BrowserImport, type BrowserImportResult,
 } from '@mingle/contracts';
 import { BrowserSignInSchema } from '@mingle/contracts';
 import type { Security } from '../security.ts';
@@ -21,6 +21,7 @@ import { discoverSources, readActivePortEndpoint } from './sources.ts';
 import { BrowserStreamServer } from './stream-server.ts';
 import type { TabEntry } from './tab.ts';
 import { TargetRegistry } from './targets.ts';
+import { listImportSources, readImportedCookies } from './import/index.ts';
 
 export interface BrowserServiceOptions {
   dataDir: string;
@@ -96,6 +97,23 @@ export class BrowserService {
     return runtime.signIn(parsed.data.url);
   }
   async finishSignIn(sessionId:string):Promise<BrowserSessionState> { assertSessionId(sessionId); const runtime=this.runtimes.get(sessionId); if(!runtime) throw new BrowserError(409,'No browser is connected for this session.'); return runtime.finishSignIn(true); }
+
+  async importSources() { return listImportSources(); }
+
+  async importCookies(sessionId:string,input:unknown):Promise<BrowserImportResult> {
+    assertSessionId(sessionId);
+    const parsed=BrowserImportSchema.safeParse(input);
+    if(!parsed.success) throw new BrowserError(400,parsed.error.issues[0]?.message ?? 'Invalid browser import request.');
+    const runtime=this.runtimes.get(sessionId);
+    if(!runtime?.isConnected) throw new BrowserError(409,'Connect the Mingle browser first.');
+    if(runtime.state().mode==='existing') throw new BrowserError(409,'This is already your own browser.');
+    let data:Awaited<ReturnType<typeof readImportedCookies>>;
+    try { data=await readImportedCookies(parsed.data as BrowserImport); }
+    catch(error) { throw new BrowserError(409,error instanceof Error?error.message:'Could not read cookies from that browser profile.'); }
+    const context=runtime.requireConnected();
+    for(let i=0;i<data.cookies.length;i+=100) await context.addCookies(data.cookies.slice(i,i+100));
+    return {imported:data.cookies.length,skipped:data.skipped,domains:data.domains};
+  }
 
   /** Downloads Playwright's pinned Chromium. Only runs on explicit request; concurrent calls share one download. */
   async install(): Promise<BrowserDiscovery> {

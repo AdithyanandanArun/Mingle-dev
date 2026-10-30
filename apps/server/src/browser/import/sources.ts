@@ -16,13 +16,14 @@ function chromiumDefinitions(platform: NodeJS.Platform, env: NodeJS.ProcessEnv, 
     ['chrome','google-chrome'],['chromium','chromium'],['brave','BraveSoftware/Brave-Browser'],['edge','microsoft-edge'],['vivaldi','vivaldi'],
   ].map(([id, rel]) => [id, path.join(env.XDG_CONFIG_HOME ?? path.join(home,'.config'),rel)]);
   const names: Record<string,string> = { chrome:'Google Chrome',chromium:'Chromium',brave:'Brave',edge:'Microsoft Edge',vivaldi:'Vivaldi' };
+  if (platform !== 'win32' && env.XDG_CONFIG_HOME) return roots.map(([id,dir]) => [id, id==='brave' ? path.join(env.XDG_CONFIG_HOME!,'BraveSoftware/Brave-Browser') : id==='edge' ? path.join(env.XDG_CONFIG_HOME!,'microsoft-edge') : id==='chrome' ? path.join(env.XDG_CONFIG_HOME!,'google-chrome') : path.join(env.XDG_CONFIG_HOME!,id)] as [string,string]).map(([id,dir])=>({id,name:names[id]!,dir,engine:'chromium'}));
   return roots.map(([id,dir]) => ({ id, name:names[id]!, dir, engine:'chromium' }));
 }
 
 function firefoxRoot(platform: NodeJS.Platform, env: NodeJS.ProcessEnv, home: string): string {
   if (platform === 'win32') return path.join(env.APPDATA ?? path.join(home,'AppData/Roaming'),'Mozilla','Firefox');
   if (platform === 'darwin') return path.join(home,'Library/Application Support/Firefox');
-  return path.join(env.XDG_CONFIG_HOME ?? home, env.XDG_CONFIG_HOME ? 'mozilla/firefox' : '.mozilla/firefox');
+  return path.join(env.XDG_CONFIG_HOME ? path.join(env.XDG_CONFIG_HOME,'mozilla','firefox') : path.join(home,'.mozilla','firefox'));
 }
 
 const profileId = (p: string) => Buffer.from(p).toString('base64url');
@@ -35,7 +36,7 @@ async function firefoxProfiles(root: string): Promise<BrowserImportProfile[]> {
   let section: Record<string,string> = {};
   const flush = async () => {
     if (section.Name === undefined || section.Path === undefined) return;
-    const dir = path.resolve(section.IsRelative === '1' ? root : path.dirname(ini), section.Path);
+    const dir = path.resolve(section.IsRelative === '1' ? root : section.Path);
     if (await exists(path.join(dir,'cookies.sqlite'))) profiles.push({ id:profileId(dir), name:section.Name });
   };
   for (const line of contents.split(/\r?\n/u)) {

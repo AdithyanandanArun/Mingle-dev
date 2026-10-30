@@ -4,6 +4,7 @@ import {
   CreateGroupSchema, AddGroupAgentSchema, UpdateGroupSchema, SendGroupMessageSchema, RepositoryCommitSchema, RepositoryPushSchema, RepositoryBranchSchema, RepositoryPullRequestSchema, BrowserConnectSchema, BrowserSignInSchema, BrowserActionSchema, ApprovalDecisionSchema, ConversationIdSchema, ImportConversationSchema, ProviderSchema, CloneProjectSchema, NewProjectSchema, CreateProjectSchema, CreateSessionSchema, CreateTaskSchema, HandoffSchema, SendMessageSchema, UpdateProjectSchema, UpdateSessionSchema, UpdateSettingsSchema, UpdateTaskSchema, EditSessionPlanSchema, UserInputAnswersSchema,
   RecoveryActionRequestSchema,
 } from '@mingle/contracts';
+import { BrowserImportSchema } from '@mingle/contracts';
 import type { Bootstrap, Session, SessionUsage } from '@mingle/contracts';
 import { gitStatus } from './git.ts';
 import type { Hub } from './hub.ts';
@@ -168,6 +169,8 @@ export function buildRouter(s: Services) {
   add('POST', '/api/browser/sandbox/fix', async (ctx) => { await ctx.body(emptyBrowserBody); return s.browser.fixSandbox(); });
   add('GET', '/api/sessions/:id/browser', (ctx) => s.browser.status(browserSession(ctx)));
   add('POST', '/api/sessions/:id/browser/connect', async (ctx) => s.browser.connect(browserSession(ctx), await ctx.body(BrowserConnectSchema)));
+  add('GET', '/api/browser/import-sources', () => s.browser.importSources());
+  add('POST', '/api/sessions/:id/browser/import', async (ctx) => s.browser.importCookies(browserSession(ctx), await ctx.body(BrowserImportSchema)));
   add('POST', '/api/sessions/:id/browser/sign-in', async (ctx) => s.browser.signIn(browserSession(ctx), await ctx.body(BrowserSignInSchema)));
   add('POST', '/api/sessions/:id/browser/sign-in/finish', async (ctx) => { const id=browserSession(ctx); await ctx.body(emptyBrowserBody); return s.browser.finishSignIn(id); });
   add('POST', '/api/sessions/:id/browser/disconnect', async (ctx) => { const id = browserSession(ctx); await ctx.body(emptyBrowserBody); return s.browser.disconnect(id); });

@@ -1,6 +1,6 @@
 import type {
   AddGroupAgent, AntigravityAuthState, AntigravityInstallState, Approval, AppSettings, Bootstrap, BrowserAction, BrowserConnect, BrowserDiscovery, BrowserSessionState, BrowserTab, CreateGroup, DirectoryListing, ExternalConversationDetails, ExternalConversationList, FileEntry, GitHubState, GitStatus, GroupSnapshot, ImportConversationResult, Project, ProjectContext, ProviderCatalog, ProviderInfo,
-  RepositoryBranch, RepositoryCommit, RepositoryMutationResult, RepositoryPullRequest, RepositoryPush, RepositoryState, RunChanges, SendGroupMessage, Session, SessionUsage, ToolCall, Task, TaskStatus, WorkspaceEvent, Message, MessageContextRef, EditSessionPlan, SessionPlan, UserInputAnswers, UserQuestion,
+  RepositoryBranch, RepositoryCommit, RepositoryMutationResult, RepositoryPullRequest, RepositoryPush, RepositoryState, RunChanges, SendGroupMessage, Session, SessionUsage, ToolCall, Task, TaskStatus, WorkspaceEvent, Message, MessageContextRef, EditSessionPlan, SessionPlan, UserInputAnswers, UserQuestion, BrowserImport, BrowserImportSource, BrowserImportResult,
 } from '@mingle/contracts';
 import type { AccountState, AccountConnection, AccountPreferences, SavedAccountPreferences, AttachmentRef, NativeActionCatalog } from '@mingle/contracts';
 import type { ProjectCollaborationSnapshot, SendTeamChatMessage, TeamChatSnapshot, TeamChatMessage } from '@mingle/contracts';
@@ -262,6 +262,8 @@ export const api = {
   startAntigravityAuth: (refresh = false) => json<AntigravityAuthState>('/api/providers/antigravity/auth', 'POST', { refresh }),
   cancelAntigravityAuth: () => json<AntigravityAuthState>('/api/providers/antigravity/auth', 'DELETE', {}),
   browserDiscovery: (signal?: AbortSignal) => json<BrowserDiscovery>('/api/browser/discovery', 'GET', undefined, signal),
+  browserImportSources: (signal?: AbortSignal) => json<BrowserImportSource[]>('/api/browser/import-sources','GET',undefined,signal),
+  browserImportCookies: (sessionId:string,input:BrowserImport) => json<BrowserImportResult>(`${browserBase(sessionId)}/import`,'POST',input),
   /** Downloads the managed Chromium; can take up to about two minutes. */
   installBrowser: () => json<BrowserDiscovery>('/api/browser/install', 'POST', {}),
   fixBrowserSandbox: () => json<BrowserDiscovery>('/api/browser/sandbox/fix', 'POST', {}),

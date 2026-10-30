@@ -1,4 +1,12 @@
 /* ——— Shared browser ——— */
+.browser-import { display:grid; gap:8px; }
+.browser-import__panel { display:grid; gap:10px; padding:12px; border:1px solid var(--border-1); border-radius:10px; background:var(--bg-1); }
+.browser-import__panel fieldset { display:grid; gap:8px; min-width:0; margin:0; padding:0; border:0; }
+.browser-import__panel legend { margin-bottom:6px; color:var(--fg-0); font-size:var(--text-sm); font-weight:550; }
+.browser-import__panel label { color:var(--fg-1); font-size:var(--text-xs); }
+.browser-import__panel select,.browser-import__panel input { width:100%; min-height:34px; padding:6px 8px; border:1px solid var(--border-1); border-radius:6px; background:var(--bg-0); color:var(--fg-0); }
+.browser-import__consent,.browser-import__result { color:var(--fg-2); font-size:var(--text-xs); line-height:1.5; }
+.browser-import__result:empty { display:none; }
 .browser-sandbox,.browser-signin form,.browser-signin-banner { display:flex;flex-direction:column;gap:10px;padding:14px;border:1px solid var(--border-1);border-radius:10px;background:var(--bg-1); }
 .browser-sandbox p,.browser-signin p { color:var(--fg-2);font-size:var(--text-sm); }
 .browser-sandbox details pre { overflow:auto;white-space:pre-wrap;padding:10px;background:var(--bg-0); }
