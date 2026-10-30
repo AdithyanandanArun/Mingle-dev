@@ -14,7 +14,7 @@ import type { Browser, BrowserContext, Dialog, Download, Page } from './playwrig
 import { TabEntry } from './tab.ts';
 import type { TargetRegistry } from './targets.ts';
 import { isEligibleTabUrl, normalizeNavigationUrl } from './url-policy.ts';
-import { execFile, type ChildProcess } from 'node:child_process';
+import { execFile, spawn, type ChildProcess } from 'node:child_process';
 import { buildSignInArgv, validateSignInUrl } from './sign-in.ts';
 import { detectSandbox } from './sandbox.ts';
 import type { BrowserAction } from '@mingle/contracts';
@@ -40,7 +40,9 @@ export interface SessionDeps {
 type Mode = 'managed' | 'existing';
 
 async function chromeUserAgent(executable:string):Promise<string|null> {
-  const platform=process.platform==='win32'?'Windows NT 10.0; Win64; x64':process.platform==='darwin'?'Macintosh; Intel Mac OS X 10_15_7':'X11; Linux x86_64';
+  // On Windows `chrome.exe --version` opens a browser window instead of printing, so the override is skipped there.
+  if (process.platform === 'win32') return null;
+  const platform=process.platform==='darwin'?'Macintosh; Intel Mac OS X 10_15_7':'X11; Linux x86_64';
   return new Promise(resolve=>execFile(executable,['--version'],{timeout:5000,windowsHide:true},(error,stdout)=>{const m=!error?String(stdout).match(/(?:Chromium|Chrome|Google Chrome)\s+(\d+)/u):null; resolve(m?`Mozilla/5.0 (${platform}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${m[1]}.0.0.0 Safari/537.36`:null);}));
 }
 
@@ -99,12 +101,14 @@ export class BrowserSessionRuntime {
 
   requireConnected(): BrowserContext {
     if (this.status === 'connecting') throw new BrowserError(409, 'The browser is still connecting for this session.');
+    if (this.status === 'signing-in') throw new BrowserError(409, 'The browser is paused while a person signs in to a site in a separate window. Try again after they finish.');
     if (this.status !== 'connected' || !this.context) throw new BrowserError(409, this.error ?? 'No browser is connected for this session.');
     return this.context;
   }
 
   /** Connects (or reuses) the session's browser. `prepare` resolves the existing-browser endpoint while status is "connecting". */
   async connect(mode: Mode, prepare: () => Promise<ExistingTarget | null>): Promise<void> {
+    if (this.status === 'signing-in') throw new BrowserError(409, 'Finish signing in (or close the sign-in window) before reconnecting this browser.');
     if (this.connecting) {
       if (this.mode === mode) return this.connecting;
       throw new BrowserError(409, 'A different browser connection is already in progress for this session.');
@@ -297,8 +301,11 @@ export class BrowserSessionRuntime {
     const profileDir=path.join(this.deps.dataDir,'browser','profiles',this.deps.sessionId), exe=await resolveManagedExecutable(this.deps.getSettings().browserExecutable);
     if(!exe.path) throw new BrowserError(409,'The managed browser executable is unavailable.');
     ++this.generation; await this.teardown(true); this.status='signing-in'; this.deps.notify();
-    const child=execFile(exe.path,buildSignInArgv(profileDir,target),{windowsHide:false}); this.signInProcess=child;
-    child.once('exit',()=>{ if(this.signInProcess===child) void this.finishSignIn(false).catch(error=>{this.status='error';this.error=toBrowserError(error).message;this.deps.notify();}); });
+    // spawn with ignored stdio: Chromium logs a lot, and a buffered execFile would kill the window once its buffer filled.
+    const child=spawn(exe.path,buildSignInArgv(profileDir,target),{stdio:'ignore',windowsHide:false}); this.signInProcess=child;
+    let ended_=false; const ended=()=>{ if(ended_) return; ended_=true; if(this.signInProcess===child) void this.finishSignIn(false).catch(error=>{this.status='error';this.error=toBrowserError(error).message;this.deps.notify();}); };
+    child.once('error',(error)=>{ this.deps.log('warn','The sign-in window could not start',error); ended(); });
+    child.once('exit',ended);
     this.signInTimer=setTimeout(()=>void this.finishSignIn(true),30*60_000); this.signInTimer.unref();
     return this.state();
   }
@@ -317,9 +324,9 @@ export class BrowserSessionRuntime {
   private async stopSignIn(kill:boolean):Promise<void> {
     if(this.signInTimer) clearTimeout(this.signInTimer); this.signInTimer=null;
     const child=this.signInProcess; if(!child) return;
-    if(!kill && child.exitCode!==null) { this.signInProcess=null; return; }
-    if(!kill) return;
     this.signInProcess=null;
+    // Without kill the window already ended (exit or spawn error); there is nothing left to stop.
+    if(!kill || child.exitCode!==null || child.signalCode!==null) return;
     child.kill('SIGTERM'); await new Promise<void>(resolve=>{const timer=setTimeout(()=>{child.kill('SIGKILL');resolve();},5000); child.once('exit',()=>{clearTimeout(timer);resolve();});});
   }
 

@@ -81,7 +81,7 @@ export function BrowserConnect({ sessionId, state, onState }: { sessionId: strin
         {settings?.browserAgentEnabled === false ? <p className="browser-connect__note">Agent access is off in Settings → Browser. You can still browse here yourself.</p> : null}
       </div>
       {shownError ? <InlineError>{shownError}</InlineError> : null}
-      {discovery ? <BrowserSandboxCard discovery={discovery} refresh={refresh} /> : null}
+      {discovery ? <BrowserSandboxCard discovery={discovery} refresh={refresh} onUseBrowser={async (executable) => { await api.updateSettings({ browserExecutable: executable }); await refresh(); }} /> : null}
       {notices.length ? <ul className="browser-notices">{notices.map((n) => <li key={n}>{n}</li>)}</ul> : null}
       {existingFirst ? <>{existing}{managed}</> : <>{managed}{existing}</>}
     </div>

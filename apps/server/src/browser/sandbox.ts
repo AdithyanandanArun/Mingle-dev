@@ -30,10 +30,8 @@ export async function detectSandbox(deps:SandboxDeps = {}):Promise<BrowserSandbo
   const executable=deps.managedExecutable ?? (await resolveManagedExecutable(undefined)).path;
   if (restricted && executable && await ex(profile)) {
     const text=await rd(profile).catch(()=> '');
-    try {
-      if (deps.configured) installed=text.includes(`profile mingle-chromium "${await profileAttachment(executable,true)}"`);
-      else installed=/profile mingle-chromium "[^"\n]*\/chromium-\*\/chrome-linux\*\/chrome"/u.test(text);
-    } catch { installed=false; }
+    // The installed profile must name this executable (or this Playwright download directory), not just exist.
+    try { installed=text.includes(`profile mingle-chromium "${await profileAttachment(executable,Boolean(deps.configured),deps)}"`); } catch { installed=false; }
   }
   const pathHas=async(name:string)=>{ for(const dir of (process.env.PATH??'').split(path.delimiter)){if(await ex(path.join(dir,name)))return true;} return false; };
   const canInstallProfile=aa && await pathHas('pkexec') && (await ex('/usr/sbin/apparmor_parser')||await ex('/sbin/apparmor_parser')) && await ex('/etc/apparmor.d');

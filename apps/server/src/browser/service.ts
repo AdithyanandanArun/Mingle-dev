@@ -83,6 +83,8 @@ export class BrowserService {
   async fixSandbox(): Promise<BrowserDiscovery> {
     const settings=this.options.getSettings(), exe=await resolveManagedExecutable(settings.browserExecutable);
     if (!exe.path) throw new BrowserError(409,'Install Chromium before allowing its sandbox.');
+    const sandbox=await detectSandbox({ managedExecutable: exe.path, configured: exe.configured });
+    if (!sandbox?.canInstallProfile) throw new BrowserError(409,'This computer cannot install an AppArmor profile from Mingle. Use the manual steps or an installed browser instead.');
     try { await installSandboxProfile(exe.path,exe.configured); } catch(e) { throw new BrowserError(403,e instanceof Error?e.message:'Could not install the Chromium AppArmor profile.'); }
     return this.discovery();
   }
