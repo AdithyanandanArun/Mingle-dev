@@ -38,7 +38,9 @@ export function createRelay({ createView, closeView, listViews, version, userAge
     const pageIds = [...pageSessions].filter(([, item]) => item === view).map(([sid]) => sid);
     const eventName = method ?? event?.method;
     const eventParams = params ?? event?.params ?? {};
-    const routedIds = pageIds.length ? pageIds : sessionId ? [sessionId] : [undefined];
+    // Iframe/worker events already belong to a real child CDP session. Only the
+    // page's root events fan out to the outer aliases attached to that page.
+    const routedIds = sessionId ? [sessionId] : pageIds.length ? pageIds : [undefined];
     for (const pageId of routedIds) {
       send({ method: eventName, params: eventParams, ...(pageId ? { sessionId: pageId } : {}) });
     }

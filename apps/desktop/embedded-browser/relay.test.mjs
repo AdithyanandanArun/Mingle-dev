@@ -23,6 +23,7 @@ test('routes browser, page and child session messages', async () => {
   await f.call('Target.attachToTarget', { targetId: view.targetId }); const page = f.sent.at(-1).result.sessionId;
   await f.call('Page.enable', {}, page); assert.equal(view.debugger.calls.at(-1)[0], 'Page.enable');
   view.debugger.emit('message', {}, 'Runtime.executionContextCreated', { context: {} }, 'child-1');
+  assert.equal(f.sent.at(-1).sessionId, 'child-1');
   await f.call('Runtime.evaluate', { expression: '1' }, 'child-1'); assert.equal(view.debugger.calls.at(-1)[2], 'child-1');
 });
 test('browser target session can attach a page session', async () => {
