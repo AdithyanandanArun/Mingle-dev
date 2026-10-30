@@ -198,20 +198,22 @@ export class BrowserService {
     }
   }
 
-  act(sessionId: string, tabId: string, action: BrowserAction, actor: Actor): Promise<unknown> {
+  async act(sessionId: string, tabId: string, action: BrowserAction, actor: Actor): Promise<unknown> {
     try {
       const { runtime, entry } = this.locate(sessionId, tabId);
       const parsed = BrowserActionSchema.safeParse(action);
       if (!parsed.success) throw new BrowserError(400, parsed.error.issues[0]?.message ?? 'Invalid browser action.');
       if ((actor.kind !== 'agent' && actor.kind !== 'human') || !actor.id || actor.id.length > 200) throw new BrowserError(400, 'Invalid actor.');
-      // The desktop may send address-bar actions without a stream, but only after its authenticated
-      // embedded input event has claimed this exact tab's native touch lease.
-      const nativeInput = actor.kind === 'human' && actor.id === NATIVE_HOLDER && entry.embedded &&
-        entry.control.ownerId === NATIVE_HOLDER && entry.control.lease === 'touch';
+      // Native toolbar writes are authorized by the desktop's authenticated proof that this exact
+      // embedded target is currently presented, so the first action works before a page input event.
+      let nativeInput = false;
+      if (actor.kind === 'human' && actor.id === NATIVE_HOLDER) {
+        try { nativeInput = await this.nativePresented(runtime, sessionId, entry); } catch { nativeInput = false; }
+      }
       if (actor.kind === 'human' && !nativeInput && !this.stream.hasViewer(sessionId, tabId, actor.id)) {
         throw new BrowserError(403, 'Open the live view of this tab first; only a connected viewer can send input.');
       }
-      return runtime.act(entry, parsed.data, { kind: actor.kind, id: actor.id });
+      return await runtime.act(entry, parsed.data, { kind: actor.kind, id: actor.id });
     } catch (error) {
       return Promise.reject(toBrowserError(error));
     }
@@ -221,11 +223,18 @@ export class BrowserService {
     const { runtime, entry } = this.locate(sessionId, tabId);
     if (!clientId || clientId.length > 200) throw new BrowserError(400, 'Invalid client id.');
     // Only a connected viewer of this very tab may take control. Releasing stays possible for the holder so a stale lock can always be cleared.
-    // Native controls are available only to the holder established by authenticated host input;
-    // the public id by itself never grants a lease or permits takeover.
-    const nativeHolder = clientId === NATIVE_HOLDER && entry.embedded && entry.control.ownerId === NATIVE_HOLDER && entry.control.lease === 'touch';
-    if (owner === 'human' && !nativeHolder && !this.stream.hasViewer(sessionId, tabId, clientId)) {
+    // Native takeover requires current presentation proof. Hand-back remains possible after the
+    // native view parks, matching disconnected stream holders' ability to release stale control.
+    let nativePresented = false;
+    if (owner === 'human' && clientId === NATIVE_HOLDER) {
+      try { nativePresented = await this.nativePresented(runtime, sessionId, entry); } catch { nativePresented = false; }
+    }
+    const releaseExistingNative = owner === 'agent' && clientId === NATIVE_HOLDER && entry.embedded && entry.control.ownerId === NATIVE_HOLDER;
+    if (owner === 'human' && !nativePresented && !this.stream.hasViewer(sessionId, tabId, clientId)) {
       throw new BrowserError(403, 'Open the live view of this tab first; only a connected viewer can take control.');
+    }
+    if (owner === 'agent' && !releaseExistingNative && !this.stream.hasViewer(sessionId, tabId, clientId) && entry.control.ownerId !== clientId) {
+      throw new BrowserError(403, 'Only the person holding control can hand it back.');
     }
     try {
       if (owner === 'human') await runtime.takeControl(entry, clientId);
@@ -287,6 +296,12 @@ export class BrowserService {
     const runtime = this.runtimes.get(sessionId);
     if (!runtime) throw new BrowserError(409, 'No browser is connected for this session.');
     return { runtime, entry: runtime.requireTab(tabId) };
+  }
+
+  private async nativePresented(runtime: BrowserSessionRuntime, sessionId: string, entry: TabEntry): Promise<boolean> {
+    const targetId = entry.embedded ? entry.targetId : null;
+    if (!targetId || runtime.state().mode !== 'embedded' || !this.embedded) return false;
+    return this.embedded.isPresented(sessionId, targetId);
   }
 
   /** Turns a source id or loopback endpoint (or the saved settings) into a validated ws:// endpoint. Human-approved connects only. */

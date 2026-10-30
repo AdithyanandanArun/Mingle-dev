@@ -28,6 +28,18 @@ export class EmbeddedBrowserClient {
     return `/sessions/${encodeURIComponent(sessionId)}/browser${suffix}`;
   }
 
+  async isPresented(sessionId: string, targetId: string): Promise<boolean> {
+    if (!/^[A-Za-z0-9_-]{1,128}$/.test(targetId)) return false;
+    try {
+      const response = await this.fetcher(`${this.baseUrl}${this.path(sessionId, `/targets/${encodeURIComponent(targetId)}/presentation`)}`, {
+        headers: { Authorization: `Bearer ${this.token}` }, signal: AbortSignal.timeout(2000),
+      });
+      if (!response.ok) return false;
+      const body = await response.json() as { visible?: unknown };
+      return typeof body.visible === 'boolean' && body.visible;
+    } catch { return false; }
+  }
+
   async open(sessionId: string): Promise<string> {
     const response = await this.fetcher(`${this.baseUrl}${this.path(sessionId)}`, { method: 'POST', headers: { Authorization: `Bearer ${this.token}` } });
     if (!response.ok) throw new Error(`Embedded browser session could not be opened (HTTP ${response.status}).`);

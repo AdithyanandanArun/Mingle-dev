@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createServer } from 'node:http';
 import { EmbeddedBrowserClient } from './embedded.ts';
 
@@ -27,5 +27,19 @@ describe('EmbeddedBrowserClient', () => {
     const running = client.events('session_1', event => events.push(event), abort.signal);
     await new Promise(resolve => setTimeout(resolve, 0)); abort.abort(); release(); await running;
     expect(events).toEqual([{ type: 'human-input', targetId: 'target', kind: 'key' }]);
+  });
+
+  it('queries presentation for an exact encoded target and fails closed on malformed or failed responses', async () => {
+    const fetcher = vi.fn(async (input: string | URL | Request) => {
+      expect(String(input)).toBe('http://127.0.0.1:1234/sessions/session_1/browser/targets/target_1/presentation');
+      return new Response(JSON.stringify({ visible: true }), { status: 200 });
+    });
+    const client = new EmbeddedBrowserClient('http://127.0.0.1:1234', 'secret', fetcher as typeof fetch);
+    await expect(client.isPresented('session_1', 'target_1')).resolves.toBe(true);
+    fetcher.mockImplementationOnce(async () => new Response(JSON.stringify({ visible: 'yes' }), { status: 200 }));
+    await expect(client.isPresented('session_1', 'target_1')).resolves.toBe(false);
+    fetcher.mockImplementationOnce(async () => { throw new Error('offline'); });
+    await expect(client.isPresented('session_1', 'target_1')).resolves.toBe(false);
+    await expect(client.isPresented('session_1', '../other')).resolves.toBe(false);
   });
 });

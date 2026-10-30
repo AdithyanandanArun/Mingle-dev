@@ -7,7 +7,7 @@ import type { Page } from './playwright.ts';
 
 const settings = {} as AppSettings;
 
-function connectedService(embedded: boolean) {
+function connectedService(embedded: boolean, isPresented: (sessionId: string, targetId: string) => Promise<boolean> = async () => false) {
   const service = new BrowserService({ dataDir: '/tmp/mingle-browser-test', getSettings: () => settings, onChange: () => undefined });
   const page = { url: () => 'about:blank', viewportSize: () => ({ width: 1024, height: 768 }) } as unknown as Page;
   const entry = new TabEntry(page, true, 'native-target', embedded);
@@ -22,6 +22,7 @@ function connectedService(embedded: boolean) {
     disconnect: vi.fn(async () => undefined),
   };
   // Keep the test at BrowserService's trust boundary while avoiding launching a browser process.
+  (service as unknown as { embedded: { isPresented: typeof isPresented } }).embedded = { isPresented };
   (service as unknown as { runtimes: Map<string, unknown> }).runtimes.set('session_test', runtime);
   return { service, entry, runtime };
 }
@@ -29,36 +30,47 @@ function connectedService(embedded: boolean) {
 describe('BrowserService native action authorization', () => {
   afterEach(() => vi.useRealTimers());
 
-  it('allows native toolbar actions after authenticated embedded input claimed touch control', async () => {
-    const { service, entry, runtime } = connectedService(true);
-    expect(entry.control.claimTouch(NATIVE_HOLDER)).toBe(true);
+  it('allows initial native toolbar actions only with authenticated exact-target presentation proof', async () => {
+    const proof = vi.fn(async (sessionId: string, targetId: string) => sessionId === 'session_test' && targetId === 'native-target');
+    const { service, entry, runtime } = connectedService(true, proof);
     await expect(service.act('session_test', entry.id, { type: 'navigate', url: 'https://example.com' }, { kind: 'human', id: NATIVE_HOLDER })).resolves.toEqual({ ok: true });
     expect(runtime.act).toHaveBeenCalledOnce();
+    expect(proof).toHaveBeenCalledWith('session_test', 'native-target');
     await service.close();
   });
 
-  it('allows native keep-control and hand-back after authenticated embedded input', async () => {
-    const { service, entry } = connectedService(true);
-    entry.control.claimTouch(NATIVE_HOLDER);
+  it('allows native keep-control with presentation proof and hand-back when parked', async () => {
+    const proof = vi.fn(async () => true);
+    const { service, entry } = connectedService(true, proof);
     const held = await service.control('session_test', entry.id, 'human', NATIVE_HOLDER);
     expect(held.control).toMatchObject({ holderId: NATIVE_HOLDER, lease: 'hold', expiresAt: null });
+    proof.mockResolvedValue(false);
     const released = await service.control('session_test', entry.id, 'agent', NATIVE_HOLDER);
     expect(released.control).toMatchObject({ holderId: null, lease: null });
     await service.close();
   });
 
-  it('rejects the native id without the native touch lease and rejects it in non-embedded mode', async () => {
+  it('rejects the native id when hidden, unprovable, targetless, or non-embedded', async () => {
     const embedded = connectedService(true);
     await expect(embedded.service.act('session_test', embedded.entry.id, { type: 'back' }, { kind: 'human', id: NATIVE_HOLDER })).rejects.toMatchObject({ status: 403 });
     await expect(embedded.service.control('session_test', embedded.entry.id, 'human', NATIVE_HOLDER)).rejects.toMatchObject({ status: 403 });
     await embedded.service.close();
 
-    const managed = connectedService(false);
+    const failedProof = connectedService(true, async () => { throw new Error('offline'); });
+    await expect(failedProof.service.act('session_test', failedProof.entry.id, { type: 'back' }, { kind: 'human', id: NATIVE_HOLDER })).rejects.toMatchObject({ status: 403 });
+    await failedProof.service.close();
+
+    const managed = connectedService(false, async () => true);
     managed.entry.control.claimTouch(NATIVE_HOLDER);
     await expect(managed.service.act('session_test', managed.entry.id, { type: 'back' }, { kind: 'human', id: NATIVE_HOLDER })).rejects.toMatchObject({ status: 403 });
     await expect(managed.service.control('session_test', managed.entry.id, 'human', NATIVE_HOLDER)).rejects.toMatchObject({ status: 403 });
     expect(managed.runtime.act).not.toHaveBeenCalled();
     await managed.service.close();
+
+    const targetless = connectedService(true, async () => true);
+    (targetless.entry as unknown as { targetId: string | null }).targetId = null;
+    await expect(targetless.service.act('session_test', targetless.entry.id, { type: 'back' }, { kind: 'human', id: NATIVE_HOLDER })).rejects.toMatchObject({ status: 403 });
+    await targetless.service.close();
   });
 
   it('keeps ordinary human actions bound to a live viewer', async () => {
