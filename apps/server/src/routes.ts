@@ -1,7 +1,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { z } from 'zod';
 import {
-  CreateGroupSchema, AddGroupAgentSchema, UpdateGroupSchema, SendGroupMessageSchema, RepositoryCommitSchema, RepositoryPushSchema, RepositoryBranchSchema, RepositoryPullRequestSchema, BrowserConnectSchema, BrowserActionSchema, ApprovalDecisionSchema, ConversationIdSchema, ImportConversationSchema, ProviderSchema, CloneProjectSchema, NewProjectSchema, CreateProjectSchema, CreateSessionSchema, CreateTaskSchema, HandoffSchema, SendMessageSchema, UpdateProjectSchema, UpdateSessionSchema, UpdateSettingsSchema, UpdateTaskSchema, EditSessionPlanSchema, UserInputAnswersSchema,
+  CreateGroupSchema, AddGroupAgentSchema, UpdateGroupSchema, SendGroupMessageSchema, RepositoryCommitSchema, RepositoryPushSchema, RepositoryBranchSchema, RepositoryPullRequestSchema, BrowserConnectSchema, BrowserSignInSchema, BrowserActionSchema, ApprovalDecisionSchema, ConversationIdSchema, ImportConversationSchema, ProviderSchema, CloneProjectSchema, NewProjectSchema, CreateProjectSchema, CreateSessionSchema, CreateTaskSchema, HandoffSchema, SendMessageSchema, UpdateProjectSchema, UpdateSessionSchema, UpdateSettingsSchema, UpdateTaskSchema, EditSessionPlanSchema, UserInputAnswersSchema,
   RecoveryActionRequestSchema,
 } from '@mingle/contracts';
 import type { Bootstrap, Session, SessionUsage } from '@mingle/contracts';
@@ -165,8 +165,11 @@ export function buildRouter(s: Services) {
   });
   add('GET', '/api/browser/discovery', () => s.browser.discovery());
   add('POST', '/api/browser/install', async (ctx) => { await ctx.body(emptyBrowserBody); return s.browser.install(); });
+  add('POST', '/api/browser/sandbox/fix', async (ctx) => { await ctx.body(emptyBrowserBody); return s.browser.fixSandbox(); });
   add('GET', '/api/sessions/:id/browser', (ctx) => s.browser.status(browserSession(ctx)));
   add('POST', '/api/sessions/:id/browser/connect', async (ctx) => s.browser.connect(browserSession(ctx), await ctx.body(BrowserConnectSchema)));
+  add('POST', '/api/sessions/:id/browser/sign-in', async (ctx) => s.browser.signIn(browserSession(ctx), await ctx.body(BrowserSignInSchema)));
+  add('POST', '/api/sessions/:id/browser/sign-in/finish', async (ctx) => { const id=browserSession(ctx); await ctx.body(emptyBrowserBody); return s.browser.finishSignIn(id); });
   add('POST', '/api/sessions/:id/browser/disconnect', async (ctx) => { const id = browserSession(ctx); await ctx.body(emptyBrowserBody); return s.browser.disconnect(id); });
   add('POST', '/api/sessions/:id/browser/tabs', async (ctx) => s.browser.open(browserSession(ctx), (await ctx.body(z.object({ url: z.string().min(1).max(4096).optional() }).strict())).url));
   add('GET', '/api/sessions/:id/browser/tabs/:tabId/snapshot', (ctx) => {

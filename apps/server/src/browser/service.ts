@@ -4,6 +4,7 @@ import {
   BrowserActionSchema, BrowserConnectSchema, type AppSettings, type BrowserAction, type BrowserConnect, type BrowserDiscovery, type BrowserSessionState,
   type BrowserSnapshot, type BrowserTab,
 } from '@mingle/contracts';
+import { BrowserSignInSchema } from '@mingle/contracts';
 import type { Security } from '../security.ts';
 import type { Logger } from '../types.ts';
 import type { Actor } from './control.ts';
@@ -12,6 +13,8 @@ import { BrowserError, toBrowserError } from './errors.ts';
 import { ChromiumInstaller } from './install.ts';
 import { ID_PATTERN } from './limits.ts';
 import { resolveManagedExecutable } from './playwright.ts';
+import { detectSandbox, installSandboxProfile } from './sandbox.ts';
+import { discoverSystemBrowsers } from './system-browsers.ts';
 import { BrowserSessionRuntime, type ExistingTarget } from './session.ts';
 import { captureSnapshot } from './snapshot.ts';
 import { discoverSources, readActivePortEndpoint } from './sources.ts';
@@ -64,7 +67,8 @@ export class BrowserService {
 
   /** What can be used right now. Never downloads or launches anything and never opens profile data. */
   async discovery(): Promise<BrowserDiscovery> {
-    const [sources, executable] = await Promise.all([discoverSources(), resolveManagedExecutable(this.options.getSettings().browserExecutable)]);
+    const [sources, executable, systemBrowsers] = await Promise.all([discoverSources(), resolveManagedExecutable(this.options.getSettings().browserExecutable), discoverSystemBrowsers({ restricted: process.platform === 'linux' })]);
+    const sandbox = await detectSandbox({ managedExecutable: executable.path, configured: executable.configured, systemSandboxReady: systemBrowsers.some(b => b.executable === executable.path && b.sandboxReady) });
     const notices: string[] = [];
     if (executable.problem) notices.push(executable.problem);
     else if (!executable.path) notices.push('No Chromium is installed for Mingle yet. Install it to get a private, sandboxed browser, or set a browser executable in settings.');
@@ -72,8 +76,24 @@ export class BrowserService {
     if (sources.length > 0 && !sources.some((source) => source.debuggingAvailable)) {
       notices.push('To share an existing browser, open chrome://inspect/#remote-debugging in it and turn remote debugging on. Mingle only attaches after you approve.');
     }
-    return { sources, managedAvailable: executable.path !== null, managedExecutable: executable.path, installing: this.installer.installing, notices, sandbox: null, systemBrowsers: [] };
+    if (sandbox && !sandbox.managedReady) notices.push('Chromium’s sandbox is blocked by this computer’s Linux security settings. Allow Chromium or choose an installed browser that is ready.');
+    return { sources, managedAvailable: executable.path !== null, managedExecutable: executable.path, installing: this.installer.installing, notices, sandbox, systemBrowsers };
   }
+
+  async fixSandbox(): Promise<BrowserDiscovery> {
+    const settings=this.options.getSettings(), exe=await resolveManagedExecutable(settings.browserExecutable);
+    if (!exe.path) throw new BrowserError(409,'Install Chromium before allowing its sandbox.');
+    try { await installSandboxProfile(exe.path,exe.configured); } catch(e) { throw new BrowserError(403,e instanceof Error?e.message:'Could not install the Chromium AppArmor profile.'); }
+    return this.discovery();
+  }
+
+  async signIn(sessionId:string,input:unknown):Promise<BrowserSessionState> {
+    assertSessionId(sessionId); const parsed=BrowserSignInSchema.safeParse(input);
+    if(!parsed.success) throw new BrowserError(400,parsed.error.issues[0]?.message??'Invalid sign-in request.');
+    const runtime=this.runtimes.get(sessionId); if(!runtime) throw new BrowserError(409,'Connect the Mingle browser first.');
+    return runtime.signIn(parsed.data.url);
+  }
+  async finishSignIn(sessionId:string):Promise<BrowserSessionState> { assertSessionId(sessionId); const runtime=this.runtimes.get(sessionId); if(!runtime) throw new BrowserError(409,'No browser is connected for this session.'); return runtime.finishSignIn(true); }
 
   /** Downloads Playwright's pinned Chromium. Only runs on explicit request; concurrent calls share one download. */
   async install(): Promise<BrowserDiscovery> {

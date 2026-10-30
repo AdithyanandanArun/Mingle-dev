@@ -48,7 +48,7 @@ export async function resolveManagedExecutable(configured: string | undefined): 
 }
 
 /** Translates launch failures into guidance without enabling --no-sandbox behind the user's back. */
-export function diagnoseLaunchError(error: unknown): BrowserError {
+export function diagnoseLaunchError(error: unknown, sandbox?: { userNamespacesRestricted: boolean; profileInstalled: boolean }): BrowserError {
   if (error instanceof BrowserError) return error;
   const message = cleanMessage(error, 800);
   if (/Executable doesn't exist|browserType\.launch.*(?:install|executable)/isu.test(message)) {
@@ -57,7 +57,9 @@ export function diagnoseLaunchError(error: unknown): BrowserError {
   if (/missing dependencies|error while loading shared libraries|cannot open shared object file/iu.test(message)) {
     return new BrowserError(503, 'Chromium cannot start because system libraries are missing. Install the Chromium runtime dependencies for this OS (for example with `npx playwright install-deps chromium`), then try again.');
   }
-  if (/sandbox|namespace|setuid|running as root/iu.test(message)) {
+  if (/running as root/iu.test(message)) return new BrowserError(503, 'Chromium refuses to run as root with its sandbox enabled. Run Mingle as your normal desktop user.');
+  if (sandbox?.userNamespacesRestricted && !sandbox.profileInstalled) return new BrowserError(503, "Ubuntu's AppArmor is blocking Chromium's sandbox. Use 'Allow Chromium' in the Browser panel (one admin prompt), or use an installed browser such as Google Chrome.");
+  if (/sandbox|namespace|setuid/iu.test(message)) {
     return new BrowserError(503, 'Chromium\'s sandbox could not start. Mingle keeps the sandbox enabled; run Mingle as a regular user and, on Linux, allow unprivileged user namespaces (on Ubuntu 23.10+ this needs an AppArmor profile for the browser).');
   }
   if (/ProcessSingleton|SingletonLock|profile.*(?:in use|locked)/iu.test(message)) {

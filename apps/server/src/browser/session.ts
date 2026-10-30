@@ -14,6 +14,9 @@ import type { Browser, BrowserContext, Dialog, Download, Page } from './playwrig
 import { TabEntry } from './tab.ts';
 import type { TargetRegistry } from './targets.ts';
 import { isEligibleTabUrl, normalizeNavigationUrl } from './url-policy.ts';
+import { execFile, type ChildProcess } from 'node:child_process';
+import { buildSignInArgv, validateSignInUrl } from './sign-in.ts';
+import { detectSandbox } from './sandbox.ts';
 import type { BrowserAction } from '@mingle/contracts';
 
 export interface ExistingTarget {
@@ -36,6 +39,11 @@ export interface SessionDeps {
 
 type Mode = 'managed' | 'existing';
 
+async function chromeUserAgent(executable:string):Promise<string|null> {
+  const platform=process.platform==='win32'?'Windows NT 10.0; Win64; x64':process.platform==='darwin'?'Macintosh; Intel Mac OS X 10_15_7':'X11; Linux x86_64';
+  return new Promise(resolve=>execFile(executable,['--version'],{timeout:5000,windowsHide:true},(error,stdout)=>{const m=!error?String(stdout).match(/(?:Chromium|Chrome|Google Chrome)\s+(\d+)/u):null; resolve(m?`Mozilla/5.0 (${platform}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${m[1]}.0.0.0 Safari/537.36`:null);}));
+}
+
 /** One Mingle session's browser: a private Chromium it launched, or a user-approved attachment to an existing one. */
 export class BrowserSessionRuntime {
   private status: BrowserSessionState['status'] = 'disconnected';
@@ -55,6 +63,9 @@ export class BrowserSessionRuntime {
   private generation = 0;
   private connecting: Promise<void> | null = null;
   private localCreates = 0;
+  private signInProcess: ChildProcess | null = null;
+  private signInTimer: NodeJS.Timeout | null = null;
+  private rememberedUrls: string[] = [];
 
   constructor(private readonly deps: SessionDeps) {}
 
@@ -139,6 +150,7 @@ export class BrowserSessionRuntime {
 
   /** Detaches from the browser. A managed Chromium is closed; a user's browser is only disconnected, never closed or emptied. */
   async disconnect(): Promise<void> {
+    await this.stopSignIn(true);
     const pending = this.connecting;
     this.generation++;
     await this.teardown(true);
@@ -249,10 +261,14 @@ export class BrowserSessionRuntime {
     await mkdir(profileDir, { recursive: true, mode: 0o700 });
     let context: BrowserContext;
     try {
+      const sandbox=await detectSandbox({ managedExecutable: executable.path, configured: executable.configured });
+      const ua=await chromeUserAgent(executable.path);
       context = await playwright.chromium.launchPersistentContext(profileDir, {
         ...(executable.configured ? { executablePath: executable.path } : { channel: 'chromium' }),
         headless: true,
         chromiumSandbox: true,
+        ignoreDefaultArgs: ['--enable-automation'],
+        args: ['--disable-blink-features=AutomationControlled', '--password-store=basic', '--use-mock-keychain', ...(ua ? [`--user-agent=${ua}`] : [])],
         viewport: { ...DEFAULT_VIEWPORT },
         acceptDownloads: false,
         handleSIGINT: false,
@@ -261,7 +277,7 @@ export class BrowserSessionRuntime {
         timeout: LAUNCH_TIMEOUT_MS,
       });
     } catch (error) {
-      throw diagnoseLaunchError(error);
+      throw diagnoseLaunchError(error, (await detectSandbox({ managedExecutable: executable.path, configured: executable.configured })) ?? undefined);
     }
     if (generation !== this.generation) {
       await context.close().catch(() => undefined);
@@ -271,6 +287,40 @@ export class BrowserSessionRuntime {
     context.on('close', () => this.browserGone(generation, 'The browser closed unexpectedly.'));
     context.on('page', (page) => this.onPage(page, generation));
     for (const page of context.pages()) await this.adopt(page, { activate: this.activeTabId === null });
+  }
+
+  async signIn(url?:string):Promise<BrowserSessionState> {
+    if(this.mode!=='managed'||this.status!=='connected'||!this.context) throw new BrowserError(409,'Sign-in is available only for a connected Mingle browser.');
+    if(this.signInProcess) throw new BrowserError(409,'A sign-in window is already open for this session.');
+    if(process.platform==='linux'&&!process.env.DISPLAY&&!process.env.WAYLAND_DISPLAY) throw new BrowserError(409,'Sign-in needs a desktop session.');
+    const target=validateSignInUrl(url); this.rememberedUrls=[...this.tabs.values()].map(t=>t.page.url()).filter(u=>isEligibleTabUrl(u)&&u!=='about:blank');
+    const profileDir=path.join(this.deps.dataDir,'browser','profiles',this.deps.sessionId), exe=await resolveManagedExecutable(this.deps.getSettings().browserExecutable);
+    if(!exe.path) throw new BrowserError(409,'The managed browser executable is unavailable.');
+    ++this.generation; await this.teardown(true); this.status='signing-in'; this.deps.notify();
+    const child=execFile(exe.path,buildSignInArgv(profileDir,target),{windowsHide:false}); this.signInProcess=child;
+    child.once('exit',()=>{ if(this.signInProcess===child) void this.finishSignIn(false).catch(error=>{this.status='error';this.error=toBrowserError(error).message;this.deps.notify();}); });
+    this.signInTimer=setTimeout(()=>void this.finishSignIn(true),30*60_000); this.signInTimer.unref();
+    return this.state();
+  }
+
+  async finishSignIn(kill=true):Promise<BrowserSessionState> {
+    if(this.status!=='signing-in') throw new BrowserError(409,'This session is not signing in.');
+    await this.stopSignIn(kill);
+    this.status='connecting'; this.deps.notify();
+    const gen=++this.generation;
+    try { await this.launchManaged(gen); this.status='connected'; this.deps.notify(); }
+    catch(error) { this.status='error'; this.error=toBrowserError(error).message; this.mode=null; this.deps.notify(); throw error; }
+    const urls=this.rememberedUrls.splice(0); for(const url of urls) await this.open(url).catch(()=>undefined);
+    return this.state();
+  }
+
+  private async stopSignIn(kill:boolean):Promise<void> {
+    if(this.signInTimer) clearTimeout(this.signInTimer); this.signInTimer=null;
+    const child=this.signInProcess; if(!child) return;
+    if(!kill && child.exitCode!==null) { this.signInProcess=null; return; }
+    if(!kill) return;
+    this.signInProcess=null;
+    child.kill('SIGTERM'); await new Promise<void>(resolve=>{const timer=setTimeout(()=>{child.kill('SIGKILL');resolve();},5000); child.once('exit',()=>{clearTimeout(timer);resolve();});});
   }
 
   private async attachExisting(target: ExistingTarget, generation: number): Promise<void> {

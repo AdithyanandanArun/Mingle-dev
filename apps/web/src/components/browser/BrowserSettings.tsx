@@ -7,6 +7,7 @@ import { SelectMenu } from '../SelectMenu';
 import { SettingRow } from '../SettingRow';
 import { BrowserSourcePicker, ChromeSetupHelp } from './BrowserSources';
 import { useBrowserDiscovery } from './useBrowserDiscovery';
+import { BrowserSandboxCard } from './BrowserSandboxCard';
 
 interface Props {
   settings: AppSettings;
@@ -44,6 +45,7 @@ export function BrowserSettings({ settings, disabled, update }: Props) {
 
     <div className="settings-page__section-head settings-page__section-head--next"><h2>Mingle browser</h2><p>A Chromium that Mingle manages for sessions.</p></div>
     {error ? <InlineError onRetry={() => void refresh()}>{error}</InlineError> : null}
+    {discovery ? <BrowserSandboxCard discovery={discovery} refresh={refresh} onUseBrowser={async path=>{setExecutable(path);await update({browserExecutable:path},'browser-exe');await refresh();}} /> : null}
     <div className="settings-row browser-setting-status">
       <div className="settings-row__copy">
         <strong>{!discovery ? (loading ? 'Checking…' : 'Status unknown') : discovery.managedAvailable ? 'Chromium is ready' : 'Chromium is not installed'}</strong>

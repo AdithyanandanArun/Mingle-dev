@@ -264,9 +264,12 @@ export const api = {
   browserDiscovery: (signal?: AbortSignal) => json<BrowserDiscovery>('/api/browser/discovery', 'GET', undefined, signal),
   /** Downloads the managed Chromium; can take up to about two minutes. */
   installBrowser: () => json<BrowserDiscovery>('/api/browser/install', 'POST', {}),
+  fixBrowserSandbox: () => json<BrowserDiscovery>('/api/browser/sandbox/fix', 'POST', {}),
   browserState: (sessionId: string, signal?: AbortSignal) => json<BrowserSessionState>(`${browserBase(sessionId)}`, 'GET', undefined, signal),
   browserConnect: (sessionId: string, input: BrowserConnect) => json<BrowserSessionState>(`${browserBase(sessionId)}/connect`, 'POST', input),
   browserDisconnect: (sessionId: string) => json<BrowserSessionState>(`${browserBase(sessionId)}/disconnect`, 'POST', {}),
+  startBrowserSignIn: (sessionId: string, url?: string) => json<BrowserSessionState>(`${browserBase(sessionId)}/sign-in`, 'POST', url ? { url } : {}),
+  finishBrowserSignIn: (sessionId: string) => json<BrowserSessionState>(`${browserBase(sessionId)}/sign-in/finish`, 'POST', {}),
   browserNewTab: (sessionId: string, url?: string) => json<BrowserTab>(`${browserBase(sessionId)}/tabs`, 'POST', url ? { url } : {}),
   /** `clientId` is the viewer id from the stream's hello message; the server checks it against the tab's control owner. */
   browserAction: (sessionId: string, tabId: string, action: BrowserAction, clientId?: string) =>
