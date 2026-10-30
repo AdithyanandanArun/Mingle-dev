@@ -201,7 +201,7 @@ async function openWorkspace() {
   const getAccountKey = createAccountKeyManager({ userData, workspaceDataDir, safeStorage });
   const serverRequire = createRequire(join(serverRoot, 'package.json'));
   const ws = serverRequire('ws');
-  embeddedBrowserHost = createEmbeddedBrowserHost({ electron: { app, BrowserWindow, WebContentsView, ipcMain, session }, ws });
+  embeddedBrowserHost = createEmbeddedBrowserHost({ electron: { app, BrowserWindow, WebContentsView, ipcMain, session }, ws, getHostWindow: () => (isLiveWindow(mainWindow) ? mainWindow : null) });
   const embeddedUrl = await embeddedBrowserHost.ready;
   // Canonical values override any legacy environment inherited from another local server.
   const environment = {
@@ -283,23 +283,14 @@ function embeddedWindowForSender(sender) {
 ipcMain.handle('mingle.browser.embedded.show', (event, sessionId, targetId, rect) => {
   const window = embeddedWindowForSender(event.sender);
   if (!window || !SESSION_ID_PATTERN.test(sessionId) || typeof targetId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(targetId) || !rectIsValid(rect, window)) return false;
-  const state = embeddedBrowserHost?.getSession(sessionId);
-  const item = state?.views.get(targetId);
-  if (!item || window.isDestroyed()) return false;
-  for (const [attachedWindow, attached] of embeddedViewsByWindow) {
-    if (attachedWindow !== window) continue;
-    for (const view of attached) {
-      attachedWindow.contentView.removeChildView(view);
-      embeddedBrowserHost.hostWindow.contentView.addChildView(view);
-      view.setBounds({ x: 0, y: 0, width: 1280, height: 800 });
-    }
-    attached.clear();
-  }
-  const view = item.webContentsView;
-  const host = embeddedBrowserHost.hostWindow;
-  try { host?.contentView.removeChildView(view); } catch {}
-  window.contentView.addChildView(view); view.setBounds(rect);
-  const attached = embeddedViewsByWindow.get(window) ?? new Set(); attached.add(view); embeddedViewsByWindow.set(window, attached);
+  const item = embeddedBrowserHost?.getSession(sessionId)?.views.get(targetId);
+  if (!item) return false;
+  const attached = embeddedViewsByWindow.get(window) ?? new Set();
+  for (const view of attached) if (view !== item.webContentsView) embeddedBrowserHost.park(view);
+  attached.clear();
+  embeddedBrowserHost.present(window, item.webContentsView, rect);
+  attached.add(item.webContentsView);
+  embeddedViewsByWindow.set(window, attached);
   return true;
 });
 
@@ -308,15 +299,13 @@ ipcMain.handle('mingle.browser.embedded.hide', (event, sessionId) => {
   if (!window || !SESSION_ID_PATTERN.test(sessionId)) return false;
   const attached = embeddedViewsByWindow.get(window);
   if (!attached) return true;
-  const state = embeddedBrowserHost?.getSession(sessionId);
-  const targetViews = new Set([...(state?.views.values() ?? [])].map(item => item.webContentsView));
+  const sessionViews = new Set([...(embeddedBrowserHost?.getSession(sessionId)?.views.values() ?? [])].map(item => item.webContentsView));
   for (const view of [...attached]) {
-    if (!targetViews.has(view)) continue;
-    window.contentView.removeChildView(view);
-    embeddedBrowserHost?.hostWindow?.contentView.addChildView(view);
-    view.setBounds({ x: 0, y: 0, width: 1280, height: 800 });
+    if (!sessionViews.has(view)) continue;
+    embeddedBrowserHost.park(view);
+    attached.delete(view);
   }
-  attached.clear(); return true;
+  return true;
 });
 
 function receiveProjectInvitation(value) {
@@ -345,6 +334,8 @@ else {
     app.quit();
   });
   app.on('window-all-closed', () => app.quit());
+  // Runs once the backend has exited (before-quit waits for it), so the server never talks to a closed relay.
+  app.on('will-quit', () => { void embeddedBrowserHost?.dispose(); });
   app.on('before-quit', event => {
     quitting = true;
     if (backend && backend.exitCode === null) {

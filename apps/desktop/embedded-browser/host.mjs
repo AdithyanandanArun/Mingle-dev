@@ -8,7 +8,15 @@ import { stripUserAgent } from './user-agent.mjs';
 const sessionPattern = /^[A-Za-z0-9_-]{1,80}$/;
 const wsPathPattern = /^\/devtools\/browser\/[A-Za-z0-9-]{8,80}$/;
 
-export function createEmbeddedBrowserHost({ electron, ws, log = () => undefined }) {
+/** Size background tabs render at while nobody is looking at them. */
+const PARKED_BOUNDS = { x: 0, y: 0, width: 1280, height: 800 };
+
+/**
+ * Background tabs are parked beneath the app's own UI inside `getHostWindow()` (normally the main window), so they keep
+ * painting for screenshots and screencasts without a separate window (Wayland compositors ignore off-screen positions
+ * and would show such a window). A hidden fallback window is used only when no app window exists (smoke tests).
+ */
+export function createEmbeddedBrowserHost({ electron, ws, log = () => undefined, getHostWindow = () => null }) {
   const token = randomBytes(32).toString('hex');
   const sessions = new Map();
   const issuedPaths = new Map();
@@ -50,6 +58,28 @@ export function createEmbeddedBrowserHost({ electron, ws, log = () => undefined 
     if (req.method === 'DELETE' && !events) { const state = sessions.get(id); if (state) await closeSession(state); return reply(res, 200, { success: true }); }
     return reply(res, 404, { error: 'Not found' });
   }
+  function parkingWindow() {
+    const preferred = getHostWindow();
+    if (preferred && !preferred.isDestroyed()) return preferred;
+    if (!hostWindow || hostWindow.isDestroyed()) {
+      hostWindow = new electron.BrowserWindow({ show: false, paintWhenInitiallyHidden: true, skipTaskbar: true, focusable: false, webPreferences: { backgroundThrottling: false } });
+      hostWindow.showInactive?.();
+    }
+    return hostWindow;
+  }
+  /** Moves a view beneath the parking window's own content (index 0), at the background size. */
+  function park(view) {
+    const target = parkingWindow();
+    for (const window of electron.BrowserWindow.getAllWindows()) if (window !== target && !window.isDestroyed()) { try { window.contentView.removeChildView(view); } catch {} }
+    target.contentView.addChildView(view, 0);
+    view.setBounds(PARKED_BOUNDS);
+  }
+  /** Shows a view on top of `window`'s content at `rect` (CSS px of that window). */
+  function present(window, view, rect) {
+    for (const other of electron.BrowserWindow.getAllWindows()) if (other !== window && !other.isDestroyed()) { try { other.contentView.removeChildView(view); } catch {} }
+    window.contentView.addChildView(view);
+    view.setBounds(rect);
+  }
   function makeSession(id, path, port) {
     const partition = `persist:mingle-browser-${createHash('sha256').update(id).digest('hex').slice(0, 20)}`;
     const ses = electron.session.fromPartition(partition);
@@ -58,16 +88,11 @@ export function createEmbeddedBrowserHost({ electron, ws, log = () => undefined 
     ses.setPermissionCheckHandler((_wc, permission) => allowed(permission));
     ses.on('will-download', (_event, item) => item.cancel());
     ses.setUserAgent(stripUserAgent(ses.getUserAgent()));
-    if (!hostWindow || hostWindow.isDestroyed()) {
-      hostWindow = new electron.BrowserWindow({ show: false, paintWhenInitiallyHidden: true, webPreferences: { backgroundThrottling: false } });
-      hostWindow.setPosition?.(-2000, -2000);
-      hostWindow.showInactive?.();
-    }
     const state = { id, partition, ses, views: new Map(), events: new Set(), relay: null, ws: null, path, wsUrl: `ws://127.0.0.1:${port}${path}` };
     const createView = async url => {
       const view = new electron.WebContentsView({ webPreferences: { partition, sandbox: true, contextIsolation: true, nodeIntegration: false, webSecurity: true, backgroundThrottling: false, preload: new URL('./guest-preload.cjs', import.meta.url).pathname } });
       view.webContents.setBackgroundThrottling(false);
-      hostWindow.contentView.addChildView(view); view.setBounds({ x: 0, y: 0, width: 1280, height: 800 });
+      park(view);
       view.webContents.debugger.attach('1.3');
       const info = await view.webContents.debugger.sendCommand('Target.getTargetInfo');
       const item = { targetId: info.targetInfo.targetId, url: () => view.webContents.getURL(), title: () => view.webContents.getTitle(), debugger: view.webContents.debugger, webContentsView: view, agentInputAt: 0, markAgentInput() { item.agentInputAt = Date.now(); } };
@@ -86,7 +111,7 @@ export function createEmbeddedBrowserHost({ electron, ws, log = () => undefined 
       view.webContents.invalidate?.();
       return item;
     };
-    state.relay = createRelay({ createView, closeView: async targetId => { const item = state.views.get(targetId); if (!item) return; state.views.delete(targetId); item.webContentsView.webContents.close(); }, listViews: () => [...state.views.values()], version: electron.app.getVersion(), userAgent: ses.getUserAgent() });
+    state.relay = createRelay({ createView, closeView: async targetId => { const item = state.views.get(targetId); if (!item) return; state.views.delete(targetId); item.webContentsView.webContents.close(); }, listViews: () => [...state.views.values()], version: process.versions.chrome, userAgent: ses.getUserAgent() });
     state.relay.createViewFromOpen = createView;
     return state;
   }
@@ -112,5 +137,5 @@ export function createEmbeddedBrowserHost({ electron, ws, log = () => undefined 
   }
   electron.ipcMain.on('mingle.embedded.human-input', humanInput);
   const ready = new Promise((resolve, reject) => { http.once('error', reject); http.listen(0, '127.0.0.1', () => resolve(`http://127.0.0.1:${http.address().port}`)); });
-  return { token, url: ready, ready, getSession: id => sessions.get(id), get hostWindow() { return hostWindow; }, async dispose() { if (disposed) return; disposed = true; electron.ipcMain.removeListener('mingle.embedded.human-input', humanInput); await Promise.all([...sessions.values()].map(closeSession)); wss.close(); await new Promise(resolve => http.close(resolve)); if (hostWindow && !hostWindow.isDestroyed()) hostWindow.destroy(); void log; } };
+  return { token, url: ready, ready, getSession: id => sessions.get(id), park, present, async dispose() { if (disposed) return; disposed = true; electron.ipcMain.removeListener('mingle.embedded.human-input', humanInput); await Promise.all([...sessions.values()].map(closeSession)); wss.close(); await new Promise(resolve => http.close(resolve)); if (hostWindow && !hostWindow.isDestroyed()) hostWindow.destroy(); void log; } };
 }

@@ -30,6 +30,9 @@ export function createRelay({ createView, closeView, listViews, version, userAge
   }
   function onDebugger(view, event, method, params, sessionId) {
     if (sessionId) childSessions.set(sessionId, view);
+    // Register iframe/worker sessions as soon as they are announced: Playwright sends them commands before they emit events.
+    if (method === 'Target.attachedToTarget' && typeof params?.sessionId === 'string') childSessions.set(params.sessionId, view);
+    if (method === 'Target.detachedFromTarget' && typeof params?.sessionId === 'string') childSessions.delete(params.sessionId);
     const pageId = [...pageSessions].find(([, item]) => item === view)?.[0];
     send({ method: method ?? event?.method, params: params ?? event?.params ?? {}, ...(sessionId ? { sessionId } : pageId ? { sessionId: pageId } : {}) });
   }

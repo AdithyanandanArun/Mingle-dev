@@ -13,7 +13,10 @@ let browser;
 
 async function run() {
   await app.whenReady();
-  host = createEmbeddedBrowserHost({ electron: { app, BrowserWindow, WebContentsView, ipcMain, session }, ws: requireServer('ws') });
+  // Stands in for Mingle's main window: background tabs are parked beneath its own content, exactly as in the app.
+  const appWindow = new BrowserWindow({ width: 900, height: 700, show: true });
+  await appWindow.loadURL('data:text/html,<body style="background:%23111;color:%23eee;font:24px sans-serif">Mingle smoke window</body>');
+  host = createEmbeddedBrowserHost({ electron: { app, BrowserWindow, WebContentsView, ipcMain, session }, ws: requireServer('ws'), getHostWindow: () => appWindow });
   const base = await host.ready;
   const response = await fetch(`${base}/sessions/smoke/browser`, { method: 'POST', headers: { authorization: `Bearer ${host.token}` } });
   if (!response.ok) throw new Error(`Session create failed: HTTP ${response.status}`);
