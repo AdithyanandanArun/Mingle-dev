@@ -9,7 +9,7 @@ import { createAccountKeyManager } from './account-storage/account-key.mjs';
 import { createAccountKeyIpcHandler } from './account-storage/account-key-ipc.mjs';
 import { configureLinuxPasswordStore } from './account-storage/linux-backend.mjs';
 import { createProjectInvitationDispatcher, focusProjectInvitationWindow, isProjectInvitationWorkspaceUrl } from './project-invitation.mjs';
-import { createEmbeddedBrowserHost } from './embedded-browser/host.mjs';
+import { createEmbeddedBrowserHost, hideOwnedEmbeddedView } from './embedded-browser/host.mjs';
 
 const root = app.isPackaged ? join(process.resourcesPath, 'workspace') : fileURLToPath(new URL('../../', import.meta.url));
 const serverRoot = join(root, 'apps/server');
@@ -285,6 +285,13 @@ ipcMain.handle('mingle.browser.embedded.show', (event, sessionId, targetId, rect
   if (!window || !SESSION_ID_PATTERN.test(sessionId) || typeof targetId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(targetId) || !rectIsValid(rect, window)) return false;
   const item = embeddedBrowserHost?.getSession(sessionId)?.views.get(targetId);
   if (!item) return false;
+  // A WebContentsView has exactly one native parent. Remove stale bookkeeping from
+  // whichever window last owned it before changing its parent.
+  for (const [owner, attached] of embeddedViewsByWindow) {
+    if (owner === window) continue;
+    attached.delete(item.webContentsView);
+    if (!attached.size) embeddedViewsByWindow.delete(owner);
+  }
   const attached = embeddedViewsByWindow.get(window) ?? new Set();
   for (const view of attached) if (view !== item.webContentsView) embeddedBrowserHost.park(view);
   attached.clear();
@@ -302,7 +309,9 @@ ipcMain.handle('mingle.browser.embedded.hide', (event, sessionId) => {
   const sessionViews = new Set([...(embeddedBrowserHost?.getSession(sessionId)?.views.values() ?? [])].map(item => item.webContentsView));
   for (const view of [...attached]) {
     if (!sessionViews.has(view)) continue;
-    embeddedBrowserHost.park(view);
+    // A late hide from an old popout must not park a view that has since moved
+    // to another window.
+    if (!hideOwnedEmbeddedView(window, view, embeddedBrowserHost.park)) { attached.delete(view); continue; }
     attached.delete(view);
   }
   return true;

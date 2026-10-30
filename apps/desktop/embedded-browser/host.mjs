@@ -11,10 +11,13 @@ export function electronCookieToCdp(cookie) {
 }
 export function cdpCookieToElectron(cookie) {
   const domain = String(cookie.domain ?? '').replace(/^\./, '');
-  const secure = Boolean(cookie.secure);
+  const hostPrefix = cookie.name?.startsWith('__Host-') === true;
+  const secure = Boolean(cookie.secure) || hostPrefix;
   const path = cookie.path || '/';
   const url = `${secure ? 'https' : 'http'}://${domain}${path.startsWith('/') ? path : `/${path}`}`;
-  return { url, name: cookie.name, value: cookie.value, path, ...(cookie.domain ? { domain: cookie.domain } : {}), secure,
+  // Chromium marks domain cookies with a leading dot; a bare host is host-only.
+  const hostOnly = cookie.hostOnly === true || !cookie.domain || !String(cookie.domain).startsWith('.') || hostPrefix;
+  return { url, name: cookie.name, value: cookie.value, path, ...(!hostOnly && cookie.domain ? { domain: cookie.domain } : {}), secure,
     httpOnly: Boolean(cookie.httpOnly), ...(Number.isFinite(cookie.expires) && cookie.expires >= 0 ? { expirationDate: cookie.expires } : {}),
     ...(cookie.sameSite ? { sameSite: cookie.sameSite === 'Strict' ? 'strict' : cookie.sameSite === 'None' ? 'no_restriction' : 'lax' } : {}) };
 }
@@ -24,6 +27,13 @@ const wsPathPattern = /^\/devtools\/browser\/[A-Za-z0-9-]{8,80}$/;
 
 /** Size background tabs render at while nobody is looking at them. */
 const PARKED_BOUNDS = { x: 0, y: 0, width: 1280, height: 800 };
+
+/** Apply a hide only while the hiding window still owns the native view. */
+export function hideOwnedEmbeddedView(window, view, park) {
+  if (view.parentWindow !== window) return false;
+  park(view);
+  return true;
+}
 
 /**
  * Background tabs are parked beneath the app's own UI inside `getHostWindow()` (normally the main window), so they keep
@@ -106,7 +116,7 @@ export function createEmbeddedBrowserHost({ electron, ws, log = () => undefined,
     ses.setUserAgent(stripUserAgent(ses.getUserAgent()));
     const state = { id, partition, ses, views: new Map(), events: new Set(), relay: null, ws: null, path, wsUrl: `ws://127.0.0.1:${port}${path}` };
     const createView = async url => {
-      const view = new electron.WebContentsView({ webPreferences: { partition, sandbox: true, contextIsolation: true, nodeIntegration: false, webSecurity: true, backgroundThrottling: false, preload: new URL('./guest-preload.cjs', import.meta.url).pathname } });
+      const view = new electron.WebContentsView({ webPreferences: { partition, sandbox: true, contextIsolation: true, nodeIntegration: false, webSecurity: true, backgroundThrottling: false, preload: fileURLToPath(new URL('./guest-preload.cjs', import.meta.url)) } });
       view.webContents.setBackgroundThrottling(false);
       park(view);
       view.webContents.debugger.attach('1.3');
@@ -123,7 +133,7 @@ export function createEmbeddedBrowserHost({ electron, ws, log = () => undefined,
         let parsed; try { parsed = new URL(target); } catch { return { action: 'deny' }; }
         if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return { action: 'deny' };
         if (/\b(?:width|height)\s*=/.test(features ?? '')) {
-          return { action: 'allow', overrideBrowserWindowOptions: { width: 800, height: 600, webPreferences: { partition, sandbox: true, contextIsolation: true, nodeIntegration: false, webSecurity: true, backgroundThrottling: false, preload: new URL('./guest-preload.cjs', import.meta.url).pathname } } };
+          return { action: 'allow', overrideBrowserWindowOptions: { width: 800, height: 600, webPreferences: { partition, sandbox: true, contextIsolation: true, nodeIntegration: false, webSecurity: true, backgroundThrottling: false, preload: fileURLToPath(new URL('./guest-preload.cjs', import.meta.url)) } } };
         }
         void state.relay?.createViewFromOpen(target); return { action: 'deny' };
       });

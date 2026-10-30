@@ -27,3 +27,11 @@ test('converts Electron and CDP cookie fields', () => {
   assert.deepEqual(electronCookieToCdp(electron), { name: 'sid', value: 'x', domain: '.example.com', path: '/', expires: 123, httpOnly: true, secure: true, sameSite: 'Strict' });
   assert.equal(cdpCookieToElectron({ name: 'session', value: 'v', domain: 'example.com', path: '/', expires: -1 }).expirationDate, undefined);
 });
+
+test('CDP host-only and __Host- cookies preserve host scope and secure URL semantics', () => {
+  const hostOnly = cdpCookieToElectron({ name: 'sid', value: 'fake', domain: 'login.example.test', path: '/auth', secure: false });
+  assert.deepEqual(hostOnly, { url: 'http://login.example.test/auth', name: 'sid', value: 'fake', path: '/auth', secure: false, httpOnly: false });
+  const prefixed = cdpCookieToElectron({ name: '__Host-session', value: 'fake', domain: '.login.example.test', path: '/', secure: true, httpOnly: true });
+  assert.deepEqual(prefixed, { url: 'https://login.example.test/', name: '__Host-session', value: 'fake', path: '/', secure: true, httpOnly: true });
+  assert.deepEqual(electronCookieToCdp(prefixed), { name: '__Host-session', value: 'fake', domain: undefined, path: '/', expires: -1, httpOnly: true, secure: true, sameSite: undefined });
+});
