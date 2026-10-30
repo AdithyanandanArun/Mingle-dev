@@ -18,6 +18,7 @@ import { execFile, spawn, type ChildProcess } from 'node:child_process';
 import { buildSignInArgv, validateSignInUrl } from './sign-in.ts';
 import { detectSandbox } from './sandbox.ts';
 import type { BrowserAction } from '@mingle/contracts';
+import type { EmbeddedBrowserClient } from './embedded.ts';
 
 export interface ExistingTarget {
   wsUrl: string;
@@ -35,9 +36,10 @@ export interface SessionDeps {
   /** Tabs tracked across all sessions, for the global limit. */
   totalTabs: () => number;
   log: Logger;
+  embedded: EmbeddedBrowserClient | null;
 }
 
-type Mode = 'managed' | 'existing';
+type Mode = 'managed' | 'existing' | 'embedded';
 
 async function chromeUserAgent(executable:string):Promise<string|null> {
   // On Windows `chrome.exe --version` opens a browser window instead of printing, so the override is skipped there.
@@ -68,6 +70,7 @@ export class BrowserSessionRuntime {
   private signInProcess: ChildProcess | null = null;
   private signInTimer: NodeJS.Timeout | null = null;
   private rememberedUrls: string[] = [];
+  private embeddedAbort: AbortController | null = null;
 
   constructor(private readonly deps: SessionDeps) {}
 
@@ -129,6 +132,7 @@ export class BrowserSessionRuntime {
       try {
         const target = await prepare();
         if (mode === 'managed') await this.launchManaged(generation);
+        else if (mode === 'embedded') await this.attachEmbedded(generation);
         else await this.attachExisting(target!, generation);
         if (generation !== this.generation) throw new BrowserError(409, 'The browser was disconnected while connecting.');
         this.status = 'connected';
@@ -358,6 +362,31 @@ export class BrowserSessionRuntime {
     for (const page of context.pages()) await this.adopt(page, { activate: this.activeTabId === null });
   }
 
+  private async attachEmbedded(generation: number): Promise<void> {
+    const client = this.deps.embedded;
+    if (!client) throw new BrowserError(503, 'The built-in browser needs the Mingle desktop app.');
+    const wsUrl = await client.open(this.deps.sessionId);
+    const playwright = await loadPlaywright();
+    let browser: Browser;
+    try { browser = await playwright.chromium.connectOverCDP(wsUrl, { headers: { Authorization: client.authorizationHeader() }, timeout: CONNECT_TIMEOUT_MS, isLocal: true }); }
+    catch (error) { await client.close(this.deps.sessionId); throw diagnoseConnectError(error, 'endpoint'); }
+    const context = browser.contexts()[0];
+    if (generation !== this.generation || !context) {
+      await withTimeout(browser.close(), DETACH_TIMEOUT_MS, 'disconnect timed out').catch(() => undefined);
+      await client.close(this.deps.sessionId);
+      throw new BrowserError(409, 'The built-in browser could not be connected.');
+    }
+    this.browser = browser; this.context = context; this.endpoint = wsUrl;
+    browser.on('disconnected', () => this.browserGone(generation, 'The built-in browser disconnected.'));
+    context.on('page', page => this.onPage(page, generation));
+    for (const page of context.pages()) await this.adopt(page, { activate: this.activeTabId === null });
+    const abort = new AbortController(); this.embeddedAbort = abort;
+    void client.events(this.deps.sessionId, event => {
+      const entry = [...this.tabs.values()].find(tab => tab.targetId === event.targetId);
+      entry?.control.claimTouch('desktop-native');
+    }, abort.signal);
+  }
+
   private browserGone(generation: number, reason: string): void {
     if (generation !== this.generation) return;
     this.generation++;
@@ -372,6 +401,7 @@ export class BrowserSessionRuntime {
   private async teardown(closeBrowser: boolean): Promise<void> {
     const entries = [...this.tabs.values()];
     const { context, browser, mode } = this;
+    this.embeddedAbort?.abort(); this.embeddedAbort = null;
     this.tabs.clear();
     this.pages.clear();
     this.activeTabId = null;
@@ -387,6 +417,7 @@ export class BrowserSessionRuntime {
     } else if (context && mode === 'managed') {
       await withTimeout(context.close(), 10_000, 'close timed out').catch(() => undefined);
     }
+    if (mode === 'embedded' && this.deps.embedded) await this.deps.embedded.close(this.deps.sessionId);
   }
 
   // --- tabs ----------------------------------------------------------------------------------------------------
@@ -444,7 +475,7 @@ export class BrowserSessionRuntime {
     }
     if (this.limitReached()) return this.refuseForLimit(page);
     let targetId: string | null = null;
-    if (this.mode === 'existing' && this.endpoint) {
+    if ((this.mode === 'existing' || this.mode === 'embedded') && this.endpoint) {
       targetId = await this.targetIdOf(page);
       if (!targetId || !live()) return null;
       if (!options.created) await this.deps.targets.idle(this.endpoint);
@@ -460,9 +491,9 @@ export class BrowserSessionRuntime {
     } else if (!live()) {
       return null;
     }
-    const entry = new TabEntry(page, this.mode === 'managed', targetId);
+    const entry = new TabEntry(page, this.mode === 'managed' || this.mode === 'embedded', targetId, this.mode === 'embedded');
       // A blank tab may be recycled by open() only if Mingle made it; never one the user already had open.
-    entry.reusable = this.mode === 'managed' || options.created === true;
+    entry.reusable = this.mode !== 'existing' || options.created === true;
     this.tabs.set(entry.id, entry);
     this.pages.set(page, entry);
     this.wire(entry, generation);

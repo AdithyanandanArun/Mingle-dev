@@ -22,6 +22,7 @@ import { BrowserStreamServer } from './stream-server.ts';
 import type { TabEntry } from './tab.ts';
 import { TargetRegistry } from './targets.ts';
 import { listImportSources, readImportedCookies } from './import/index.ts';
+import { EmbeddedBrowserClient } from './embedded.ts';
 
 export interface BrowserServiceOptions {
   dataDir: string;
@@ -53,6 +54,7 @@ export class BrowserService {
   private readonly log: Logger;
   private notifyTimer: NodeJS.Timeout | null = null;
   private closing: Promise<void> | null = null;
+  private readonly embedded = EmbeddedBrowserClient.fromEnv();
 
   constructor(private readonly options: BrowserServiceOptions) {
     this.log = options.log ?? (() => undefined);
@@ -78,7 +80,7 @@ export class BrowserService {
       notices.push('To share an existing browser, open chrome://inspect/#remote-debugging in it and turn remote debugging on. Mingle only attaches after you approve.');
     }
     if (sandbox && !sandbox.managedReady) notices.push('Chromium’s sandbox is blocked by this computer’s Linux security settings. Allow Chromium or choose an installed browser that is ready.');
-    return { sources, managedAvailable: executable.path !== null, managedExecutable: executable.path, installing: this.installer.installing, notices, sandbox, systemBrowsers, embeddedAvailable: false };
+    return { sources, managedAvailable: executable.path !== null, managedExecutable: executable.path, installing: this.installer.installing, notices, sandbox, systemBrowsers, embeddedAvailable: this.embedded !== null };
   }
 
   async fixSandbox(): Promise<BrowserDiscovery> {
@@ -140,11 +142,10 @@ export class BrowserService {
     const parsed = BrowserConnectSchema.safeParse(input);
     if (!parsed.success) throw new BrowserError(400, parsed.error.issues[0]?.message ?? 'Invalid browser connection request.');
     const request = parsed.data;
-    // Placeholder until the embedded engine is wired to the server.
-    if (request.mode === 'embedded') throw new BrowserError(503, 'The built-in browser is not available yet.');
+    if (request.mode === 'embedded' && !this.embedded) throw new BrowserError(503, 'The built-in browser needs the Mingle desktop app.');
     const runtime = this.runtime(sessionId);
     try {
-      await runtime.connect(request.mode, () => (request.mode === 'managed' ? Promise.resolve(null) : this.resolveExisting(request)));
+      await runtime.connect(request.mode, () => (request.mode === 'existing' ? this.resolveExisting(request) : Promise.resolve(null)));
     } catch (error) {
       // The failure stays visible in status(); the caller also gets the real status and a public message.
       throw toBrowserError(error);
@@ -266,6 +267,7 @@ export class BrowserService {
         targets: this.targets,
         totalTabs: () => [...this.runtimes.values()].reduce((sum, item) => sum + item.tabCount, 0),
         log: this.log,
+        embedded: this.embedded,
       });
       this.runtimes.set(sessionId, runtime);
     }
