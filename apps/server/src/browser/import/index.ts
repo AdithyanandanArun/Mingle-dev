@@ -9,6 +9,24 @@ import { firefoxExpiry, readFirefox } from './firefox.ts';
 
 export { listImportSources } from './sources.ts';
 export type { ImportEnvironment } from './sources.ts';
+export interface ImportedCookie { name:string; value:string; domain?:string; path?:string; url?:string; expires:number; httpOnly:boolean; secure:boolean; sameSite:'Strict'|'Lax'|'None' }
+
+/**
+ * Makes a read cookie acceptable to Chromium: SameSite=None requires Secure, and `__Host-` cookies must be set by URL
+ * with no Domain and path "/" (otherwise Chromium rejects them).
+ */
+export function normalizeCookie(cookie:ImportedCookie):ImportedCookie {
+  const next={...cookie};
+  if(next.sameSite==='None' && !next.secure) next.sameSite='Lax';
+  if(next.name.startsWith('__Host-')) {
+    const host=String(next.domain??'').replace(/^\./u,'');
+    const { domain:_domain, path:_path, ...rest }=next;
+    return { ...rest, secure:true, url:`https://${host}/` };
+  }
+  if(next.name.startsWith('__Secure-')) next.secure=true;
+  return next;
+}
+
 export async function readImportedCookies(input:BrowserImport):Promise<{cookies:any[];skipped:number;domains:string[]}> {
   const sources=await listImportSources();
   const {source,path:profilePath}=resolveListedProfile(sources,input.sourceId,input.profileId);
@@ -22,14 +40,14 @@ export async function readImportedCookies(input:BrowserImport):Promise<{cookies:
     try { await copyFile(`${dbPath}-wal`,`${copy}-wal`); } catch (e:any) { if(e?.code!=='ENOENT') throw e; }
     const db=new DatabaseSync(copy,{readOnly:true});
     try {
-      if(source.engine==='chromium') { const out=await readChromium(db,source.id,process.platform,input.domains); return {...out,domains:input.domains}; }
+      if(source.engine==='chromium') { const out=await readChromium(db,source.id,process.platform,input.domains); return {cookies:out.cookies.map(normalizeCookie),skipped:out.skipped,domains:input.domains}; }
       const rows=readFirefox(db,input.domains), cookies:any[]=[]; let skipped=0;
       for(const row of rows) {
         const expires=firefoxExpiry(Number(row.expiry));
         if(expires>0 && expires<=Date.now()/1000) { skipped++; continue; }
         cookies.push({name:String(row.name),value:String(row.value),domain:String(row.host),path:String(row.path||'/'),expires:expires>0?expires:-1,httpOnly:Boolean(row.isHttpOnly),secure:Boolean(row.isSecure),sameSite:Number(row.sameSite)===2?'Strict':Number(row.sameSite)===1?'Lax':'None'});
       }
-      return {cookies,skipped,domains:input.domains};
+      return {cookies:cookies.map(normalizeCookie),skipped,domains:input.domains};
     } finally { db.close(); }
   } finally { await rm(temp,{recursive:true,force:true}); }
 }

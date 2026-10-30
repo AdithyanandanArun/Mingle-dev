@@ -9,6 +9,7 @@ import { useMingle } from '../../store/store';
 import { Button, EmptyState, IconButton, InlineError, Spinner } from '../ui';
 import { BrowserConnect } from './BrowserConnect';
 import { BrowserSignInButton, BrowserSigningInBanner } from './BrowserSignIn';
+import { BrowserImportButton } from './BrowserImport';
 import { BrowserHost } from './BrowserHost';
 import { BrowserSurface } from './BrowserSurface';
 import { canOpenBrowserPopout, canShowEmbedded, dockBrowserPopout, focusBrowserPopout, isBrowserPopoutOpen, onBrowserPopoutClosed, openBrowserPopout } from './desktopBridge';
@@ -255,6 +256,7 @@ export function BrowserPane({ session, active, popout = false }: { session: Sess
                 : ownsLease && tab?.control.lease === 'hold' ? <Button size="sm" data-browser-focus-exit onClick={() => stream.setControl('agent')}>Hand back to agent</Button>
                   : ownsLease ? <Button size="sm" onClick={() => stream.setControl('human')}>Keep control</Button> : null}
               {state.mode === 'managed' ? <BrowserSignInButton sessionId={session.id} /> : null}
+              {state.mode !== 'existing' ? <BrowserImportButton sessionId={session.id} /> : null}
             </div>
             {canInput ? <p className="browser-hint">Keys and clicks go to the page. Alt+Shift+Escape moves focus back to Mingle. Paste with {navigator.platform.includes('Mac') ? '⌘' : 'Ctrl'}+V.</p> : null}
             {stream.error ? <div className="browser-stream-error"><InlineError>{stream.error}</InlineError><button type="button" className="link-btn" onClick={stream.dismissError}>Dismiss</button></div> : null}

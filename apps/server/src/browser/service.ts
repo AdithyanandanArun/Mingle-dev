@@ -111,8 +111,14 @@ export class BrowserService {
     try { data=await readImportedCookies(parsed.data as BrowserImport); }
     catch(error) { throw new BrowserError(409,error instanceof Error?error.message:'Could not read cookies from that browser profile.'); }
     const context=runtime.requireConnected();
-    for(let i=0;i<data.cookies.length;i+=100) await context.addCookies(data.cookies.slice(i,i+100));
-    return {imported:data.cookies.length,skipped:data.skipped,domains:data.domains};
+    // One rejected cookie fails a whole batch, so a failed batch is retried cookie by cookie and the rejects are counted as skipped.
+    let imported=0, skipped=data.skipped;
+    for(let i=0;i<data.cookies.length;i+=100) {
+      const batch=data.cookies.slice(i,i+100);
+      try { await context.addCookies(batch); imported+=batch.length; }
+      catch { for(const cookie of batch) { try { await context.addCookies([cookie]); imported++; } catch { skipped++; } } }
+    }
+    return {imported,skipped,domains:data.domains};
   }
 
   /** Downloads Playwright's pinned Chromium. Only runs on explicit request; concurrent calls share one download. */

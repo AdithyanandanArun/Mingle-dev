@@ -9,8 +9,9 @@ export function decryptAesCbc(payload: Buffer, key: Buffer): Buffer {
   const decipher=createDecipheriv('aes-128-cbc',key,Buffer.alloc(16,0x20));
   return Buffer.concat([decipher.update(payload),decipher.final()]);
 }
-export function stripHostHash(value: Buffer, host: string, dbVersion: number): Buffer {
-  if (dbVersion >= 24 && value.length >= 32) {
+/** Chromium (cookie DB version 24+) prefixes the plaintext with SHA-256(host_key). Checked by content, so a wrong version read cannot corrupt values. */
+export function stripHostHash(value: Buffer, host: string, _dbVersion: number): Buffer {
+  if (value.length >= 32) {
     const expected=createHash('sha256').update(host).digest();
     if (value.subarray(0,32).equals(expected)) return value.subarray(32);
   }
