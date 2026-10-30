@@ -5,6 +5,7 @@ const unsupported = method => ({ code: -32000, message: `Not supported by Mingle
 export function createRelay({ createView, closeView, listViews, version, userAgent, getCookies, setCookies, clearCookies }) {
   const pageSessions = new Map();
   const childSessions = new Map();
+  const autoAttachSessions = new Map();
   const browserSessions = new Set();
   const listeners = new Map();
   let socket;
@@ -18,14 +19,15 @@ export function createRelay({ createView, closeView, listViews, version, userAge
     if (autoAttach) attach(view);
   }
   function attach(view, emitEvent = true) {
-    let sessionId = [...pageSessions].find(([, item]) => item === view)?.[0];
-    if (!sessionId) { sessionId = randomUUID(); pageSessions.set(sessionId, view); }
+    const sessionId = randomUUID();
+    pageSessions.set(sessionId, view);
     if (emitEvent) send({ method: 'Target.attachedToTarget', params: { sessionId, targetInfo: targetInfo(view), waitingForDebugger: false } });
     return sessionId;
   }
   function unbindView(view) {
     for (const [sid, item] of pageSessions) if (item === view) { send({ method: 'Target.detachedFromTarget', params: { sessionId: sid, targetId: view.targetId } }); pageSessions.delete(sid); }
     for (const [sid, item] of childSessions) if (item === view) childSessions.delete(sid);
+    autoAttachSessions.delete(view);
     if (discover) send({ method: 'Target.targetDestroyed', params: { targetId: view.targetId } });
   }
   function onDebugger(view, event, method, params, sessionId) {
@@ -33,8 +35,13 @@ export function createRelay({ createView, closeView, listViews, version, userAge
     // Register iframe/worker sessions as soon as they are announced: Playwright sends them commands before they emit events.
     if (method === 'Target.attachedToTarget' && typeof params?.sessionId === 'string') childSessions.set(params.sessionId, view);
     if (method === 'Target.detachedFromTarget' && typeof params?.sessionId === 'string') childSessions.delete(params.sessionId);
-    const pageId = [...pageSessions].find(([, item]) => item === view)?.[0];
-    send({ method: method ?? event?.method, params: params ?? event?.params ?? {}, ...(sessionId ? { sessionId } : pageId ? { sessionId: pageId } : {}) });
+    const pageIds = [...pageSessions].filter(([, item]) => item === view).map(([sid]) => sid);
+    const eventName = method ?? event?.method;
+    const eventParams = params ?? event?.params ?? {};
+    const routedIds = pageIds.length ? pageIds : sessionId ? [sessionId] : [undefined];
+    for (const pageId of routedIds) {
+      send({ method: eventName, params: eventParams, ...(pageId ? { sessionId: pageId } : {}) });
+    }
   }
   function bindView(view) {
     if (listeners.has(view)) return;
@@ -77,11 +84,28 @@ export function createRelay({ createView, closeView, listViews, version, userAge
         case 'Target.setDiscoverTargets': discover = Boolean(params.discover); if (discover) views().forEach(view => send({ method: 'Target.targetCreated', params: { targetInfo: targetInfo(view) } })); return respond({});
         case 'Target.getTargets': return respond({ targetInfos: views().map(targetInfo) });
         case 'Target.getTargetInfo': { const view = views().find(item => !params.targetId || item.targetId === params.targetId); return respond(view ? { targetInfo: targetInfo(view) } : { targetInfo: { targetId: '', type: 'browser', title: '', url: '', attached: false, canAccessOpener: false, browserContextId: 'mingle-default' } }); }
-        case 'Target.setAutoAttach': autoAttach = Boolean(params.autoAttach); if (autoAttach) views().forEach(attach); return respond({});
+        case 'Target.setAutoAttach': {
+          autoAttach = Boolean(params.autoAttach);
+          if (autoAttach) views().forEach(view => {
+            if (!autoAttachSessions.has(view)) autoAttachSessions.set(view, attach(view));
+          });
+          else for (const [view, sessionId] of autoAttachSessions) {
+            pageSessions.delete(sessionId);
+            send({ method: 'Target.detachedFromTarget', params: { sessionId, targetId: view.targetId } });
+          }
+          if (!autoAttach) autoAttachSessions.clear();
+          return respond({});
+        }
         case 'Target.attachToTarget': { const view = views().find(item => item.targetId === params.targetId); if (!view) return respond({ sessionId: '' }); return respond({ sessionId: attach(view, false) }); }
         case 'Target.attachToBrowserTarget': { const browserSession = randomUUID(); browserSessions.add(browserSession); return respond({ sessionId: browserSession }); }
-        case 'Target.detachFromTarget': pageSessions.delete(params.sessionId); send({ method: 'Target.detachedFromTarget', params: { sessionId: params.sessionId } }); return respond({});
-      case 'Target.createTarget': { const view = await createView(params.url ?? 'about:blank'); if (!listeners.has(view)) bindView(view); return respond({ targetId: view.targetId }); }
+        case 'Target.detachFromTarget': {
+          const view = pageSessions.get(params.sessionId);
+          pageSessions.delete(params.sessionId);
+          if (autoAttachSessions.get(view) === params.sessionId) autoAttachSessions.delete(view);
+          send({ method: 'Target.detachedFromTarget', params: { sessionId: params.sessionId, ...(view ? { targetId: view.targetId } : {}) } });
+          return respond({});
+        }
+        case 'Target.createTarget': { const view = await createView(params.url ?? 'about:blank'); if (!listeners.has(view)) bindView(view); return respond({ targetId: view.targetId }); }
         case 'Target.closeTarget': await closeView(params.targetId); return respond({ success: true });
         case 'Target.activateTarget': case 'Browser.setDownloadBehavior': case 'Browser.grantPermissions': case 'Browser.resetPermissions': return respond({});
         case 'Target.getBrowserContexts': return respond({ browserContextIds: [] });

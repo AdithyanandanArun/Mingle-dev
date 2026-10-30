@@ -33,6 +33,19 @@ test('browser target session can attach a page session', async () => {
   await f.call('Page.startScreencast', {}, pageSession);
   assert.equal(view.debugger.calls.at(-1)[0], 'Page.startScreencast');
 });
+test('multiple explicit page sessions are independent when one detaches', async () => {
+  const f = fixture(); const view = f.makeView();
+  await f.call('Target.attachToTarget', { targetId: view.targetId }); const first = f.sent.at(-1).result.sessionId;
+  await f.call('Target.attachToTarget', { targetId: view.targetId }); const second = f.sent.at(-1).result.sessionId;
+  assert.notEqual(first, second);
+
+  await f.call('Target.detachFromTarget', { sessionId: first });
+  await f.call('Page.navigate', { url: 'https://example.com' }, second);
+  assert.equal(view.debugger.calls.at(-1)[0], 'Page.navigate');
+  view.debugger.emit('message', {}, 'Page.loadEventFired', { timestamp: 1 });
+  assert.ok(f.sent.some(item => item.method === 'Page.loadEventFired' && item.sessionId === second));
+  assert.equal(f.sent.some(item => item.method === 'Page.loadEventFired' && item.sessionId === first), false);
+});
 test('auto attach announces targets created later', async () => {
   const f = fixture(); await f.call('Target.setAutoAttach', { autoAttach: true });
   const created = await f.call('Target.createTarget', { url: 'https://example.com' });
