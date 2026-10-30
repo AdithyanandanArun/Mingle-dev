@@ -76,8 +76,7 @@ export function createEmbeddedBrowserHost({ electron, ws, log = () => undefined 
         let parsed; try { parsed = new URL(target); } catch { return { action: 'deny' }; }
         if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return { action: 'deny' };
         if (/\b(?:width|height)\s*=/.test(features ?? '')) {
-          const popup = new electron.BrowserWindow({ width: 800, height: 600, webPreferences: { partition, sandbox: true, contextIsolation: true, nodeIntegration: false, webSecurity: true, backgroundThrottling: false, preload: new URL('./guest-preload.cjs', import.meta.url).pathname } });
-          void popup.loadURL(target); return { action: 'allow' };
+          return { action: 'allow', overrideBrowserWindowOptions: { width: 800, height: 600, webPreferences: { partition, sandbox: true, contextIsolation: true, nodeIntegration: false, webSecurity: true, backgroundThrottling: false, preload: new URL('./guest-preload.cjs', import.meta.url).pathname } } };
         }
         void state.relay?.createViewFromOpen(target); return { action: 'deny' };
       });

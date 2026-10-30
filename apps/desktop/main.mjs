@@ -273,7 +273,9 @@ function rectIsValid(rect, window) {
 }
 
 function embeddedWindowForSender(sender) {
-  if (isLiveWindow(mainWindow) && sender === mainWindow.webContents && isWorkspaceFrame({ sender, senderFrame: sender.mainFrame })) return mainWindow;
+  const event = { sender, senderFrame: sender?.mainFrame };
+  if (!isWorkspaceFrame(event)) return null;
+  if (isLiveWindow(mainWindow) && sender === mainWindow.webContents) return mainWindow;
   for (const window of browserWindows.values()) if (isLiveWindow(window) && sender === window.webContents) return window;
   return null;
 }
@@ -286,7 +288,11 @@ ipcMain.handle('mingle.browser.embedded.show', (event, sessionId, targetId, rect
   if (!item || window.isDestroyed()) return false;
   for (const [attachedWindow, attached] of embeddedViewsByWindow) {
     if (attachedWindow !== window) continue;
-    for (const view of attached) attachedWindow.contentView.removeChildView(view);
+    for (const view of attached) {
+      attachedWindow.contentView.removeChildView(view);
+      embeddedBrowserHost.hostWindow.contentView.addChildView(view);
+      view.setBounds({ x: 0, y: 0, width: 1280, height: 800 });
+    }
     attached.clear();
   }
   const view = item.webContentsView;
