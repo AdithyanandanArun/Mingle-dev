@@ -61,3 +61,14 @@ test('CDP host-only and __Host- cookies preserve host scope and secure URL seman
   assert.deepEqual(prefixed, { url: 'https://login.example.test/', name: '__Host-session', value: 'fake', path: '/', secure: true, httpOnly: true });
   assert.deepEqual(electronCookieToCdp(prefixed), { name: '__Host-session', value: 'fake', domain: undefined, path: '/', expires: -1, httpOnly: true, secure: true, sameSite: undefined });
 });
+
+test('native trusted input timestamps remain eligible immediately after an agent call', () => {
+  const host = createEmbeddedBrowserHost({ electron: fakeElectron(), ws: { WebSocketServer: class { close() {} } } });
+  try {
+    assert.equal(host.isHumanInputEvent({ isTrusted: true, timeStamp: 42 }), true);
+    assert.equal(host.isHumanInputEvent({ isTrusted: true, timeStamp: 0 }), false);
+    assert.equal(host.isHumanInputEvent({ isTrusted: true, timeStamp: -1 }), false);
+    assert.equal(host.isHumanInputEvent({ isTrusted: false, timeStamp: 42 }), false);
+    assert.equal(host.isHumanInputEvent({ isTrusted: true, timeStamp: Number.NaN }), false);
+  } finally { void host.dispose(); }
+});

@@ -60,8 +60,14 @@ export function createRelay({ createView, closeView, listViews, version, userAge
         if (child) view = childSessions.get(sessionId);
         if (!view) return fail(unsupported(method));
         if (method === 'Runtime.runIfWaitingForDebugger' && !child) return respond({});
+        let forwardedParams = params;
+        if (method === 'Input.dispatchMouseEvent' || method === 'Input.dispatchKeyEvent' || method === 'Input.dispatchTouchEvent') {
+          // Chromium exposes this CDP timestamp as the trusted DOM event's timeStamp.
+          // Zero distinguishes Mingle's dispatched input from physical input without a time window.
+          forwardedParams = { ...params, timestamp: 0 };
+        }
         if (/^(Input\.|Page\.navigate$|Runtime\.(evaluate|callFunctionOn)$)/.test(method)) view.markAgentInput();
-        return respond(await view.debugger.sendCommand(method, params, child ? sessionId : undefined));
+        return respond(await view.debugger.sendCommand(method, forwardedParams, child ? sessionId : undefined));
       }
       switch (method) {
         case 'Browser.getVersion': return respond({ protocolVersion: '1.3', product: `Chrome/${version}`, revision: '', userAgent, jsVersion: '' });

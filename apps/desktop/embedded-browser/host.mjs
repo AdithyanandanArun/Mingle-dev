@@ -139,7 +139,7 @@ export function createEmbeddedBrowserHost({ electron, ws, log = () => undefined,
       park(view);
       view.webContents.debugger.attach('1.3');
       const info = await view.webContents.debugger.sendCommand('Target.getTargetInfo');
-      const item = { targetId: info.targetInfo.targetId, url: () => view.webContents.getURL(), title: () => view.webContents.getTitle(), debugger: view.webContents.debugger, webContentsView: view, agentInputAt: 0, markAgentInput() { item.agentInputAt = Date.now(); } };
+      const item = { targetId: info.targetInfo.targetId, url: () => view.webContents.getURL(), title: () => view.webContents.getTitle(), debugger: view.webContents.debugger, webContentsView: view, markAgentInput() {} };
       view.webContents.on('before-input-event', (event, input) => {
         if (input.type === 'keyDown' && input.key === 'Escape' && input.alt && input.shift) {
           event.preventDefault();
@@ -181,14 +181,15 @@ export function createEmbeddedBrowserHost({ electron, ws, log = () => undefined,
     wss.handleUpgrade(req, socket, head, client => { state.ws?.close(); state.ws = client; state.relay.attachSocket(client); });
   });
   function humanInput(event, detail) {
-    if (!detail || !['pointer', 'key', 'wheel'].includes(detail.kind)) return;
+    if (!detail || !['pointer', 'key', 'wheel'].includes(detail.kind) || !isHumanInputEvent({ isTrusted: true, timeStamp: detail.timeStamp })) return;
     const state = [...sessions.values()].find(candidate => [...candidate.views.values()].some(item => item.webContentsView.webContents === event.sender));
     const item = [...(state?.views.values() ?? [])].find(entry => entry.webContentsView.webContents === event.sender);
-    if (!state || !item || Date.now() - item.agentInputAt <= 500) return;
+    if (!state || !item) return;
     const data = `data: ${JSON.stringify({ type: 'human-input', targetId: item.targetId, kind: detail.kind })}\n\n`;
     for (const client of state.events) client.write(data);
   }
+  function isHumanInputEvent(event) { return event?.isTrusted === true && Number.isFinite(event.timeStamp) && event.timeStamp > 0; }
   electron.ipcMain.on('mingle.embedded.human-input', humanInput);
   const ready = new Promise((resolve, reject) => { http.once('error', reject); http.listen(0, '127.0.0.1', () => resolve(`http://127.0.0.1:${http.address().port}`)); });
-  return { token, url: ready, ready, getSession: id => sessions.get(id), park, present, setPresented(sessionId, targetId, window, view, rect) { const state = sessions.get(sessionId); if (!state || state.views.get(targetId)?.webContentsView !== view || !view?.webContents || view.webContents.isDestroyed?.() || !window || window.isDestroyed?.()) return false; present(window, view, rect, state, targetId); return true; }, async dispose() { if (disposed) return; disposed = true; electron.ipcMain.removeListener('mingle.embedded.human-input', humanInput); await Promise.all([...sessions.values()].map(closeSession)); wss.close(); await new Promise(resolve => http.close(resolve)); if (hostWindow && !hostWindow.isDestroyed()) hostWindow.destroy(); void log; } };
+  return { token, url: ready, ready, getSession: id => sessions.get(id), park, present, isHumanInputEvent, setPresented(sessionId, targetId, window, view, rect) { const state = sessions.get(sessionId); if (!state || state.views.get(targetId)?.webContentsView !== view || !view?.webContents || view.webContents.isDestroyed?.() || !window || window.isDestroyed?.()) return false; present(window, view, rect, state, targetId); return true; }, async dispose() { if (disposed) return; disposed = true; electron.ipcMain.removeListener('mingle.embedded.human-input', humanInput); await Promise.all([...sessions.values()].map(closeSession)); wss.close(); await new Promise(resolve => http.close(resolve)); if (hostWindow && !hostWindow.isDestroyed()) hostWindow.destroy(); void log; } };
 }

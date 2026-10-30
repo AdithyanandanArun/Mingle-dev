@@ -44,6 +44,16 @@ test('unknown method returns supported error; agent input is marked', async () =
   await f.call('Target.attachToTarget', { targetId: view.targetId }); const sid = f.sent.at(-1).result.sessionId;
   await f.call('Input.dispatchMouseEvent', {}, sid); assert.equal(view.marks, 1);
 });
+test('CDP timestamp-bearing input dispatches are tagged at the event source', async () => {
+  const f = fixture(); const view = f.makeView();
+  await f.call('Target.attachToTarget', { targetId: view.targetId }); const sid = f.sent.at(-1).result.sessionId;
+  for (const method of ['Input.dispatchMouseEvent', 'Input.dispatchKeyEvent', 'Input.dispatchTouchEvent']) {
+    await f.call(method, { type: 'fixture', timestamp: 9 }, sid);
+    assert.equal(view.debugger.calls.at(-1)[1].timestamp, 0, `${method} timestamp`);
+  }
+  await f.call('Input.insertText', { text: 'fixture' }, sid);
+  assert.equal('timestamp' in view.debugger.calls.at(-1)[1], false, 'insertText has no timestamp field');
+});
 test('detach event is forwarded', async () => {
   const f = fixture(); const view = f.makeView(); await f.call('Target.setDiscoverTargets', { discover: true });
   await f.call('Target.attachToTarget', { targetId: view.targetId }); view.debugger.emit('detach');
