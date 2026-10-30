@@ -124,7 +124,9 @@ export class TextTail {
 export function cleanEnv(base: NodeJS.ProcessEnv, remove: readonly string[] = [], set: Record<string, string> = {}): Record<string, string> {
   const env: Record<string, string> = {};
   for (const [key, value] of Object.entries(base)) {
-    if (value !== undefined && !remove.includes(key)) env[key] = value;
+    // The desktop relay authorizes every embedded target. Providers receive only their
+    // scoped browser MCP capability, never the backend's unrestricted relay connection.
+    if (value !== undefined && key !== 'MINGLE_EMBEDDED_BROWSER_TOKEN' && key !== 'MINGLE_EMBEDDED_BROWSER_URL' && !remove.includes(key)) env[key] = value;
   }
   return { ...env, ...set };
 }
