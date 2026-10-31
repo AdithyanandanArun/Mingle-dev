@@ -144,6 +144,51 @@ async function main() {
       startedAt: at, finishedAt: status === 'completed' ? at : null, durationMs: null,
       subagentMessages: status === 'completed' ? [{ id: 'example-child-reply', content: 'Example source is ready.', createdAt: at }] : [] });
   };
+  await test('workspace header keeps labels, icons and the Example badge inside their own bounds', async () => {
+    fixture = (boot) => {
+      boot.projects = boot.projects.map((project) => ({ ...project, name: 'Example project with a long name that must truncate' }));
+      boot.sessions = boot.sessions.map((session) => ({ ...session, name: 'Example session with a long name that must truncate' }));
+    };
+    await refresh();
+    try {
+      for (const width of [1440, 1280, 1101, 1100, 900, 600, 390, 320]) {
+        await page.setViewportSize({ width, height: 900 });
+        const layout = await page.locator('.header').evaluate((header) => {
+          const bounds = (node) => {
+            const r = node.getBoundingClientRect();
+            return { left: r.left, right: r.right, top: r.top, bottom: r.bottom, width: r.width };
+          };
+          return {
+            header: bounds(header),
+            badge: bounds(header.querySelector('.header__example')),
+            actions: bounds(header.querySelector('.header__actions')),
+            buttons: [...header.querySelectorAll('.header__compact-action')].map((button) => ({
+              name: button.getAttribute('aria-label'), rect: bounds(button),
+              icon: bounds(button.querySelector('svg')),
+              label: bounds(button.querySelector('span:not(.sr-only)')),
+            })),
+          };
+        });
+        assert.ok(layout.actions.right <= width + 1, `header actions stay on screen at ${width}px`);
+        assert.ok(layout.badge.right <= layout.actions.left, `Example badge never overlaps actions at ${width}px`);
+        for (const button of layout.buttons) {
+          assert.ok(button.icon.width >= 13, `${button.name} retains its icon at ${width}px`);
+          assert.ok(button.icon.left >= button.rect.left && button.icon.right <= button.rect.right, `${button.name} icon stays inside its button at ${width}px`);
+          if (width > 1100) {
+            assert.ok(button.label.width > 0 && button.label.left >= button.rect.left && button.label.right <= button.rect.right,
+              `${button.name} desktop label stays inside its button at ${width}px: ${JSON.stringify(button)}`);
+          } else {
+            assert.equal(button.label.width, 0, `${button.name} uses an accessible icon-only action at ${width}px`);
+          }
+        }
+        if (width === 1280 || width === 390) await page.screenshot({ path: path.join(outputDir, `header-${width}.png`) });
+      }
+    } finally {
+      fixture = null;
+      await refresh();
+      await page.setViewportSize({ width: 1280, height: 900 });
+    }
+  });
   await test('composer has no manual launcher or empty subagent rail', async () => {
     assert.equal(await page.getByRole('button', { name: 'Start a subagent', exact: true }).count(), 0);
     assert.equal(await rail.count(), 0);

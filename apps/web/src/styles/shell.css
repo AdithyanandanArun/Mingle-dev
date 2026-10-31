@@ -34,7 +34,8 @@
 .crumbs__project { color: var(--fg-2); max-width: 220px; }
 .crumbs__current { font-weight: 450; letter-spacing: 0; color: var(--fg-0); }
 .header__actions { gap: 4px; }
-.header__actions .header__compact-action { width: 30px; height: 30px; }
+.header__actions .header__compact-action { width: auto; height: 30px; padding-inline: 9px; flex: none; }
+.header__compact-action > svg { flex: none; }
 .header__title { display: flex; align-items: center; gap: 9px; flex: 1; min-width: 0; }
 .header__title .crumbs { flex: 1; }
 .header__primary, .header__team-row { display: contents; }
@@ -61,7 +62,7 @@
 @media (max-width: 680px) { .crumbs__project { max-width: 120px; } .header { padding-left: 10px; } }
 @media (max-width: 1100px) {
   .header__actions .header__compact-action { width: 30px; height: 30px; padding: 0; }
-  .header__actions .header__compact-action > span { display: none; }
+  .header__actions .header__compact-action > span:not(.sr-only) { display: none; }
 }
 @media (max-width: 600px) {
   .header--team {
