@@ -7,14 +7,13 @@ import { dirname, delimiter, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createAccountKeyManager } from './account-storage/account-key.mjs';
 import { createAccountKeyIpcHandler } from './account-storage/account-key-ipc.mjs';
-import { configureLinuxPasswordStore } from './account-storage/linux-backend.mjs';
+import { configureCredentialStoreStartup, verifyCredentialStore, saveUserCredentialStore, credentialStoreOptions } from './account-storage/credential-store.mjs';
 import { createProjectInvitationDispatcher, focusProjectInvitationWindow, isProjectInvitationWorkspaceUrl } from './project-invitation.mjs';
 import { createEmbeddedBrowserHost, hideOwnedEmbeddedView } from './embedded-browser/host.mjs';
 
 const root = app.isPackaged ? join(process.resourcesPath, 'workspace') : fileURLToPath(new URL('../../', import.meta.url));
 const serverRoot = join(root, 'apps/server');
 app.setName('Mingle');
-configureLinuxPasswordStore({ app });
 const mingleUserData = app.getPath('userData');
 const legacyUserData = join(dirname(mingleUserData), 'Relay');
 const mingleWorkspace = join(mingleUserData, 'workspace');
@@ -26,6 +25,7 @@ const userData = hasDatabase(legacyWorkspace) ? legacyUserData
   : hasDatabase(mingleWorkspace) ? mingleUserData
     : existsSync(legacyWorkspace) || existsSync(legacyUserData) ? legacyUserData
       : mingleUserData;
+const credentialStoreStartup = configureCredentialStoreStartup({ app, safeStorage, userData });
 mkdirSync(userData, { recursive: true, mode: 0o700 });
 app.setPath('userData', userData);
 app.setPath('sessionData', userData);
@@ -46,6 +46,23 @@ const browserWindows = new Map();
 const SESSION_ID_PATTERN = /^[A-Za-z0-9_-]{1,80}$/;
 
 function isLiveWindow(window) { return Boolean(window && !window.isDestroyed()); }
+
+ipcMain.handle('mingle.credential-store.choose', (event, backend) => {
+  if (!isLiveWindow(mainWindow) || event.sender !== mainWindow.webContents || !isWorkspaceFrame(event)) return false;
+  if (backend !== 'auto' && !['gnome-libsecret', 'kwallet5', 'kwallet6', 'kwallet'].includes(backend)) return false;
+  if (backend !== 'auto' && !credentialStoreOptions({ userData }).available.includes(backend)) return false;
+  return saveUserCredentialStore(userData, backend);
+});
+ipcMain.handle('mingle.credential-store.state', event => {
+  if (!isLiveWindow(mainWindow) || event.sender !== mainWindow.webContents || !isWorkspaceFrame(event)) return null;
+  return credentialStoreOptions({ userData });
+});
+ipcMain.handle('mingle.credential-store.restart', event => {
+  if (!isLiveWindow(mainWindow) || event.sender !== mainWindow.webContents || !isWorkspaceFrame(event)) return false;
+  app.relaunch();
+  app.exit(0);
+  return true;
+});
 
 function isWorkspaceFrame(event) {
   if (!workspaceUrl || event.senderFrame !== event.sender.mainFrame) return false;
@@ -199,6 +216,7 @@ async function openWorkspace() {
   const dataOverride = process.env.MINGLE_DATA_DIR !== undefined ? process.env.MINGLE_DATA_DIR : process.env.RELAY_DATA_DIR;
   const workspaceDataDir = dataOverride?.trim() || join(userData, 'workspace');
   const getAccountKey = createAccountKeyManager({ userData, workspaceDataDir, safeStorage });
+  verifyCredentialStore({ app, safeStorage, userData, startup: credentialStoreStartup });
   const serverRequire = createRequire(join(serverRoot, 'package.json'));
   const ws = serverRequire('ws');
   embeddedBrowserHost = createEmbeddedBrowserHost({ electron: { app, BrowserWindow, WebContentsView, ipcMain, session }, ws, getHostWindow: () => (isLiveWindow(mainWindow) ? mainWindow : null) });

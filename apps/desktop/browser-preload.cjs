@@ -38,6 +38,10 @@ ipcRenderer.on('mingle.browser.popout.closed', (_event, sessionId) => {
 });
 
 contextBridge.exposeInMainWorld('mingleBrowserDesktop', Object.freeze({
+  chooseCredentialStore: backend => ['auto', 'gnome-libsecret', 'kwallet', 'kwallet5', 'kwallet6'].includes(backend)
+    ? ipcRenderer.invoke('mingle.credential-store.choose', backend) : Promise.resolve(false),
+  credentialStoreState: () => ipcRenderer.invoke('mingle.credential-store.state'),
+  restartForCredentialStore: () => ipcRenderer.invoke('mingle.credential-store.restart'),
   openPopout: (sessionId) => sessionPattern.test(sessionId) ? ipcRenderer.invoke('mingle.browser.open-popout', sessionId) : Promise.resolve(false),
   isPopoutOpen: (sessionId) => sessionPattern.test(sessionId) ? ipcRenderer.invoke('mingle.browser.is-popout-open', sessionId) : Promise.resolve(false),
   focusPopout: (sessionId) => sessionPattern.test(sessionId) ? ipcRenderer.invoke('mingle.browser.focus-popout', sessionId) : Promise.resolve(false),

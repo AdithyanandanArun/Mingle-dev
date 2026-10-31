@@ -150,3 +150,19 @@ export function configureLinuxPasswordStore({ app, ...options }) {
   if (selection.status === 'selected') app.commandLine.appendSwitch('password-store', selection.backend);
   return selection;
 }
+
+export function linuxPasswordStoreCandidates({ platform = process.platform, argv = process.argv, run = spawnSync } = {}) {
+  if (platform !== 'linux' || hasExplicitPasswordStore(argv)) return [];
+  const services = probeSessionServices(run);
+  if (!services) return [];
+  const activeSecret = services.owned.has('org.freedesktop.secrets');
+  const activeWallet = walletBackend(services.owned);
+  const activatableSecret = services.activatable.has('org.freedesktop.secrets');
+  const activatableWallet = walletBackend(services.activatable);
+  return [...new Set([
+    ...(activeSecret ? ['gnome-libsecret'] : []),
+    ...(activeWallet ? [activeWallet] : []),
+    ...(!activeSecret && activatableSecret ? ['gnome-libsecret'] : []),
+    ...(!activeWallet && activatableWallet ? [activatableWallet] : []),
+  ])];
+}
