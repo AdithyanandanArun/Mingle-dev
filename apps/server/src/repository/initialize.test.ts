@@ -34,6 +34,20 @@ describe('project Git initialization', () => {
     expect((await git(cwd, ['ls-tree', '-r', '--name-only', 'HEAD'])).stdout).not.toMatch(/\.env|id_rsa/);
   });
 
+  it('excludes private files despite negated ignore rules while retaining templates and public keys', async () => {
+    const cwd = folder();
+    writeFileSync(path.join(cwd, '.gitignore'), '.env*\n!.env\n!.env.example\n*.key\n!private.key\n');
+    for (const file of ['.env', '.npmrc', 'private.key', 'id_ed25519', '.ENV']) writeFileSync(path.join(cwd, file), 'example-private-data');
+    mkdirSync(path.join(cwd, '.aws'));
+    writeFileSync(path.join(cwd, '.aws', 'config'), 'example-private-data');
+    writeFileSync(path.join(cwd, '.env.example'), 'API_KEY=');
+    writeFileSync(path.join(cwd, 'id_ed25519.pub'), 'example-public-key');
+    await initializeProjectRepository({ cwd, fallbackIdentity: { name: 'Mingle User', email: 'user@example.test' }, getState: async () => ({}) as never });
+    const tracked = (await git(cwd, ['ls-tree', '-r', '--name-only', 'HEAD'])).stdout.split('\n').filter(Boolean);
+    expect(tracked.sort()).toEqual(['.env.example', '.gitignore', 'id_ed25519.pub']);
+    expect(readFileSync(path.join(cwd, '.env'), 'utf8')).toBe('example-private-data');
+  });
+
   it('passes validated GitHub argv and returns the created URL', async () => {
     const cwd = folder();
     const calls: Array<{ args: string[]; cwd?: string; timeoutMs?: number }> = [];

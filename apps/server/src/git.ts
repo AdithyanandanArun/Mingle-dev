@@ -90,25 +90,34 @@ export async function initializeRepository(cwd: string, identity: string[] = [])
   const notices: string[] = [];
   const ignore = await fsp.readFile(ignorePath, 'utf8').catch(() => '');
   const extraIgnore: string[] = [];
+  const excluded: string[] = [];
   const status = await git(cwd, ['status', '--porcelain=v1', '-z', '--untracked-files=all']);
   const paths = status.stdout.split('\0').filter(Boolean).map((row) => row.length >= 4 ? row.slice(3) : '').filter(Boolean);
   for (const rel of paths) {
-    if (rel.split(/[\\/]/).some((part) => part === '.git')) continue;
+    const parts = rel.split(/[\\/]/);
+    const secret = parts.some((part, index) => isDeniedName(part) && !(index === parts.length - 1 && /\.pub$/i.test(part)));
+    if (secret) excluded.push(rel);
+    if (parts.some((part) => part === '.git')) continue;
     let stat;
     try { stat = await fsp.lstat(path.join(cwd, rel)); } catch { continue; }
     if (stat.isDirectory() || stat.isSymbolicLink()) continue;
-    if (stat.size > 50 * 1024 * 1024) { notices.push(`Skipped ${rel} because it is larger than 50 MB.`); continue; }
+    if (stat.size > 50 * 1024 * 1024) { excluded.push(rel); notices.push(`Skipped ${rel} because it is larger than 50 MB.`); continue; }
     const basename = path.basename(rel);
     // Templates such as .env.example are meant to be committed.
     const template = /^\.env\.(?:example|sample|template|dist)$/i.test(basename) || /\.pub$/i.test(basename);
-    if (!template && /^(?:\.env(?:\..*)?|.*\.pem|id_rsa.*)$/i.test(basename) && !isIgnored(ignore, rel)) {
+    if (secret && !template && !isIgnored(ignore, rel)) {
       const pattern = rel.startsWith('.env') ? '.env*' : path.basename(rel);
       if (!extraIgnore.includes(pattern)) extraIgnore.push(pattern);
       notices.push(`Added ${rel} to .gitignore because it looks like a secret or private key.`);
     }
   }
   if (extraIgnore.length) await fsp.appendFile(ignorePath, `${ignore && !ignore.endsWith('\n') ? '\n' : ''}${extraIgnore.join('\n')}\n`);
-  await git(cwd, ['add', '-A']);
+  // Re-read after updating .gitignore and stage only explicitly approved files. Negations cannot re-include secrets.
+  const visible = (await git(cwd, ['ls-files', '--others', '--exclude-standard', '-z'])).stdout.split('\0').filter(Boolean);
+  const blocked = new Set(excluded);
+  const inspected = new Set(paths);
+  const safe = visible.filter(rel => inspected.has(rel) && !blocked.has(rel));
+  if (safe.length) await git(cwd, ['--literal-pathspecs', 'add', '--pathspec-from-file=-', '--pathspec-file-nul'], { stdin: safe.join('\0') + '\0' });
   const cached = await git(cwd, ['diff', '--cached', '--name-only', '-z']);
   const candidates = cached.stdout.split('\0').filter(Boolean);
   for (const rel of candidates) {
