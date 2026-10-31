@@ -1,36 +1,37 @@
-/* Mingle design tokens — neutral surfaces with a muted accent. */
+/* Mingle design tokens — neutral surfaces and monochrome accents. */
 :root,
 :root[data-theme='dark'] {
   color-scheme: dark;
 
-  --bg-app: #0d0e11;
-  --bg-sidebar: #111216;
-  --bg-panel: #14161a;
-  --bg-surface: #191c21;
-  --bg-raised: #20242b;
+  --bg-app: #0e0e0e;
+  --bg-sidebar: #121212;
+  --bg-panel: #161616;
+  --bg-surface: #1c1c1c;
+  --bg-raised: #242424;
   --bg-hover: rgba(255, 255, 255, 0.045);
   --bg-active: rgba(255, 255, 255, 0.075);
-  --bg-inset: #0d0e11;
-  --bg-message: #191c21;
+  --bg-inset: #0e0e0e;
+  --bg-message: #1c1c1c;
   --bg-overlay: rgba(0, 0, 0, 0.62);
 
   --line-soft: rgba(255, 255, 255, 0.055);
   --line: rgba(255, 255, 255, 0.10);
   --line-strong: rgba(255, 255, 255, 0.18);
 
-  --fg-0: #eef0f5;
-  --fg-1: #c4c8d1;
-  --fg-2: #969ca9;
-  --fg-3: #89909d;
-  --fg-on-accent: #191c21;
+  --fg-0: #f0f0f0;
+  --fg-1: #c8c8c8;
+  --fg-2: #9c9c9c;
+  --fg-3: #909090;
+  --fg-on-accent: #1c1c1c;
 
-  --blue: #7d9fe8;
-  --blue-strong: #a0baff;
-  --blue-soft: rgba(125, 159, 232, 0.12);
-  --blue-line: rgba(93, 148, 240, 0.65);
-  --fg-on-blue: #101b30;
+  /* Compatibility aliases for controls that predate the neutral accent tokens. */
+  --blue: var(--accent);
+  --blue-strong: var(--accent-strong);
+  --blue-soft: var(--accent-soft);
+  --blue-line: rgba(255, 255, 255, 0.55);
+  --fg-on-blue: var(--fg-on-accent);
 
-  --accent: #eef0f5;
+  --accent: #f0f0f0;
   --accent-strong: #ffffff;
   --accent-dim: #c6c6c6;
   --accent-soft: rgba(255, 255, 255, 0.07);
@@ -42,8 +43,8 @@
   --warn-soft: rgba(241, 194, 109, 0.12);
   --err: #ff8296;
   --err-soft: rgba(255, 130, 150, 0.12);
-  --info: #7fc3f5;
-  --info-soft: rgba(127, 195, 245, 0.12);
+  --info: var(--fg-1);
+  --info-soft: var(--accent-soft);
 
   --codex: #a3a3a3;
   --claude: #d7987e;
@@ -62,13 +63,13 @@
   color-scheme: light;
 
   --bg-app: #f8f8f8;
-  --bg-sidebar: #f0f0f1;
+  --bg-sidebar: #f0f0f0;
   --bg-panel: #fafafa;
   --bg-surface: #ffffff;
   --bg-raised: #ffffff;
   --bg-hover: rgba(0, 0, 0, 0.04);
   --bg-active: rgba(0, 0, 0, 0.07);
-  --bg-inset: #ededee;
+  --bg-inset: #ededed;
   --bg-message: #eeeeee;
   --bg-overlay: rgba(0, 0, 0, 0.3);
 
@@ -79,17 +80,18 @@
   --fg-0: #181818;
   --fg-1: #454545;
   --fg-2: #707070;
-  --fg-3: #707781;
+  --fg-3: #747474;
   --fg-on-accent: #ffffff;
 
-  --blue: #356bc9;
-  --blue-strong: #245bb8;
-  --blue-soft: rgba(53, 107, 201, 0.09);
-  --blue-line: rgba(53, 107, 201, 0.55);
-  --fg-on-blue: #ffffff;
+  /* Compatibility aliases for controls that predate the neutral accent tokens. */
+  --blue: var(--accent);
+  --blue-strong: var(--accent-strong);
+  --blue-soft: var(--accent-soft);
+  --blue-line: rgba(0, 0, 0, 0.5);
+  --fg-on-blue: var(--fg-on-accent);
 
   --accent: #242424;
-  --accent-strong: #14161a;
+  --accent-strong: #161616;
   --accent-dim: #424242;
   --accent-soft: rgba(0, 0, 0, 0.05);
   --accent-line: rgba(0, 0, 0, 0.24);
@@ -100,8 +102,8 @@
   --warn-soft: rgba(164, 106, 5, 0.1);
   --err: #cc3550;
   --err-soft: rgba(204, 53, 80, 0.09);
-  --info: #1f78b8;
-  --info-soft: rgba(31, 120, 184, 0.09);
+  --info: var(--fg-1);
+  --info-soft: var(--accent-soft);
 
   --codex: #606060;
   --claude: #606060;
@@ -117,6 +119,8 @@
 }
 
 :root {
+  accent-color: var(--accent);
+
   --font-sans: 'Inter', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
   --font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace;
 

@@ -6,14 +6,14 @@
 .team-session__agent-message { gap: 3px; }
 .team-session__agent-message .team-session__message-state { width: fit-content; max-width: calc(100% - 42px); margin: -2px 0 8px 42px; padding: 3px 7px; border: 1px solid var(--line-soft); border-radius: 999px; background: var(--bg-panel); line-height: 1.35; }
 .team-session__agent-message .team-session__message-state.is-failed { border-color: var(--err-soft); background: var(--err-soft); }
-.team-session__group-routing { position: relative; gap: 7px 10px; margin: 9px 0 17px; padding: 10px 12px; border-color: var(--line); border-radius: 10px; background: linear-gradient(110deg, color-mix(in srgb, var(--accent-soft) 27%, var(--bg-panel)), var(--bg-panel) 58%); line-height: 1.45; }
+.team-session__group-routing { position: relative; gap: 7px 10px; margin: 9px 0 17px; padding: 10px 12px; border-color: var(--line); border-radius: 10px; background: var(--bg-panel); line-height: 1.45; }
 .team-session__group-routing > strong { display: inline-flex; min-height: 22px; align-items: center; padding: 0 8px; border: 1px solid var(--accent-line); border-radius: 999px; background: var(--accent-soft); color: var(--accent); font-size: var(--text-2xs); font-weight: 650; }
 .team-session__group-routing > span { min-width: 0; overflow-wrap: anywhere; }
 .team-session__paused { flex-basis: 100%; padding-top: 6px; border-top: 1px solid var(--line-soft); font-size: var(--text-xs); }
 .team-session__group-feed { gap: 9px; margin-bottom: 17px; }
 .team-session__group-message .msg__bubble { max-width: min(82%, 700px); line-height: 1.6; }
 .team-session__group-message .msg__main { min-width: 0; }
-.team-session__group-card { margin: 2px 0; border-color: var(--line); border-radius: 11px; background: linear-gradient(145deg, var(--bg-surface), color-mix(in srgb, var(--bg-panel) 36%, var(--bg-surface))); box-shadow: var(--shadow-card); }
+.team-session__group-card { margin: 2px 0; border-color: var(--line); border-radius: 11px; background: var(--bg-surface); box-shadow: var(--shadow-card); }
 .team-session__group-card > header { min-height: 39px; flex-wrap: wrap; gap: 6px 10px; padding: 7px 12px; background: color-mix(in srgb, var(--bg-panel) 68%, transparent); }
 .team-session__group-card .group-card__kind { display: inline-flex; min-height: 21px; align-items: center; padding: 0 7px; border: 1px solid var(--line); border-radius: 999px; background: var(--bg-surface); font-size: var(--text-2xs); }
 .team-session__group-card .group-card__route { flex-wrap: wrap; color: var(--fg-2); line-height: 1.4; overflow-wrap: anywhere; }
@@ -32,7 +32,7 @@
 .team-session__group-status > .msg__time { margin-left: auto; }
 .team-session__group-status .deliveries { flex-basis: 100%; }
 .team-session__group-message .msg__time, .team-session__group-card .msg__time, .team-session__group-status .msg__time { color: var(--fg-3); font-variant-numeric: tabular-nums; }
-.team-session__result { gap: 10px; margin: 15px 0 8px; padding: 14px 15px; border-color: var(--line); border-left: 3px solid var(--accent-line); border-radius: 11px; background: linear-gradient(130deg, color-mix(in srgb, var(--accent-soft) 20%, var(--bg-surface)), var(--bg-surface) 48%); box-shadow: var(--shadow-card); line-height: 1.55; }
+.team-session__result { gap: 10px; margin: 15px 0 8px; padding: 14px 15px; border-color: var(--line); border-left: 3px solid var(--accent-line); border-radius: 11px; background: var(--bg-surface); box-shadow: var(--shadow-card); line-height: 1.55; }
 .team-session__result-head { align-items: center; }
 .team-session__result-head strong { font-size: var(--text-sm); }
 .team-session__result-head > span { flex: none; padding: 3px 8px; border: 1px solid var(--line); border-radius: 999px; background: var(--bg-panel); color: var(--fg-1); font-size: var(--text-2xs); font-weight: 600; }

@@ -2,14 +2,14 @@ import type { GroupMember, GroupSnapshot } from '@mingle/contracts';
 
 /** Distinct hues for the eight active membership slots; the light theme uses the same hues at readable contrast. */
 export const AGENT_PALETTE = [
-  { dark: '#86b8e5', light: '#356484' }, // blue
+  { dark: '#b8b8b8', light: '#646464' }, // silver
   { dark: '#79c3ae', light: '#316e60' }, // teal
   { dark: '#dfbb70', light: '#806124' }, // amber
   { dark: '#d991a1', light: '#975261' }, // rose
-  { dark: '#80c8d8', light: '#31717f' }, // cyan
+  { dark: '#c4a4bd', light: '#79546f' }, // mauve
   { dark: '#b1c47c', light: '#61712f' }, // olive
   { dark: '#dfa077', light: '#975f31' }, // orange
-  { dark: '#b0bccc', light: '#556477' }, // slate
+  { dark: '#bcb4a8', light: '#6a6256' }, // stone
 ] as const;
 export type AgentColor = (typeof AGENT_PALETTE)[number];
 

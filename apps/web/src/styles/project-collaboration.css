@@ -174,7 +174,7 @@
 
 /* Project collaboration: invite first, operational details second. */
 .pc-dialog { gap: 12px; }
-.pc-invite-card { display: grid; gap: 12px; padding: 14px; border: 1px solid var(--line); border-radius: var(--radius-md); background: linear-gradient(145deg, color-mix(in srgb, var(--bg-surface) 95%, var(--accent-soft)), var(--bg-panel) 70%); box-shadow: var(--shadow-card); }
+.pc-invite-card { display: grid; gap: 12px; padding: 14px; border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--bg-surface); box-shadow: var(--shadow-card); }
 .pc-invite-intro { align-items: center; gap: 10px; }
 .pc-invite-intro .pc-icon { width: 36px; height: 36px; border-color: var(--accent-line); background: var(--accent-soft); color: var(--accent); }
 .pc-invite-intro strong { font-size: var(--text-md); letter-spacing: -.01em; }
@@ -230,7 +230,7 @@
 .pc-no-run-note { padding-top: 3px; border-top: 1px solid var(--line-soft); }
 
 .pc-join { gap: 14px; padding: 2px 5px 2px 0; }
-.pc-join-summary { padding: 14px; border-color: var(--line); background: linear-gradient(135deg, var(--bg-surface), var(--bg-panel)); }
+.pc-join-summary { padding: 14px; border-color: var(--line); background: var(--bg-surface); }
 .pc-join-mark { width: 40px; height: 40px; }
 .pc-join-form { gap: 14px; }
 .pc-section { padding: 13px; background: color-mix(in srgb, var(--bg-panel) 76%, var(--bg-surface)); }

@@ -357,7 +357,7 @@ a.ibtn.is-disabled { opacity: 0.4; pointer-events: none; }
 .activity { flex: 1; min-height: 0; display: flex; flex-direction: column; animation: fade-up var(--motion-ui) var(--ease-out) both; }
 .activity__scroll { flex: 1; overflow: auto; padding: 0 24px 32px; }
 .egroup { width: min(900px, 100%); margin: 0 0 8px; }
-.egroup h2 { position: sticky; top: 0; z-index: 2; padding: 10px 0 8px; font-size: var(--text-xs); text-transform: uppercase; letter-spacing: 0.09em; font-weight: 600; color: var(--fg-3); background: linear-gradient(var(--bg-app) 70%, transparent); }
+.egroup h2 { position: sticky; top: 0; z-index: 2; padding: 10px 0 8px; font-size: var(--text-xs); text-transform: uppercase; letter-spacing: 0.09em; font-weight: 600; color: var(--fg-3); background: var(--bg-app); }
 .evts { list-style: none; margin: 0; padding: 0; position: relative; }
 .evts::before { content: ''; position: absolute; left: 4px; top: 8px; bottom: 8px; width: 1px; background: var(--line); }
 .evt { display: flex; gap: 14px; padding: 8px 0; position: relative; animation: fade-up var(--motion-ui) var(--ease-out) both; }

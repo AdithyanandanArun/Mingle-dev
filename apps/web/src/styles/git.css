@@ -23,7 +23,7 @@
 .gitbar__setup-actions, .gitbar__setup-form { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
 .gitbar__setup-button { display: inline-flex; align-items: center; justify-content: center; gap: 5px; min-height: 27px; padding: 0 9px; border: 1px solid var(--line); border-radius: 7px; background: var(--bg); color: var(--fg-1); font: inherit; cursor: pointer; }
 .gitbar__setup-button:hover:not(:disabled) { background: var(--bg-hover); color: var(--fg-0); }
-.gitbar__setup-button--primary { border-color: var(--blue); background: var(--blue); color: white; }
+.gitbar__setup-button--primary { border-color: var(--blue); background: var(--blue); color: var(--fg-on-blue); }
 .gitbar__setup-button--primary:hover:not(:disabled) { filter: brightness(1.08); color: white; }
 .gitbar__setup-button:disabled { opacity: .55; cursor: not-allowed; }
 .gitbar__setup-form { padding-top: 3px; }
