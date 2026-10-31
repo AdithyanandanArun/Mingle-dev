@@ -86,7 +86,7 @@ await cp(join(root, 'apps/desktop/account-storage'), join(appDir, 'account-stora
   recursive: true, filter: source => !source.endsWith('.test.mjs'),
 });
 await writeFile(join(appDir, 'package.json'), JSON.stringify({
-  name: 'mingle', productName: 'Mingle', version: pkg.version, type: 'module', main: 'main.mjs',
+  name: 'mingle', productName: 'Mingle', version: pkg.version, license: pkg.license, type: 'module', main: 'main.mjs',
 }, null, 2) + '\n');
 const workspace = join(stage, 'resources/workspace');
 const server = join(workspace, 'apps/server');
@@ -168,9 +168,10 @@ if (target === 'linux-x64') {
 
 const licenses = join(stage, 'resources/licenses');
 await mkdir(licenses, { recursive: true });
+await copyFile(join(root, 'LICENSE'), join(licenses, 'Mingle-LICENSE'));
 await copyFile(join(nodeDir, 'LICENSE'), join(licenses, 'Node-LICENSE'));
 await copyFile(join(stage, 'LICENSE'), join(licenses, 'Electron-LICENSE'));
-await writeFile(join(licenses, 'Mingle-NOTICE'), 'Mingle source: https://github.com/AdithyanandanArun/Agent_Orch_App\nThe project owner has not selected a license for Mingle source code. This package does not grant a new license.\nThird-party components retain their own licenses, reproduced alongside their packages and in this directory.\n');
+await writeFile(join(licenses, 'Mingle-NOTICE'), 'Mingle source: https://github.com/AdithyanandanArun/Mingle-dev\nMingle is licensed under the MIT License; see Mingle-LICENSE in this directory.\nThird-party components retain their own licenses, reproduced alongside their packages and in this directory.\n');
 const inventory = [];
 const inventoried = new Set();
 async function inventoryPackage(packageDir) {

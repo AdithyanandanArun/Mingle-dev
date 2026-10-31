@@ -47,7 +47,7 @@ The temporary prerelease includes `.deb`, `.exe` and their SHA-256 files. Before
 
 ## License metadata
 
-The repository does not currently declare a project license. The recipe records this as `unknown` and installs the license notices bundled in each release; it does not claim that those third-party notices license Mingle itself. Set the package license metadata only after the project owner selects and documents a project license. The build inventories both backend dependencies and bundled frontend dependencies and includes their license/notice files.
+Mingle is licensed under the [MIT License](../LICENSE). Workspace manifests and the Arch recipe declare `MIT`. New desktop builds include the complete project license at `resources/licenses/Mingle-LICENSE`; Arch also installs it under `/usr/share/licenses/mingle-bin/`, and Debian packages include it under `/usr/share/doc/mingle/licenses/`. The build inventories both backend dependencies and bundled frontend dependencies and preserves their separate license/notice files. Previously published binaries retain the notices they shipped with.
 
 
 ## Installed behavior and updates
@@ -62,7 +62,7 @@ There is no automatic updater. Until an AUR listing exists, install newer packag
 
 ## Publishing checklist
 
-1. Select and document Mingle's project license; replace `unknown` metadata. Third-party license notices do not grant rights to Mingle itself.
+1. Check that the package includes Mingle's MIT license and the separate notices for its bundled dependencies.
 2. Build the intended version and perform installation/launch verification on Arch. Type checking and package creation do not substitute for that check.
 3. Review the generated archive/package checksums. Copy the generated recipe into the AUR publication checkout, regenerate `.SRCINFO`, and ensure its source URL names the exact release asset.
 4. With the owner's approval, publish the versioned archive/package and checksums as a GitHub release, then register/update `mingle-bin` on the AUR using the owner's AUR account.

@@ -7,7 +7,7 @@ conflicts=('relay-workspace-bin')
 replaces=('relay-workspace-bin')
 arch=('x86_64')
 url='https://github.com/AdithyanandanArun/Mingle-dev'
-license=('unknown')
+license=('MIT')
 depends=(
   'alsa-lib'
   'at-spi2-core'
