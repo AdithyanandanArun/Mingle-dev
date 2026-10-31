@@ -166,9 +166,30 @@ describe('local transport security', () => {
     expect(await open('http://localhost:5173', '/other')).toMatchObject({ ok: false, code: 404 });
     const good = await open('http://localhost:5173');
     expect(good.ok).toBe(true);
-    const message = new Promise<any>((resolve) => good.ws.once('message', (d) => resolve(JSON.parse(d.toString()))));
+    let unrelatedNotifications = 0;
+    const message = new Promise<any>((resolve, reject) => {
+      const receive = (data: WebSocket.RawData) => {
+        const event = JSON.parse(data.toString());
+        if (event.type !== 'state.changed' || event.event?.type !== 'settings.updated') {
+          unrelatedNotifications++;
+          return;
+        }
+        clearTimeout(timer);
+        good.ws.off('message', receive);
+        resolve(event);
+      };
+      const timer = setTimeout(() => {
+        good.ws.off('message', receive);
+        reject(new Error('The settings.updated WebSocket notification did not arrive.'));
+      }, 3000);
+      good.ws.on('message', receive);
+    });
+    // Background discovery/browser updates can precede this mutation's durable event.
+    // Exercise that ordering explicitly instead of assuming the next message is ours.
+    t.app.hub.notify();
     await t.api('PATCH', '/api/settings', { theme: 'light' });
     expect(await message).toMatchObject({ type: 'state.changed', event: { type: 'settings.updated' } });
+    expect(unrelatedNotifications).toBeGreaterThanOrEqual(1);
     good.ws.close();
   });
 });
