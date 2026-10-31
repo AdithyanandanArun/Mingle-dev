@@ -34,4 +34,5 @@ Feedback from real user testing of Mingle 0.0.9. Each item is checked off once i
 
 ## Credentials on Linux
 
-- [ ] **Multiple keyrings on Arch (KWallet and GNOME Keyring).** Mingle didn't pick the one actually in use, couldn't save credentials, and kept saying "KWallet". Detect the active Secret Service correctly, and let the person choose when more than one is available.
+- [x] **Multiple keyrings on Arch (KWallet and GNOME Keyring).** Mingle didn't pick the one actually in use, couldn't save credentials, and kept saying "KWallet". Detect the active Secret Service correctly, and let the person choose when more than one is available.
+  - Done: Mingle now prefers the keyring that is actually running, checks it with a real encrypt/decrypt test, remembers what worked, and retries once with the other keyring if it fails. On the first launch after upgrading, a key saved by an older version must still decrypt, or Mingle switches back. Settings → Account shows where credentials are stored and lets you choose: Automatic, GNOME Keyring or KWallet.

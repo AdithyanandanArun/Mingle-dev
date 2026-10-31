@@ -67,3 +67,37 @@ test('relaunches once with the next detected candidate after an automatic store 
   assert.deepEqual(calls, [{ args: ['main.mjs', '--password-store=kwallet6', '--mingle-credential-store-relaunch'] }, 0]);
   assert.deepEqual(readCredentialStore(userData), { backend: 'kwallet6', chosenBy: 'auto' });
 });
+
+test('first launch after an upgrade relaunches with another keyring when the existing key does not decrypt', t => {
+  const userData = directory(t);
+  const relaunched = [];
+  const app = { relaunch: (options) => relaunched.push(options), exit: () => undefined, commandLine: { appendSwitch: () => undefined } };
+  const safeStorage = {
+    isEncryptionAvailable: () => true,
+    encryptString: (value) => Buffer.from(`enc:${value}`),
+    decryptString: (buffer) => { const text = buffer.toString(); if (!text.startsWith('enc:')) throw new Error('wrong keyring'); return text.slice(4); },
+  };
+  const run = (command, args) => {
+    const method = args.find((value) => typeof value === 'string' && value.includes('List'));
+    const names = method?.includes('Activatable') ? '' : '"org.freedesktop.secrets" "org.kde.kwalletd6"';
+    return { status: 0, stdout: names };
+  };
+  const result = verifyCredentialStore({
+    app, safeStorage, userData, platform: 'linux', argv: ['mingle'], run,
+    startup: { backend: 'gnome-libsecret', chosenBy: 'auto', explicit: false, stored: null },
+    existingKey: Buffer.from('wrapped-by-kwallet'),
+  });
+  assert.equal(result.status, 'relaunching');
+  assert.ok(relaunched[0].args.some((value) => value.startsWith('--password-store=kwallet')));
+});
+
+test('an existing key is not re-checked once a working choice is stored', t => {
+  const userData = directory(t);
+  const safeStorage = { isEncryptionAvailable: () => true, encryptString: (v) => Buffer.from(v), decryptString: (b) => b.toString() };
+  const result = verifyCredentialStore({
+    app: { relaunch: () => assert.fail('no relaunch'), exit: () => undefined }, safeStorage, userData, platform: 'linux', argv: ['mingle'],
+    startup: { backend: 'gnome-libsecret', chosenBy: 'auto', explicit: false, stored: { backend: 'gnome-libsecret', chosenBy: 'auto' } },
+    existingKey: Buffer.from('anything'),
+  });
+  assert.equal(result.status, 'available');
+});

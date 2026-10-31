@@ -1,11 +1,11 @@
 import { app, BrowserWindow, WebContentsView, dialog, ipcMain, shell, safeStorage, session } from 'electron';
 import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, statSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { createRequire } from 'node:module';
 import { dirname, delimiter, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createAccountKeyManager } from './account-storage/account-key.mjs';
+import { accountKeyFilePath, createAccountKeyManager, MAX_WRAPPED_ACCOUNT_KEY_BYTES } from './account-storage/account-key.mjs';
 import { createAccountKeyIpcHandler } from './account-storage/account-key-ipc.mjs';
 import { configureCredentialStoreStartup, verifyCredentialStore, saveUserCredentialStore, credentialStoreOptions } from './account-storage/credential-store.mjs';
 import { createProjectInvitationDispatcher, focusProjectInvitationWindow, isProjectInvitationWorkspaceUrl } from './project-invitation.mjs';
@@ -205,6 +205,15 @@ async function waitForBackend(url) {
   throw new Error('The local runtime did not become ready within 15 seconds.');
 }
 
+/** The wrapped account key from an earlier launch, if any, so the credential-store check can confirm it still decrypts. */
+function readExistingAccountKey(userData, workspaceDataDir) {
+  try {
+    const file = accountKeyFilePath(userData, workspaceDataDir);
+    if (!existsSync(file) || statSync(file).size > MAX_WRAPPED_ACCOUNT_KEY_BYTES) return null;
+    return readFileSync(file);
+  } catch { return null; }
+}
+
 async function openWorkspace() {
   if (!existsSync(join(root, 'apps/web/dist/index.html'))) {
     throw new Error(app.isPackaged ? 'The installed application is missing its UI files. Reinstall Mingle.' : 'Build Mingle first with pnpm build, then run pnpm desktop.');
@@ -216,7 +225,7 @@ async function openWorkspace() {
   const dataOverride = process.env.MINGLE_DATA_DIR !== undefined ? process.env.MINGLE_DATA_DIR : process.env.RELAY_DATA_DIR;
   const workspaceDataDir = dataOverride?.trim() || join(userData, 'workspace');
   const getAccountKey = createAccountKeyManager({ userData, workspaceDataDir, safeStorage });
-  const credentialStoreCheck = verifyCredentialStore({ app, safeStorage, userData, startup: credentialStoreStartup });
+  const credentialStoreCheck = verifyCredentialStore({ app, safeStorage, userData, startup: credentialStoreStartup, existingKey: readExistingAccountKey(userData, workspaceDataDir) });
   if (credentialStoreCheck.status === 'relaunching') return;
   const serverRequire = createRequire(join(serverRoot, 'package.json'));
   const ws = serverRequire('ws');

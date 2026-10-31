@@ -55,10 +55,19 @@ function roundTrip(safeStorage) {
   } catch { return false; }
 }
 
-export function verifyCredentialStore({ app, safeStorage, userData, startup, argv = process.argv, platform = process.platform, run, fileSystem }) {
+/**
+ * Upgrade guard: the first launch that records a choice must also decrypt an account key wrapped by an earlier
+ * version, which may have used the other keyring. A key that only the other keyring can read counts as a failure.
+ */
+function existingKeyReadable(safeStorage, existingKey, startup) {
+  if (!existingKey || startup.stored) return true;
+  try { return typeof safeStorage.decryptString(existingKey) === 'string'; } catch { return false; }
+}
+
+export function verifyCredentialStore({ app, safeStorage, userData, startup, argv = process.argv, platform = process.platform, run, fileSystem, existingKey = null }) {
   const actual = startup.backend ?? backendFromArgs(argv);
   if (!actual) return { status: roundTrip(safeStorage) ? 'available' : 'unavailable', backend: null };
-  if (roundTrip(safeStorage)) {
+  if (roundTrip(safeStorage) && existingKeyReadable(safeStorage, existingKey, startup)) {
     writeCredentialStore(userData, { backend: actual, chosenBy: startup.chosenBy ?? 'auto' }, fileSystem);
     return { status: 'available', backend: actual };
   }
