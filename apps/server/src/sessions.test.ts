@@ -123,6 +123,15 @@ describe('provider runs', () => {
     await waitFor(() => t.app.store.listEvents().some((event: any) => event.sessionId === sid && event.type === 'session.queue.start-failed'));
     expect(t.app.store.listEvents().some((event: any) => event.sessionId === sid && event.type === 'session.queue.start-failed')).toBe(true);
   });
+  it('falls back to queue when native steering fails', async () => {
+    const t = await boot(); const gate = deferred(); t.fake.script = async () => { await gate.promise; }; t.fake.steerError = new Error('steer rejected');
+    const sid = EXAMPLE_CONTRACT_SESSION_ID;
+    await t.api('POST', `/api/sessions/${sid}/messages`, { content: 'first' }); await waitFor(() => t.fake.runs.length === 1);
+    const response = await t.api('POST', `/api/sessions/${sid}/messages`, { content: 'please focus on errors' });
+    expect(response.status).toBe(202); expect(response.json).toMatchObject({ accepted: true, queued: { content: 'please focus on errors' } });
+    expect((await messages(t, sid)).filter((message) => message.kind === 'steered')).toHaveLength(0);
+    gate.resolve(); await waitFor(() => t.fake.runs.length === 2);
+  });
   it('streams deltas durably, finalises messages and tracks usage', async () => {
     const t = await boot();
     const gate = deferred();

@@ -71,6 +71,7 @@ export function createCodexAdapter(deps: CodexAdapterDeps = {}): AgentAdapter {
   const env = deps.env ?? process.env;
   const timeouts: CodexTimeouts = { ...DEFAULT_CODEX_TIMEOUTS, ...deps.timeouts };
   const resolveBinary = deps.resolveExecutable ?? ((settings, e) => resolveExecutableCached({ name: 'codex', override: settings.codexExecutable, env: e }));
+  let activeRun: CodexRun | null = null;
   return {
     async run(options: RunOptions): Promise<void> {
       markNotDispatched(options);
@@ -79,8 +80,15 @@ export function createCodexAdapter(deps: CodexAdapterDeps = {}): AgentAdapter {
       const resolved = await resolveBinary(options.settings, env);
       if (!resolved.ok) throw new ProviderError(resolved.reason, { code: 'executable_unavailable' });
       if (options.signal.aborted) throw abortError();
-      await new CodexRun(options, resolved.executable.path, { env, timeouts, spawn: deps.spawn ?? defaultSpawn, version: deps.clientVersion ?? CODEX_CLIENT_INFO.version }).execute();
+      const run = new CodexRun(options, resolved.executable.path, { env, timeouts, spawn: deps.spawn ?? defaultSpawn, version: deps.clientVersion ?? CODEX_CLIENT_INFO.version });
+      activeRun = run;
+      try { await run.execute(); } finally { if (activeRun === run) activeRun = null; }
     },
+    async steer(text: string): Promise<void> {
+      if (!activeRun) throw new ProviderError('Codex has no active turn to steer.', { code: 'not_running' });
+      await activeRun.steer(text);
+    },
+    isSteerable(): boolean { return activeRun?.isSteerable() ?? false; },
     async compact({ session, settings, signal }): Promise<ContextCompactionResult> {
       const startedAt = new Date().toISOString();
       const result = (status: ContextCompactionResult['status'], message: string, error: string | null): ContextCompactionResult => ({
@@ -142,6 +150,12 @@ class CodexRun {
   private emit(event: AdapterEvent): void {
     try { this.options.onEvent(event); } catch { /* a faulty host listener must not break the protocol loop */ }
   }
+
+  async steer(text: string): Promise<void> {
+    if (this.phase !== 'turn' || !this.threadId || !this.turnId) throw new ProviderError('Codex has no active turn to steer.', { code: 'not_running' });
+    await this.conn.request('turn/steer', { threadId: this.threadId, input: [{ type: 'text', text, text_elements: [] }], expectedTurnId: this.turnId }, this.ctx.timeouts.turnStartMs);
+  }
+  isSteerable(): boolean { return this.phase === 'turn' && Boolean(this.threadId && this.turnId); }
 
   private info(message: string): void {
     if (this.warned.has(message)) return;

@@ -227,7 +227,7 @@ export function buildRouter(s: Services) {
     const runs = s.store.bootstrapRuns();
     const body: Bootstrap = {
       groups: s.groups.snapshots(), runs, toolCalls: s.store.bootstrapToolCalls(runs.map((run) => run.id)),
-      projects: s.store.listProjects(), sessions: s.store.listSessions(), messages: s.store.bootstrapMessages(300), queuedMessages: s.store.listSessions().flatMap((session) => s.store.listQueuedMessages(session.id)), tasks: s.store.listTasks(),
+      projects: s.store.listProjects(), sessions: s.store.listSessions().map((session) => ({ ...session, steerable: s.runtime.isSteerable(session.id) })), messages: s.store.bootstrapMessages(300), queuedMessages: s.store.listSessions().flatMap((session) => s.store.listQueuedMessages(session.id)), tasks: s.store.listTasks(),
       events: s.store.recentEvents(500), approvals: s.store.bootstrapApprovals(50), plans: s.store.bootstrapPlans(), questions: s.store.bootstrapQuestions(), providers, settings: s.store.getSettings(), version: s.config.version,
     };
     return body;
@@ -567,6 +567,7 @@ export function buildRouter(s: Services) {
       if (session.status === 'waiting') throw conflict('A pending question or approval must be resolved before sending a message.');
       const attachments = s.attachments.validate({ kind: 'session', id }, attachmentIds ?? []);
       validateSessionAttachmentSupport(s, session, attachments, content);
+      if (!attachments.length && !selected?.length && intent !== 'plan' && await s.runtime.steer(id, content)) return new Reply(202, { accepted: true, steered: true });
       const queuedId = `queued-${crypto.randomUUID()}`;
       let queued!: import('@mingle/contracts').QueuedMessage;
       s.store.tx(() => {

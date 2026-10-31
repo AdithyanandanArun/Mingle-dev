@@ -13,6 +13,8 @@ export interface Project { id: string; name: string; path: string; createdAt: st
 export interface Session {
   id: string; projectId: string; name: string; provider: Provider; model: string; effort: Effort;
   status: SessionStatus; policy: Policy; serviceTier?: string; isolated: boolean; worktreePath: string; branch: string | null;
+  /** True while the active native provider turn accepts steering input. */
+  steerable?: boolean;
   providerSessionId: string | null; createdAt: string; updatedAt: string; error: string | null;
   handoffFromProvider?: Provider | null; handoffFromModel?: string | null; handoffPendingAt?: string | null;
   inputTokens: number; outputTokens: number; costUsd: number | null;
@@ -238,6 +240,9 @@ export type AdapterEvent =
   | { type: 'info'; content: string };
 export interface AgentAdapter {
   run(options: RunOptions): Promise<void>;
+  /** Appends user text to the active native provider turn when supported. */
+  steer?(text: string): Promise<void>;
+  isSteerable?(): boolean;
   /** Explicit native context compaction, when supported; unsupported runtimes leave history untouched. */
   compact?(options: { session: Session; settings: AppSettings; signal: AbortSignal }): Promise<ContextCompactionResult>;
 }

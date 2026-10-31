@@ -292,6 +292,19 @@ describe('codex adapter', () => {
     expect(run.events.some((e) => e.type === 'info' && e.content.includes('stream dropped'))).toBe(true);
   });
 
+  it('steers the active native turn with expected thread and turn ids', async () => {
+    const run = makeRun(); let release!: () => void; const gate = new Promise<void>((resolve) => { release = resolve; });
+    const { child, adapter } = setup(server((m, c) => {
+      if (m.method === 'turn/start') { void gate.then(() => c.notify('turn/completed', completed())); }
+      if (m.method === 'turn/steer') c.reply(m, {});
+    }));
+    const running = adapter.run(run.options);
+    await waitFor(() => child.requestsFor('turn/start').length === 1);
+    await adapter.steer!('Please focus on the failing test');
+    expect(child.requestsFor('turn/steer')[0]?.params).toEqual({ threadId: 'thr_1', input: [{ type: 'text', text: 'Please focus on the failing test', text_elements: [] }], expectedTurnId: 'turn_1' });
+    release(); await running;
+  });
+
   it('stops the run instead of accepting a service-side model substitution', async () => {
     const run = makeRun();
     const { child, adapter } = setup(server((m, c) => {

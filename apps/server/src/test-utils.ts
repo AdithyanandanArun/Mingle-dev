@@ -15,10 +15,11 @@ export type Script = (options: RunOptions, emit: (event: AdapterEvent) => void) 
 export class FakeProviders implements ProviderRuntime {
   runs: RunOptions[] = [];
   catalogSkills: import('@mingle/contracts').ProviderSkill[] = [];
+  steerError: Error | null = null;
   script: Script = async (_o, emit) => { emit({ type: 'text', text: 'ok' }); };
   detections = 0;
   createAdapter(_provider: Provider): AgentAdapter {
-    return { run: async (options) => { this.runs.push(options); await this.script(options, options.onEvent); } };
+    return { run: async (options) => { this.runs.push(options); await this.script(options, options.onEvent); }, ...(this.steerError ? { steer: async () => { throw this.steerError; } } : {}) };
   }
   async detectProviders(_settings: AppSettings): Promise<ProviderInfo[]> {
     this.detections++;

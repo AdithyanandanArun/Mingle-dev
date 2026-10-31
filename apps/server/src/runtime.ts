@@ -253,10 +253,10 @@ export class SessionRuntime {
     return this.active.has(sessionId) || this.compactions.has(sessionId) || Boolean(this.teamProxy?.isActive(sessionId));
   }
   canQueue(sessionId:string): boolean { const run=this.active.get(sessionId); return Boolean(run && !run.cleanupPending && !run.closed); }
-  isSteerable(sessionId: string): boolean { const run=this.active.get(sessionId); return Boolean(run && run.providerPhase && !run.closed && !run.cleanupPending && run.provider==='codex' && run.adapter?.steer); }
+  isSteerable(sessionId: string): boolean { const run=this.active.get(sessionId); return Boolean(run && run.providerPhase && !run.closed && !run.cleanupPending && run.provider==='codex' && run.adapter?.steer && run.adapter.isSteerable?.()); }
   async steer(sessionId: string, content: string): Promise<boolean> {
     const run=this.active.get(sessionId);
-    if (!run || !run.providerPhase || run.closed || run.cleanupPending || run.provider!=='codex' || !run.adapter?.steer) return false;
+    if (!run || !run.providerPhase || run.closed || run.cleanupPending || run.provider!=='codex' || !run.adapter?.steer || !run.adapter.isSteerable?.()) return false;
     try {
       await run.adapter.steer(content);
       this.store.insertMessage({sessionId,role:'user',content,kind:'steered'});
