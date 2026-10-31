@@ -54,6 +54,17 @@ describe('session creation', () => {
 });
 
 describe('provider runs', () => {
+  it('persists and drains queued messages in order after a run ends', async () => {
+    const t=await boot(); const gate=deferred(); t.fake.script=async()=>{await gate.promise;};
+    await t.api('POST',`/api/sessions/${EXAMPLE_CONTRACT_SESSION_ID}/messages`,{content:'first'});
+    await waitFor(()=>t.fake.runs.length===1);
+    const a=await t.api('POST',`/api/sessions/${EXAMPLE_CONTRACT_SESSION_ID}/messages`,{content:'second'});
+    const b=await t.api('POST',`/api/sessions/${EXAMPLE_CONTRACT_SESSION_ID}/messages`,{content:'third'});
+    expect(a.json.queued).toBeTruthy(); expect(b.json.queued).toBeTruthy();
+    expect((await t.api('GET','/api/bootstrap')).json.queuedMessages.map((m:any)=>m.content)).toEqual(['second','third']);
+    gate.resolve(); await waitFor(()=>t.fake.runs.length===3);
+    expect(t.fake.runs.map((r:any)=>r.prompt)).toEqual(expect.arrayContaining(['second','third']));
+  });
   it('streams deltas durably, finalises messages and tracks usage', async () => {
     const t = await boot();
     const gate = deferred();
@@ -73,22 +84,22 @@ describe('provider runs', () => {
     expect(t.fake.runs[0]!.session.worktreePath).toBe((await session(t)).worktreePath);
   });
 
-  it('prevents overlapping runs: concurrent sends start exactly one provider promise', async () => {
+  it('queues concurrent sends without overlapping provider promises', async () => {
     const t = await boot();
     const gate = deferred();
-    t.fake.script = async () => { await gate.promise; };
+    t.fake.script = async () => { if(t.fake.runs.length===1) await gate.promise; };
     const url = `/api/sessions/${EXAMPLE_CONTRACT_SESSION_ID}/messages`;
     const results = await Promise.all(Array.from({ length: 6 }, (_, i) => t.api('POST', url, { content: `msg ${i}` })));
-    expect(results.filter((r) => r.status === 202)).toHaveLength(1);
-    expect(results.filter((r) => r.status === 409)).toHaveLength(5);
+    expect(results.filter((r) => r.status === 202)).toHaveLength(6);
+    expect(results.slice(1).every((r) => Boolean(r.json.queued))).toBe(true);
     await waitFor(() => t.fake.runs.length === 1);
     expect(t.fake.runs).toHaveLength(1);
     gate.resolve();
-    await waitFor(async () => (await session(t)).status === 'idle' && t.app.runtime.activeCount() === 0);
+    await waitFor(async () => t.fake.runs.length===6 && (await session(t)).status === 'idle' && t.app.runtime.activeCount() === 0);
     const next = await t.api('POST', url, { content: 'again' });
     expect(next.status).toBe(202); // allowed after completion
-    await waitFor(async () => t.fake.runs.length === 2);
-  });
+    await waitFor(async () => t.fake.runs.length === 7);
+  }, 15000);
 
   it('cancels a run, keeps partial text, and settles as interrupted', async () => {
     const t = await boot();

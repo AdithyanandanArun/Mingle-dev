@@ -232,6 +232,7 @@ export class SessionRuntime {
   isActive(sessionId: string): boolean {
     return this.active.has(sessionId) || this.compactions.has(sessionId) || Boolean(this.teamProxy?.isActive(sessionId));
   }
+  canQueue(sessionId:string): boolean { const run=this.active.get(sessionId); return Boolean(run && !run.cleanupPending && !run.closed); }
   /** A cleanup lock can outlive provider execution; it must not keep tool authority alive. */
   isRunLive(sessionId: string, runId: string): boolean {
     const run = this.active.get(sessionId);

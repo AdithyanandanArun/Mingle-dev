@@ -542,7 +542,7 @@ export function buildRouter(s: Services) {
       if (!member) throw conflict('This agent is no longer in the group. Refresh the conversation.');
       return new Reply(202, await s.groups.send(group.group.id, { content, attachmentIds, contextRefs, ...(id === group.group.anchorSessionId ? {} : { recipients: [member.id] }) }));
     }
-    if (s.runtime.isActive(id) || session.status === 'waiting') {
+    if ((s.runtime.canQueue(id) && session.status === 'running') || session.status === 'waiting') {
       if (session.status === 'waiting') throw conflict('A pending question or approval must be resolved before sending a message.');
       const attachments = s.attachments.validate({ kind: 'session', id }, attachmentIds ?? []);
       validateSessionAttachmentSupport(s, session, attachments, content);
