@@ -29,7 +29,7 @@ export interface ResolveOptions {
   npmPrefix?: string;
 }
 
-const VERSION_PATTERN = /\b(\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)\b/;
+const VERSION_PATTERN = /(?:^|[^0-9A-Za-z])v?(\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)(?=$|[^0-9A-Za-z])/;
 
 export function parseVersion(output: string): string | null {
   return VERSION_PATTERN.exec(output)?.[1] ?? null;

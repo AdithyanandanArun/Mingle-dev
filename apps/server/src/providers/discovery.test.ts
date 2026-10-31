@@ -10,6 +10,8 @@ describe('version parsing', () => {
     expect(parseVersion('2.1.292 (Claude Code)')).toBe('2.1.292');
     expect(parseVersion('codex-cli 0.160.1\n')).toBe('0.160.1');
     expect(parseVersion('Error: claude native binary not installed.')).toBeNull();
+    expect(parseVersion('OpenCode 1.19.5 (linux x64)')).toBe('1.19.5');
+    expect(parseVersion('v2.0.0-beta.3')).toBe('2.0.0-beta.3');
   });
 });
 

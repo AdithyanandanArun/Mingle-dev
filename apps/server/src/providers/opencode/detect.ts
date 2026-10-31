@@ -49,6 +49,6 @@ export async function detectOpencode(settings: AppSettings, deps: OpencodeDetect
     return info({ ...base, version: metadata.version || version, available: true, models: metadata.models, promptCapabilities: metadata.promptCapabilities, reason: notes });
   } catch (error) {
     const detail = error instanceof ProviderError ? error.message : errorMessage(error);
-    return info({ ...base, reason: `OpenCode ${version} is installed at ${path}, but \`opencode acp\` could not report metadata: ${safeOpencodeError(detail, [], 450)}` });
+    return info({ ...base, reason: `OpenCode ${version} at ${path} failed its ACP metadata probe: ${safeOpencodeError(detail, [], 650)}. Check that this executable supports \`opencode acp\`, then Re-check in Settings.` });
   }
 }

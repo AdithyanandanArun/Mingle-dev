@@ -275,8 +275,9 @@ export async function withProbeSession<T>(executable: string, options: ProbeOpti
     if (signal.aborted || shuttingDown) throw abortError();
     privateDir = await mkdtemp(join(tmpdir(), 'relay-opencode-'));
     const cwd = options.cwd ?? privateDir;
-    runtime = await startOpencode(executable, {
-      env: opencodeEnvironment(baseEnv), cwd, timeoutMs: Math.min(15_000, left()), signal, killOnAbort: true, ...(options.spawn ? { spawn: options.spawn } : {}),
+    try {
+      runtime = await startOpencode(executable, {
+        env: opencodeEnvironment(baseEnv), cwd, timeoutMs: Math.min(15_000, left()), signal, killOnAbort: true, ...(options.spawn ? { spawn: options.spawn } : {}),
       notification: (method, params) => {
         const update = object(object(params).update);
         if (method === 'session/update' && update.sessionUpdate === 'available_commands_update' && Array.isArray(update.availableCommands)) {
@@ -284,8 +285,18 @@ export async function withProbeSession<T>(executable: string, options: ProbeOpti
           announce?.();
         }
       },
-    });
-    const selected = object(await runtime.conn.request('session/new', { cwd, mcpServers: [] }, Math.min(SESSION_TIMEOUT, left())));
+      });
+    } catch (error) {
+      const detail = runtime?.stderr.summary(450, runtime.secrets);
+      throw new ProviderError(`ACP initialize failed: ${safeOpencodeError(error, runtime?.secrets ?? [], 350)}${detail ? `; stderr: ${detail}` : ''}`, { code: 'acp_initialize_failed', cause: error });
+    }
+    let selected: Record<string, unknown>;
+    try {
+      selected = object(await runtime.conn.request('session/new', { cwd, mcpServers: [] }, Math.min(SESSION_TIMEOUT, left())));
+    } catch (error) {
+      const detail = runtime.stderr.summary(450, runtime.secrets);
+      throw new ProviderError(`ACP session/new failed: ${safeOpencodeError(error, runtime.secrets, 350)}${detail ? `; stderr: ${detail}` : ''}`, { code: 'acp_session_failed', cause: error });
+    }
     sessionId = typeof selected.sessionId === 'string' && SESSION_ID.test(selected.sessionId) ? selected.sessionId : null;
     if (!sessionId) throw new ProviderError('OpenCode did not return a valid native session ID.', { code: 'protocol_error' });
     const active = runtime;
