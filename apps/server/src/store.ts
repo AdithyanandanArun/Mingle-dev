@@ -1,5 +1,5 @@
 import type { DatabaseSync, SQLInputValue } from 'node:sqlite';
-import type { TaskSource, ProjectContext, AppSettings, Approval, Message, Policy, Project, Provider, ProviderFailure, RecoveryCheckpoint, RunChanges, RunChangesSummary, Session, SessionStatus, SessionRun, ToolCall, ToolCategory, RunStatus, Task, TaskStatus, WorkspaceEvent, SessionPlan, UserQuestion, UserInputAnswers } from '@mingle/contracts';
+import type { TaskSource, ProjectContext, AppSettings, Approval, Message, Policy, Project, Provider, ProviderFailure, RecoveryCheckpoint, RunChanges, RunChangesSummary, Session, SessionStatus, SessionRun, ToolCall, ToolCategory, RunStatus, Task, TaskStatus, WorkspaceEvent, SessionPlan, UserQuestion, UserInputAnswers, QueuedMessage } from '@mingle/contracts';
 import { SCHEMA_VERSION } from './db.ts';
 import { newId, nowIso } from './util.ts';
 import { AttachmentRepo } from './attachments/repo.ts';
@@ -461,6 +461,11 @@ export class Store {
   }
 
   // messages
+  listQueuedMessages(sessionId: string): QueuedMessage[] { return this.all('SELECT * FROM queued_messages WHERE session_id=? ORDER BY created_at,id', sessionId).map((r) => ({ id:r.id as string, sessionId:r.session_id as string, content:r.content as string, intent:r.intent as QueuedMessage['intent'], skills:JSON.parse(r.skills_json as string) as string[], attachmentIds:JSON.parse(r.attachment_ids_json as string) as string[], contextRefs:JSON.parse(r.context_refs_json as string) as QueuedMessage['contextRefs'], createdAt:r.created_at as string })); }
+  enqueueMessage(input: Omit<QueuedMessage, 'createdAt'> & { createdAt?: string }): QueuedMessage { const createdAt=input.createdAt??nowIso(); this.run('INSERT INTO queued_messages VALUES(?,?,?,?,?,?,?,?)',input.id,input.sessionId,input.content,input.intent,JSON.stringify(input.skills),JSON.stringify(input.attachmentIds),JSON.stringify(input.contextRefs),createdAt); this.touch(); return this.listQueuedMessages(input.sessionId).find((m)=>m.id===input.id)!; }
+  dequeueMessage(sessionId: string, id?: string): QueuedMessage | undefined { const message=id?this.listQueuedMessages(sessionId).find((m)=>m.id===id):this.listQueuedMessages(sessionId)[0]; if(message){this.run('DELETE FROM queued_messages WHERE id=?',message.id);this.touch();} return message; }
+  updateQueuedMessage(sessionId:string,id:string,content:string): QueuedMessage | undefined { this.run('UPDATE queued_messages SET content=? WHERE id=? AND session_id=?',content,id,sessionId);this.touch();return this.listQueuedMessages(sessionId).find((m)=>m.id===id); }
+  removeQueuedMessage(sessionId:string,id:string): void { this.run('DELETE FROM queued_messages WHERE id=? AND session_id=?',id,sessionId);this.touch(); }
   insertMessage(input: { id?: string; sessionId: string; role: Message['role']; content: string; kind?: string | null; runId?: string; createdAt?: string; contextRefs?: Message['contextRefs'] }): Message {
     const id = input.id ?? newId('msg');
     const createdAt = input.createdAt ?? nowIso();

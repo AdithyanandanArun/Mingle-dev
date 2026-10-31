@@ -14,6 +14,7 @@ import { AttachmentDrafts, AttachmentTray, useAttachmentDraft } from './Attachme
 import { usePresence } from '../lib/motion';
 import { useTeamStructure } from '../lib/team-structure-context';
 import { providerSwitchFailureCopy } from '../lib/providerFailureUi';
+import { QueuedMessages } from './composer/QueuedMessages';
 import {
   appendContextReference, ContextReferenceChips, EMPTY_CONTEXT_REFS, FileContextPicker,
   findFileMentionTrigger, removeFileMentionTrigger, type FileMentionTrigger,
@@ -147,9 +148,10 @@ export function Composer({ session, statusBar }: { session: Session; statusBar?:
   const attachmentDraft = useAttachmentDraft({ kind: 'session', id: session.id }, attachments, setAttachments, setError);
 
   const running = session.status === 'running' || session.status === 'waiting';
+  const waitingBlocker = session.status === 'waiting' ? 'Waiting for your answer or approval above before the run can continue.' : null;
   const blocker =
     connection !== 'online' ? 'Disconnected from the Mingle server — reconnect to send.'
-      : running ? (session.status === 'waiting' ? 'Waiting for your answer or approval above before the run can continue.' : 'This session is running. Wait for it to finish or interrupt it.')
+      : session.status === 'waiting' ? waitingBlocker
         : provider && !provider.available ? `${PROVIDER_NAME[session.provider]} needs setup before you can send a message.`
           : null;
   const empty = draft.trim().length === 0 && attachments.length === 0 && attachmentDraft.uploads.length === 0;
@@ -251,7 +253,10 @@ export function Composer({ session, statusBar }: { session: Session; statusBar?:
       const submittedDraft = draft;
       const submittedAttachmentIds = attachments.map((item) => item.id);
       const submittedContextRefs = contextRefs;
-      await api.sendMessage(session.id, draft.trim(), messageSkills, submittedAttachmentIds, submittedContextRefs, planningMode ? 'plan' : 'normal');
+      if (running) {
+        await api.queueMessage(session.id,{content:draft.trim(),skills:messageSkills,attachmentIds:submittedAttachmentIds,contextRefs:submittedContextRefs,intent:planningMode?'plan':'normal'});
+        useMingle.getState().toast('success','Message queued');
+      } else await api.sendMessage(session.id, draft.trim(), messageSkills, submittedAttachmentIds, submittedContextRefs, planningMode ? 'plan' : 'normal');
       if (useMingle.getState().drafts[session.id] === submittedDraft) useMingle.getState().setDraft(session.id, '');
       if (useMingle.getState().contextDrafts[session.id] === submittedContextRefs) useMingle.getState().setContextDraft(session.id, []);
       attachmentDraft.sent(submittedAttachmentIds);
@@ -319,7 +324,7 @@ export function Composer({ session, statusBar }: { session: Session; statusBar?:
       setSending(false);
     }
   };
-  const disabled = running || sending || updating || connection !== 'online';
+  const disabled = session.status === 'waiting' || sending || updating || connection !== 'online';
   const providerFailureCopy = providerFailure ? providerSwitchFailureCopy(providerFailure) : null;
   const canRetryFailedMessage = Boolean(providerFailure && session.provider !== providerFailure.provider && provider?.available && failedMessage
     && (failedMessage.content.trim() || failedMessage.attachments?.length));
@@ -453,6 +458,7 @@ export function Composer({ session, statusBar }: { session: Session; statusBar?:
   }, [activeSuggestion, pickerId, suggestion]);
   return (
     <div className="composer-wrap">
+      <QueuedMessages sessionId={session.id} items={(useMingle((s)=>s.boot?.queuedMessages ?? [])).filter((item)=>item.sessionId===session.id)} />
       {providerFailureCopy ? <div className="composer__note is-error" role="alert">
         <span>{providerFailureCopy}</span>{' '}
         <button type="button" className="link-btn" onClick={() => setModelOpenRequest((value) => value + 1)} disabled={disabled} title={running ? 'Wait for the active run to finish before switching providers.' : 'Choose another available provider.'}>Switch provider</button>
@@ -462,7 +468,7 @@ export function Composer({ session, statusBar }: { session: Session; statusBar?:
       <div className={cx('composer', blocker && 'is-blocked')}>
         <label htmlFor={`composer-${session.id}`} className="sr-only">Message {session.name}</label>
         <ContextReferenceChips refs={contextRefs} disabled={sending || updating} onRemove={(index) => useMingle.getState().setContextDraft(session.id, contextRefs.filter((_, i) => i !== index))} />
-        <AttachmentTray attachments={attachments} busy={attachmentDraft.busy} uploads={attachmentDraft.uploads} onRetry={attachmentDraft.retry} onForget={attachmentDraft.forget} loading={attachmentDraft.loading} loadError={attachmentDraft.loadError} onReload={attachmentDraft.reload} onRemove={(id) => void attachmentDraft.remove(id)} disabled={sending || updating || Boolean(blocker)} />
+        <AttachmentTray attachments={attachments} busy={attachmentDraft.busy} uploads={attachmentDraft.uploads} onRetry={attachmentDraft.retry} onForget={attachmentDraft.forget} loading={attachmentDraft.loading} loadError={attachmentDraft.loadError} onReload={attachmentDraft.reload} onRemove={(id) => void attachmentDraft.remove(id)} disabled={sending || updating || Boolean(waitingBlocker)} />
         <textarea
           id={`composer-${session.id}`} ref={ref} className="composer__input" rows={1} value={draft}
           role="combobox" aria-autocomplete="list" aria-haspopup="listbox" aria-expanded={Boolean(suggestion && suggestions.length)}
@@ -551,7 +557,7 @@ export function Composer({ session, statusBar }: { session: Session; statusBar?:
             ) : running && !['usage', 'import'].includes(localDraftCommand?.[1]?.toLowerCase() ?? '') ? (
               <button type="button" className="sendbtn sendbtn--stop" onClick={stop} aria-label="Interrupt run" title="Interrupt run"><Square size={12} fill="currentColor" /></button>
             ) : (
-              <button type="button" className="sendbtn" onClick={() => void submit()} disabled={Boolean(blocker && !localDraftCommand) || empty || sending || updating || (attachmentDraft.busy && !compactIntent)} aria-label={compactIntent ? 'Compact conversation' : ['usage', 'import'].includes(localDraftCommand?.[1]?.toLowerCase() ?? '') ? (localDraftCommand?.[1]?.toLowerCase() === 'import' ? 'Import conversation' : 'Open usage') : 'Send message'} title={compactIntent ? blocker ?? 'Compact conversation' : ['usage', 'import'].includes(localDraftCommand?.[1]?.toLowerCase() ?? '') ? (localDraftCommand?.[1]?.toLowerCase() === 'import' ? 'Import conversation' : 'Open usage') : blocker ?? (empty ? 'Write a message first' : `Send (${MOD}+Enter or Enter)`)}>
+          <button type="button" className="sendbtn" onClick={() => void submit()} disabled={Boolean(waitingBlocker) || empty || sending || updating || (attachmentDraft.busy && !compactIntent)} aria-label={compactIntent ? 'Compact conversation' : ['usage', 'import'].includes(localDraftCommand?.[1]?.toLowerCase() ?? '') ? (localDraftCommand?.[1]?.toLowerCase() === 'import' ? 'Import conversation' : 'Open usage') : 'Send message'} title={compactIntent ? blocker ?? 'Compact conversation' : ['usage', 'import'].includes(localDraftCommand?.[1]?.toLowerCase() ?? '') ? (localDraftCommand?.[1]?.toLowerCase() === 'import' ? 'Import conversation' : 'Open usage') : blocker ?? (empty ? 'Write a message first' : `Send (${MOD}+Enter or Enter)`)}>
                 <ArrowUp size={15} />
               </button>
             )}

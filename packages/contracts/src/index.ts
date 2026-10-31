@@ -54,6 +54,7 @@ export interface ToolActivity {
   cwd?: string | null; exitCode?: number | null; processId?: string | null; durationMs?: number | null;
 }
 export interface Message { id: string; sessionId: string; role: 'user' | 'assistant' | 'system' | 'tool'; content: string; createdAt: string; kind?: string; runId?: string; attachments?: import('./attachments').AttachmentRef[]; contextRefs?: import('./message-context').MessageContextRef[] }
+export interface QueuedMessage { id: string; sessionId: string; content: string; intent: 'normal' | 'plan'; skills: string[]; attachmentIds: string[]; contextRefs: import('./message-context').MessageContextRef[]; createdAt: string }
 export interface Task { id: string; projectId: string; title: string; description: string; acceptanceCriteria: string; sessionId: string | null; dependsOn: string[]; status: TaskStatus; createdAt: string; updatedAt: string; source?: import('./project-context').TaskSource }
 export interface WorkspaceEvent { id: number; projectId: string | null; sessionId: string | null; type: string; summary: string; payload: Record<string, unknown>; createdAt: string }
 export interface Approval { id: string; sessionId: string; tool: string; description: string; input: Record<string, unknown>; status: 'pending' | 'approved' | 'denied'; createdAt: string }
@@ -143,7 +144,7 @@ export interface AppSettings {
   browserAgentEnabled?: boolean; browserExecutable?: string;
   browserDefaultMode?: 'embedded' | 'managed' | 'existing'; browserExistingSourceId?: string; browserCdpEndpoint?: string;
 }
-export interface Bootstrap { projects: Project[]; sessions: Session[]; messages: Message[]; tasks: Task[]; events: WorkspaceEvent[]; approvals: Approval[]; plans: import('./planning').SessionPlan[]; questions: import('./planning').UserQuestion[]; providers: ProviderInfo[]; settings: AppSettings; version: string; runs: SessionRun[]; toolCalls: ToolCall[]; groups?: import('./groups').GroupSnapshot[] }
+export interface Bootstrap { projects: Project[]; sessions: Session[]; messages: Message[]; queuedMessages?: QueuedMessage[]; tasks: Task[]; events: WorkspaceEvent[]; approvals: Approval[]; plans: import('./planning').SessionPlan[]; questions: import('./planning').UserQuestion[]; providers: ProviderInfo[]; settings: AppSettings; version: string; runs: SessionRun[]; toolCalls: ToolCall[]; groups?: import('./groups').GroupSnapshot[] }
 export interface GitFile { path: string; status: string }
 export interface GitStatus { branch: string; files: GitFile[]; diff: string; isRepo: boolean }
 export interface FileEntry { path: string; name: string; type: 'file' | 'directory' }

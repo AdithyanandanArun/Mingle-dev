@@ -182,6 +182,8 @@ function sanitizeProviderFailureInput(error: unknown, scrub: (value: string) => 
 }
 
 export class SessionRuntime {
+  sendQueuedNow(sessionId:string,messageId:string): void { const item=this.store.listQueuedMessages(sessionId).find((m)=>m.id===messageId); if(!item) throw notFound('Queued message not found'); this.store.removeQueuedMessage(sessionId,messageId); this.interrupt(sessionId); void this.waitAndStartQueued(sessionId,item); }
+  private async waitAndStartQueued(sessionId:string,item:import('@mingle/contracts').QueuedMessage): Promise<void> { const run=this.active.get(sessionId); if(run) await run.promise; if(this.store.getSession(sessionId)?.status==='waiting') { this.store.enqueueMessage({...item,createdAt:item.createdAt}); return; } this.start(sessionId,item.content,{intent:item.intent,attachmentIds:item.attachmentIds,contextRefs:item.contextRefs,deferContextResolution:true}); }
   private shutdownStartedAt: number | null = null;
   private readonly active = new Map<string, ActiveRun>();
   private readonly compactions = new Map<string, ActiveCompaction>();
@@ -1391,6 +1393,10 @@ export class SessionRuntime {
     }
     try { if (!run.teamRun) this.groups?.onRunFinished(run.sessionId, run.id, outcome); }
     catch (error) { this.log('error', `Failed to record group delivery outcome for ${run.sessionId}`, error); }
+    if (!run.cleanupPending && !run.teamRun && this.store.getSession(run.sessionId)?.status !== 'waiting') {
+      const queued=this.store.dequeueMessage(run.sessionId);
+      if(queued) queueMicrotask(()=>{ try { this.start(run.sessionId,queued.content,{intent:queued.intent,attachmentIds:queued.attachmentIds,contextRefs:queued.contextRefs,deferContextResolution:true}); } catch(error) { this.log('error',`Could not drain queued message for ${run.sessionId}`,error); } });
+    }
   }
 
   /** Aborts all native provider work and waits (bounded) for provider cleanup. */

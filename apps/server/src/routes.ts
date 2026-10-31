@@ -208,7 +208,7 @@ export function buildRouter(s: Services) {
     const runs = s.store.bootstrapRuns();
     const body: Bootstrap = {
       groups: s.groups.snapshots(), runs, toolCalls: s.store.bootstrapToolCalls(runs.map((run) => run.id)),
-      projects: s.store.listProjects(), sessions: s.store.listSessions(), messages: s.store.bootstrapMessages(300), tasks: s.store.listTasks(),
+      projects: s.store.listProjects(), sessions: s.store.listSessions(), messages: s.store.bootstrapMessages(300), queuedMessages: s.store.listSessions().flatMap((session) => s.store.listQueuedMessages(session.id)), tasks: s.store.listTasks(),
       events: s.store.recentEvents(500), approvals: s.store.bootstrapApprovals(50), plans: s.store.bootstrapPlans(), questions: s.store.bootstrapQuestions(), providers, settings: s.store.getSettings(), version: s.config.version,
     };
     return body;
@@ -542,7 +542,13 @@ export function buildRouter(s: Services) {
       if (!member) throw conflict('This agent is no longer in the group. Refresh the conversation.');
       return new Reply(202, await s.groups.send(group.group.id, { content, attachmentIds, contextRefs, ...(id === group.group.anchorSessionId ? {} : { recipients: [member.id] }) }));
     }
-    if (s.runtime.isActive(id)) throw conflict('Session already has an active run or provider cleanup is still in progress');
+    if (s.runtime.isActive(id) || session.status === 'waiting') {
+      if (session.status === 'waiting') throw conflict('A pending question or approval must be resolved before sending a message.');
+      const attachments = s.attachments.validate({ kind: 'session', id }, attachmentIds ?? []);
+      validateSessionAttachmentSupport(s, session, attachments, content);
+      const queued = s.store.enqueueMessage({ id: `queued:${crypto.randomUUID()}`, sessionId:id, content, intent, skills:[...new Set(selected ?? [])], attachmentIds:attachmentIds ?? [], contextRefs:contextRefs ?? [] });
+      return new Reply(202, { accepted:true, queued });
+    }
     const skillIds = [...new Set(selected ?? [])];
     if (intent === 'plan' && skillIds.length) throw badRequest('Native plan generation cannot run provider commands or skills. Send a regular planning prompt instead.');
     if (session.provider === 'claude' && skillIds.length > 1) throw badRequest('Claude supports one explicitly selected skill per message.');
@@ -574,6 +580,10 @@ export function buildRouter(s: Services) {
     s.runtime.start(id, content, { intent, attachmentIds, contextRefs, deferContextResolution: true, resolveSkills });
     return new Reply(202, { accepted: true });
   });
+  add('GET', '/api/sessions/:id/queue', (ctx) => { const id=param(ctx,'id'); if(!s.store.getSession(id)) throw notFound('Session not found'); return s.store.listQueuedMessages(id); });
+  add('PATCH', '/api/sessions/:id/queue/:messageId', async (ctx) => { const id=param(ctx,'id'); const {content}=await ctx.body(z.object({content:z.string().trim().min(1).max(100_000)}).strict()); const message=s.store.updateQueuedMessage(id,param(ctx,'messageId'),content); if(!message) throw notFound('Queued message not found'); return message; });
+  add('DELETE', '/api/sessions/:id/queue/:messageId', (ctx) => { const id=param(ctx,'id'); s.store.removeQueuedMessage(id,param(ctx,'messageId')); return {ok:true}; });
+  add('POST', '/api/sessions/:id/queue/:messageId/send-now', (ctx) => { const id=param(ctx,'id'); if(!s.store.getSession(id)) throw notFound('Session not found'); if(s.store.getSession(id)?.status==='waiting') throw conflict('Resolve the pending question or approval first.'); s.runtime.sendQueuedNow(id,param(ctx,'messageId')); return new Reply(202,{accepted:true}); });
   add('POST', '/api/sessions/:id/interrupt', (ctx) => {
     const id = param(ctx, 'id');
     if (!s.store.getSession(id)) throw notFound('Session not found');

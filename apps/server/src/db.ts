@@ -410,13 +410,18 @@ const MIGRATIONS: (string | ((db: DatabaseSync) => void))[] = [
       addColumn(db, 'group_requests', 'auto_max_hops', 'ALTER TABLE group_requests ADD COLUMN auto_max_hops INTEGER CHECK (auto_max_hops BETWEEN 1 AND 24);');
     },
     // Migration 26 preserves provider cooldowns used by group health and routing.
-    `CREATE TABLE IF NOT EXISTS group_provider_cooldowns (
+  `CREATE TABLE IF NOT EXISTS group_provider_cooldowns (
         group_id TEXT NOT NULL REFERENCES conversation_groups(id) ON DELETE CASCADE,
         member_id TEXT NOT NULL REFERENCES group_members(id) ON DELETE CASCADE,
         provider TEXT NOT NULL, reason TEXT NOT NULL, until TEXT NOT NULL, created_at TEXT NOT NULL,
-        PRIMARY KEY(group_id, member_id, provider)
+      PRIMARY KEY(group_id, member_id, provider)
       );
       CREATE INDEX IF NOT EXISTS group_provider_cooldowns_until ON group_provider_cooldowns(until);`,
+    `CREATE TABLE IF NOT EXISTS queued_messages (
+      id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+      content TEXT NOT NULL, intent TEXT NOT NULL, skills_json TEXT NOT NULL, attachment_ids_json TEXT NOT NULL,
+      context_refs_json TEXT NOT NULL, created_at TEXT NOT NULL
+    ); CREATE INDEX IF NOT EXISTS queued_messages_order ON queued_messages(session_id, created_at, id);`,
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;
