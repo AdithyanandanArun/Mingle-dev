@@ -62,6 +62,36 @@ describe.skipIf(posixOnly)('executable discovery', () => {
   it('says so when nothing is installed', async () => {
     const result = await resolveExecutable({ name: 'codex', override: '', env: { PATH: join(box.root, 'none') }, home: join(box.root, 'home') });
     expect(result).toMatchObject({ ok: false, reason: expect.stringContaining('not found') });
+    expect(!result.ok && result.reason).toContain('set its executable path in Settings');
+    expect(!result.ok && result.reason).toContain('.bun/bin');
+  });
+
+  it('searches additional install directories and prefers the newest nvm version', async () => {
+    const home = join(box.root, 'home');
+    const found = new Map<string, string>();
+    const executable = async (path: string) => found.has(path);
+    const directories = async (path: string) => path.endsWith('/.nvm/versions/node') ? ['v18.1.0', 'v22.4.0', 'v20.18.1'] : [];
+    const newest = join(home, '.nvm/versions/node/v22.4.0/bin/opencode');
+    const older = join(home, '.nvm/versions/node/v20.18.1/bin/opencode');
+    const bun = join(home, '.bun/bin/opencode');
+    found.set(newest, 'latest'); found.set(older, 'older'); found.set(bun, 'bun');
+    const result = await resolveExecutable({ name: 'opencode', override: '', env: { PATH: '' }, home,
+      fs: { executable, directories }, probe: async (path) => ({ ok: true, stdout: `${found.get(path) === 'older' ? '1.2.3' : '2.4.0'}\n`, stderr: '', exitCode: 0, signal: null, timedOut: false, spawnError: null }) });
+    expect(result).toMatchObject({ ok: true, executable: { path: bun, source: 'bun' } });
+    // Established fallback order retains .bun before nvm.
+    const onlyNvm = await resolveExecutable({ name: 'opencode', override: '', env: { PATH: '' }, home,
+      fs: { executable: async (path) => path === newest || path === older, directories },
+      probe: async (path) => ({ ok: true, stdout: `${path === newest ? '2.4.0' : '1.2.3'}\n`, stderr: '', exitCode: 0, signal: null, timedOut: false, spawnError: null }) });
+    expect(onlyNvm).toMatchObject({ ok: true, executable: { path: newest, source: 'nvm' } });
+  });
+
+  it('searches npm configured prefix after standard candidates', async () => {
+    const home = join(box.root, 'home');
+    const prefixBinary = join(box.root, 'npm-prefix/bin/codex');
+    const result = await resolveExecutable({ name: 'codex', override: '', env: { PATH: '', npm_config_prefix: join(box.root, 'npm-prefix') }, home,
+      fs: { executable: async (path) => path === prefixBinary, directories: async () => [] },
+      probe: async () => ({ ok: true, stdout: '1.2.3', stderr: '', exitCode: 0, signal: null, timedOut: false, spawnError: null }) });
+    expect(result).toMatchObject({ ok: true, executable: { path: prefixBinary, source: 'npm-prefix' } });
   });
 });
 

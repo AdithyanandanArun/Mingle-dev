@@ -1,11 +1,11 @@
-import { access, constants, stat } from 'node:fs/promises';
+import { access, constants, readdir, stat } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { homedir } from 'node:os';
 import { delimiter, isAbsolute, join, resolve } from 'node:path';
 import type { ProbeFn } from './process.js';
 import { describeProbeFailure, runProbe } from './process.js';
 
-export type ExecutableSource = 'setting' | 'path' | 'home-local' | 'npm-global' | 'sdk-bundled';
+export type ExecutableSource = 'setting' | 'path' | 'home-local' | 'npm-global' | 'opencode' | 'bun' | 'volta' | 'nvm' | 'pnpm' | 'cargo' | 'homebrew' | 'npm-prefix' | 'sdk-bundled';
 export type ProviderBinary = 'claude' | 'codex' | 'opencode';
 
 export interface SkippedExecutable { path: string; source: ExecutableSource; reason: string }
@@ -24,6 +24,9 @@ export interface ResolveOptions {
   probeTimeoutMs?: number;
   /** Extra last-resort candidates (for example the binary bundled with an SDK). */
   extraCandidates?: { path: string; source: ExecutableSource }[];
+  /** Testable filesystem and npm prefix hooks. */
+  fs?: { executable: (path: string) => Promise<boolean>; directories: (path: string) => Promise<string[]> };
+  npmPrefix?: string;
 }
 
 const VERSION_PATTERN = /\b(\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)\b/;
@@ -74,6 +77,10 @@ export async function resolveExecutable(options: ResolveOptions): Promise<Resolv
   const probe = options.probe ?? runProbe;
   const timeoutMs = options.probeTimeoutMs ?? 6_000;
   const skipped: SkippedExecutable[] = [];
+  const executable = options.fs?.executable ?? isExecutableFile;
+  const directories = options.fs?.directories ?? (async (path: string) => {
+    try { return await readdir(path); } catch { return []; }
+  });
 
   const test = async (path: string, source: ExecutableSource): Promise<ResolvedExecutable | null> => {
     const result = await probe(path, ['--version'], { timeoutMs, env });
@@ -89,7 +96,7 @@ export async function resolveExecutable(options: ResolveOptions): Promise<Resolv
     const hasSeparator = /[\\/]/.test(expanded);
     const path = hasSeparator ? resolve(expanded) : (await findOnPath(expanded, env))[0];
     if (!path) return { ok: false, reason: `Configured ${options.name} executable "${override}" was not found on PATH.`, skipped };
-    if (hasSeparator && !(await isExecutableFile(path))) {
+    if (hasSeparator && !(await executable(path))) {
       return { ok: false, reason: `Configured ${options.name} executable ${path} does not exist or is not executable.`, skipped };
     }
     const resolved = await test(path, 'setting');
@@ -103,11 +110,30 @@ export async function resolveExecutable(options: ResolveOptions): Promise<Resolv
   };
   for (const path of await findOnPath(options.name, env)) add(path, 'path');
   const exe = process.platform === 'win32' ? `${options.name}.exe` : options.name;
-  for (const [dir, source] of [[join(home, '.local', 'bin'), 'home-local'], [join(home, '.npm-global', 'bin'), 'npm-global']] as const) {
-    const path = join(dir, exe);
-    if (await isExecutableFile(path)) add(path, source);
+  const fallbackDirs: [string, ExecutableSource][] = [
+    [join(home, '.local', 'bin'), 'home-local'], [join(home, '.npm-global', 'bin'), 'npm-global'],
+    [join(home, '.opencode', 'bin'), 'opencode'], [join(home, '.bun', 'bin'), 'bun'], [join(home, '.volta', 'bin'), 'volta'],
+    [join(home, '.local', 'share', 'pnpm'), 'pnpm'], [join(home, '.cargo', 'bin'), 'cargo'],
+    ['/home/linuxbrew/.linuxbrew/bin', 'homebrew'], ['/opt/homebrew/bin', 'homebrew'], ['/usr/local/bin', 'homebrew'],
+  ];
+  const nvmRoot = join(home, '.nvm', 'versions', 'node');
+  const nvmVersions = (await directories(nvmRoot)).sort((a, b) => {
+    const pa = parseSemver(a); const pb = parseSemver(b);
+    if (pa && pb) return compareSemver(pb, pa);
+    if (pa) return -1; if (pb) return 1;
+    return b.localeCompare(a, undefined, { numeric: true });
+  });
+  for (const version of nvmVersions) fallbackDirs.push([join(nvmRoot, version, 'bin'), 'nvm']);
+  if (options.npmPrefix?.trim()) fallbackDirs.push([join(options.npmPrefix.trim(), 'bin'), 'npm-prefix']);
+  else {
+    const prefix = env.npm_config_prefix?.trim();
+    if (prefix) fallbackDirs.push([join(prefix, 'bin'), 'npm-prefix']);
   }
-  for (const extra of options.extraCandidates ?? []) if (await isExecutableFile(extra.path)) add(extra.path, extra.source);
+  for (const [dir, source] of fallbackDirs) {
+    const path = join(dir, exe);
+    if (await executable(path)) add(path, source);
+  }
+  for (const extra of options.extraCandidates ?? []) if (await executable(extra.path)) add(extra.path, extra.source);
 
   for (const candidate of candidates) {
     const resolved = await test(candidate.path, candidate.source);
@@ -118,9 +144,17 @@ export async function resolveExecutable(options: ResolveOptions): Promise<Resolv
     ok: false,
     reason: tried
       ? `No working ${options.name} executable found. Tried: ${tried}. Set the executable path in settings.`
-      : `${options.name} executable not found on PATH, ~/.local/bin or ~/.npm-global/bin. Install it or set the executable path in settings.`,
+      : `${options.name} executable not found. Looked on PATH and in ${fallbackDirs.map(([dir]) => dir).join(', ')}. Install it or set its executable path in Settings.`,
     skipped,
   };
+}
+
+function parseSemver(value: string): [number, number, number] | null {
+  const match = /^v?(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$/.exec(value);
+  return match ? [Number(match[1]), Number(match[2]), Number(match[3])] : null;
+}
+function compareSemver(a: [number, number, number], b: [number, number, number]): number {
+  return a[0] - b[0] || a[1] - b[1] || a[2] - b[2];
 }
 
 /** Location of the native Claude Code binary shipped with the Agent SDK, when installed. */
