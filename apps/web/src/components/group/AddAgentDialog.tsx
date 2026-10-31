@@ -88,7 +88,11 @@ export function AddAgentDialog({ sessionId }: { sessionId: string }) {
 
   const existingHandle = useMemo(() => suggestHandle(session?.provider ?? settings?.defaultProvider ?? 'claude', []), [session?.provider, settings?.defaultProvider]);
   const takenHandles = useMemo(() => (group ? allHandles(group) : new Set([existingHandle])), [group, existingHandle]);
-  const [agent, setAgent] = useState<AgentConfiguration | null>(() => (providers && settings ? initialWorkerConfig(settings, providers) : null));
+  const lastConfiguration = group ? [...activeMembers(group)].reverse().map((member) => {
+    const item = boot?.sessions.find((candidate) => candidate.id === member.sessionId);
+    return item ? sessionConfig(item) : null;
+  }).find((value): value is AgentConfiguration => Boolean(value)) : null;
+  const [agent, setAgent] = useState<AgentConfiguration | null>(() => (providers && settings ? normalizeConfig(lastConfiguration ?? initialWorkerConfig(settings, providers), providers, settings) : null));
   const [handle, setHandle] = useState(() => suggestHandle(agent?.provider ?? settings?.defaultProvider ?? 'codex', takenHandles));
   const [handleTouched, setHandleTouched] = useState(false);
   const [isolated, setIsolated] = useState(true);
@@ -198,7 +202,7 @@ export function AddAgentDialog({ sessionId }: { sessionId: string }) {
     : handleError ? handleError
       : !newAvailability.available ? `${providerName(agent.provider)} is unavailable: ${newAvailability.reason}`
         : orchestratedConversion && !orchestratorAvailability.available ? `The orchestrator’s provider is unavailable: ${orchestratorAvailability.reason}`
-          : changing && sessionBusy ? 'The current agent is running; configuration can only change while it is idle.'
+      : changing && sessionBusy ? 'The current agent is running; configuration can only change while it is idle.'
             : null;
 
   const submit = async () => {
@@ -267,6 +271,7 @@ export function AddAgentDialog({ sessionId }: { sessionId: string }) {
   return (
     <Modal title={title} description={description} onClose={close} footer={footer} width={step === 'mode' ? 1040 : 760}>
       <div className="group-dialog" ref={motionRoot}>
+        {joining && sharedProject ? <p className="field__hint">Adding an agent from another teammate’s device requires that owner’s sharing consent. Their agent remains on their device and can be revoked by them.</p> : null}
         {step === 'mode' ? (
           <>
             <div className="gm-head">

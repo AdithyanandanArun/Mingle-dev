@@ -8,6 +8,7 @@ import { teamConsentStatusLabel } from '../../lib/team-consent';
 import { useMingle } from '../../store/store';
 import { AgentIdentity } from './AgentIdentity';
 import { AgentActivityDrawer, type ActivityAgent } from '../team-orchestration/activity/AgentActivityDrawer';
+import { Button } from '../ui';
 
 const ACTIVITY_STATE = {
   working: 'working', approval: 'awaiting-approval', queued: 'queued', paused: 'paused', error: 'failed',
@@ -123,6 +124,7 @@ export function AgentPresenceRail({
   const resizeVersion = useRef(0);
   const [expanded, setExpanded] = useState(true);
   const [selectedAgent, setSelectedAgent] = useState<ActivityAgent | null>(null);
+  const openDialog = useMingle((state) => state.openDialog);
   const presence = snapshot ? members.map((member) => memberPresence({
     snapshot, member, session: sessions.find((session) => session.id === member.sessionId), runs, approvals, connection,
   })) : teamMembers.map((member) => {
@@ -233,6 +235,7 @@ export function AgentPresenceRail({
           const teamMember = teamMembers.find((candidate) => candidate.agentId === member.id || candidate.sessionId === member.sessionId || candidate.handle === member.handle);
           return <PresenceRow key={member.id} snapshot={snapshot} member={member} session={sessions.find((item) => item.id === member.sessionId)} runs={runs} approvals={approvals} connection={connection} providers={providers} onOpen={setSelectedAgent} teamMember={teamMember} />;
         }) : teamMembers.map((member) => <TeamPresenceRow key={member.agentId} member={member} state={teamStates[member.agentId]} onOpen={setSelectedAgent} />)}
+        {snapshot ? <li className="agent-presence__add"><Button size="sm" disabled={connection !== 'online'} why="Reconnect to the server first." onClick={() => openDialog({ kind: 'add-agent', sessionId: snapshot.group.anchorSessionId })}>Add agent</Button></li> : null}
       </ul>
     </aside>
     {selectedAgent ? <AgentActivityDrawer key={`${selectedAgent.agentId}:${selectedAgent.sessionId ?? ''}`} projectId={snapshot?.group.projectId ?? projectId ?? ''} agent={selectedAgent} onClose={() => setSelectedAgent(null)} /> : null}

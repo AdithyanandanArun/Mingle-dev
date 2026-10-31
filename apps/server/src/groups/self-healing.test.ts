@@ -141,7 +141,10 @@ it('persists provider cooldowns across restart and prunes them at their injected
       (options as typeof options & DispatchAwareOptions).onDispatchState?.('dispatched');
       throw new ProviderError('Account quota exhausted.', { code: 'quota_exhausted', outcomeKnown: true });
     }
-  });
+});
+
+
+
   await waitFor(() => before.app.groups.get(group.groupId).deliveries.some((delivery) => delivery.memberId === source.id && delivery.status === 'failed'), 6000, 'quota failure cooldown');
   expect(before.app.groups.getMemberHealth(group.groupId).find((health) => health.memberId === source.id)).toMatchObject({
     state: 'cooldown', reason: 'Provider quota exhausted', until: new Date(clock + 15 * 60_000).toISOString(),
@@ -157,6 +160,25 @@ it('persists provider cooldowns across restart and prunes them at their injected
   expect(restarted.app.groups.getMemberHealth(group.groupId).find((health) => health.memberId === source.id)?.state).not.toBe('cooldown');
   expect(restarted.app.store.db.prepare('SELECT COUNT(*) AS count FROM group_provider_cooldowns').get()).toEqual({ count: 0 });
 }, 20_000);
+
+
+it('allows adding another idle agent while an existing group delivery is running', async () => {
+  const t = await startTestApp(); apps.push(t);
+  const group = await createLocalGroup(t, 'current-leads', 2);
+  const running = deferred<void>();
+  const finish = deferred<void>();
+  t.fake.script = async (_options, emit) => { running.resolve(); await finish.promise; emit({ type: 'text', text: 'Finished.' }); };
+  await t.api('POST', `/api/groups/${group.groupId}/messages`, { content: 'Keep working while another agent is added.' });
+  await running.promise;
+  const added = await t.api<GroupSnapshot>('POST', `/api/groups/${group.groupId}/agents`, {
+    handle: 'newagent', isolated: true,
+    configuration: { provider: 'opencode', model: 'opencode-model', effort: 'high', policy: 'supervised', serviceTier: 'standard' },
+  });
+  expect(added.status, JSON.stringify(added.json)).toBe(201);
+  expect(added.json.members.some((member) => member.handle === 'newagent' && member.role === 'worker')).toBe(true);
+  expect(t.fake.runs).toHaveLength(1);
+  finish.resolve();
+});
 
 it('replaces a failed Full-access coordinator using the best available worker', async () => {
   const t = await startTestApp(); apps.push(t);

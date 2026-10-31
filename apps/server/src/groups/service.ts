@@ -883,7 +883,6 @@ export class GroupService {
       this.checkConfiguration(input.configuration);
       const handle = this.validateHandle(input.handle);
       this.assertHandleFree(group.id, handle);
-      this.assertCanChangeRoster(group);
       if (this.repo.members(group.id, false).length >= MAX_MEMBERS) throw conflict(`A group supports at most ${MAX_MEMBERS} agents`);
       const created: Session[] = [];
       try {
@@ -892,7 +891,6 @@ export class GroupService {
         this.assertOpen();
         const fresh = this.requireGroup(groupId);
         this.assertHandleFree(fresh.id, handle);
-        this.assertCanChangeRoster(fresh);
         if (session.projectId !== fresh.projectId) throw unprocessable('Agents must belong to the group project');
         const role = fresh.mode === 'cowork' ? 'peer' : 'worker';
         this.store.tx(() => {
