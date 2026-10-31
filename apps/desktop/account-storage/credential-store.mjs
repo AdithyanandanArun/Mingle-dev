@@ -63,7 +63,7 @@ function existingKeyReadable(safeStorage, existingKey) {
 
 export function verifyCredentialStore({ app, safeStorage, userData, startup, argv = process.argv, platform = process.platform, run, fileSystem, existingKey = null }) {
   const actual = startup.backend ?? backendFromArgs(argv);
-  if (!actual) return { status: roundTrip(safeStorage) ? 'available' : 'unavailable', backend: null };
+  if (!actual) return { status: roundTrip(safeStorage) && existingKeyReadable(safeStorage, existingKey) ? 'available' : 'unavailable', backend: null };
   const readableExistingKey = existingKeyReadable(safeStorage, existingKey);
   if (roundTrip(safeStorage) && readableExistingKey) {
     writeCredentialStore(userData, { backend: actual, chosenBy: startup.chosenBy ?? 'auto' }, fileSystem);

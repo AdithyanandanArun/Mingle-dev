@@ -135,3 +135,19 @@ test('a saved choice remains available when the existing wrapped key decrypts', 
   assert.equal(result.status, 'available');
   assert.deepEqual(readCredentialStore(userData), { backend: 'gnome-libsecret', chosenBy: 'auto' });
 });
+
+
+test('unselected platform backend must decrypt existing account data before reporting availability', t => {
+  const userData = directory(t);
+  let existingRead = false;
+  const safeStorage = {
+    isEncryptionAvailable: () => true,
+    encryptString: value => Buffer.from(value),
+    decryptString: bytes => { if (bytes.toString() === 'example-unreadable-key') { existingRead = true; throw new Error('unreadable'); } return bytes.toString(); },
+  };
+  const result = verifyCredentialStore({ app: { relaunch: () => assert.fail('no relaunch'), exit: () => assert.fail('no exit') },
+    safeStorage, userData, startup: { backend: null, chosenBy: null, stored: null }, argv: ['mingle'], platform: 'darwin',
+    existingKey: Buffer.from('example-unreadable-key') });
+  assert.deepEqual(result, { status: 'unavailable', backend: null });
+  assert.equal(existingRead, true);
+});
