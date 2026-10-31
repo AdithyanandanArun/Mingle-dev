@@ -39,7 +39,7 @@ describe('deriveStatusBarState', () => {
       { ...toolCall('task-1', 'Task', 'agent'), input: JSON.stringify({ description: 'Explore routes' }) },
       { ...toolCall('team-1', 'mcp:mingle_team/team_send', 'agent') },
     ];
-    expect(deriveStatusBarState({ ...defaults, toolCalls: calls })).toMatchObject({ primary: 'Waiting on 1 subagent', secondary: 'Explore routes' });
+    expect(deriveStatusBarState({ ...defaults, toolCalls: calls })).toMatchObject({ primary: 'Waiting for subagent to finish', secondary: 'Explore routes' });
   });
 
   it('uses waiting approval and question messages when no explicit plan activity is reported', () => {

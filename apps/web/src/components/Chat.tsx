@@ -86,6 +86,7 @@ function SingleSessionPane() {
   const sessionToolCalls = useMemo(() => allToolCalls.filter((call) => call.sessionId === session?.id), [allToolCalls, session?.id]);
   const subagents = useMemo(() => session ? deriveSubagents(sessionToolCalls, session.provider, session.model) : [], [sessionToolCalls, session?.provider, session?.model]);
   const delegatedSubagents = useMingle((s) => s.boot?.delegatedSubagents?.filter((item) => item.parentSessionId === session?.id) ?? []);
+  const continuingSubagent = delegatedSubagents.find((item) => item.status === 'completed' && item.resultDelivered)?.name;
   const allPlans = useMingle((s) => s.boot?.plans ?? EMPTY_PLANS);
   const allQuestions = useMingle((s) => s.boot?.questions ?? EMPTY_QUESTIONS);
   const allTasks = useMingle((s) => s.boot?.tasks ?? EMPTY_TASKS);
@@ -131,7 +132,8 @@ function SingleSessionPane() {
   const pending = useMemo(() => (approvals ?? []).filter((a) => a.sessionId === session?.id && a.status === 'pending'), [approvals, session?.id]);
   const statusBarState = useMemo(() => session ? deriveStatusBarState({
     session, runs, toolCalls: sessionToolCalls, tasks: allTasks, events: allEvents, approvals: allApprovals, questions: allQuestions,
-  }) : null, [session, runs, sessionToolCalls, allTasks, allEvents, allApprovals, allQuestions]);
+    delegatedSubagents, continuingSubagent,
+  }) : null, [session, runs, sessionToolCalls, allTasks, allEvents, allApprovals, allQuestions, delegatedSubagents, continuingSubagent]);
   const stopStatusRun = useCallback(async () => {
     if (!session) return;
     try { await api.interrupt(session.id); await useMingle.getState().refreshNow(); }

@@ -1,4 +1,5 @@
 import type { Approval, Session, SessionRun, Task, ToolCall, UserQuestion, WorkspaceEvent } from '@mingle/contracts';
+import type { DelegatedSubagent } from '@mingle/contracts';
 
 export type StatusBarStepStatus = 'pending' | 'in_progress' | 'done' | 'blocked';
 export interface StatusBarStep { id: string; title: string; status: StatusBarStepStatus }
@@ -18,6 +19,8 @@ export interface StatusBarInput {
   approvals: readonly Approval[];
   questions: readonly UserQuestion[];
   waitingAgents?: readonly { name: string; running: boolean }[];
+  delegatedSubagents?: readonly DelegatedSubagent[];
+  continuingSubagent?: string;
 }
 
 interface PlanCandidate { steps: StatusBarStep[]; updatedAt: string }
@@ -136,7 +139,9 @@ export function deriveStatusBarState(input: StatusBarInput): StatusBarState | nu
   const pendingApproval = input.approvals.some((approval) => approval.sessionId === session.id && approval.status === 'pending');
   const pendingQuestion = input.questions.some((question) => question.sessionId === session.id && question.status === 'pending');
   const agents = (input.waitingAgents ?? []).filter((agent) => agent.running);
-  const subagents = runningAgentNames(input.toolCalls, activeRun?.id);
+  const nativeSubagents = runningAgentNames(input.toolCalls, activeRun?.id);
+  const delegatedSubagents = (input.delegatedSubagents ?? []).filter((item) => item.parentSessionId === session.id && item.status === 'running');
+  const subagents = [...nativeSubagents, ...delegatedSubagents.map((item) => `@${item.name}`)];
   if (!running && !unfinished && !agents.length) return null;
 
   let primary = 'Working…';
@@ -153,7 +158,7 @@ export function deriveStatusBarState(input: StatusBarInput): StatusBarState | nu
         agents.length ? `Waiting on ${agents.length} agent${agents.length === 1 ? '' : 's'}${agents.length === 1 ? ` · ${agents[0]!.name}` : ''}` : undefined].filter(Boolean).join(' · ');
     }
   } else if (subagents.length) {
-    primary = `Waiting on ${subagents.length} subagent${subagents.length === 1 ? '' : 's'}`;
+    primary = subagents.length === 1 ? 'Waiting for subagent to finish' : `Waiting for ${subagents.length} subagents to finish`;
     secondary = subagents.join(', ');
   } else if (agents.length) {
     primary = `Waiting on ${agents.length} agent${agents.length === 1 ? '' : 's'}`;
@@ -165,6 +170,8 @@ export function deriveStatusBarState(input: StatusBarInput): StatusBarState | nu
   } else if (session.status === 'waiting') {
     primary = 'Waiting…';
   }
+
+  if (input.continuingSubagent && !running) primary = `Subagent @${input.continuingSubagent} finished · continuing`;
 
   return { primary, secondary, running, steps: unfinished ? steps : [] };
 }
