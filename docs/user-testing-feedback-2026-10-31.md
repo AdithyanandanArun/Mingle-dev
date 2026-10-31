@@ -22,8 +22,11 @@ Feedback from real user testing of Mingle 0.0.9. Each item is checked off once i
 
 ## Composer
 
-- [ ] **Steer while it runs.** Allow sending a message while the agent is working; it is queued and delivered at the next opportunity.
-- [ ] **Send now.** Offer a way to send a queued message straight away (interrupt and deliver it immediately).
+- [x] **Steer while it runs.** Allow sending a message while the agent is working; it is queued and delivered at the next opportunity.
+  - The composer stays usable while the agent works. With Codex, the message reaches the running turn straight away (`turn/steer`) and appears in the chat. With other providers, or when a message has attachments or skills, it is queued (saved across restarts) and sent automatically when the run finishes, keeping its attachments and skills. Queued messages appear above the composer with Edit, Remove and Send now.
+  - Limitation: Claude can't receive a message mid-turn yet, because Mingle's Claude adapter sends each turn as one prompt, so Claude messages wait in the queue. Codex steering is covered by tests with a fake Codex, not yet tried against a live model.
+- [x] **Send now.** Offer a way to send a queued message straight away (interrupt and deliver it immediately).
+  - "Send now" on a queued message, or Ctrl/Cmd+Shift+Enter while the agent runs, interrupts the run, waits for it to finish cleaning up and sends that message first. If sending fails, the message goes back to the front of the queue with a notice.
 
 ## Projects and worktrees
 
