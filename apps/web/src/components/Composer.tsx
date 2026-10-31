@@ -258,8 +258,12 @@ export function Composer({ session, statusBar }: { session: Session; statusBar?:
       const submittedContextRefs = contextRefs;
       if (running) {
         const response = await api.queueMessage(session.id,{content:draft.trim(),skills:messageSkills,attachmentIds:submittedAttachmentIds,contextRefs:submittedContextRefs,intent:planningMode?'plan':'normal'});
-        if (sendNow) await api.sendQueuedNow(session.id, response.queued.id);
-        useMingle.getState().toast('success', sendNow ? 'Message sent next' : 'Message queued');
+        // A steered message already reached the running turn; only a queued one can be sent next.
+        if (response.steered) useMingle.getState().toast('success', 'Sent to the running agent');
+        else {
+          if (sendNow && response.queued) await api.sendQueuedNow(session.id, response.queued.id);
+          useMingle.getState().toast('success', sendNow ? 'Message sent next' : 'Message queued');
+        }
       } else await api.sendMessage(session.id, draft.trim(), messageSkills, submittedAttachmentIds, submittedContextRefs, planningMode ? 'plan' : 'normal');
       if (useMingle.getState().drafts[session.id] === submittedDraft) useMingle.getState().setDraft(session.id, '');
       if (useMingle.getState().contextDrafts[session.id] === submittedContextRefs) useMingle.getState().setContextDraft(session.id, []);
