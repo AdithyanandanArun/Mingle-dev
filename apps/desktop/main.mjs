@@ -10,6 +10,7 @@ import { createAccountKeyIpcHandler } from './account-storage/account-key-ipc.mj
 import { configureCredentialStoreStartup, verifyCredentialStore, saveUserCredentialStore, credentialStoreOptions } from './account-storage/credential-store.mjs';
 import { createProjectInvitationDispatcher, focusProjectInvitationWindow, isProjectInvitationWorkspaceUrl } from './project-invitation.mjs';
 import { createEmbeddedBrowserHost, hideOwnedEmbeddedView } from './embedded-browser/host.mjs';
+import { readLoginPath } from './shell-environment.mjs';
 
 const root = app.isPackaged ? join(process.resourcesPath, 'workspace') : fileURLToPath(new URL('../../', import.meta.url));
 const serverRoot = join(root, 'apps/server');
@@ -232,6 +233,8 @@ async function openWorkspace() {
   embeddedBrowserHost = createEmbeddedBrowserHost({ electron: { app, BrowserWindow, WebContentsView, ipcMain, session }, ws, getHostWindow: () => (isLiveWindow(mainWindow) ? mainWindow : null) });
   const embeddedUrl = await embeddedBrowserHost.ready;
   // Canonical values override any legacy environment inherited from another local server.
+  const loginEnvironment = await readLoginPath();
+  if (loginEnvironment.warning) console.warn(loginEnvironment.warning);
   const environment = {
     ...process.env, NODE_ENV: 'production', MINGLE_HOST: '127.0.0.1',
     MINGLE_PORT: String(port), PORT: String(port), MINGLE_DATA_DIR: workspaceDataDir,
@@ -240,10 +243,11 @@ async function openWorkspace() {
     MINGLE_EMBEDDED_BROWSER_URL: embeddedUrl,
     MINGLE_EMBEDDED_BROWSER_TOKEN: embeddedBrowserHost.token,
   };
+  if (process.platform !== 'win32') environment.PATH = loginEnvironment.path;
   delete environment.ELECTRON_RUN_AS_NODE;
   delete environment.NODE_OPTIONS;
   delete environment.NODE_PATH;
-  if (app.isPackaged) environment.PATH = [dirname(runtimeNode), process.env.PATH || (process.platform === 'win32' ? '' : '/usr/local/bin:/usr/bin:/bin')].join(delimiter);
+  if (app.isPackaged) environment.PATH = [dirname(runtimeNode), environment.PATH || (process.platform === 'win32' ? '' : '/usr/local/bin:/usr/bin:/bin')].join(delimiter);
   const serverArgs = app.isPackaged ? [join(serverRoot, 'dist/index.mjs')] : ['--import', join(serverRoot, 'node_modules/tsx/dist/loader.mjs'), join(serverRoot, 'src/index.ts')];
   backend = spawn(runtimeNode, serverArgs, {
     cwd: app.isPackaged ? userData : root,
