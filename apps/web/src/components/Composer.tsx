@@ -74,6 +74,15 @@ export function Composer({ session, statusBar }: { session: Session; statusBar?:
   const [subagentTask, setSubagentTask] = useState('');
   const [subagentName, setSubagentName] = useState('');
   const [subagentModel, setSubagentModel] = useState({ provider: session.provider, model: session.model });
+  const subagentLauncher = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!subagentOpen) return;
+    const outside = (event: PointerEvent) => { if (!subagentLauncher.current?.contains(event.target as Node)) setSubagentOpen(false); };
+    const escape = (event: KeyboardEvent) => { if (event.key === 'Escape') { event.preventDefault(); setSubagentOpen(false); } };
+    document.addEventListener('pointerdown', outside);
+    window.addEventListener('keydown', escape);
+    return () => { document.removeEventListener('pointerdown', outside); window.removeEventListener('keydown', escape); };
+  }, [subagentOpen]);
   const [reasoningOpenRequest, setReasoningOpenRequest] = useState(0);
   const modelControl = useRef<HTMLButtonElement>(null);
   const reasoningControl = useRef<HTMLButtonElement>(null);
@@ -589,10 +598,11 @@ export function Composer({ session, statusBar }: { session: Session; statusBar?:
           </div>
         </div>
       </div>
-      {subagentOpen ? <div className="subagent-launcher" role="dialog" aria-label="Start a subagent">
+      {subagentOpen ? <div ref={subagentLauncher} className="subagent-launcher" role="dialog" aria-label="Start a subagent">
+        <header className="subagent-launcher__head"><div><h2>Start a subagent</h2><p>Runs in parallel on any provider. Its result comes back to this chat automatically.</p></div><button type="button" aria-label="Close subagent form" title="Close" onClick={() => setSubagentOpen(false)}>×</button></header>
         <label>Task<textarea autoFocus value={subagentTask} onChange={(event) => setSubagentTask(event.target.value)} /></label>
         <label>Name (optional)<input value={subagentName} onChange={(event) => setSubagentName(event.target.value)} /></label>
-        <ModelPicker value={subagentModel} providers={providers ?? []} onChange={(value) => setSubagentModel(value)} placement="top" />
+        <label className="subagent-launcher__model-label">Provider and model</label><ModelPicker className="subagent-launcher__model" value={subagentModel} providers={providers ?? []} onChange={(value) => setSubagentModel(value)} placement="top" />
         {subagentDisabledReason ? <p role="status">{subagentDisabledReason}</p> : null}
         <button type="button" disabled={Boolean(subagentDisabledReason) || !subagentTask.trim() || sending} onClick={() => void (async () => {
           setSending(true); setError(null);

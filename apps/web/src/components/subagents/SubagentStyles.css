@@ -5,9 +5,18 @@
 .single-subagents__cancel:focus-visible { outline: 2px solid var(--blue-strong); outline-offset: 2px; }
 .agent-presence__identity { padding: 0; border: 0; background: transparent; color: inherit; text-align: left; cursor: pointer; }
 .subagent-launcher { position: absolute; z-index: 40; right: 70px; bottom: calc(100% + 8px); display: grid; gap: 10px; width: min(360px, calc(100vw - 28px)); padding: 14px; border: 1px solid var(--line); border-radius: 12px; background: var(--bg-panel); box-shadow: var(--shadow-lg); }
+.subagent-launcher__head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.subagent-launcher__head h2 { margin: 0; color: var(--fg-0); font-size: var(--text-sm); font-weight: 600; }
+.subagent-launcher__head p { margin: 4px 0 0; color: var(--fg-2); font-size: var(--text-2xs); line-height: 1.45; }
+.subagent-launcher__head > button { flex: none; width: 26px; height: 26px; border: 0; border-radius: 6px; background: transparent; color: var(--fg-2); font-size: 20px; line-height: 1; cursor: pointer; }
+.subagent-launcher__head > button:hover { background: var(--bg-hover); color: var(--fg-0); }
+.subagent-launcher__head > button:focus-visible, .subagent-launcher > button:focus-visible { outline: 2px solid var(--accent-line); outline-offset: 2px; }
 .subagent-launcher label { display: grid; gap: 5px; color: var(--fg-1); font-size: var(--text-xs); }
 .subagent-launcher textarea, .subagent-launcher input { width: 100%; padding: 8px; border: 1px solid var(--line); border-radius: 7px; background: var(--bg-app); color: var(--fg-0); font: inherit; }
 .subagent-launcher textarea { min-height: 90px; resize: vertical; }
+.subagent-launcher__model-label { margin-bottom: -7px; }
+.subagent-launcher .subagent-launcher__model .model-picker__trigger { width: 100%; min-height: 36px; padding: 6px 9px; border: 1px solid var(--line); border-radius: 7px; background: var(--bg-app); color: var(--fg-0); text-align: left; }
+.subagent-launcher .subagent-launcher__model .model-picker__trigger:hover:not(:disabled), .subagent-launcher .subagent-launcher__model .model-picker__trigger[aria-expanded='true'] { background: var(--bg-app); border-color: var(--line-strong); }
 .subagent-launcher > button { justify-self: end; padding: 7px 12px; border: 0; border-radius: 7px; background: var(--blue-strong); color: white; cursor: pointer; }
 .subagent-launcher > button:disabled { opacity: .5; cursor: not-allowed; }
 .composer__subagent-button { display: inline-flex; align-items: center; gap: 4px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 7px; background: var(--bg-panel); color: var(--fg-1); font-size: var(--text-xs); cursor: pointer; }

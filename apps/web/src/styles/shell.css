@@ -34,6 +34,7 @@
 .crumbs__project { color: var(--fg-2); max-width: 220px; }
 .crumbs__current { font-weight: 450; letter-spacing: 0; color: var(--fg-0); }
 .header__actions { gap: 4px; }
+.header__actions .header__compact-action { width: 30px; height: 30px; }
 .header__title { display: flex; align-items: center; gap: 9px; flex: 1; min-width: 0; }
 .header__title .crumbs { flex: 1; }
 .header__primary, .header__team-row { display: contents; }
@@ -58,6 +59,10 @@
 .group-session-row__mark { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 35%, var(--line)); }
 .sgroup--team-session { margin-bottom: 8px; padding-bottom: 4px; border-bottom: 1px solid var(--line-soft); }
 @media (max-width: 680px) { .crumbs__project { max-width: 120px; } .header { padding-left: 10px; } }
+@media (max-width: 1100px) {
+  .header__actions .header__compact-action { width: 30px; height: 30px; padding: 0; }
+  .header__actions .header__compact-action > span { display: none; }
+}
 @media (max-width: 600px) {
   .header--team {
     display: flex; height: auto; min-height: var(--header-h); flex-direction: column; align-items: stretch;

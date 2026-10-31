@@ -5,8 +5,9 @@
 .settings-page__head p { color: var(--fg-2); font-size: 14px; margin-top: 8px; }
 .header--settings { border-bottom-color: transparent; }
 .settings-page__save { padding-top: 9px; color: var(--fg-2); font-size: 12px; text-align: right; }
-.settings-page__tabs { display: flex; gap: 26px; border-bottom: 1px solid var(--line); margin-bottom: 30px; }
-.settings-page__tabs button { position: relative; height: 39px; padding: 0 1px 13px; color: var(--fg-2); font-size: 13px; background: transparent; border: 0; transition: color var(--motion-fast) var(--ease-standard); }
+.settings-page__tabs { display: flex; gap: 26px; overflow-x: auto; overflow-y: hidden; border-bottom: 1px solid var(--line); margin-bottom: 30px; scrollbar-width: none; }
+.settings-page__tabs::-webkit-scrollbar { display: none; }
+.settings-page__tabs button { position: relative; flex: none; height: 39px; padding: 0 1px 13px; color: var(--fg-2); font-size: 13px; white-space: nowrap; background: transparent; border: 0; transition: color var(--motion-fast) var(--ease-standard); }
 .settings-page__tabs button:hover, .settings-page__tabs button[aria-current='page'] { color: var(--fg-0); }
 .settings-page__tabs button::after { content: ''; position: absolute; left: 0; right: 0; bottom: -1px; height: 2px; border-radius: 2px; background: var(--fg-0); transform: scaleX(0); transform-origin: left center; transition: transform var(--motion-ui) var(--ease-out); }
 .settings-page__tabs button[aria-current='page']::after { transform: scaleX(1); }

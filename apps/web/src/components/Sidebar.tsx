@@ -159,7 +159,7 @@ export function Sidebar() {
               setMenu({ sessionId: session.id, x: bounds.left + 24, y: bounds.bottom, returnFocus: event.target as HTMLElement });
             }}>
               <button type="button" className={cx('sitem', session.id === activeSessionId && view === 'workspace' && 'is-active', session.unread && 'is-unread')} onClick={() => selectSession(session.id)} aria-current={session.id === activeSessionId && view === 'workspace' ? 'true' : undefined} aria-label={`${kind}: ${session.name}${session.pinned ? ', pinned' : ''}${session.unread ? ', unread' : ''}`} title={`${kind} · ${session.name} · ${session.model}`}>
-                <span className="sitem__text"><span className="sitem__meta"><span>{kind}</span><span>{relativeTime(session.updatedAt, now)}</span></span><strong>{session.unread ? <i className="sitem__unread" aria-hidden="true" /> : null}<span>{session.name}</span></strong></span>
+                <span className="sitem__text"><strong>{session.unread ? <i className="sitem__unread" aria-hidden="true" /> : null}<span>{session.name}</span></strong><span className="sitem__meta"><span>{kind}</span><span>{relativeTime(session.updatedAt, now)}</span></span></span>
                 <span className="sitem__state">{session.pinned ? <Pin size={11} aria-hidden="true" /> : null}{session.status !== 'idle' ? <StatusDot status={session.status} label={false} /> : null}{teamAgent ? <span className="agent-session-row__mark">Agent</span> : groupConversation ? <span className="group-session-row__mark">Group</span> : null}</span>
               </button>
               {nested.length ? <button type="button" className="sitem__child-toggle" aria-expanded={Boolean(expandedChildren[session.id])} onClick={() => setExpandedChildren((state) => ({ ...state, [session.id]: !state[session.id] }))}>{expandedChildren[session.id] ? '▾' : '▸'} {nested.length} subagent{nested.length === 1 ? '' : 's'}</button> : null}
@@ -173,7 +173,7 @@ export function Sidebar() {
               }}><MoreHorizontal size={14} /></button>
             </div>
             {expandedChildren[session.id] ? nested.map((child) => <div role="listitem" key={child.id} className="sitem-row sitem-row--child" data-session-id={child.id}>
-              <button type="button" className={cx('sitem', child.id === activeSessionId && view === 'workspace' && 'is-active')} onClick={() => selectSession(child.id)} aria-current={child.id === activeSessionId && view === 'workspace' ? 'true' : undefined} aria-label={`Subagent session: ${child.name}`}><span className="sitem__text"><span className="sitem__meta"><span>↳ Subagent · {child.provider}</span><span>{relativeTime(child.updatedAt, now)}</span></span><strong>{child.name}</strong></span><span className="sitem__state">{child.status !== 'idle' ? <StatusDot status={child.status} label={false} /> : null}</span></button>
+              <button type="button" className={cx('sitem', child.id === activeSessionId && view === 'workspace' && 'is-active')} onClick={() => selectSession(child.id)} aria-current={child.id === activeSessionId && view === 'workspace' ? 'true' : undefined} aria-label={`Subagent session: ${child.name}`}><span className="sitem__text"><strong>{child.name}</strong><span className="sitem__meta"><span>↳ Subagent · {child.provider}</span><span>{relativeTime(child.updatedAt, now)}</span></span></span><span className="sitem__state">{child.status !== 'idle' ? <StatusDot status={child.status} label={false} /> : null}</span></button>
             </div>) : null}
             </div>;
             })}
