@@ -71,6 +71,9 @@ export class SessionResumeService {
 
     const session = this.store.getSession(entry.sessionId, true);
     if (!session || !this.store.getSession(entry.sessionId)) return this.skip(entry, 'session-archived-or-missing');
+    // Delegated children have their own durable recovery path: it fails the stale delegation and notifies the parent.
+    // Resuming the child here would duplicate its work after that failure has already been delivered.
+    if (session.parentSessionId) return this.skip(entry, 'delegated-subagent-managed');
     const run = this.store.getRun(entry.runId);
     if (!run) return this.skip(entry, 'interrupted-run-missing');
     const startedAt = Date.parse(run.startedAt);

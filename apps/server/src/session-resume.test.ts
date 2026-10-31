@@ -84,6 +84,46 @@ describe('automatic session resume after restart', () => {
     expect(secondRestart.app.store.db.prepare('SELECT state,attempts FROM session_resume_queue WHERE run_id=?').get(interrupted.runId)).toEqual({ state: 'resumed', attempts: 1 });
   });
 
+  it('does not resume an interrupted delegated child after recovery has failed it and notified the parent', async () => {
+    const dir = dataDir();
+    const before = await boot(dir);
+    const store = before.app.store;
+    const parent = store.getSession(EXAMPLE_CONTRACT_SESSION_ID)!;
+    store.updateSettings({ autoResumeOnRestart: true });
+    const child = store.insertSession({
+      projectId: parent.projectId, name: '↳ restart-child', provider: 'claude', model: 'claude-sonnet-5-5',
+      effort: parent.effort, policy: parent.policy, isolated: false, worktreePath: parent.worktreePath,
+      branch: parent.branch, parentSessionId: parent.id,
+    });
+    const runId = randomUUID();
+    const userMessage = store.insertMessage({ sessionId: child.id, role: 'user', content: 'Complete the delegated work.' });
+    store.updateSession(child.id, { status: 'running' });
+    store.insertRun({ id: runId, sessionId: child.id, userMessageId: userMessage.id, provider: 'claude', model: 'claude-sonnet-5-5', startedAt: new Date().toISOString() });
+    const delegationId = randomUUID();
+    store.insertDelegatedSubagent({
+      id: delegationId, parentSessionId: parent.id, childSessionId: child.id, name: 'restart-child', provider: 'claude',
+      model: 'claude-sonnet-5-5', task: 'Complete the delegated work.', status: 'running', requestedBy: 'agent',
+      startedAt: new Date().toISOString(), endedAt: null, resultPreview: null, error: null, resultDelivered: false,
+    });
+    await before.cleanup();
+    apps.splice(apps.indexOf(before), 1);
+
+    const restarted = await boot(dir);
+    await waitFor(() => restarted.app.store.getDelegatedSubagent(delegationId)?.resultDelivered === true, 5000, 'delegated failure delivery');
+    await waitFor(() => restarted.app.store.db.prepare('SELECT state FROM session_resume_queue WHERE run_id=?').get(runId)?.state === 'skipped', 5000, 'child resume skipped');
+
+    expect(restarted.app.store.getDelegatedSubagent(delegationId)).toMatchObject({
+      status: 'failed', error: 'Mingle restarted before the subagent finished', resultDelivered: true,
+    });
+    expect(restarted.app.store.db.prepare('SELECT skipped_reason FROM session_resume_queue WHERE run_id=?').get(runId)).toEqual({
+      skipped_reason: 'delegated-subagent-managed',
+    });
+    expect(restarted.fake.runs.some((run) => run.session.id === child.id)).toBe(false);
+    const failureNotices = restarted.app.store.listMessages(parent.id).filter((message) =>
+      message.content.includes('Subagent @restart-child') && message.content.includes('Mingle restarted before the subagent finished'));
+    expect(failureNotices).toHaveLength(1);
+  });
+
   it('continues an interrupted, still-approved session plan through plan execution', async () => {
     const dir = dataDir();
     const before = await boot(dir);
