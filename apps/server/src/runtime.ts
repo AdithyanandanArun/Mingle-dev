@@ -186,7 +186,23 @@ function sanitizeProviderFailureInput(error: unknown, scrub: (value: string) => 
 
 export class SessionRuntime {
   sendQueuedNow(sessionId:string,messageId:string): void { const item=this.store.listQueuedMessages(sessionId).find((m)=>m.id===messageId); if(!item) throw notFound('Queued message not found'); this.store.removeQueuedMessage(sessionId,messageId); this.interrupt(sessionId); void this.waitAndStartQueued(sessionId,item); }
-  private async waitAndStartQueued(sessionId:string,item:import('@mingle/contracts').QueuedMessage): Promise<void> { const run=this.active.get(sessionId); if(run) await run.promise; if(this.store.getSession(sessionId)?.status==='waiting') { this.store.enqueueMessage({...item,createdAt:item.createdAt}); return; } const session=this.store.getSession(sessionId); this.start(sessionId,item.content,{intent:item.intent,attachmentIds:item.attachmentIds,contextRefs:item.contextRefs,deferContextResolution:true,resolveSkills:session ? this.resolveQueuedSkills?.(session,item.skills) : undefined,queuedAttachmentOwnerId:item.id}); }
+  private async waitAndStartQueued(sessionId:string,item:import('@mingle/contracts').QueuedMessage): Promise<void> {
+    const run=this.active.get(sessionId); if(run) await run.promise;
+    const deadline=Date.now()+15_000;
+    while(this.isActive(sessionId) && Date.now()<deadline) await new Promise((resolve)=>setTimeout(resolve,25));
+    if(this.isActive(sessionId)) { this.requeueFront(sessionId,item,'Provider cleanup did not finish within 15 seconds.'); return; }
+    if(this.store.getSession(sessionId)?.status==='waiting') { this.store.enqueueMessage({...item,createdAt:item.createdAt}); return; }
+    try {
+      const session=this.store.getSession(sessionId);
+      this.start(sessionId,item.content,{intent:item.intent,attachmentIds:item.attachmentIds,contextRefs:item.contextRefs,deferContextResolution:true,resolveSkills:session ? this.resolveQueuedSkills?.(session,item.skills) : undefined,queuedAttachmentOwnerId:item.id});
+    } catch(error) { this.requeueFront(sessionId,item,`Could not start queued message: ${errorMessage(error)}`); }
+  }
+  private requeueFront(sessionId:string,item:import('@mingle/contracts').QueuedMessage,reason:string): void {
+    this.store.enqueueMessageFront({...item,createdAt:item.createdAt});
+    const session=this.store.getSession(sessionId,true);
+    this.store.insertMessage({sessionId,role:'system',kind:'info',content:`${reason} The message remains queued and will be retried.`});
+    this.store.recordEvent({projectId:session?.projectId??null,sessionId,type:'session.queue.start-failed',summary:'Queued message remains queued',payload:{queuedMessageId:item.id,error:truncate(redactSecrets(reason),500)}});
+  }
   private shutdownStartedAt: number | null = null;
   private readonly active = new Map<string, ActiveRun>();
   private readonly compactions = new Map<string, ActiveCompaction>();
@@ -237,6 +253,16 @@ export class SessionRuntime {
     return this.active.has(sessionId) || this.compactions.has(sessionId) || Boolean(this.teamProxy?.isActive(sessionId));
   }
   canQueue(sessionId:string): boolean { const run=this.active.get(sessionId); return Boolean(run && !run.cleanupPending && !run.closed); }
+  isSteerable(sessionId: string): boolean { const run=this.active.get(sessionId); return Boolean(run && run.providerPhase && !run.closed && !run.cleanupPending && run.provider==='codex' && run.adapter?.steer); }
+  async steer(sessionId: string, content: string): Promise<boolean> {
+    const run=this.active.get(sessionId);
+    if (!run || !run.providerPhase || run.closed || run.cleanupPending || run.provider!=='codex' || !run.adapter?.steer) return false;
+    try {
+      await run.adapter.steer(content);
+      this.store.insertMessage({sessionId,role:'user',content,kind:'steered'});
+      return true;
+    } catch { return false; }
+  }
   /** A cleanup lock can outlive provider execution; it must not keep tool authority alive. */
   isRunLive(sessionId: string, runId: string): boolean {
     const run = this.active.get(sessionId);
@@ -1403,7 +1429,7 @@ export class SessionRuntime {
     catch (error) { this.log('error', `Failed to record group delivery outcome for ${run.sessionId}`, error); }
     if (!run.cleanupPending && !run.teamRun && this.store.getSession(run.sessionId)?.status !== 'waiting') {
       const queued=this.store.dequeueMessage(run.sessionId);
-      if(queued) queueMicrotask(()=>{ try { const session=this.store.getSession(run.sessionId); this.start(run.sessionId,queued.content,{intent:queued.intent,attachmentIds:queued.attachmentIds,contextRefs:queued.contextRefs,deferContextResolution:true,resolveSkills:session ? this.resolveQueuedSkills?.(session,queued.skills) : undefined,queuedAttachmentOwnerId:queued.id}); } catch(error) { this.log('error',`Could not drain queued message for ${run.sessionId}`,error); } });
+      if(queued) queueMicrotask(()=>{ try { const session=this.store.getSession(run.sessionId); this.start(run.sessionId,queued.content,{intent:queued.intent,attachmentIds:queued.attachmentIds,contextRefs:queued.contextRefs,deferContextResolution:true,resolveSkills:session ? this.resolveQueuedSkills?.(session,queued.skills) : undefined,queuedAttachmentOwnerId:queued.id}); } catch(error) { this.log('error',`Could not drain queued message for ${run.sessionId}`,error); this.requeueFront(run.sessionId,queued,`Could not start queued message: ${errorMessage(error)}`); } });
     }
   }
 

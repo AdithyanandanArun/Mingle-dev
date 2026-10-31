@@ -148,6 +148,7 @@ export function Composer({ session, statusBar }: { session: Session; statusBar?:
   const attachmentDraft = useAttachmentDraft({ kind: 'session', id: session.id }, attachments, setAttachments, setError);
 
   const running = session.status === 'running' || session.status === 'waiting';
+  const steerable = running && session.steerable === true;
   const waitingBlocker = session.status === 'waiting' ? 'Waiting for your answer or approval above before the run can continue.' : null;
   const blocker =
     connection !== 'online' ? 'Disconnected from the Mingle server — reconnect to send.'
@@ -159,7 +160,7 @@ export function Composer({ session, statusBar }: { session: Session; statusBar?:
   const localDraftCommand = compactDraftCommand ?? (attachments.length || attachmentDraft.uploads.length ? null : /^\/(new|stop|settings|model|effort|permissions|tier|skills|usage|import|status|diff|compact|help)(?:\s.*)?$/i.exec(draft.trim()));
   const compactIntent = localDraftCommand?.[1]?.toLowerCase() === 'compact';
 
-  const submit = async () => {
+  const submit = async (sendNow = false) => {
     const compactCommand = /^\/(compact)(?:\s.*)?$/i.exec(draft.trim());
     const local = compactCommand ?? (attachments.length || attachmentDraft.uploads.length ? null : /^\/(new|stop|settings|model|effort|permissions|tier|skills|usage|import|status|diff|compact|help)(?:\s.*)?$/i.exec(draft.trim()));
     if (local?.[1]?.toLowerCase() === 'compact' && attachmentDraft.isBusy()) {
@@ -254,8 +255,9 @@ export function Composer({ session, statusBar }: { session: Session; statusBar?:
       const submittedAttachmentIds = attachments.map((item) => item.id);
       const submittedContextRefs = contextRefs;
       if (running) {
-        await api.queueMessage(session.id,{content:draft.trim(),skills:messageSkills,attachmentIds:submittedAttachmentIds,contextRefs:submittedContextRefs,intent:planningMode?'plan':'normal'});
-        useMingle.getState().toast('success','Message queued');
+        const response = await api.queueMessage(session.id,{content:draft.trim(),skills:messageSkills,attachmentIds:submittedAttachmentIds,contextRefs:submittedContextRefs,intent:planningMode?'plan':'normal'});
+        if (sendNow) await api.sendQueuedNow(session.id, response.queued.id);
+        useMingle.getState().toast('success', sendNow ? 'Message sent next' : 'Message queued');
       } else await api.sendMessage(session.id, draft.trim(), messageSkills, submittedAttachmentIds, submittedContextRefs, planningMode ? 'plan' : 'normal');
       if (useMingle.getState().drafts[session.id] === submittedDraft) useMingle.getState().setDraft(session.id, '');
       if (useMingle.getState().contextDrafts[session.id] === submittedContextRefs) useMingle.getState().setContextDraft(session.id, []);
@@ -458,7 +460,7 @@ export function Composer({ session, statusBar }: { session: Session; statusBar?:
   }, [activeSuggestion, pickerId, suggestion]);
   return (
     <div className="composer-wrap">
-      <QueuedMessages sessionId={session.id} items={(useMingle((s)=>s.boot?.queuedMessages ?? [])).filter((item)=>item.sessionId===session.id)} />
+      <QueuedMessages sessionId={session.id} steerable={steerable} items={(useMingle((s)=>s.boot?.queuedMessages ?? [])).filter((item)=>item.sessionId===session.id)} />
       {providerFailureCopy ? <div className="composer__note is-error" role="alert">
         <span>{providerFailureCopy}</span>{' '}
         <button type="button" className="link-btn" onClick={() => setModelOpenRequest((value) => value + 1)} disabled={disabled} title={running ? 'Wait for the active run to finish before switching providers.' : 'Choose another available provider.'}>Switch provider</button>
@@ -474,7 +476,7 @@ export function Composer({ session, statusBar }: { session: Session; statusBar?:
           role="combobox" aria-autocomplete="list" aria-haspopup="listbox" aria-expanded={Boolean(suggestion && suggestions.length)}
           aria-controls={suggestion && suggestions.length ? pickerId : undefined}
           aria-activedescendant={suggestion && suggestions.length ? `${pickerId}-option-${activeSuggestion}` : undefined}
-          placeholder={planningMode ? 'Describe what to plan… or type @/path to add file context' : 'Ask anything, or type @/path to add file context…'}
+          placeholder={planningMode ? 'Describe what to plan… or type @/path to add file context' : steerable ? 'Will steer the running agent…' : running ? 'Queued · will send when the agent finishes…' : 'Ask anything, or type @/path to add file context…'}
           onChange={(e) => {
             const nextDraft = e.target.value;
             caret.current = e.target.selectionStart ?? nextDraft.length;
@@ -518,6 +520,7 @@ export function Composer({ session, statusBar }: { session: Session; statusBar?:
               if ((e.key === 'Enter' || e.key === 'Tab') && !e.shiftKey) { e.preventDefault(); chooseSuggestion(activeSuggestion); return; }
               if (e.key === 'Escape') { e.preventDefault(); dismissedSuggestion.current = trigger; setSuggestion(null); return; }
             }
+            if (e.key === 'Enter' && e.shiftKey && (e.ctrlKey || e.metaKey) && running && !e.nativeEvent.isComposing) { e.preventDefault(); void submit(true); return; }
             if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); void submit(); }
           }}
         />

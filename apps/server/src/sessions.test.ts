@@ -98,6 +98,31 @@ describe('provider runs', () => {
     expect(t.app.attachments.repo.getRow(uploaded2.json.id)).toBeUndefined();
     secondGate.resolve();
   });
+  it('send-now waits for provider cleanup before starting the selected item', async () => {
+    const t = await boot({ runtime: { abortGraceMs: 40 } }); const gate = deferred();
+    t.fake.script = async () => { await gate.promise; };
+    const sid = EXAMPLE_CONTRACT_SESSION_ID;
+    await t.api('POST', `/api/sessions/${sid}/messages`, { content: 'first' }); await waitFor(() => t.fake.runs.length === 1);
+    const queued = await t.api('POST', `/api/sessions/${sid}/messages`, { content: 'next' });
+    await t.api('POST', `/api/sessions/${sid}/queue/${queued.json.queued.id}/send-now`);
+    await waitFor(async () => (await session(t, sid)).status === 'interrupted');
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    expect(t.fake.runs).toHaveLength(1);
+    gate.resolve(); await waitFor(() => t.fake.runs.length === 2);
+  });
+  it('requeues a failed automatic drain at the front and records a notice', async () => {
+    const t = await boot(); const gate = deferred(); const sid = EXAMPLE_CONTRACT_SESSION_ID;
+    t.fake.script = async () => { await gate.promise; };
+    await t.api('POST', `/api/sessions/${sid}/messages`, { content: 'first' }); await waitFor(() => t.fake.runs.length === 1);
+    const first = await t.api('POST', `/api/sessions/${sid}/messages`, { content: 'drain fails' });
+    const second = await t.api('POST', `/api/sessions/${sid}/messages`, { content: 'later' });
+    (await import('node:fs')).rmSync((await session(t, sid)).worktreePath, { recursive: true, force: true });
+    gate.resolve();
+    await waitFor(() => t.app.store.listQueuedMessages(sid).length === 2);
+    expect(t.app.store.listQueuedMessages(sid).map((item) => item.id)).toEqual([first.json.queued.id, second.json.queued.id]);
+    await waitFor(() => t.app.store.listEvents().some((event: any) => event.sessionId === sid && event.type === 'session.queue.start-failed'));
+    expect(t.app.store.listEvents().some((event: any) => event.sessionId === sid && event.type === 'session.queue.start-failed')).toBe(true);
+  });
   it('streams deltas durably, finalises messages and tracks usage', async () => {
     const t = await boot();
     const gate = deferred();
