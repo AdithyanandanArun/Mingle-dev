@@ -153,7 +153,6 @@ export function AccountSettings({ settings }: { settings: AppSettings }) {
   const waiting = account?.status === 'signing-in';
   const signedIn = account?.status === 'signed-in';
   const secureStorage = account ? storageMessage(account) : null;
-  const savedStoreLabel = storageBackendLabel(account?.storage?.backend);
 
   const retryStorage = async () => {
     if (!secureStorage?.retryable || busy) return;
@@ -190,7 +189,8 @@ export function AccountSettings({ settings }: { settings: AppSettings }) {
         <div className="account-settings__storage-icon" aria-hidden="true">{secureStorage.available ? <ShieldCheck size={17} /> : <ShieldAlert size={17} />}</div>
         <div className="account-settings__storage-copy">
           <div className="account-settings__storage-heading"><h3>Secure sign-in storage</h3><span>{secureStorage.label}</span></div>
-          <p>{savedStoreLabel && secureStorage.available ? `Saved in ${savedStoreLabel}.` : !secureStorage.available ? 'Not saved — no keyring available.' : secureStorage.message}</p>
+          <p>{secureStorage.message}</p>
+          {secureStorage.backend ? <small>{secureStorage.available ? 'Keyring' : 'Selected keyring'}: {secureStorage.backend}</small> : null}
           {busy === 'storage-retry' ? <p className="account-settings__storage-progress" role="status" aria-live="polite">Checking secure storage…</p> : null}
         </div>
         {secureStorage.retryable ? <Button size="sm" disabled={Boolean(busy)} busy={busy === 'storage-retry'} onClick={() => void retryStorage()}><RefreshCw size={12} />Retry secure storage</Button> : null}
