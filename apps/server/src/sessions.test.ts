@@ -65,6 +65,16 @@ describe('provider runs', () => {
     gate.resolve(); await waitFor(()=>t.fake.runs.length===3);
     expect(t.fake.runs.map((r:any)=>r.prompt)).toEqual(expect.arrayContaining(['second','third']));
   });
+  it('resolves queued skills into the provider run options', async () => {
+    const t = await boot(); const gate = deferred(); t.fake.script = async () => { await gate.promise; };
+    t.fake.catalogSkills = [{ id: 'skill:review', name: 'review', description: 'Review changes', source: 'user', enabled: true, path: '/skills/review' }];
+    await t.api('POST', `/api/sessions/${EXAMPLE_CONTRACT_SESSION_ID}/messages`, { content: 'first' });
+    await waitFor(() => t.fake.runs.length === 1);
+    await t.api('POST', `/api/sessions/${EXAMPLE_CONTRACT_SESSION_ID}/messages`, { content: 'use review', skills: ['skill:review'] });
+    gate.resolve();
+    await waitFor(() => t.fake.runs.length === 2);
+    expect(t.fake.runs[1]?.skills).toMatchObject([{ id: 'skill:review', enabled: true }]);
+  });
   it('streams deltas durably, finalises messages and tracks usage', async () => {
     const t = await boot();
     const gate = deferred();

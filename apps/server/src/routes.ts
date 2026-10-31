@@ -125,6 +125,25 @@ function validateSessionAttachmentSupport(s: Services, session: Session, attachm
   }
 }
 
+function resolveSkillsFor(s: Services, session: Session, skillIds: string[]): (() => Promise<import('@mingle/contracts').ProviderSkill[]>) | undefined {
+  if (!skillIds.length) return undefined;
+  return async () => {
+    const catalog = await s.providers.catalog(session, true);
+    const skills = skillIds.map((key) => {
+      const skill = catalog.skills.find((row) => row.id === key && row.enabled);
+      if (!skill) throw badRequest('A selected skill is no longer available. Refresh the skill picker and select it again.');
+      return skill;
+    });
+    const current = s.store.getSession(session.id);
+    if (!current) throw notFound('Session not found');
+    if (s.groups.forSession(session.id)) throw conflict('This session joined a group while loading skills. Send through its group conversation.');
+    if (current.provider !== session.provider || current.model !== session.model || current.worktreePath !== session.worktreePath) {
+      throw conflict('Session settings changed while loading skills. Send the message again.');
+    }
+    return skills;
+  };
+}
+
 export function buildRouter(s: Services) {
   const routes: Route[] = [];
   const add = (method: string, pattern: string, handler: Handler) => routes.push({ method, ...compile(pattern), handler });
@@ -554,21 +573,7 @@ export function buildRouter(s: Services) {
     const skillIds = [...new Set(selected ?? [])];
     if (intent === 'plan' && skillIds.length) throw badRequest('Native plan generation cannot run provider commands or skills. Send a regular planning prompt instead.');
     if (session.provider === 'claude' && skillIds.length > 1) throw badRequest('Claude supports one explicitly selected skill per message.');
-    const resolveSkills = skillIds.length ? async () => {
-      const catalog = await s.providers.catalog(session, true);
-      const skills = skillIds.map((key) => {
-        const skill = catalog.skills.find((row) => row.id === key && row.enabled);
-        if (!skill) throw badRequest('A selected skill is no longer available. Refresh the skill picker and select it again.');
-        return skill;
-      });
-      const current = s.store.getSession(id);
-      if (!current) throw notFound('Session not found');
-      if (s.groups.forSession(id)) throw conflict('This session joined a group while loading skills. Send through its group conversation.');
-      if (current.provider !== session.provider || current.model !== session.model || current.worktreePath !== session.worktreePath) {
-        throw conflict('Session settings changed while loading skills. Send the message again.');
-      }
-      return skills;
-    } : undefined;
+    const resolveSkills = resolveSkillsFor(s, session, skillIds);
     const attachmentRows = s.attachments.validate({ kind: 'session', id }, attachmentIds ?? []);
     validateSessionAttachmentSupport(s, session, attachmentRows, content);
     const latest = s.store.getSession(id);

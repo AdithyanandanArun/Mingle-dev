@@ -183,7 +183,17 @@ export function createApplication(options: ApplicationOptions): MingleApplicatio
   const runtime = new SessionRuntime(store, hub, options.providers, tasks, log, options.runtime, (session) => {
     repository.assertSessionAvailable(session);
     resolveRunConfig(providers.cached()?.find((row) => row.id === session.provider), session, { effort: true, policy: true, serviceTier: true });
-  }, browserMcp, intelligence, recovery);
+  }, browserMcp, intelligence, recovery, (session, skillIds) => {
+    if (!skillIds.length) return undefined;
+    return async () => {
+      const catalog = await providers.catalog(session, true);
+      const skills = skillIds.map((id) => catalog.skills.find((skill) => skill.id === id && skill.enabled));
+      if (skills.some((skill) => !skill)) throw new Error('A selected skill is no longer available. Refresh the skill picker and select it again.');
+      const latest = store.getSession(session.id);
+      if (!latest || latest.provider !== session.provider || latest.model !== session.model || latest.worktreePath !== session.worktreePath) throw new Error('Session settings changed while loading skills. Send the message again.');
+      return skills as import('@mingle/contracts').ProviderSkill[];
+    };
+  });
   runtime.setProgressMcp(progressMcp);
   const terminals = new TerminalManager(store, hub, log, options.terminal);
   const workspace = new WorkspaceService(store, config.dataDir, runtime, () => providers.cached());

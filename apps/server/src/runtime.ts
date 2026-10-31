@@ -95,6 +95,8 @@ interface ActiveRun {
   baseCost: number | null;
   taskId: string | null;
   skills: ProviderSkill[];
+  adapter?: import('@mingle/contracts').AgentAdapter;
+  providerPhase: boolean;
   invocation?: NativeInvocation;
   intent: 'normal' | 'plan';
   executionPlanId?: string;
@@ -183,7 +185,7 @@ function sanitizeProviderFailureInput(error: unknown, scrub: (value: string) => 
 
 export class SessionRuntime {
   sendQueuedNow(sessionId:string,messageId:string): void { const item=this.store.listQueuedMessages(sessionId).find((m)=>m.id===messageId); if(!item) throw notFound('Queued message not found'); this.store.removeQueuedMessage(sessionId,messageId); this.interrupt(sessionId); void this.waitAndStartQueued(sessionId,item); }
-  private async waitAndStartQueued(sessionId:string,item:import('@mingle/contracts').QueuedMessage): Promise<void> { const run=this.active.get(sessionId); if(run) await run.promise; if(this.store.getSession(sessionId)?.status==='waiting') { this.store.enqueueMessage({...item,createdAt:item.createdAt}); return; } this.start(sessionId,item.content,{intent:item.intent,attachmentIds:item.attachmentIds,contextRefs:item.contextRefs,deferContextResolution:true}); }
+  private async waitAndStartQueued(sessionId:string,item:import('@mingle/contracts').QueuedMessage): Promise<void> { const run=this.active.get(sessionId); if(run) await run.promise; if(this.store.getSession(sessionId)?.status==='waiting') { this.store.enqueueMessage({...item,createdAt:item.createdAt}); return; } const session=this.store.getSession(sessionId); this.start(sessionId,item.content,{intent:item.intent,attachmentIds:item.attachmentIds,contextRefs:item.contextRefs,deferContextResolution:true,resolveSkills:session ? this.resolveQueuedSkills?.(session,item.skills) : undefined}); }
   private shutdownStartedAt: number | null = null;
   private readonly active = new Map<string, ActiveRun>();
   private readonly compactions = new Map<string, ActiveCompaction>();
@@ -202,6 +204,7 @@ export class SessionRuntime {
     private readonly store: Store, private readonly hub: Hub, private readonly providers: ProviderRuntime, private readonly tasks: TaskService,
     private readonly log: Logger, options: RuntimeOptions = {}, private readonly validateSession?: (session: Session) => void, private readonly browserMcp?: BrowserMcpBridge, private readonly intelligence?: ProjectIntelligenceService,
     private readonly recovery?: RecoveryService,
+    private readonly resolveQueuedSkills?: (session: Session, skillIds: string[]) => (() => Promise<ProviderSkill[]>) | undefined,
   ) {
     // Covers the supported adapters' interrupt grace and escalating process shutdown.
     this.abortGraceMs = options.abortGraceMs ?? 30_000;
@@ -309,7 +312,7 @@ export class SessionRuntime {
     const run: ActiveRun = {
       id: runId, startedAt: nowIso(), provider: session.provider, tick: performance.now(), tools: new Map(), activityTimer: null,
       sessionId, controller: new AbortController(), closed: false, cleanupPending: false, acceptingTools: false, approvals: new Map(), questions: new Map(), stream: null, flushTimer: null, consumedHandoffs: handoffs.map((h) => h.id), firstEvent: false, capabilityTokens: [],
-      baseInput: session.inputTokens, baseOutput: session.outputTokens, baseCost: session.costUsd, taskId: options.taskId ?? null, skills: options.skills ?? [], invocation, intent: options.intent ?? 'normal', executionPlanId: options.executionPlanId,
+      baseInput: session.inputTokens, baseOutput: session.outputTokens, baseCost: session.costUsd, taskId: options.taskId ?? null, skills: options.skills ?? [], providerPhase: false, invocation, intent: options.intent ?? 'normal', executionPlanId: options.executionPlanId,
       contextRefs: options.contextRefs, deferContextResolution: options.deferContextResolution, resolveSkills: options.resolveSkills,
       context: [options.context, invocation && handoffs.length ? this.composePrompt(handoffs, '') : undefined].filter(Boolean).join('\n\n') || undefined,
       providerHandoff: pendingProviderHandoff,
@@ -535,6 +538,8 @@ export class SessionRuntime {
       }
       if (run.resolveSkills) run.skills = await run.resolveSkills();
       const adapter = this.providers.createAdapter(startSession.provider);
+      run.adapter = adapter;
+      run.providerPhase = true;
       const savedSession = this.store.getSession(run.sessionId) ?? startSession;
       const session: Session = {
         ...savedSession, worktreePath: startSession.worktreePath, branch: startSession.branch,
@@ -1396,7 +1401,7 @@ export class SessionRuntime {
     catch (error) { this.log('error', `Failed to record group delivery outcome for ${run.sessionId}`, error); }
     if (!run.cleanupPending && !run.teamRun && this.store.getSession(run.sessionId)?.status !== 'waiting') {
       const queued=this.store.dequeueMessage(run.sessionId);
-      if(queued) queueMicrotask(()=>{ try { this.start(run.sessionId,queued.content,{intent:queued.intent,attachmentIds:queued.attachmentIds,contextRefs:queued.contextRefs,deferContextResolution:true}); } catch(error) { this.log('error',`Could not drain queued message for ${run.sessionId}`,error); } });
+      if(queued) queueMicrotask(()=>{ try { const session=this.store.getSession(run.sessionId); this.start(run.sessionId,queued.content,{intent:queued.intent,attachmentIds:queued.attachmentIds,contextRefs:queued.contextRefs,deferContextResolution:true,resolveSkills:session ? this.resolveQueuedSkills?.(session,queued.skills) : undefined}); } catch(error) { this.log('error',`Could not drain queued message for ${run.sessionId}`,error); } });
     }
   }
 

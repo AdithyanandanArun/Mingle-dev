@@ -13,6 +13,7 @@ export type Script = (options: RunOptions, emit: (event: AdapterEvent) => void) 
 /** Scriptable stand-in for the provider module; never starts a real model or child process. */
 export class FakeProviders implements ProviderRuntime {
   runs: RunOptions[] = [];
+  catalogSkills: import('@mingle/contracts').ProviderSkill[] = [];
   script: Script = async (_o, emit) => { emit({ type: 'text', text: 'ok' }); };
   detections = 0;
   createAdapter(_provider: Provider): AgentAdapter {
@@ -25,6 +26,7 @@ export class FakeProviders implements ProviderRuntime {
       { id: 'claude', name: 'Claude', available: true, version: 'fake', executable: '/fake/claude', reason: null, models: [{ id: 'claude-sonnet-5-5', name: 'Sonnet' }] },
     ];
   }
+  async getCatalog() { return { commands: [], skills: this.catalogSkills, warnings: [] }; }
 }
 
 export function deferred<T = void>() {
