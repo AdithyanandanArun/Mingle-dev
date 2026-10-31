@@ -422,6 +422,8 @@ const MIGRATIONS: (string | ((db: DatabaseSync) => void))[] = [
       content TEXT NOT NULL, intent TEXT NOT NULL, skills_json TEXT NOT NULL, attachment_ids_json TEXT NOT NULL,
       context_refs_json TEXT NOT NULL, created_at TEXT NOT NULL
     ); CREATE INDEX IF NOT EXISTS queued_messages_order ON queued_messages(session_id, created_at, id);`,
+    (db) => addColumn(db, 'conversation_groups', 'preferred_coordinator_member_id',
+      'ALTER TABLE conversation_groups ADD COLUMN preferred_coordinator_member_id TEXT;'),
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;

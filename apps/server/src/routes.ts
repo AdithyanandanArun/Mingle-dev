@@ -361,6 +361,8 @@ export function buildRouter(s: Services) {
   });
   add('PATCH', '/api/groups/:id', async (ctx) => s.groups.update(param(ctx, 'id'), await ctx.body(UpdateGroupSchema)));
   add('POST', '/api/groups/:id/agents', async (ctx) => new Reply(201, await s.groups.addAgent(param(ctx, 'id'), await ctx.body(AddGroupAgentSchema))));
+  add('POST', '/api/groups/:id/restore-coordinator', async (ctx) => { await ctx.body(emptyGroupBody); return s.groups.restorePreferredCoordinator(param(ctx, 'id')); });
+  add('GET', '/api/groups/:id/coordinator-restore-status', (ctx) => s.groups.coordinatorRestoreStatus(param(ctx, 'id')));
   add('DELETE', '/api/groups/:id/members/:memberId', (ctx) => s.groups.removeMember(param(ctx, 'id'), param(ctx, 'memberId')));
   add('POST', '/api/groups/:id/messages', async (ctx) => new Reply(202, await s.groups.send(param(ctx, 'id'), await ctx.body(SendGroupMessageSchema))));
   add('POST', '/api/groups/:id/pause', async (ctx) => { await ctx.body(emptyGroupBody); return s.groups.pause(param(ctx, 'id')); });

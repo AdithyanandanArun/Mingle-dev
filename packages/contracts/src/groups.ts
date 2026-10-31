@@ -49,6 +49,8 @@ export type SendGroupMessage = z.infer<typeof SendGroupMessageSchema>;
 export interface ConversationGroup {
   id: string; projectId: string; title: string; anchorSessionId: string; mode: GroupMode;
   orchestratorMemberId: string | null; paused: boolean; pauseReason: string | null;
+  /** Original orchestrator retained while a temporary fallback member coordinates. */
+  preferredCoordinatorMemberId?: string | null;
   maxParallel: number; maxTurns: number; maxHops: number; createdAt: string; updatedAt: string;
   /** Present on cross-device sessions; the host's canonical team permission, independent of local group autonomy defaults. */
   teamPermissionLevel?: 'supervised' | 'full-access';

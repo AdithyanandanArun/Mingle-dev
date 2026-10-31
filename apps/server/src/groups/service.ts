@@ -137,6 +137,7 @@ export class GroupService {
   private lock: Promise<unknown> = Promise.resolve();
   private readonly pending = new Set<string>();
   private readonly automaticFallbackCaptures = new Set<string>();
+  private readonly pendingCoordinatorRestores = new Set<string>();
   private readonly safeRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
   /** Only former coordinator runs lose authority on takeover; independent worker runs keep their tools. */
   private readonly fencedCoordinatorDeliveries = new Set<string>();
@@ -650,6 +651,7 @@ export class GroupService {
       }
       this.repo.updateGroup(groupId, {
         orchestratorMemberId: next?.id ?? null, coordinatorEpoch: (group.coordinatorEpoch ?? 1) + 1,
+        preferredCoordinatorMemberId: options.automatic ? group.preferredCoordinatorMemberId ?? previous?.id ?? null : null,
         paused: options.paused ?? !next, pauseReason: options.pauseReason ?? (next ? null : 'No team orchestrator is currently available.'),
       });
       if (next) {
@@ -765,6 +767,18 @@ export class GroupService {
     });
   }
 
+  coordinatorRestoreStatus(groupId: string): { handle: string; cooldownUntil: string | null; reason: string | null } | null {
+    const group = this.requireGroup(groupId);
+    const id = group.preferredCoordinatorMemberId;
+    if (!id) return null;
+    const member = this.requireMember(group, id);
+    const session = this.store.getSession(member.sessionId);
+    this.pruneProviderCooldowns();
+    const cooldown = session ? this.providerCooldowns.get(session.provider) : undefined;
+    return { handle: member.handle, cooldownUntil: cooldown && cooldown.until > this.now() ? new Date(cooldown.until).toISOString() : null,
+      reason: cooldown?.reason ?? null };
+  }
+
   forSession(sessionId: string): GroupSnapshot | undefined {
     const member = this.repo.activeMemberOfSession(sessionId);
     const group = member ? this.repo.getGroup(member.groupId) : undefined;
@@ -773,7 +787,8 @@ export class GroupService {
 
   private snapshot(group: ConversationGroup): GroupSnapshot {
     const members: GroupMember[] = this.repo.members(group.id).map((m) => {
-      const failure = this.recovery?.failure(m.sessionId) ?? undefined;
+      const failedRunId = this.repo.memberDeliveries(m.id, ['failed', 'interrupted']).filter((delivery) => delivery.runId).at(-1)?.runId;
+      const failure = this.recovery?.failure(m.sessionId) ?? (failedRunId ? this.recovery?.failureForRun(failedRunId) : undefined);
       return { id: m.id, groupId: m.groupId, sessionId: m.sessionId, handle: m.handle, role: m.role, held: m.held,
         joinedAt: m.joinedAt, removedAt: m.removedAt, ...(failure ? { failure } : {}) };
     });
@@ -1656,6 +1671,7 @@ export class GroupService {
       if (member.role !== role) this.repo.updateMember(member.id, { role });
     }
     this.repo.updateGroup(group.id, { mode: nextMode, orchestratorMemberId: target.id, coordinatorEpoch: epoch,
+      preferredCoordinatorMemberId: automatic ? group.preferredCoordinatorMemberId ?? old.id : null,
       recoveryState: { status: group.recoveryState?.pendingCheckpointId ? 'paused' : 'recovering',
         ...(group.recoveryState?.pendingCheckpointId ? { pendingCheckpointId: group.recoveryState.pendingCheckpointId, reason: group.recoveryState.reason } : {}),
         ...(checkpoint?.id ? { acknowledgedCheckpointId: checkpoint.id } : group.recoveryState?.acknowledgedCheckpointId ? { acknowledgedCheckpointId: group.recoveryState.acknowledgedCheckpointId } : {}),
@@ -1680,6 +1696,43 @@ export class GroupService {
         quotaPoolVerification: quotaPoolVerification ?? (automatic ? 'verified' : undefined),
         fallbackUncertainty: quotaPoolVerification === 'unverified' ? 'Distinct provider quota pools were not reported; this single explicitly configured fallback does not assert that the replacement has quota available.' : undefined });
     for (const id of runningOld) this.fencedCoordinatorDeliveries.add(id);
+  }
+
+  /** Return a quota-fallback group to its persisted original coordinator. */
+  async restorePreferredCoordinator(groupId: string): Promise<GroupSnapshot> {
+    const group = this.requireGroup(groupId);
+    const preferredId = group.preferredCoordinatorMemberId;
+    if (!preferredId) throw conflict('This group has no temporary coordinator to restore.');
+    const preferred = this.requireMember(group, preferredId);
+    const current = group.orchestratorMemberId ? this.requireMember(group, group.orchestratorMemberId) : undefined;
+    if (!current) throw conflict('This group has no active temporary coordinator.');
+    const failure = this.recovery?.failure(preferred.sessionId);
+    if (failure && this.failureCooldownActive(failure)) {
+      const retryAt = failure.retryAt ?? new Date(Date.parse(failure.occurredAt) + DEFAULT_PROVIDER_COOLDOWN_MS).toISOString();
+      throw conflict(`@${preferred.handle} is still in provider cooldown until ${retryAt}.`);
+    }
+    const targetSession = this.store.getSession(preferred.sessionId);
+    const currentSession = this.store.getSession(current.sessionId);
+    if (!targetSession || !this.memberProviderAvailable(preferred, targetSession)) throw conflict(`@${preferred.handle}'s provider is unavailable. Refresh provider availability and try again.`);
+    if (this.sessionBusy(targetSession) || this.repo.memberDeliveries(preferred.id, ['queued', 'running']).length) throw conflict(`@${preferred.handle} must be idle before resuming orchestration.`);
+    if (currentSession && this.sessionBusy(currentSession) || this.repo.memberDeliveries(current.id, ['running']).length) {
+      this.pendingCoordinatorRestores.add(groupId);
+      return this.get(groupId);
+    }
+    const contextDelivery = this.repo.memberDeliveries(current.id, ['failed', 'interrupted']).filter((delivery) => delivery.runId).at(-1);
+    const checkpoint = contextDelivery?.runId ? await this.recovery?.capture(current.sessionId, `Restore original orchestrator @${preferred.handle}`, contextDelivery.runId) : undefined;
+    this.store.tx(() => {
+      const fresh = this.requireGroup(groupId);
+      if (fresh.orchestratorMemberId !== current.id || fresh.preferredCoordinatorMemberId !== preferred.id) throw conflict('The coordinator changed while restoration was being prepared.');
+      this.applyCoordinatorReplacement(fresh, preferred.id, false, checkpoint?.id);
+      const latest = this.repo.getGroup(groupId)!;
+      this.repo.updateGroup(groupId, { preferredCoordinatorMemberId: null });
+      this.repo.insertMessage({ groupId, senderMemberId: null, recipients: [], kind: 'status',
+        content: `@${preferred.handle} is back and has resumed orchestrating.` });
+      this.event(latest, 'group.coordinator.restored', `@${preferred.handle} restored as orchestrator`, { fromMemberId: current.id, toMemberId: preferred.id });
+    });
+    this.schedule(groupId);
+    return this.get(groupId);
   }
 
   private queueCoordinatorContinuation(
@@ -2711,7 +2764,7 @@ ${task ? `Task ${task.id}: ${task.title}\nAcceptance: ${task.acceptanceCriteria}
     }
     if (!delivery || delivery.status !== 'running') return;
     if (outcome === 'completed') this.recovery?.clearFailure(sessionId);
-    this.settle(delivery, outcome);
+    void this.settle(delivery, outcome);
     this.teamRunFinishedHook?.({ sessionId, runId, outcome, groupId: delivery.groupId, deliveryId: delivery.id });
   }
 
@@ -2759,7 +2812,7 @@ ${task ? `Task ${task.id}: ${task.title}\nAcceptance: ${task.acceptanceCriteria}
     for (const delivery of this.repo.memberDeliveries(member.id, ['running'])) {
       if (this.reserved.get(sessionId) === delivery.id) continue;
       const run = delivery.runId ? this.store.getRun(delivery.runId) : undefined;
-      if (!run || run.status !== 'running') this.settle(delivery, run?.status === 'completed' ? 'completed' : run?.status === 'failed' ? 'failed' : 'interrupted');
+      if (!run || run.status !== 'running') void this.settle(delivery, run?.status === 'completed' ? 'completed' : run?.status === 'failed' ? 'failed' : 'interrupted');
     }
     this.schedule(member.groupId);
   }
@@ -2772,7 +2825,7 @@ ${task ? `Task ${task.id}: ${task.title}\nAcceptance: ${task.acceptanceCriteria}
     return this.repo.getDelivery(delivery.id);
   }
 
-  private settle(delivery: DeliveryRow, outcome: Outcome): void {
+  private async settle(delivery: DeliveryRow, outcome: Outcome): Promise<void> {
     const group = this.repo.getGroup(delivery.groupId);
     const member = this.repo.getMember(delivery.memberId);
     if (!group || !member) return;
@@ -2850,6 +2903,12 @@ ${task ? `Task ${task.id}: ${task.title}\nAcceptance: ${task.acceptanceCriteria}
     });
     if (outcome === 'completed' || outcome === 'failed' || outcome === 'interrupted') this.notifyCoordinator(delivery.requestId);
     if (outcome === 'completed') this.refreshRecoveryState(group.id);
+    if (this.pendingCoordinatorRestores.has(group.id)) {
+      this.pendingCoordinatorRestores.delete(group.id);
+      try { await this.restorePreferredCoordinator(group.id); } catch (error) {
+        if (!(error instanceof HttpError)) this.log('warn', `Deferred coordinator restoration failed for ${group.id}`, error);
+      }
+    }
     this.schedule(group.id);
   }
 

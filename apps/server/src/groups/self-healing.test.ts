@@ -200,6 +200,51 @@ it('replaces a failed Full-access coordinator using the best available worker', 
   expect(t.app.store.listEvents().some((event) => event.type === 'group.coordinator.fallback' && event.payload.toMemberId === worker.id)).toBe(true);
 }, 15_000);
 
+it('restores a quota-failed coordinator after cooldown and defers while the stand-in is delivering', async () => {
+  const t = await startTestApp(); apps.push(t);
+  const group = await createLocalGroup(t, 'orchestrated', 3);
+  const lead = group.members.find((member) => member.role === 'orchestrator')!;
+  await t.api('PATCH', `/api/sessions/${lead.sessionId}`, { policy: 'full-access' });
+  const standIn = group.workers.find((member) => member.handle === 'claude2')!;
+  const active = deferred<void>(); const finish = deferred<void>(); let failLead = true;
+  const seen: string[] = [];
+  t.fake.script = async (options, emit) => {
+    seen.push(options.session.id);
+    if (options.session.id === lead.sessionId && failLead) {
+      (options as typeof options & DispatchAwareOptions).onDispatchState?.('dispatched');
+      throw new ProviderError('Account quota exhausted.', { code: 'quota_exhausted', outcomeKnown: true });
+    }
+    if (options.session.id === standIn.sessionId && options.prompt.includes('restore-defer-marker')) { active.resolve(); await finish.promise; }
+    emit({ type: 'text', text: 'Completed by current coordinator.' });
+  };
+  await t.api('POST', `/api/groups/${group.groupId}/messages`, { content: 'Start coordinator fallback.' });
+  await waitFor(() => t.app.groups.get(group.groupId).group.orchestratorMemberId === standIn.id, 8000, 'quota fallback');
+  const cooldown = await t.api('POST', `/api/groups/${group.groupId}/restore-coordinator`, {});
+  expect(cooldown.status).toBe(409);
+  expect(cooldown.json.error).toContain('cooldown');
+  const initialFailure = t.app.groups.get(group.groupId).members.find((member) => member.id === lead.id)?.failure;
+  expect(initialFailure?.kind).toBe('quota_exhausted');
+  await waitFor(() => t.app.groups.get(group.groupId).requests.at(-1)?.status === 'completed', 8000, 'fallback request to finish');
+  const now = Date.now(); let increments = 0;
+  vi.spyOn(Date, 'now').mockImplementation(() => now + 16 * 60_000 + increments++);
+  const deferredRequest = await t.api('POST', `/api/groups/${group.groupId}/messages`, { content: 'restore-defer-marker' });
+  expect(deferredRequest.status).toBe(202);
+  await active.promise;
+  const pending = await t.api('POST', `/api/groups/${group.groupId}/restore-coordinator`, {});
+  expect(pending.status).toBe(200);
+  expect(pending.json.group.orchestratorMemberId).toBe(standIn.id);
+  finish.resolve();
+  await waitFor(() => t.app.groups.get(group.groupId).group.orchestratorMemberId === lead.id, 8000, 'deferred coordinator restoration');
+  expect(t.app.groups.get(group.groupId).group.preferredCoordinatorMemberId).toBeNull();
+  expect(t.app.groups.get(group.groupId).messages.some((message) => message.content.includes('is back and has resumed orchestrating'))).toBe(true);
+  expect(t.app.store.listEvents().some((event) => event.type === 'group.coordinator.restored' && event.payload.toMemberId === lead.id)).toBe(true);
+  failLead = false;
+  await t.api('POST', `/api/groups/${group.groupId}/messages`, { content: 'Verify restored coordinator tools and role.' });
+  await waitFor(() => seen.filter((sessionId) => sessionId === lead.sessionId).length >= 2, 8000, 'restored coordinator prompt');
+  const restoredContext = t.app.groups.contextForRun(lead.sessionId, t.app.groups.get(group.groupId).deliveries.find((delivery) => delivery.memberId === lead.id && delivery.runId)?.runId ?? '');
+  expect(restoredContext?.instructions).toContain('coordinator');
+}, 30_000);
+
 it('pauses after two automatic task fallbacks and after a second stalled attempt', async () => {
   const t = await startTestApp(); apps.push(t);
   const group = await createLocalGroup(t, 'current-leads', 3);

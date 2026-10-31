@@ -54,6 +54,7 @@ const mapGroup = (r: Row): ConversationGroup => ({
   ...(r.recovery_policy ? { recoveryPolicy: JSON.parse(r.recovery_policy as string) as GroupRecoveryPolicy } : {}),
   ...(r.recovery_state ? { recoveryState: JSON.parse(r.recovery_state as string) as GroupRecoveryState } : {}),
   coordinatorEpoch: Number(r.coordinator_epoch ?? 1),
+  preferredCoordinatorMemberId: (r.preferred_coordinator_member_id as string | null) ?? null,
 });
 const mapMember = (r: Row): MemberRow => ({
   id: r.id as string, groupId: r.group_id as string, sessionId: r.session_id as string, handle: r.handle as string,
@@ -128,7 +129,7 @@ export class GroupRepo {
   updateGroup(id: string, patch: {
     mode?: GroupMode; orchestratorMemberId?: string | null; paused?: boolean; pauseReason?: string | null;
     maxParallel?: number; maxTurns?: number; maxHops?: number; autonomy?: AutonomyConfig; recoveryPolicy?: GroupRecoveryPolicy;
-    recoveryState?: GroupRecoveryState; coordinatorEpoch?: number;
+    recoveryState?: GroupRecoveryState; coordinatorEpoch?: number; preferredCoordinatorMemberId?: string | null;
   }): void {
     const sets = ['updated_at = ?'];
     const params: SQLInputValue[] = [nowIso()];
@@ -144,6 +145,7 @@ export class GroupRepo {
     if (patch.recoveryPolicy !== undefined) add('recovery_policy', JSON.stringify(patch.recoveryPolicy));
     if (patch.recoveryState !== undefined) add('recovery_state', JSON.stringify(patch.recoveryState));
     add('coordinator_epoch', patch.coordinatorEpoch);
+    add('preferred_coordinator_member_id', patch.preferredCoordinatorMemberId);
     this.run(`UPDATE conversation_groups SET ${sets.join(', ')} WHERE id = ?`, ...params, id);
   }
   touchGroup(id: string): void { this.run('UPDATE conversation_groups SET updated_at = ? WHERE id = ?', nowIso(), id); }

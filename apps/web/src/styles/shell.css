@@ -50,6 +50,7 @@
 .team-control__state[data-state='paused'], .team-control__state[data-state='waiting'] { color: var(--warn); }
 .team-control__state[data-state='offline'], .team-control__state[data-state='error'] { color: var(--err); }
 .team-control__action { flex: none; }
+.team-control__standin { max-width: 230px; overflow: hidden; color: var(--warn); font-size: var(--text-2xs); text-overflow: ellipsis; white-space: nowrap; }
 .team-control--remote { cursor: default; }
 .team-control--remote:hover { border-color: transparent; background: transparent; color: var(--fg-1); }
 .team-session-row__mark { color: var(--fg-3); font-size: var(--text-2xs); }

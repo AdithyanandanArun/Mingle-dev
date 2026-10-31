@@ -10,6 +10,7 @@
 .agent-presence__head > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg-3); font-size: var(--text-2xs); font-variant-numeric: tabular-nums; }
 .agent-presence__toggle { display: inline-flex; width: 23px; height: 23px; align-items: center; justify-content: center; padding: 0; border: 1px solid var(--line); border-radius: 6px; background: var(--bg-panel); color: var(--fg-1); font-size: 16px; line-height: 1; cursor: pointer; }
 .agent-presence__list { display: grid; align-content: start; max-height: max(0px, calc(var(--agent-presence-max-height, 280px) - 36px)); min-height: 0; overflow-y: auto; margin: 0; padding: 3px 10px; list-style: none; opacity: 1; transform: translateY(0); transition: opacity var(--motion-fast) var(--ease-out), transform var(--motion-ui) var(--ease-out), visibility 0s linear 0s; }
+.agent-presence__add { display: flex; justify-content: flex-end; padding: 7px 0 3px; }
 .agent-presence.is-collapsed .agent-presence__list { max-height: 0; padding-block: 0; opacity: 0; transform: translateY(-4px); overflow: hidden; visibility: hidden; transition: opacity var(--motion-fast) var(--ease-out), transform var(--motion-ui) var(--ease-out), visibility 0s linear var(--motion-ui); }
 .agent-presence.is-collapsed { width: min(190px, calc(100% - 24px)); height: 38px; }
 .agent-presence__row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 3px 8px; min-width: 0; padding: 7px 1px; border-bottom: 1px solid var(--line-soft); }

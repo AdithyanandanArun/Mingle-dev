@@ -1,8 +1,9 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Pause, Play, Users } from 'lucide-react';
 import type { GroupSnapshot } from '@mingle/contracts';
 import { useMingle } from '../../store/store';
 import { pauseGroup, resumeGroup } from '../../lib/groupActions';
+import { api, errorMessage } from '../../lib/api';
 import { activeMembers } from '../../lib/groups';
 import { Button } from '../ui';
 import { MembersPopover } from './MembersPopover';
@@ -15,6 +16,21 @@ export function GroupControl({ snapshot }: { snapshot: GroupSnapshot }) {
   const busy = useMingle((s) => s.groupActionBusyId !== null);
   const trigger = useRef<HTMLButtonElement>(null);
   const { group } = snapshot;
+  const preferred = group.preferredCoordinatorMemberId ? snapshot.members.find((member) => member.id === group.preferredCoordinatorMemberId) : undefined;
+  const [restoreStatus, setRestoreStatus] = useState<{ handle: string; cooldownUntil: string | null; reason: string | null } | null>(null);
+  useEffect(() => {
+    if (!preferred) { setRestoreStatus(null); return; }
+    let active = true;
+    const refresh = () => { void api.coordinatorRestoreStatus(group.id).then((value) => { if (active) setRestoreStatus(value); }).catch(() => undefined); };
+    refresh();
+    const timer = window.setInterval(refresh, 5000);
+    return () => { active = false; window.clearInterval(timer); };
+  }, [group.id, preferred?.id]);
+  const restoreBlocked = restoreStatus?.cooldownUntil ? `@${preferred?.handle} is still in provider cooldown until ${new Date(restoreStatus.cooldownUntil).toLocaleTimeString()}.` : undefined;
+  const restore = async () => {
+    try { useMingle.getState().applyGroup(await api.restoreGroupCoordinator(group.id)); }
+    catch (error) { useMingle.getState().toast('error', errorMessage(error)); }
+  };
   const members = activeMembers(snapshot);
   const live = members.map((member) => sessions?.find((session) => session.id === member.sessionId));
   const running = live.filter((session) => session?.status === 'running').length;
@@ -64,6 +80,7 @@ export function GroupControl({ snapshot }: { snapshot: GroupSnapshot }) {
   return (
     <>
       <div className="header__team">
+        {preferred ? <span className="team-control__standin">Standing in for @{preferred.handle} (usage limit)</span> : null}
         <button
           ref={trigger}
           type="button"
@@ -94,6 +111,7 @@ export function GroupControl({ snapshot }: { snapshot: GroupSnapshot }) {
           {group.paused ? <Play size={12} aria-hidden="true" /> : <Pause size={12} aria-hidden="true" />}
           <span className="team-control__action-label">{group.paused ? 'Resume' : 'Pause'}</span>
         </Button>
+        {preferred ? <Button size="sm" variant="secondary" disabled={!online || busy || Boolean(restoreBlocked)} why={!online ? 'Reconnect to the server first.' : restoreBlocked ?? (busy ? 'A group action is already in progress.' : undefined)} onClick={() => void restore()}>Restore @{preferred.handle}</Button> : null}
       </div>
       <MembersPopover snapshot={snapshot} anchor={trigger} open={membersOpen} onClose={() => useMingle.getState().setGroupMembersOpen(null)} />
     </>

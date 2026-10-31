@@ -3185,7 +3185,7 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
             .run(JSON.stringify(next), JSON.stringify(history), at, teamId, sharedProjectId, row.settings_json);
           if (Number(changed.changes) !== 1) throw new HttpError(409, 'Team orchestration settings changed during automatic handover.');
           this.syncTeamRoster(context, row.group_id, next);
-            this.options.groups.setTeamLeader(row.group_id, sessionId, { paused: false, pauseReason: null, automatic: true, failureKind, reason });
+          this.options.groups.setTeamLeader(row.group_id, sessionId, { paused: false, pauseReason: null, automatic: true, failureKind, reason });
         });
       } catch { continue; }
       await this.broadcastStructure(context, this.readHost(teamId, sharedProjectId)!);
