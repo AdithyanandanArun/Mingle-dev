@@ -775,6 +775,7 @@ export class SessionRuntime {
       run.capabilityTokens.length = 0;
       try { this.groups?.onRuntimeIdle(run.sessionId); }
       catch (error) { this.log('error', `Failed to resume group queue after provider cleanup for ${run.sessionId}`, error); }
+      if (!run.teamRun) queueMicrotask(() => this.drainQueued(run.sessionId));
     }
   }
 
@@ -1438,9 +1439,26 @@ export class SessionRuntime {
     try { if (!run.teamRun) this.groups?.onRunFinished(run.sessionId, run.id, outcome); }
     catch (error) { this.log('error', `Failed to record group delivery outcome for ${run.sessionId}`, error); }
     for (const listener of this.runFinishedListeners) { try { listener(run.sessionId,outcome,failure); } catch(error) { this.log('error','Run-finished listener failed',error); } }
-    if (!run.cleanupPending && !run.teamRun && this.store.getSession(run.sessionId)?.status !== 'waiting') {
-      const queued=this.store.dequeueMessage(run.sessionId);
-      if(queued) queueMicrotask(()=>{ try { const session=this.store.getSession(run.sessionId); this.start(run.sessionId,queued.content,{intent:queued.intent,attachmentIds:queued.attachmentIds,contextRefs:queued.contextRefs,deferContextResolution:true,resolveSkills:session ? this.resolveQueuedSkills?.(session,queued.skills) : undefined,queuedAttachmentOwnerId:queued.id}); } catch(error) { this.log('error',`Could not drain queued message for ${run.sessionId}`,error); this.requeueFront(run.sessionId,queued,`Could not start queued message: ${errorMessage(error)}`); } });
+    if (!run.cleanupPending && !run.teamRun) queueMicrotask(() => this.drainQueued(run.sessionId));
+  }
+
+  /**
+   * Starts the oldest queued message when the session is idle. Called when a run ends, when provider cleanup finishes
+   * (a run that ended with cleanup pending skips the drain), and after something is queued for an idle session.
+   */
+  drainQueued(sessionId: string): boolean {
+    if (this.isActive(sessionId) || this.groups?.forSession(sessionId)) return false;
+    const session = this.store.getSession(sessionId);
+    if (!session || session.status === 'waiting' || session.status === 'running') return false;
+    const queued = this.store.dequeueMessage(sessionId);
+    if (!queued) return false;
+    try {
+      this.start(sessionId, queued.content, { intent: queued.intent, attachmentIds: queued.attachmentIds, contextRefs: queued.contextRefs, deferContextResolution: true, resolveSkills: this.resolveQueuedSkills?.(session, queued.skills), queuedAttachmentOwnerId: queued.id });
+      return true;
+    } catch (error) {
+      this.log('error', `Could not drain queued message for ${sessionId}`, error);
+      this.requeueFront(sessionId, queued, `Could not start queued message: ${errorMessage(error)}`);
+      return false;
     }
   }
 

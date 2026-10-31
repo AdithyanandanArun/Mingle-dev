@@ -42,14 +42,15 @@ export class DelegatedSubagentService {
     const row=this.store.listDelegatedSubagents().find(x=>x.childSessionId===childSessionId&&x.status==='running');if(!row)return;
     const answer=this.store.lastAssistantMessage(childSessionId)?.content??'';const failed=status==='failed'||status==='cancelled';
     this.store.updateDelegatedSubagent(row.id,{status,endedAt:new Date().toISOString(),resultPreview:answer.slice(0,400)||null,error:error??null});
-    const message=status==='cancelled'?`Subagent @${row.name} was cancelled.`:failed?`Subagent @${row.name} (${providerName(row.provider)} ${row.model}) failed: ${error??'Unknown error'}`:`Subagent @${row.name} (${providerName(row.provider)} ${row.model}) finished.\n\nTask: ${row.task.slice(0,300)}\n\nResult:\n${answer.slice(-12000)}`;
-    void this.deliver(row.parentSessionId,message).then(()=>this.store.updateDelegatedSubagent(row.id,{resultDelivered:true})).catch(()=>{this.store.enqueueMessage({id:newId('msg'),sessionId:row.parentSessionId,content:message,intent:'normal',skills:[],attachmentIds:[],contextRefs:[]});this.store.updateDelegatedSubagent(row.id,{resultDelivered:true});});
+    const message=status==='cancelled'?`Subagent @${row.name} was cancelled.`:failed?`Subagent @${row.name} (${providerName(row.provider)} ${row.model}) failed: ${error??'Unknown error'}`:`Subagent @${row.name} (${providerName(row.provider)} ${row.model}) finished.\n\nTask: ${row.task.slice(0,300)}\n\nResult:\n${answer.slice(-12000)}\n\nContinue your work using this result.`;
+    void this.deliver(row.parentSessionId,message).then(()=>this.store.updateDelegatedSubagent(row.id,{resultDelivered:true})).catch(()=>{this.store.enqueueMessage({id:newId('msg'),sessionId:row.parentSessionId,content:message,intent:'normal',skills:[],attachmentIds:[],contextRefs:[]});this.store.updateDelegatedSubagent(row.id,{resultDelivered:true});this.runtime.drainQueued(row.parentSessionId);});
   }
   private async deliver(parentId:string,content:string):Promise<void> {
     const parent=this.store.getSession(parentId);if(!parent)return;
     if(parent.status==='running'&&this.runtime.isSteerable(parentId)){if(await this.runtime.steer(parentId,content))return;}
-    if(parent.status==='running'||parent.status==='waiting'){this.store.enqueueMessage({id:newId('msg'),sessionId:parentId,content,intent:'normal',skills:[],attachmentIds:[],contextRefs:[]});return;}
-    this.runtime.start(parentId,content);
+    // Queue the result, then drain at once if the parent is idle; a parent that is still running drains it when its run ends.
+    this.store.enqueueMessage({id:newId('msg'),sessionId:parentId,content,intent:'normal',skills:[],attachmentIds:[],contextRefs:[]});
+    this.runtime.drainQueued(parentId);
   }
   recover():void {for(const row of this.store.listDelegatedSubagents().filter(x=>x.status==='running')){const child=this.store.getSession(row.childSessionId);if(!child||child.status!=='running'&&child.status!=='waiting')this.finish(row.childSessionId,'failed','Mingle restarted before the subagent finished');}}
 }
