@@ -3,7 +3,7 @@ import fsp from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import type {
-  GitHubState, RepositoryBranch, RepositoryCommit, RepositoryMutationResult, RepositoryPullRequest, RepositoryPush, RepositoryState,
+  GitHubState, InitializeGitRequest, InitializeGitResult, RepositoryBranch, RepositoryCommit, RepositoryMutationResult, RepositoryPullRequest, RepositoryPush, RepositoryState,
 } from '@mingle/contracts';
 import type { Session } from '@mingle/contracts';
 import type { SessionRuntime } from '../runtime.ts';
@@ -19,6 +19,7 @@ import { basics, configuredPushRemote, identityProblem, isMirrorRemote, locate, 
 import { KeyedLock } from './lock.ts';
 import { isValidBranchName } from './refs.ts';
 import { failureSummary, scrub } from './scrub.ts';
+import { initializeProjectRepository } from './initialize.ts';
 import { readSnapshot, type Entry, type Scope, type Snapshot } from './snapshot.ts';
 
 export interface RepositoryServiceOptions {
@@ -26,6 +27,7 @@ export interface RepositoryServiceOptions {
   workspace: WorkspaceService;
   runtime: Pick<SessionRuntime, 'isActive'>;
   log: Logger;
+  getAccountIdentity?: () => { name?: string | null; email?: string | null } | null;
 }
 
 interface MutationContext { scope: Scope; snap: Snapshot; top: string }
@@ -54,6 +56,7 @@ export class RepositoryService {
   private readonly workspace: WorkspaceService;
   private readonly runtime: Pick<SessionRuntime, 'isActive'>;
   private readonly log: Logger;
+  private readonly getAccountIdentity: NonNullable<RepositoryServiceOptions['getAccountIdentity']>;
   private readonly abort = new AbortController();
   private readonly locks = new KeyedLock();
   private readonly reader = new GitHubReader(this.abort.signal);
@@ -71,6 +74,7 @@ export class RepositoryService {
     this.workspace = options.workspace;
     this.runtime = options.runtime;
     this.log = options.log;
+    this.getAccountIdentity = options.getAccountIdentity ?? (() => null);
   }
 
   // ── reads ────────────────────────────────────────────────────────────────
@@ -80,6 +84,22 @@ export class RepositoryService {
       const scope = this.workspace.resolveScope(projectId, sessionId);
       return (await this.snapshot(scope)).state;
     });
+  }
+
+  async initializeGit(projectId: string, body: InitializeGitRequest): Promise<InitializeGitResult> {
+    const scope = this.workspace.resolveScope(projectId);
+    const sessions = this.store.listSessions(projectId);
+    if (sessions.some((session) => this.runtime.isActive(session.id) || session.status === 'running' || session.status === 'waiting')) {
+      throw conflict('Stop active sessions before setting up Git in this folder.');
+    }
+    const result = await initializeProjectRepository({
+      cwd: scope.project.path,
+      github: body.createGitHub,
+      fallbackIdentity: this.getAccountIdentity() ?? undefined,
+      getState: () => this.state(projectId),
+    });
+    this.store.recordEvent({ projectId, type: 'repository.initialized', summary: `Git repository initialized: ${scope.project.name}`, payload: { github: result.github?.status ?? null, notices: result.notices } });
+    return result;
   }
 
   async github(projectId: string, sessionId?: string, refresh = false): Promise<GitHubState> {

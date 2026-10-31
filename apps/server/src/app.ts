@@ -197,7 +197,10 @@ export function createApplication(options: ApplicationOptions): MingleApplicatio
   runtime.setProgressMcp(progressMcp);
   const terminals = new TerminalManager(store, hub, log, options.terminal);
   const workspace = new WorkspaceService(store, config.dataDir, runtime, () => providers.cached());
-  const repository = new RepositoryService({ store, workspace, runtime, log });
+  const repository = new RepositoryService({ store, workspace, runtime, log, getAccountIdentity: () => {
+    const accountState = account.snapshot();
+    return accountState.status === 'signed-in' ? { name: accountState.user?.name, email: accountState.user?.email } : null;
+  } });
   const handoffs = new HandoffService(store);
   const attachments = new AttachmentService(store, config.dataDir, log);
   runtime.setAttachments(attachments);

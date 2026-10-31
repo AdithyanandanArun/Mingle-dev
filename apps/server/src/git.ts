@@ -79,6 +79,53 @@ export async function addWorktree(repoCwd: string, worktreePath: string, branch:
   await git(repoCwd, ['worktree', 'add', '-b', branch, '--', worktreePath, 'HEAD'], { timeoutMs: 60_000, extraConfig: IDENTITY_FREE });
 }
 
+/** Git command boundary used by project initialization so callers never invoke a shell. */
+export async function initializeRepository(cwd: string, identity: string[] = []): Promise<{ notices: string[] }> {
+  await git(cwd, ['init', '-b', 'main']);
+  const ignorePath = path.join(cwd, '.gitignore');
+  const ignoreStat = await fsp.lstat(ignorePath).catch(() => null);
+  if (!ignoreStat) await fsp.writeFile(ignorePath, 'node_modules/\n.env\n.env.*\ndist/\nbuild/\n.DS_Store\n', { flag: 'wx', mode: 0o600 });
+  else if (!ignoreStat.isFile()) throw new HttpError(400, 'The existing .gitignore must be a regular file.');
+
+  const notices: string[] = [];
+  const ignore = await fsp.readFile(ignorePath, 'utf8').catch(() => '');
+  const extraIgnore: string[] = [];
+  const status = await git(cwd, ['status', '--porcelain=v1', '-z', '--untracked-files=all']);
+  const paths = status.stdout.split('\0').filter(Boolean).map((row) => row.length >= 4 ? row.slice(3) : '').filter(Boolean);
+  for (const rel of paths) {
+    if (rel.split(/[\\/]/).some((part) => part === '.git')) continue;
+    let stat;
+    try { stat = await fsp.lstat(path.join(cwd, rel)); } catch { continue; }
+    if (stat.isDirectory() || stat.isSymbolicLink()) continue;
+    if (stat.size > 50 * 1024 * 1024) { notices.push(`Skipped ${rel} because it is larger than 50 MB.`); continue; }
+    const basename = path.basename(rel);
+    if (/^(?:\.env(?:\..*)?|.*\.pem|id_rsa.*)$/i.test(basename) && !isIgnored(ignore, rel)) {
+      const pattern = rel.startsWith('.env') ? '.env*' : path.basename(rel);
+      if (!extraIgnore.includes(pattern)) extraIgnore.push(pattern);
+      notices.push(`Added ${rel} to .gitignore because it looks like a secret or private key.`);
+    }
+  }
+  if (extraIgnore.length) await fsp.appendFile(ignorePath, `${ignore && !ignore.endsWith('\n') ? '\n' : ''}${extraIgnore.join('\n')}\n`);
+  await git(cwd, ['add', '-A']);
+  const cached = await git(cwd, ['diff', '--cached', '--name-only', '-z']);
+  const candidates = cached.stdout.split('\0').filter(Boolean);
+  for (const rel of candidates) {
+    try { if ((await fsp.lstat(path.join(cwd, rel))).size > 50 * 1024 * 1024) await git(cwd, ['reset', '-q', '--', rel]); } catch { /* deleted entries need no size check */ }
+  }
+  await git(cwd, [...identity, 'commit', '-m', 'Initial commit'], { timeoutMs: 60_000, extraConfig: ['commit.gpgsign=false'] });
+  return { notices };
+}
+
+function isIgnored(ignore: string, rel: string): boolean {
+  const base = path.basename(rel);
+  return ignore.split(/\r?\n/).map((line) => line.trim()).filter((line) => line && !line.startsWith('#')).some((pattern) => {
+    const plain = pattern.replace(/^\//, '').replace(/\/$/, '');
+    if (pattern.endsWith('/')) return rel.split(/[\\/]/).includes(plain);
+    if (plain.endsWith('*')) return rel.startsWith(plain.slice(0, -1)) || base.startsWith(plain.slice(0, -1));
+    return pattern.includes('/') ? rel === plain || rel.startsWith(`${plain}/`) : base === plain;
+  });
+}
+
 export function parsePorcelain(output: string): GitFile[] {
   const files: GitFile[] = [];
   const records = output.split('\0');

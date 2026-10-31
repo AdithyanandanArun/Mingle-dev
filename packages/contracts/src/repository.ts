@@ -27,3 +27,6 @@ export type RepositoryPush = z.infer<typeof RepositoryPushSchema>;
 export type RepositoryBranch = z.infer<typeof RepositoryBranchSchema>;
 export type RepositoryPullRequest = z.infer<typeof RepositoryPullRequestSchema>;
 export interface RepositoryMutationResult { state: RepositoryState; commit?: string; url?: string; notices: string[] }
+export const InitializeGitSchema = z.object({ createGitHub: z.object({ name: z.string().regex(/^[A-Za-z0-9._-]{1,100}$/), visibility: z.enum(['private', 'public']) }).strict().optional() }).strict();
+export type InitializeGitRequest = z.infer<typeof InitializeGitSchema>;
+export interface InitializeGitResult { repository: RepositoryState; github: { status: 'created'; url: string } | { status: 'unavailable'; reason: string } | null; notices: string[] }

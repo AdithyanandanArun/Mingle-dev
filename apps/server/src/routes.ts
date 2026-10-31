@@ -2,7 +2,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { z } from 'zod';
 import {
   CreateGroupSchema, AddGroupAgentSchema, UpdateGroupSchema, SendGroupMessageSchema, RepositoryCommitSchema, RepositoryPushSchema, RepositoryBranchSchema, RepositoryPullRequestSchema, BrowserConnectSchema, BrowserSignInSchema, BrowserActionSchema, ApprovalDecisionSchema, ConversationIdSchema, ImportConversationSchema, ProviderSchema, CloneProjectSchema, NewProjectSchema, CreateProjectSchema, CreateSessionSchema, CreateTaskSchema, HandoffSchema, SendMessageSchema, UpdateProjectSchema, UpdateSessionSchema, UpdateSettingsSchema, UpdateTaskSchema, EditSessionPlanSchema, UserInputAnswersSchema,
-  RecoveryActionRequestSchema,
+  RecoveryActionRequestSchema, InitializeGitSchema,
 } from '@mingle/contracts';
 import { BrowserImportSchema } from '@mingle/contracts';
 import type { Bootstrap, Session, SessionUsage } from '@mingle/contracts';
@@ -308,6 +308,7 @@ export function buildRouter(s: Services) {
     const query = parse(repositoryQuery, Object.fromEntries(ctx.url.searchParams));
     return s.repository.github(param(ctx, 'id'), query.sessionId, query.refresh === 'true');
   });
+  add('POST', '/api/projects/:id/git/init', async (ctx) => s.repository.initializeGit(param(ctx, 'id'), await ctx.body(InitializeGitSchema)));
   add('POST', '/api/projects/:id/repository/commit', async (ctx) => s.repository.commit(param(ctx, 'id'), await ctx.body(RepositoryCommitSchema)));
   add('POST', '/api/projects/:id/repository/push', async (ctx) => s.repository.push(param(ctx, 'id'), await ctx.body(RepositoryPushSchema)));
   add('POST', '/api/projects/:id/repository/branch', async (ctx) => s.repository.branch(param(ctx, 'id'), await ctx.body(RepositoryBranchSchema)));

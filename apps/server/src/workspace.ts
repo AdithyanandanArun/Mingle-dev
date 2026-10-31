@@ -7,7 +7,7 @@ import type { z } from 'zod';
 import { addWorktree, repoInfo } from './git.ts';
 import type { RuntimeLike } from './app-types.ts';
 import type { Store } from './store.ts';
-import { badRequest, conflict, newId, notFound, slugify, unprocessable } from './util.ts';
+import { badRequest, conflict, newId, notFound, slugify } from './util.ts';
 import { resolveRunConfig } from './session-config.ts';
 import { defaultModel } from './provider-config.ts';
 
@@ -124,7 +124,7 @@ export class WorkspaceService {
       // A project that lives in a sub-directory of its repository keeps the same relative position in the worktree.
       worktreePath = info.prefix ? path.join(await fsp.realpath(target), ...info.prefix.split('/')) : await fsp.realpath(target);
       worktreeBaseRevision = (await repoInfo(worktreePath)).head;
-    } else if (info.isRepo) {
+    } else if (info.isRepo && info.hasHead) {
       branch = info.branch;
     }
     return this.store.tx(() => {
