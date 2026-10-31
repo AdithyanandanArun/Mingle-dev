@@ -12,6 +12,7 @@ import type { GroupService } from './groups/service.ts';
 import type { TeamMcpBridge } from './team-mcp.ts';
 import type { BrowserMcpBridge } from './browser-mcp.ts';
 import type { ProgressMcpBridge } from './progress-mcp.ts';
+import type { SubagentMcpBridge } from './subagent-mcp.ts';
 import type { AttachmentService } from './attachments/service.ts';
 import type { NativeInvocation, RunAttachment } from '@mingle/contracts';
 import type { RecoveryService } from './recovery/service.ts';
@@ -211,6 +212,7 @@ export class SessionRuntime {
   private groups?: GroupService;
   private teamMcp?: TeamMcpBridge;
   private progressMcp?: ProgressMcpBridge;
+  private subagentMcp?: SubagentMcpBridge;
   private runFinishedListeners = new Set<(sessionId:string,outcome:'completed'|'failed'|'interrupted',failure:string|null)=>void>();
   private teamProxy?: TeamProxyRuntimeService;
   private attachmentService?: AttachmentService;
@@ -235,6 +237,7 @@ export class SessionRuntime {
     this.teamMcp = teamMcp;
   }
   setProgressMcp(progressMcp: ProgressMcpBridge): void { this.progressMcp = progressMcp; }
+  setSubagentMcp(bridge:SubagentMcpBridge):void {this.subagentMcp=bridge;}
   onRunFinished(listener:(sessionId:string,outcome:'completed'|'failed'|'interrupted',failure:string|null)=>void):()=>void { this.runFinishedListeners.add(listener);return()=>this.runFinishedListeners.delete(listener); }
   setTeamProxyService(service: TeamProxyRuntimeService): void { this.teamProxy = service; }
 
@@ -599,21 +602,25 @@ export class SessionRuntime {
         updatePlan: (plan) => this.updateProgressPlan(run, plan),
       }) : undefined;
       if (progressMcp) capabilityTokens.push(progressMcp.token);
+      const subagentMcp = run.intent !== 'plan' && !session.parentSessionId && !this.groups?.forSession(session.id)
+        ? this.subagentMcp?.create({runId:run.id,session,signal:run.controller.signal,live:()=>this.isRunLive(run.sessionId,run.id)}) : undefined;
+      if(subagentMcp) capabilityTokens.push(subagentMcp.token);
       const explicit = run.invocation;
       const providerHandoffBlock = await this.providerHandoffBlock(run, session);
       const progressInstructions = progressMcp
         ? 'Mingle provides mingle_status_set for the live composer status and mingle_plan_update for a replaceable checklist. Keep them current during multi-step work, updating status as you make progress.'
         : undefined;
+      const subagentInstructions=subagentMcp?'Mingle provides subagent tools for parallel self-contained tasks. Start them, continue your work, and finish your turn when ready; Mingle will resume you with each result automatically.':'';
       const effectivePrompt = explicit ? prompt : [providerHandoffBlock, run.intent !== 'plan' ? groupContext?.instructions : undefined, run.context, prompt].filter(Boolean).join('\n\n');
-      if (explicit && (providerHandoffBlock || progressInstructions)) run.context = [providerHandoffBlock, progressInstructions, run.context].filter(Boolean).join('\n\n');
+      if (explicit && (providerHandoffBlock || progressInstructions || subagentInstructions)) run.context = [providerHandoffBlock, progressInstructions, subagentInstructions, run.context].filter(Boolean).join('\n\n');
       if (explicit && groupContext) run.context = [run.context, groupContext.instructions].filter(Boolean).join('\n\n');
       const stagedAttachments = this.attachmentService && run.attachmentOwnerId
         ? await this.attachmentService.stage(run.id, run.attachmentOwnerKind ?? 'message', run.attachmentOwnerId)
         : [];
       if (run.controller.signal.aborted) throw conflict('The run was interrupted before the provider started.');
-      const injectedContext = [explicit ? run.context : undefined, progressInstructions].filter(Boolean).join('\n\n');
+      const injectedContext = [explicit ? run.context : undefined, progressInstructions, subagentInstructions].filter(Boolean).join('\n\n');
       const runOptions: RunOptions & DispatchAwareOptions = {
-        session, prompt: effectivePrompt, intent: run.intent, ...(explicit ? { invocation: explicit } : {}), ...(injectedContext ? { context: injectedContext } : {}), attachments: stagedAttachments, teamMcp, progressMcp, providerTaskState: this.nativeTaskState(session), skills: run.skills, browserMcp, signal: run.controller.signal, settings,
+        session, prompt: effectivePrompt, intent: run.intent, ...(explicit ? { invocation: explicit } : {}), ...(injectedContext ? { context: injectedContext } : {}), attachments: stagedAttachments, teamMcp, progressMcp, subagentMcp, providerTaskState: this.nativeTaskState(session), skills: run.skills, browserMcp, signal: run.controller.signal, settings,
         onEvent: (event) => this.handleEvent(run, capabilityTokens.length ? JSON.parse(scrubCapabilities(JSON.stringify(event))) as AdapterEvent : event),
         requestApproval: (request) => this.requestApproval(run, JSON.parse(scrubCapabilities(JSON.stringify(request)))),
         requestUserInput: (request) => this.requestUserInput(run, request),
@@ -662,6 +669,7 @@ export class SessionRuntime {
     this.browserMcp?.revoke(run.id);
     this.teamMcp?.revoke(run.id);
     this.progressMcp?.revoke(run.id);
+    this.subagentMcp?.revoke(run.id);
     let changes: RunChanges;
     try {
       changes = run.cleanupPending

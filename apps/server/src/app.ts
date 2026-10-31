@@ -44,6 +44,7 @@ import { createTeamOrchestration, type TeamOrchestrationDeviceSideFactory } from
 import { createDeviceSide } from './team-orchestration/device/index.ts';
 import { SessionResumeService } from './session-resume.ts';
 import { DelegatedSubagentService } from './delegated-subagents.ts';
+import { SubagentMcpBridge } from './subagent-mcp.ts';
 
 export interface ApplicationOptions extends ConfigOptions {
   /** Provider adapters and detection. Inject a fake in tests; the CLI entry passes ./providers/index.ts. */
@@ -199,6 +200,8 @@ export function createApplication(options: ApplicationOptions): MingleApplicatio
   const terminals = new TerminalManager(store, hub, log, options.terminal);
   const workspace = new WorkspaceService(store, config.dataDir, runtime, () => providers.cached());
   const subagents = new DelegatedSubagentService(store,workspace,runtime,()=>providers.cached(),(id)=>Boolean(groups?.forSession(id)));
+  const subagentMcp = new SubagentMcpBridge(store,subagents,()=>providers.cached(),()=>boundPort,()=>config.host);
+  runtime.setSubagentMcp(subagentMcp);
   const repository = new RepositoryService({ store, workspace, runtime, log, getAccountIdentity: () => {
     const accountState = account.snapshot();
     return accountState.status === 'signed-in' ? { name: accountState.user?.name, email: accountState.user?.email } : null;
@@ -303,6 +306,7 @@ export function createApplication(options: ApplicationOptions): MingleApplicatio
       if (url.pathname === '/api/team/mcp') return await teamMcp.handle(req, res);
       if (url.pathname === '/api/browser/mcp') return await browserMcp.handle(req, res);
       if (url.pathname === '/api/progress/mcp') return await progressMcp.handle(req, res);
+      if (url.pathname === '/api/subagents/mcp') return await subagentMcp.handle(req,res);
       if (url.pathname === '/api' || url.pathname.startsWith('/api/')) {
         if (await handleAttachmentRequest(attachments, req, res, url)) return;
         const reply = await dispatch(req, res, url);
@@ -393,6 +397,7 @@ export function createApplication(options: ApplicationOptions): MingleApplicatio
         await repository.close();
         browserMcp.close();
         progressMcp.close();
+        subagentMcp.close();
         await browser.close();
         terminals.killAll();
         await hub.close();
