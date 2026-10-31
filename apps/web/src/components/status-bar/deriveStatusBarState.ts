@@ -142,7 +142,8 @@ export function deriveStatusBarState(input: StatusBarInput): StatusBarState | nu
   const nativeSubagents = runningAgentNames(input.toolCalls, activeRun?.id);
   const delegatedSubagents = (input.delegatedSubagents ?? []).filter((item) => item.parentSessionId === session.id && item.status === 'running');
   const subagents = [...nativeSubagents, ...delegatedSubagents.map((item) => `@${item.name}`)];
-  if (!running && !unfinished && !agents.length) return null;
+  // An idle agent that is waiting on its subagents still shows the strip ("Waiting for subagent to finish").
+  if (!running && !unfinished && !agents.length && !subagents.length) return null;
 
   let primary = 'Working…';
   let secondary: string | undefined;

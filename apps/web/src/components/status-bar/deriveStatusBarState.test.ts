@@ -16,6 +16,11 @@ function event(id: number, type: string, payload: Record<string, unknown>, creat
 }
 
 describe('deriveStatusBarState', () => {
+  it('shows "Waiting for subagent to finish" while an idle agent waits on its delegated subagents', () => {
+    const subagent = { id: 'sub-1', parentSessionId: session.id, childSessionId: 'child-1', name: 'a11y-review', provider: 'codex' as const, model: 'gpt-6.1-sol', task: 'Review', status: 'running' as const, requestedBy: 'agent' as const, startedAt: '2026-01-01T00:00:00Z', endedAt: null, resultPreview: null, error: null, resultDelivered: false };
+    expect(deriveStatusBarState({ ...defaults, session: { ...session, status: 'idle' }, runs: [{ ...run, status: 'completed' }], delegatedSubagents: [subagent] })).toMatchObject({ primary: 'Waiting for subagent to finish', secondary: '@a11y-review' });
+    expect(deriveStatusBarState({ ...defaults, session: { ...session, status: 'idle' }, runs: [{ ...run, status: 'completed' }], delegatedSubagents: [subagent, { ...subagent, id: 'sub-2', name: 'store-tests' }] })).toMatchObject({ primary: 'Waiting for 2 subagents to finish' });
+  });
   it('prioritizes the active run explicit status and its detail/progress', () => {
     const result = deriveStatusBarState({ ...defaults, events: [event(1, 'session.progress.status', { runId: run.id, status: { step: 'Inspecting routes', detail: 'Tracing request handling', progress: { current: 2, total: 5 } } })] });
     expect(result).toMatchObject({ primary: 'Inspecting routes', secondary: 'Step 2 of 5 · Tracing request handling', running: true });
