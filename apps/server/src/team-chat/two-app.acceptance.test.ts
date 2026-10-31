@@ -50,7 +50,8 @@ it('shares imported session history and team messages over HTTP and the encrypte
     { id: '21000000-0000-4000-8000-000000000011', email: 'leader@example.test' },
     { id: '21000000-0000-4000-8000-000000000012', email: 'teammate@example.test' },
   ];
-  const cloud = new ProjectInvitationCloudFixture();
+  // Exercise the sealed live-envelope/wake path as well as its durable mailbox copy.
+  const cloud = new ProjectInvitationCloudFixture({ realtime: true });
   const accounts = new Map<string, typeof users[number]>();
   const apps: TestApp[] = [];
   const repositories: string[] = [];
@@ -606,6 +607,7 @@ it('shares imported session history and team messages over HTTP and the encrypte
     expect(leader.app.store.db.prepare('SELECT run_state FROM team_chat_messages WHERE id=?').get(direct.json.id)).toMatchObject({ run_state: 'completed' });
     expect(teammate.app.store.db.prepare('SELECT run_state FROM team_chat_messages WHERE id=?').get(direct.json.id)).toMatchObject({ run_state: 'completed' });
     expect(leader.app.store.db.prepare('SELECT COUNT(*) AS count FROM team_chat_messages WHERE body=?').get('Owner-signed direct remote completion.')).toEqual({ count: 1 });
+    expect(cloud.wakeTimings.some(event => event.deliveredAt !== null)).toBe(true);
   } finally {
     while (apps.length) await apps.pop()!.cleanup();
     vi.restoreAllMocks();
