@@ -19,7 +19,7 @@ jobs:
       - name: Check desktop invitation links, landing page and email submission
         run: node --experimental-strip-types --test apps/desktop/project-invitation.test.mjs apps/desktop/browser-preload.test.cjs website/join/join.test.mjs supabase/functions/_shared/gmail-smtp.test.mjs supabase/functions/project-invitation-delivery.test.mjs
       - name: Check desktop encrypted account storage
-        run: node --test apps/desktop/account-storage/*.test.mjs
+        run: node --test apps/desktop/account-storage/*.test.mjs apps/desktop/shell-environment.test.mjs
       - name: Check embedded browser relay and isolation
         run: node --test apps/desktop/embedded-browser/*.test.mjs
       - run: pnpm typecheck

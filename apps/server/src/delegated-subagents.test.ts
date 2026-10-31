@@ -90,6 +90,25 @@ describe('delegated subagents',()=>{
     const cancel=await t.api('POST',`/api/sessions/${EXAMPLE_CLIENT_SESSION_ID}/subagents`,{task:'Cancel this run'});const cancelled=await t.api('POST',`/api/subagents/${cancel.json.id}/cancel`);expect(cancelled.json.status).toBe('cancelled');
   });
 
+  it('retains restart interruption as a note without paid work when automatic resume is off', async () => {
+    const t = await startTestApp({ keepData: true }); apps.push(t);
+    await t.api('GET', '/api/bootstrap');
+    t.app.store.updateSettings({ autoResumeOnRestart: false });
+    const parent = t.app.store.getSession(EXAMPLE_CLIENT_SESSION_ID)!;
+    const child = t.app.store.insertSession({ projectId: parent.projectId, name: '↳ stale', provider: 'claude', model: 'claude-sonnet-5-5',
+      effort: parent.effort, policy: parent.policy, isolated: false, worktreePath: parent.worktreePath, branch: parent.branch, parentSessionId: parent.id });
+    const record = { id: newId('run'), parentSessionId: parent.id, childSessionId: child.id, name: 'stale', provider: 'claude' as const,
+      model: 'claude-sonnet-5-5', task: 'Interrupted by restart', status: 'running' as const, requestedBy: 'agent' as const,
+      startedAt: new Date().toISOString(), endedAt: null, resultPreview: null, error: null, resultDelivered: false };
+    t.app.store.insertDelegatedSubagent(record);
+    const dataDir = t.dataDir; await t.app.close(); apps.pop();
+    const restarted = await startTestApp({ dataDir }); apps.push(restarted);
+    expect(restarted.app.store.getDelegatedSubagent(record.id)).toMatchObject({ status: 'failed', resultDelivered: true });
+    expect(restarted.app.store.listMessages(parent.id).some(m => m.content.includes('stopped because Mingle restarted'))).toBe(true);
+    expect(restarted.app.store.listQueuedMessages(parent.id)).toHaveLength(0);
+    expect(restarted.fake.runs).toHaveLength(0);
+  });
+
   it('marks a persisted running child failed after restart and returns its recovery note',async()=>{
     const t=await startTestApp({keepData:true});apps.push(t);await t.api('GET','/api/bootstrap');const parent=t.app.store.getSession(EXAMPLE_CLIENT_SESSION_ID)!;
     const child=t.app.store.insertSession({projectId:parent.projectId,name:'↳ stale',provider:'claude',model:'claude-sonnet-5-5',effort:parent.effort,policy:parent.policy,isolated:false,worktreePath:parent.worktreePath,branch:parent.branch,parentSessionId:parent.id});

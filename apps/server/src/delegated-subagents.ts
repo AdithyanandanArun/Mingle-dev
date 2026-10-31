@@ -52,5 +52,19 @@ export class DelegatedSubagentService {
     this.store.enqueueMessage({id:newId('msg'),sessionId:parentId,content,intent:'normal',skills:[],attachmentIds:[],contextRefs:[]});
     this.runtime.drainQueued(parentId);
   }
-  recover():void {for(const row of this.store.listDelegatedSubagents().filter(x=>x.status==='running')){const child=this.store.getSession(row.childSessionId);if(!child||child.status!=='running'&&child.status!=='waiting')this.finish(row.childSessionId,'failed','Mingle restarted before the subagent finished');}}
+  /**
+   * Marks subagents interrupted by a restart as failed. Their note wakes the parent only when "Resume after restart" is
+   * on; otherwise it is shown in the parent's chat without starting a run.
+   */
+  recover():void {
+    const resume=this.store.getSettings().autoResumeOnRestart!==false;
+    for(const row of this.store.listDelegatedSubagents().filter(x=>x.status==='running')){
+      const child=this.store.getSession(row.childSessionId);
+      if(child&&(child.status==='running'||child.status==='waiting'))continue;
+      if(resume){this.finish(row.childSessionId,'failed','Mingle restarted before the subagent finished');continue;}
+      this.store.updateDelegatedSubagent(row.id,{status:'failed',endedAt:new Date().toISOString(),error:'Mingle restarted before the subagent finished'});
+      this.store.insertMessage({sessionId:row.parentSessionId,role:'system',kind:'info',content:`Subagent @${row.name} (${providerName(row.provider)} ${row.model}) stopped because Mingle restarted before it finished.`});
+      this.store.updateDelegatedSubagent(row.id,{resultDelivered:true});
+    }
+  }
 }
