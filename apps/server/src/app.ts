@@ -43,6 +43,7 @@ import { TeamChatService } from './team-chat/service.ts';
 import { createTeamOrchestration, type TeamOrchestrationDeviceSideFactory } from './team-orchestration/index.ts';
 import { createDeviceSide } from './team-orchestration/device/index.ts';
 import { SessionResumeService } from './session-resume.ts';
+import { DelegatedSubagentService } from './delegated-subagents.ts';
 
 export interface ApplicationOptions extends ConfigOptions {
   /** Provider adapters and detection. Inject a fake in tests; the CLI entry passes ./providers/index.ts. */
@@ -197,6 +198,7 @@ export function createApplication(options: ApplicationOptions): MingleApplicatio
   runtime.setProgressMcp(progressMcp);
   const terminals = new TerminalManager(store, hub, log, options.terminal);
   const workspace = new WorkspaceService(store, config.dataDir, runtime, () => providers.cached());
+  const subagents = new DelegatedSubagentService(store,workspace,runtime,()=>providers.cached(),(id)=>Boolean(groups?.forSession(id)));
   const repository = new RepositoryService({ store, workspace, runtime, log, getAccountIdentity: () => {
     const accountState = account.snapshot();
     return accountState.status === 'signed-in' ? { name: accountState.user?.name, email: accountState.user?.email } : null;
@@ -267,7 +269,7 @@ export function createApplication(options: ApplicationOptions): MingleApplicatio
     },
   });
   const services: Services = {
-    config, store, hub, runtime, tasks, terminals, providers, browser, intelligence, repository, groups, handoffs, workspace, attachments, account, recovery, distributed, projectCollaboration, teamChat, teamOrchestration, setupSignal: setupLifecycle.signal,
+    config, store, hub, runtime, tasks, terminals, providers, browser, intelligence, repository, groups, handoffs, workspace, attachments, account, recovery, distributed, projectCollaboration, teamChat, teamOrchestration, subagents, setupSignal: setupLifecycle.signal,
     imports: new ImportService(store, options.providers, providers, runtime), directories: new DirectoryService(), projectSources: new ProjectSources(workspace), startedAt: Date.now(), getPort: () => boundPort,
   };
   hub.bind({ onMessage: (socket, raw) => terminals.handleMessage(socket, raw), onClose: (socket) => terminals.releaseSocket(socket) });

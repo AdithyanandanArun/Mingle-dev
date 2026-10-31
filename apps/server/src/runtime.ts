@@ -211,6 +211,7 @@ export class SessionRuntime {
   private groups?: GroupService;
   private teamMcp?: TeamMcpBridge;
   private progressMcp?: ProgressMcpBridge;
+  private runFinishedListeners = new Set<(sessionId:string,outcome:'completed'|'failed'|'interrupted',failure:string|null)=>void>();
   private teamProxy?: TeamProxyRuntimeService;
   private attachmentService?: AttachmentService;
   private readonly abortGraceMs: number;
@@ -234,6 +235,7 @@ export class SessionRuntime {
     this.teamMcp = teamMcp;
   }
   setProgressMcp(progressMcp: ProgressMcpBridge): void { this.progressMcp = progressMcp; }
+  onRunFinished(listener:(sessionId:string,outcome:'completed'|'failed'|'interrupted',failure:string|null)=>void):()=>void { this.runFinishedListeners.add(listener);return()=>this.runFinishedListeners.delete(listener); }
   setTeamProxyService(service: TeamProxyRuntimeService): void { this.teamProxy = service; }
 
   async authorizeApprovalDecision(approvalId: string): Promise<void> {
@@ -1427,6 +1429,7 @@ export class SessionRuntime {
     }
     try { if (!run.teamRun) this.groups?.onRunFinished(run.sessionId, run.id, outcome); }
     catch (error) { this.log('error', `Failed to record group delivery outcome for ${run.sessionId}`, error); }
+    for (const listener of this.runFinishedListeners) { try { listener(run.sessionId,outcome,failure); } catch(error) { this.log('error','Run-finished listener failed',error); } }
     if (!run.cleanupPending && !run.teamRun && this.store.getSession(run.sessionId)?.status !== 'waiting') {
       const queued=this.store.dequeueMessage(run.sessionId);
       if(queued) queueMicrotask(()=>{ try { const session=this.store.getSession(run.sessionId); this.start(run.sessionId,queued.content,{intent:queued.intent,attachmentIds:queued.attachmentIds,contextRefs:queued.contextRefs,deferContextResolution:true,resolveSkills:session ? this.resolveQueuedSkills?.(session,queued.skills) : undefined,queuedAttachmentOwnerId:queued.id}); } catch(error) { this.log('error',`Could not drain queued message for ${run.sessionId}`,error); this.requeueFront(run.sessionId,queued,`Could not start queued message: ${errorMessage(error)}`); } });

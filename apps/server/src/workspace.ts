@@ -82,11 +82,11 @@ export class WorkspaceService {
     return sessions.map((session) => session.id);
   }
 
-  async createSession(input: CreateSession): Promise<Session> {
+  async createSession(input: CreateSession, options: { parentSessionId?: string; worktreePath?: string; branch?: string | null } = {}): Promise<Session> {
     const project = this.store.getProject(input.projectId);
     if (!project) throw notFound('Project not found');
     this.preparing.set(project.id, (this.preparing.get(project.id) ?? 0) + 1);
-    try { return await this.prepareSession(input, project); }
+    try { return await this.prepareSession(input, project, options); }
     finally {
       const remaining = (this.preparing.get(project.id) ?? 1) - 1;
       if (remaining > 0) this.preparing.set(project.id, remaining);
@@ -94,7 +94,7 @@ export class WorkspaceService {
     }
   }
 
-  private async prepareSession(input: CreateSession, project: Project): Promise<Session> {
+  private async prepareSession(input: CreateSession, project: Project, child: { parentSessionId?: string; worktreePath?: string; branch?: string | null } = {}): Promise<Session> {
     const settings = this.store.getSettings();
     const provider = input.provider ?? settings.defaultProvider;
     const model = input.model ?? defaultModel(provider, settings);
@@ -103,10 +103,10 @@ export class WorkspaceService {
       provider, model, effort: input.effort ?? settings.defaultEffort, policy: input.policy ?? settings.defaultPolicy,
       serviceTier: input.serviceTier ?? settings.defaultServiceTier ?? 'standard',
     }, { effort: input.effort !== undefined, policy: input.policy !== undefined, serviceTier: input.serviceTier !== undefined });
-    const isolated = input.isolated ?? settings.defaultIsolated;
+    const isolated = child.parentSessionId ? false : input.isolated ?? settings.defaultIsolated;
     const id = newId('ses');
-    let worktreePath = project.path;
-    let branch: string | null = null;
+    let worktreePath = child.worktreePath ?? project.path;
+    let branch: string | null = child.branch ?? null;
     const info = await repoInfo(project.path);
     let worktreeBaseRevision = info.head;
     let isolationNotice: string | undefined;
@@ -117,7 +117,9 @@ export class WorkspaceService {
         ? "This folder isn't a Git repository yet, so this session works directly in the folder. Set up Git to give sessions their own isolated copies."
         : 'This Git repository has no commits yet, so this session works directly in the folder. Create an initial commit to give sessions their own isolated copies.';
     }
-    if (effectiveIsolated) {
+    // A delegated subagent's child session shares its parent's workspace and branch.
+    if (child.parentSessionId) { /* keep child.worktreePath and child.branch */ }
+    else if (effectiveIsolated) {
       branch = `mingle/${slugify(name)}-${id.slice(4, 12)}`;
       const target = path.join(this.dataDir, 'worktrees', project.id, id);
       await addWorktree(project.path, target, branch);
@@ -128,7 +130,7 @@ export class WorkspaceService {
       branch = info.branch;
     }
     return this.store.tx(() => {
-      const session = this.store.insertSession({ id, projectId: project.id, name, provider, model, effort, policy, serviceTier, isolated: effectiveIsolated, worktreePath, branch });
+      const session = this.store.insertSession({ id, projectId: project.id, name, provider, model, effort, policy, serviceTier, isolated: effectiveIsolated, worktreePath, branch, parentSessionId: child.parentSessionId });
       if (isolationNotice) session.isolationNotice = isolationNotice;
       this.store.db.prepare(`INSERT INTO session_worktree_bases(session_id,base_revision,created_at) VALUES(?,?,?)`)
         .run(id, worktreeBaseRevision, new Date().toISOString());

@@ -1,5 +1,5 @@
 import type { DatabaseSync, SQLInputValue } from 'node:sqlite';
-import type { TaskSource, ProjectContext, AppSettings, Approval, Message, Policy, Project, Provider, ProviderFailure, RecoveryCheckpoint, RunChanges, RunChangesSummary, Session, SessionStatus, SessionRun, ToolCall, ToolCategory, RunStatus, Task, TaskStatus, WorkspaceEvent, SessionPlan, UserQuestion, UserInputAnswers, QueuedMessage } from '@mingle/contracts';
+import type { TaskSource, ProjectContext, AppSettings, Approval, Message, Policy, Project, Provider, ProviderFailure, RecoveryCheckpoint, RunChanges, RunChangesSummary, Session, SessionStatus, SessionRun, ToolCall, ToolCategory, RunStatus, Task, TaskStatus, WorkspaceEvent, SessionPlan, UserQuestion, UserInputAnswers, QueuedMessage, DelegatedSubagent } from '@mingle/contracts';
 import { SCHEMA_VERSION } from './db.ts';
 import { newId, nowIso } from './util.ts';
 import { AttachmentRepo } from './attachments/repo.ts';
@@ -18,7 +18,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
 
 export interface NewSession {
   id?: string; projectId: string; name: string; provider: Provider; model: string; effort: Session['effort']; policy: Policy; isolated: boolean;
-  worktreePath: string; branch: string | null; status?: SessionStatus; serviceTier?: string;
+  worktreePath: string; branch: string | null; status?: SessionStatus; serviceTier?: string; parentSessionId?: string | null;
 }
 
 export interface NewTask { id?: string; projectId: string; title: string; description: string; acceptanceCriteria: string; sessionId: string | null; dependsOn: string[]; status: TaskStatus }
@@ -39,8 +39,10 @@ const mapSession = (r: Row): Session => ({
   handoffPendingAt: (r.handoff_pending_at as string | null) ?? null,
   createdAt: r.created_at as string, updatedAt: r.updated_at as string, error: (r.error as string | null) ?? null,
   pinned: r.pinned === 1, unread: r.unread === 1,
+  parentSessionId: (r.parent_session_id as string | null) ?? null,
   inputTokens: r.input_tokens as number, outputTokens: r.output_tokens as number, costUsd: (r.cost_usd as number | null) ?? null,
 });
+const mapDelegated = (r: Row): DelegatedSubagent => ({ id:r.id as string,parentSessionId:r.parent_session_id as string,childSessionId:r.child_session_id as string,name:r.name as string,provider:r.provider as Provider,model:r.model as string,task:r.task as string,status:r.status as DelegatedSubagent['status'],requestedBy:r.requested_by as DelegatedSubagent['requestedBy'],startedAt:r.started_at as string,endedAt:(r.ended_at as string|null)??null,resultPreview:(r.result_preview as string|null)??null,error:(r.error as string|null)??null,resultDelivered:r.result_delivered===1 });
 const mapMessage = (r: Row): Message => {
   const message: Message = { id: r.id as string, sessionId: r.session_id as string, role: r.role as Message['role'], content: r.content as string, createdAt: r.created_at as string };
   if (r.kind) message.kind = r.kind as string;
@@ -146,9 +148,9 @@ export class Store {
     const now = nowIso();
     const id = input.id ?? newId('ses');
     this.run(
-      `INSERT INTO sessions(id, project_id, name, provider, model, effort, status, policy, isolated, worktree_path, branch, created_at, updated_at, service_tier)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      id, input.projectId, input.name, input.provider, input.model, input.effort, input.status ?? 'idle', input.policy, input.isolated ? 1 : 0, input.worktreePath, input.branch, now, now, input.serviceTier ?? 'standard',
+      `INSERT INTO sessions(id, project_id, name, provider, model, effort, status, policy, isolated, worktree_path, branch, created_at, updated_at, service_tier, parent_session_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      id, input.projectId, input.name, input.provider, input.model, input.effort, input.status ?? 'idle', input.policy, input.isolated ? 1 : 0, input.worktreePath, input.branch, now, now, input.serviceTier ?? 'standard', input.parentSessionId ?? null,
     );
     return this.getSession(id)!;
   }
@@ -162,6 +164,11 @@ export class Store {
       : this.all(`SELECT * FROM sessions WHERE id IN (${VISIBLE_SESSIONS}) ORDER BY created_at ASC, rowid ASC`);
     return rows.map(mapSession);
   }
+  insertDelegatedSubagent(input: DelegatedSubagent): DelegatedSubagent { this.run('INSERT INTO delegated_subagents(id,parent_session_id,child_session_id,name,provider,model,task,status,requested_by,started_at,ended_at,result_preview,error,result_delivered) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)',input.id,input.parentSessionId,input.childSessionId,input.name,input.provider,input.model,input.task,input.status,input.requestedBy,input.startedAt,input.endedAt,input.resultPreview,input.error,Number(input.resultDelivered));this.touch();return input; }
+  updateDelegatedSubagent(id:string,patch:Partial<Pick<DelegatedSubagent,'status'|'endedAt'|'resultPreview'|'error'|'resultDelivered'>>):DelegatedSubagent { const fields:Record<string,string>={status:'status',endedAt:'ended_at',resultPreview:'result_preview',error:'error',resultDelivered:'result_delivered'};for(const [key,value] of Object.entries(patch)){const col=fields[key];if(col)this.run(`UPDATE delegated_subagents SET ${col}=? WHERE id=?`,key==='resultDelivered'?Number(value):value as string|null,id);}this.touch();const result=this.getDelegatedSubagent(id);if(!result)throw new Error('Subagent not found');return result; }
+  getDelegatedSubagent(id:string):DelegatedSubagent|undefined { const row=this.get('SELECT * FROM delegated_subagents WHERE id=?',id);return row?mapDelegated(row):undefined; }
+  listDelegatedSubagents(parentSessionId?:string):DelegatedSubagent[] { return (parentSessionId?this.all('SELECT * FROM delegated_subagents WHERE parent_session_id=? ORDER BY started_at,id',parentSessionId):this.all('SELECT * FROM delegated_subagents ORDER BY started_at,id')).map(mapDelegated); }
+  lastAssistantMessage(sessionId:string):Message|undefined { const row=this.get("SELECT * FROM messages WHERE session_id=? AND role='assistant' ORDER BY seq DESC LIMIT 1",sessionId);return row?mapMessage(row):undefined; }
   updateSession(id: string, patch: Partial<Pick<Session, 'name' | 'provider' | 'model' | 'effort' | 'policy' | 'serviceTier' | 'status' | 'error' | 'providerSessionId' | 'handoffFromProvider' | 'handoffFromModel' | 'handoffPendingAt' | 'inputTokens' | 'outputTokens' | 'costUsd' | 'pinned' | 'unread' | 'branch'>>): Session {
     const columns: Record<string, string> = { branch: 'branch', name: 'name', provider: 'provider', model: 'model', effort: 'effort', policy: 'policy', serviceTier: 'service_tier', status: 'status', error: 'error', providerSessionId: 'provider_session_id', handoffFromProvider: 'handoff_from_provider', handoffFromModel: 'handoff_from_model', handoffPendingAt: 'handoff_pending_at', inputTokens: 'input_tokens', outputTokens: 'output_tokens', costUsd: 'cost_usd', pinned: 'pinned', unread: 'unread' };
     // Organizing a session does not count as conversation activity or change its recency.

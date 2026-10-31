@@ -1,7 +1,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { z } from 'zod';
 import {
-  CreateGroupSchema, AddGroupAgentSchema, UpdateGroupSchema, SendGroupMessageSchema, RepositoryCommitSchema, RepositoryPushSchema, RepositoryBranchSchema, RepositoryPullRequestSchema, BrowserConnectSchema, BrowserSignInSchema, BrowserActionSchema, ApprovalDecisionSchema, ConversationIdSchema, ImportConversationSchema, ProviderSchema, CloneProjectSchema, NewProjectSchema, CreateProjectSchema, CreateSessionSchema, CreateTaskSchema, HandoffSchema, SendMessageSchema, UpdateProjectSchema, UpdateSessionSchema, UpdateSettingsSchema, UpdateTaskSchema, EditSessionPlanSchema, UserInputAnswersSchema,
+  CreateGroupSchema, AddGroupAgentSchema, UpdateGroupSchema, SendGroupMessageSchema, RepositoryCommitSchema, RepositoryPushSchema, RepositoryBranchSchema, RepositoryPullRequestSchema, BrowserConnectSchema, BrowserSignInSchema, BrowserActionSchema, ApprovalDecisionSchema, ConversationIdSchema, ImportConversationSchema, ProviderSchema, CloneProjectSchema, NewProjectSchema, CreateProjectSchema, CreateSessionSchema, CreateTaskSchema, HandoffSchema, SendMessageSchema, UpdateProjectSchema, UpdateSessionSchema, UpdateSettingsSchema, UpdateTaskSchema, EditSessionPlanSchema, UserInputAnswersSchema, StartSubagentSchema,
   RecoveryActionRequestSchema, InitializeGitSchema,
 } from '@mingle/contracts';
 import { BrowserImportSchema } from '@mingle/contracts';
@@ -32,6 +32,7 @@ import { antigravityAuthState, cancelAntigravityAuth, startAntigravityAuth } fro
 import type { AttachmentService } from './attachments/service.ts';
 import type { AccountService } from './account/service.ts';
 import type { RecoveryService } from './recovery/service.ts';
+import type { DelegatedSubagentService } from './delegated-subagents.ts';
 import { AccountConnectionSchema, SaveAccountPreferencesSchema } from '@mingle/contracts';
 import { ATTACHMENT_LIMITS, NativeActionCatalogQuerySchema, nativeActionCommands, nativeActionSkills, unsupportedActionNotes } from '@mingle/contracts';
 import type { DistributedWorkspaceService } from './distributed/service.ts';
@@ -53,6 +54,7 @@ export interface Services {
   setupSignal: AbortSignal;
   config: ServerConfig; store: Store; hub: Hub; workspace: WorkspaceService; runtime: SessionRuntime; tasks: TaskService; handoffs: HandoffService;
   groups: GroupService; attachments: AttachmentService; recovery: RecoveryService; intelligence: ProjectIntelligenceService; repository: RepositoryService; browser: BrowserService; providers: ProviderService; imports: ImportService; directories: DirectoryService; projectSources: ProjectSources; terminals: TerminalManager; startedAt: number; getPort: () => number;
+  subagents: DelegatedSubagentService;
 }
 
 export class Reply {
@@ -227,6 +229,7 @@ export function buildRouter(s: Services) {
     const runs = s.store.bootstrapRuns();
     const body: Bootstrap = {
       groups: s.groups.snapshots(), runs, toolCalls: s.store.bootstrapToolCalls(runs.map((run) => run.id)),
+      delegatedSubagents: s.subagents.list(),
       projects: s.store.listProjects(), sessions: s.store.listSessions().map((session) => ({ ...session, steerable: s.runtime.isSteerable(session.id) })), messages: s.store.bootstrapMessages(300), queuedMessages: s.store.listSessions().flatMap((session) => s.store.listQueuedMessages(session.id)), tasks: s.store.listTasks(),
       events: s.store.recentEvents(500), approvals: s.store.bootstrapApprovals(50), plans: s.store.bootstrapPlans(), questions: s.store.bootstrapQuestions(), providers, settings: s.store.getSettings(), version: s.config.version,
     };
@@ -397,6 +400,9 @@ export function buildRouter(s: Services) {
   });
 
   add('POST', '/api/sessions', async (ctx) => new Reply(201, await s.workspace.createSession(await ctx.body(CreateSessionSchema))));
+  add('POST', '/api/sessions/:id/subagents', async (ctx) => new Reply(201, await s.subagents.start(param(ctx,'id'), await ctx.body(StartSubagentSchema), 'user')));
+  add('GET', '/api/sessions/:id/subagents', (ctx) => { const id=param(ctx,'id'); if(!s.store.getSession(id))throw notFound('Session not found'); return s.subagents.list(id); });
+  add('POST', '/api/subagents/:id/cancel', (ctx) => s.subagents.cancel(param(ctx,'id')));
   add('GET', '/api/sessions/:id/recovery', (ctx) => {
     const id = recoverySession(ctx);
     return { checkpoint: s.recovery.latest(id), failure: s.recovery.failure(id) };
