@@ -36,9 +36,11 @@ export function hideOwnedEmbeddedView(window, view, park) {
 }
 
 /**
- * Background tabs are parked beneath the app's own UI inside `getHostWindow()` (normally the main window), so they keep
- * painting for screenshots and screencasts without a separate window (Wayland compositors ignore off-screen positions
- * and would show such a window). A hidden fallback window is used only when no app window exists (smoke tests).
+ * Background tabs are parked at the bottom of the app window's view stack, beneath the workspace UI view (main.mjs runs
+ * the UI in a child view for this reason). Child views always draw above a window's own page, so they must never be
+ * parked on a window whose UI is its own page: that showed them as a block over the interface. Beneath an opaque UI
+ * view they stay hidden yet keep rendering, which Playwright needs (a never-shown window paints no frames, and views
+ * outside the window bounds stop rendering). A hidden fallback window is used only when no app window exists (tests).
  */
 export function createEmbeddedBrowserHost({ electron, ws, log = () => undefined, getHostWindow = () => null }) {
   const token = randomBytes(32).toString('hex');
@@ -96,14 +98,16 @@ export function createEmbeddedBrowserHost({ electron, ws, log = () => undefined,
   }
   function parkingWindow() {
     const preferred = getHostWindow();
-    if (preferred && !preferred.isDestroyed()) return preferred;
+    if (preferred && !preferred.isDestroyed() && preferred.mingleUi) return preferred;
     if (!hostWindow || hostWindow.isDestroyed()) {
-      hostWindow = new electron.BrowserWindow({ show: false, paintWhenInitiallyHidden: true, skipTaskbar: true, focusable: false, webPreferences: { backgroundThrottling: false } });
-      hostWindow.showInactive?.();
+      hostWindow = new electron.BrowserWindow({
+        show: false, paintWhenInitiallyHidden: true, skipTaskbar: true, focusable: false,
+        width: PARKED_BOUNDS.width, height: PARKED_BOUNDS.height, webPreferences: { backgroundThrottling: false },
+      });
     }
     return hostWindow;
   }
-  /** Moves a view beneath the parking window's own content (index 0), at the background size. */
+  /** Moves a view to the bottom of the parking window's stack (beneath its UI view), at the background size. */
   function park(view) {
     const owner = view.parentWindow;
     const ownerState = [...sessions.values()].find(state => state.presentedView === view);
@@ -143,7 +147,7 @@ export function createEmbeddedBrowserHost({ electron, ws, log = () => undefined,
       view.webContents.on('before-input-event', (event, input) => {
         if (input.type === 'keyDown' && input.key === 'Escape' && input.alt && input.shift) {
           event.preventDefault();
-          (view.parentWindow ?? getHostWindow())?.webContents?.focus?.();
+          { const window = view.parentWindow ?? getHostWindow(); (window?.mingleUi?.webContents ?? window?.webContents)?.focus?.(); }
         }
       });
       state.views.set(item.targetId, item);

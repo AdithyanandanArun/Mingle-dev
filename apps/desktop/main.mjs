@@ -48,18 +48,46 @@ const SESSION_ID_PATTERN = /^[A-Za-z0-9_-]{1,80}$/;
 
 function isLiveWindow(window) { return Boolean(window && !window.isDestroyed()); }
 
+const WORKSPACE_WEB_PREFERENCES = () => ({
+  preload: join(dirname(fileURLToPath(import.meta.url)), 'browser-preload.cjs'),
+  nodeIntegration: false, contextIsolation: true, sandbox: true, webSecurity: true,
+});
+
+/**
+ * The workspace UI of a window. It runs in a child view rather than the window's own page: child views always draw
+ * above a window's page, so built-in browser tabs parked beneath the UI view stay hidden while still rendering.
+ */
+function uiContents(window) { return window?.mingleUi?.webContents ?? window?.webContents; }
+
+function attachWorkspaceUi(window, backgroundColor) {
+  const view = new WebContentsView({ webPreferences: WORKSPACE_WEB_PREFERENCES() });
+  view.setBackgroundColor(backgroundColor);
+  window.contentView.addChildView(view);
+  const fit = () => {
+    if (window.isDestroyed()) return;
+    const [width, height] = window.getContentSize();
+    view.setBounds({ x: 0, y: 0, width, height });
+  };
+  fit();
+  for (const name of ['resize', 'maximize', 'unmaximize', 'enter-full-screen', 'leave-full-screen', 'restore']) window.on(name, fit);
+  window.on('focus', () => { if (!view.webContents.isDestroyed()) view.webContents.focus(); });
+  window.once('closed', () => { if (!view.webContents.isDestroyed()) view.webContents.close(); });
+  window.mingleUi = view;
+  return view;
+}
+
 ipcMain.handle('mingle.credential-store.choose', (event, backend) => {
-  if (!isLiveWindow(mainWindow) || event.sender !== mainWindow.webContents || !isWorkspaceFrame(event)) return false;
+  if (!isLiveWindow(mainWindow) || event.sender !== uiContents(mainWindow) || !isWorkspaceFrame(event)) return false;
   if (backend !== 'auto' && !['gnome-libsecret', 'kwallet5', 'kwallet6', 'kwallet'].includes(backend)) return false;
   if (backend !== 'auto' && !credentialStoreOptions({ userData }).available.includes(backend)) return false;
   return saveUserCredentialStore(userData, backend);
 });
 ipcMain.handle('mingle.credential-store.state', event => {
-  if (!isLiveWindow(mainWindow) || event.sender !== mainWindow.webContents || !isWorkspaceFrame(event)) return null;
+  if (!isLiveWindow(mainWindow) || event.sender !== uiContents(mainWindow) || !isWorkspaceFrame(event)) return null;
   return credentialStoreOptions({ userData });
 });
 ipcMain.handle('mingle.credential-store.restart', event => {
-  if (!isLiveWindow(mainWindow) || event.sender !== mainWindow.webContents || !isWorkspaceFrame(event)) return false;
+  if (!isLiveWindow(mainWindow) || event.sender !== uiContents(mainWindow) || !isWorkspaceFrame(event)) return false;
   app.relaunch();
   app.exit(0);
   return true;
@@ -78,11 +106,12 @@ function openExternalWebTarget(target, origin) {
 }
 
 function configureWorkspaceWindow(window, origin) {
-  window.webContents.setWindowOpenHandler(({ url: target }) => {
+  const contents = uiContents(window);
+  contents.setWindowOpenHandler(({ url: target }) => {
     openExternalWebTarget(target, origin);
     return { action: 'deny' };
   });
-  window.webContents.on('will-navigate', (event, target) => {
+  contents.on('will-navigate', (event, target) => {
     let sameOrigin = false;
     try { sameOrigin = new URL(target).origin === origin; } catch { /* invalid targets are blocked */ }
     if (!sameOrigin) {
@@ -93,8 +122,8 @@ function configureWorkspaceWindow(window, origin) {
 }
 
 function notifyBrowserPopoutClosed(sessionId) {
-  if (isLiveWindow(mainWindow) && !mainWindow.webContents.isDestroyed()) {
-    mainWindow.webContents.send('mingle.browser.popout.closed', sessionId);
+  if (isLiveWindow(mainWindow) && !uiContents(mainWindow).isDestroyed()) {
+    uiContents(mainWindow).send('mingle.browser.popout.closed', sessionId);
   }
 }
 
@@ -103,9 +132,10 @@ function focusMainWindow() {
 }
 
 function sendProjectInvitation(window, token) {
-  if (!isLiveWindow(window) || window !== mainWindow || !window.webContents || window.webContents.isDestroyed()) return;
-  if (!isProjectInvitationWorkspaceUrl(window.webContents.getURL(), workspaceUrl)) return;
-  window.webContents.send('mingle.project-invitation', token);
+  const contents = uiContents(window);
+  if (!isLiveWindow(window) || window !== mainWindow || !contents || contents.isDestroyed()) return;
+  if (!isProjectInvitationWorkspaceUrl(contents.getURL(), workspaceUrl)) return;
+  contents.send('mingle.project-invitation', token);
 }
 
 const projectInvitationDispatcher = createProjectInvitationDispatcher({
@@ -116,7 +146,7 @@ const projectInvitationDispatcher = createProjectInvitationDispatcher({
 });
 
 ipcMain.handle('mingle.browser.open-popout', async (event, sessionId) => {
-  if (!isLiveWindow(mainWindow) || event.sender !== mainWindow.webContents || !isWorkspaceFrame(event) || typeof sessionId !== 'string' || !SESSION_ID_PATTERN.test(sessionId)) return false;
+  if (!isLiveWindow(mainWindow) || event.sender !== uiContents(mainWindow) || !isWorkspaceFrame(event) || typeof sessionId !== 'string' || !SESSION_ID_PATTERN.test(sessionId)) return false;
   const existing = browserWindows.get(sessionId);
   if (isLiveWindow(existing)) {
     if (existing.isMinimized()) existing.restore();
@@ -128,11 +158,9 @@ ipcMain.handle('mingle.browser.open-popout', async (event, sessionId) => {
   const window = new BrowserWindow({
     parent: mainWindow, title: 'Mingle Browser', width: 1120, height: 780, minWidth: 560, minHeight: 420,
     backgroundColor: '#111111', autoHideMenuBar: true,
-    webPreferences: {
-      preload: join(dirname(fileURLToPath(import.meta.url)), 'browser-preload.cjs'),
-      nodeIntegration: false, contextIsolation: true, sandbox: true, webSecurity: true,
-    },
+    webPreferences: { nodeIntegration: false, contextIsolation: true, sandbox: true, webSecurity: true },
   });
+  attachWorkspaceUi(window, '#111111');
   browserWindows.set(sessionId, window);
   window.once('closed', () => {
     if (browserWindows.get(sessionId) === window) browserWindows.delete(sessionId);
@@ -140,7 +168,7 @@ ipcMain.handle('mingle.browser.open-popout', async (event, sessionId) => {
   });
   configureWorkspaceWindow(window, origin);
   try {
-    await window.loadURL(`${workspaceUrl}/?browserPopout=${encodeURIComponent(sessionId)}`);
+    await uiContents(window).loadURL(`${workspaceUrl}/?browserPopout=${encodeURIComponent(sessionId)}`);
     if (!isLiveWindow(window)) return false;
     window.show();
     window.focus();
@@ -152,12 +180,12 @@ ipcMain.handle('mingle.browser.open-popout', async (event, sessionId) => {
 });
 
 ipcMain.handle('mingle.browser.is-popout-open', (event, sessionId) => {
-  if (!isLiveWindow(mainWindow) || event.sender !== mainWindow.webContents || !isWorkspaceFrame(event) || typeof sessionId !== 'string' || !SESSION_ID_PATTERN.test(sessionId)) return false;
+  if (!isLiveWindow(mainWindow) || event.sender !== uiContents(mainWindow) || !isWorkspaceFrame(event) || typeof sessionId !== 'string' || !SESSION_ID_PATTERN.test(sessionId)) return false;
   return isLiveWindow(browserWindows.get(sessionId));
 });
 
 ipcMain.handle('mingle.browser.focus-popout', (event, sessionId) => {
-  if (!isLiveWindow(mainWindow) || event.sender !== mainWindow.webContents || !isWorkspaceFrame(event) || typeof sessionId !== 'string' || !SESSION_ID_PATTERN.test(sessionId)) return false;
+  if (!isLiveWindow(mainWindow) || event.sender !== uiContents(mainWindow) || !isWorkspaceFrame(event) || typeof sessionId !== 'string' || !SESSION_ID_PATTERN.test(sessionId)) return false;
   const window = browserWindows.get(sessionId);
   if (!isLiveWindow(window)) return false;
   if (window.isMinimized()) window.restore();
@@ -169,12 +197,12 @@ ipcMain.handle('mingle.browser.focus-popout', (event, sessionId) => {
 ipcMain.handle('mingle.browser.dock-popout', (event, sessionId) => {
   let target = null;
   if (!isWorkspaceFrame(event)) return false;
-  if (isLiveWindow(mainWindow) && event.sender === mainWindow.webContents) {
+  if (isLiveWindow(mainWindow) && event.sender === uiContents(mainWindow)) {
     if (typeof sessionId !== 'string' || !SESSION_ID_PATTERN.test(sessionId)) return false;
     target = browserWindows.get(sessionId);
   } else {
     if (sessionId !== undefined) return false;
-    for (const window of browserWindows.values()) if (window.webContents === event.sender) { target = window; break; }
+    for (const window of browserWindows.values()) if (uiContents(window) === event.sender) { target = window; break; }
   }
   if (!isLiveWindow(target)) return false;
   target.close();
@@ -286,14 +314,12 @@ async function openWorkspace() {
     title: 'Mingle', icon: app.isPackaged ? join(root, 'apps/web/dist/mingle-icon.png') : join(root, 'apps/web/public/mingle-icon.png'),
     width: 1540, height: 1000, minWidth: 900, minHeight: 620,
     backgroundColor: '#0a0a0a', autoHideMenuBar: true,
-    webPreferences: {
-      preload: join(dirname(fileURLToPath(import.meta.url)), 'browser-preload.cjs'),
-      nodeIntegration: false, contextIsolation: true, sandbox: true, webSecurity: true,
-    },
+    webPreferences: { nodeIntegration: false, contextIsolation: true, sandbox: true, webSecurity: true },
   });
+  attachWorkspaceUi(window, '#0a0a0a');
   mainWindow = window;
   configureWorkspaceWindow(window, new URL(url).origin);
-  await window.loadURL(projectInvitationDispatcher.getStartupUrl());
+  await uiContents(window).loadURL(projectInvitationDispatcher.getStartupUrl());
   focusMainWindow();
   projectInvitationDispatcher.markWorkspaceReady();
 }
@@ -307,8 +333,8 @@ function rectIsValid(rect, window) {
 function embeddedWindowForSender(sender) {
   const event = { sender, senderFrame: sender?.mainFrame };
   if (!isWorkspaceFrame(event)) return null;
-  if (isLiveWindow(mainWindow) && sender === mainWindow.webContents) return mainWindow;
-  for (const window of browserWindows.values()) if (isLiveWindow(window) && sender === window.webContents) return window;
+  if (isLiveWindow(mainWindow) && sender === uiContents(mainWindow)) return mainWindow;
+  for (const window of browserWindows.values()) if (isLiveWindow(window) && sender === uiContents(window)) return window;
   return null;
 }
 
