@@ -424,15 +424,18 @@ const MIGRATIONS: (string | ((db: DatabaseSync) => void))[] = [
     ); CREATE INDEX IF NOT EXISTS queued_messages_order ON queued_messages(session_id, created_at, id);`,
     (db) => addColumn(db, 'conversation_groups', 'preferred_coordinator_member_id',
       'ALTER TABLE conversation_groups ADD COLUMN preferred_coordinator_member_id TEXT;'),
-    `ALTER TABLE sessions ADD COLUMN parent_session_id TEXT REFERENCES sessions(id);
-     CREATE INDEX sessions_parent ON sessions(parent_session_id);
-     CREATE TABLE delegated_subagents (
+    // Idempotent: schema-upgrade paths can replay later migrations against databases that already have these objects.
+    (db) => {
+      addColumn(db, 'sessions', 'parent_session_id', 'ALTER TABLE sessions ADD COLUMN parent_session_id TEXT REFERENCES sessions(id);');
+      db.exec(`CREATE INDEX IF NOT EXISTS sessions_parent ON sessions(parent_session_id);
+     CREATE TABLE IF NOT EXISTS delegated_subagents (
        id TEXT PRIMARY KEY, parent_session_id TEXT NOT NULL REFERENCES sessions(id), child_session_id TEXT NOT NULL REFERENCES sessions(id),
        name TEXT NOT NULL, provider TEXT NOT NULL, model TEXT NOT NULL, task TEXT NOT NULL,
        status TEXT NOT NULL CHECK(status IN ('running','completed','failed','cancelled')), requested_by TEXT NOT NULL CHECK(requested_by IN ('agent','user')),
        started_at TEXT NOT NULL, ended_at TEXT, result_preview TEXT, error TEXT, result_delivered INTEGER NOT NULL DEFAULT 0
      );
-     CREATE INDEX delegated_subagents_parent ON delegated_subagents(parent_session_id);`,
+     CREATE INDEX IF NOT EXISTS delegated_subagents_parent ON delegated_subagents(parent_session_id);`);
+    },
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;
