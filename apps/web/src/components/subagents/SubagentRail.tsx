@@ -44,6 +44,7 @@ export function SubagentRail({
 
   if (subagents.length + delegated.length === 0) return null;
   const total = subagents.length + delegated.length;
+  const announcement = delegated.map((item) => `${item.name} ${item.status}`).join('. ');
   const toggle = () => {
     const next = !expanded;
     preference.current = next;
@@ -52,6 +53,7 @@ export function SubagentRail({
 
   return (
     <aside ref={panel} className={`agent-presence single-subagents${expanded ? ' is-expanded' : ' is-collapsed'}`} aria-label="Subagents">
+      <span className="sr-only" aria-live="polite">{announcement}</span>
       <header className="agent-presence__head">
         <strong>Subagents</strong>
         <span>{total}</span>
