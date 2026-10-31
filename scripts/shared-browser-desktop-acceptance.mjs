@@ -127,11 +127,12 @@ async function until(fn, label) {
         assert.equal(await guest.eval(() => typeof require), 'undefined');
         assert.equal(await guest.eval(() => typeof process), 'undefined');
         checks.push('guest Node integration disabled');
+        await guest.eval(() => { window.__exampleInputEvents = []; for (const type of ['pointerdown', 'pointerup', 'pointercancel', 'blur', 'focus']) addEventListener(type, event => window.__exampleInputEvents.push({ type, trusted: event.isTrusted, at: event.timeStamp }), true); });
         await guest.call('Input.dispatchMouseEvent', { type: 'mousePressed', x: 80, y: 80, button: 'left', clickCount: 1 });
         await until(async () => (await state()).tabs.find(t => t.id === tid).control.holderId === 'desktop-native', 'native touch');
         checks.push('native touch takeover');
         await new Promise(r => setTimeout(r, 2800));
-        assert.equal((await state()).tabs.find(t => t.id === tid).control.holderId, 'desktop-native');
+        assert.equal((await state()).tabs.find(t => t.id === tid).control.holderId, 'desktop-native', JSON.stringify(await guest.eval(() => ({events:window.__exampleInputEvents,focused:document.hasFocus()}))));
         checks.push('held native drag does not expire');
         await guest.call('Input.dispatchMouseEvent', { type: 'mouseReleased', x: 80, y: 80, button: 'left', clickCount: 1 });
         await until(async () => (await state()).tabs.find(t => t.id === tid).control.holderId === null, 'idle handback');
