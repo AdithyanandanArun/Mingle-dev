@@ -4,6 +4,9 @@ import type { AccountPreferences, AccountState, AccountStorageState, AppSettings
 import { api, errorMessage } from '../lib/api';
 import { useMingle } from '../store/store';
 import { Button, InlineError } from './ui';
+import type { BrowserDesktopBridge } from './browser/desktopBridge';
+
+declare global { interface Window { mingleBrowserDesktop?: BrowserDesktopBridge } }
 
 function storageBackendLabel(backend: string | null | undefined): string | null {
   if (!backend) return null;
@@ -84,6 +87,9 @@ function portablePreferences(settings: AppSettings): AccountPreferences {
 
 export function AccountSettings({ settings }: { settings: AppSettings }) {
   const [account, setAccount] = useState<AccountState | null>(null);
+  const [storeState, setStoreState] = useState<{ available: string[]; selected: string | null; chosenBy: 'auto' | 'user' } | null>(null);
+  const [storeChoice, setStoreChoice] = useState('auto');
+  const [storeRestart, setStoreRestart] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -96,6 +102,12 @@ export function AccountSettings({ settings }: { settings: AppSettings }) {
   const storageRetrying = useRef(false);
   const storageSnapshotVersion = useRef(0);
   const userId = account?.user?.id ?? null;
+
+  useEffect(() => {
+    let active = true;
+    void window.mingleBrowserDesktop?.credentialStoreState().then(value => { if (active && value) { setStoreState(value); setStoreChoice(value.chosenBy === 'user' ? value.selected ?? 'auto' : 'auto'); } });
+    return () => { active = false; };
+  }, []);
   const canSync = Boolean(userId && loadedFor === userId);
 
   useEffect(() => {
@@ -141,6 +153,7 @@ export function AccountSettings({ settings }: { settings: AppSettings }) {
   const waiting = account?.status === 'signing-in';
   const signedIn = account?.status === 'signed-in';
   const secureStorage = account ? storageMessage(account) : null;
+  const savedStoreLabel = storageBackendLabel(account?.storage?.backend);
 
   const retryStorage = async () => {
     if (!secureStorage?.retryable || busy) return;
@@ -177,11 +190,22 @@ export function AccountSettings({ settings }: { settings: AppSettings }) {
         <div className="account-settings__storage-icon" aria-hidden="true">{secureStorage.available ? <ShieldCheck size={17} /> : <ShieldAlert size={17} />}</div>
         <div className="account-settings__storage-copy">
           <div className="account-settings__storage-heading"><h3>Secure sign-in storage</h3><span>{secureStorage.label}</span></div>
-          <p>{secureStorage.message}</p>
-          {secureStorage.backend ? <p className="account-settings__storage-backend">{secureStorage.available ? 'Protected by' : 'Selected keyring:'} {secureStorage.backend}</p> : null}
+          <p>{savedStoreLabel && secureStorage.available ? `Saved in ${savedStoreLabel}.` : !secureStorage.available ? 'Not saved — no keyring available.' : secureStorage.message}</p>
           {busy === 'storage-retry' ? <p className="account-settings__storage-progress" role="status" aria-live="polite">Checking secure storage…</p> : null}
         </div>
         {secureStorage.retryable ? <Button size="sm" disabled={Boolean(busy)} busy={busy === 'storage-retry'} onClick={() => void retryStorage()}><RefreshCw size={12} />Retry secure storage</Button> : null}
+        {storeState && storeState.available.length > 1 ? <div className="account-settings__store-choice">
+          <label htmlFor="credential-store-choice">Store credentials in</label>
+          <select id="credential-store-choice" value={storeChoice} disabled={Boolean(busy)} onChange={event => {
+            const choice = event.target.value;
+            setStoreChoice(choice);
+            void window.mingleBrowserDesktop?.chooseCredentialStore(choice).then(ok => { setStoreRestart(ok); if (!ok) setError('Could not save this credential storage choice.'); });
+          }}>
+            <option value="auto">Automatic</option>
+            {storeState.available.map(backend => <option key={backend} value={backend}>{storageBackendLabel(backend) ?? backend}</option>)}
+          </select>
+          {storeRestart ? <><p>Switching may require signing in again if Mingle cannot read the existing key.</p><Button size="sm" onClick={() => void window.mingleBrowserDesktop?.restartForCredentialStore()}>Restart now</Button></> : null}
+        </div> : null}
       </section> : null}
       <div className="account-settings__identity">
         <div className="account-settings__avatar" aria-hidden="true">{(account.user?.name ?? account.user?.email ?? 'M').charAt(0).toUpperCase()}</div>

@@ -1,4 +1,7 @@
 export interface BrowserDesktopBridge {
+  chooseCredentialStore(backend: string): Promise<boolean>;
+  credentialStoreState(): Promise<{ available: string[]; selected: string | null; chosenBy: 'auto' | 'user' } | null>;
+  restartForCredentialStore(): Promise<boolean>;
   openPopout(sessionId: string): Promise<boolean>;
   isPopoutOpen(sessionId: string): Promise<boolean>;
   focusPopout(sessionId: string): Promise<boolean>;

@@ -216,7 +216,8 @@ async function openWorkspace() {
   const dataOverride = process.env.MINGLE_DATA_DIR !== undefined ? process.env.MINGLE_DATA_DIR : process.env.RELAY_DATA_DIR;
   const workspaceDataDir = dataOverride?.trim() || join(userData, 'workspace');
   const getAccountKey = createAccountKeyManager({ userData, workspaceDataDir, safeStorage });
-  verifyCredentialStore({ app, safeStorage, userData, startup: credentialStoreStartup });
+  const credentialStoreCheck = verifyCredentialStore({ app, safeStorage, userData, startup: credentialStoreStartup });
+  if (credentialStoreCheck.status === 'relaunching') return;
   const serverRequire = createRequire(join(serverRoot, 'package.json'));
   const ws = serverRequire('ws');
   embeddedBrowserHost = createEmbeddedBrowserHost({ electron: { app, BrowserWindow, WebContentsView, ipcMain, session }, ws, getHostWindow: () => (isLiveWindow(mainWindow) ? mainWindow : null) });
