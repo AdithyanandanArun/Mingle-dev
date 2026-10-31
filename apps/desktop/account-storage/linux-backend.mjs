@@ -56,15 +56,51 @@ function queryServices(run, command, makeArgs, deadline) {
   };
 }
 
+function secretServiceOwner(run, command, deadline) {
+  const args = command === 'busctl'
+    ? ['--user', '--no-pager', 'call', DBUS_DESTINATION, DBUS_OBJECT, DBUS_INTERFACE, 'GetNameOwner', 's', 'org.freedesktop.secrets']
+    : ['--session', '--print-reply=literal', `--dest=${DBUS_DESTINATION}`, DBUS_OBJECT, `${DBUS_INTERFACE}.GetNameOwner`, 'string:org.freedesktop.secrets'];
+  const output = invoke(run, command, args, deadline);
+  if (!output) return null;
+  const match = output.match(/(?:"|'?)(:[0-9]+\.[0-9]+)(?:"|'?)/);
+  return match?.[1] ?? null;
+}
+
+function secretServiceProcessId(run, command, owner, deadline) {
+  const args = command === 'busctl'
+    ? ['--user', '--no-pager', 'call', DBUS_DESTINATION, DBUS_OBJECT, DBUS_INTERFACE, 'GetConnectionUnixProcessID', 's', owner]
+    : ['--session', '--print-reply=literal', `--dest=${DBUS_DESTINATION}`, DBUS_OBJECT, `${DBUS_INTERFACE}.GetConnectionUnixProcessID`, `string:${owner}`];
+  const output = invoke(run, command, args, deadline);
+  if (!output) return null;
+  const match = output.match(/(?:^|\s)([1-9][0-9]{0,8})(?:\s|$)/);
+  const pid = match ? Number(match[1]) : NaN;
+  return Number.isSafeInteger(pid) && pid > 0 ? pid : null;
+}
+
+function identifySecretService(run, command, deadline) {
+  const owner = secretServiceOwner(run, command, deadline);
+  if (!owner) return null;
+  const pid = secretServiceProcessId(run, command, owner, deadline);
+  if (!pid) return null;
+  try {
+    const result = run('cat', [`/proc/${pid}/comm`], { encoding: 'utf8', timeout: 100, maxBuffer: 256, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true });
+    if (!result || result.error || result.status !== 0 || typeof result.stdout !== 'string') return null;
+    return result.stdout.trim().toLowerCase();
+  } catch { return null; }
+}
+
 function probeSessionServices(run = spawnSync) {
   const deadline = Date.now() + PROBE_BUDGET_MS;
   const busctl = queryServices(run, 'busctl', method => [
     '--user', '--no-pager', 'call', DBUS_DESTINATION, DBUS_OBJECT, DBUS_INTERFACE, `List${method}`,
   ], deadline);
-  if (busctl) return busctl;
-  return queryServices(run, 'dbus-send', method => [
+  if (busctl) return { ...busctl, secretServiceProvider: busctl.owned.has('org.freedesktop.secrets')
+    ? identifySecretService(run, 'busctl', deadline) : null };
+  const dbusSend = queryServices(run, 'dbus-send', method => [
     '--session', '--print-reply=literal', `--dest=${DBUS_DESTINATION}`, DBUS_OBJECT, `${DBUS_INTERFACE}.List${method}`,
   ], deadline);
+  return dbusSend ? { ...dbusSend, secretServiceProvider: dbusSend.owned.has('org.freedesktop.secrets')
+    ? identifySecretService(run, 'dbus-send', deadline) : null } : null;
 }
 
 function walletBackend(names) {
@@ -74,39 +110,15 @@ function walletBackend(names) {
   return null;
 }
 
-function desktopHint(environment) {
-  const values = [environment.XDG_CURRENT_DESKTOP, environment.XDG_SESSION_DESKTOP, environment.DESKTOP_SESSION];
-  for (const value of values) {
-    if (typeof value !== 'string') continue;
-    const tokens = value.toLowerCase().split(/[^a-z0-9_-]+/).filter(Boolean);
-    for (const token of tokens) {
-      if (token === 'gnome' || token === 'gnome-classic' || token === 'gnome-flashback') return 'gnome';
-      if (
-        token === 'kde' || token === 'plasma' || token === 'kde-plasma' ||
-        token === 'kdewayland' || token === 'kdex11' ||
-        token === 'plasmawayland' || token === 'plasmax11' ||
-        token.startsWith('plasma-')
-      ) return 'kde';
-    }
-  }
-  return 'unknown';
-}
-
-function chooseBackend(services, hint = 'unknown') {
+function chooseBackend(services) {
   const activeWallet = walletBackend(services.owned);
   const activatableWallet = walletBackend(services.activatable);
   const secretServiceAvailable = services.owned.has('org.freedesktop.secrets')
     || services.activatable.has('org.freedesktop.secrets');
   const walletAvailable = activeWallet ?? activatableWallet;
 
-  // Desktop hints break ties only when both candidate providers were observed on
-  // this session bus. A hint can never select an absent service.
-  if (secretServiceAvailable && walletAvailable) {
-    if (hint === 'kde') return walletAvailable;
-    if (hint === 'gnome') return 'gnome-libsecret';
-  }
-
-  // Preserve the existing default ordering for unknown compositors and single-provider systems.
+  // The Secret Service API may itself be backed by KWallet or another provider. Its
+  // Electron backend remains libsecret, and a running owner beats an activatable service.
   if (services.owned.has('org.freedesktop.secrets')) return 'gnome-libsecret';
   if (activeWallet) return activeWallet;
   if (services.activatable.has('org.freedesktop.secrets')) return 'gnome-libsecret';
@@ -115,7 +127,6 @@ function chooseBackend(services, hint = 'unknown') {
 
 /**
  * Select Electron's Linux safeStorage provider from actual session-bus services.
- * Recognized desktop hints only break ties between providers evidenced on that bus.
  */
 export function selectLinuxPasswordStore({
   platform = process.platform,
@@ -128,7 +139,7 @@ export function selectLinuxPasswordStore({
 
   const services = probeSessionServices(run);
   if (!services) return { status: 'unavailable', backend: null, explicit: false };
-  const backend = chooseBackend(services, desktopHint(environment));
+  const backend = chooseBackend(services);
   return backend
     ? { status: 'selected', backend, explicit: false }
     : { status: 'unavailable', backend: null, explicit: false };

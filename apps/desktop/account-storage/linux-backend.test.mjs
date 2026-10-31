@@ -10,13 +10,16 @@ function dbusOutput(names) {
   return `as ${names.length}${names.map(name => ` "${name}"`).join('')}`;
 }
 
-function successfulBus({ owned = [], activatable = [] } = {}) {
+function successfulBus({ owned = [], activatable = [], provider = 'gnome-keyring-d' } = {}) {
   const calls = [];
   return {
     calls,
     run(command, args, options) {
       calls.push({ command, args, options });
       const query = args.at(-1);
+      if (query === 'GetNameOwner') return { status: 0, stdout: 's ":1.42"' };
+      if (query === 'GetConnectionUnixProcessID') return { status: 0, stdout: 'u 4242' };
+      if (command === 'cat') return { status: 0, stdout: `${provider}\n` };
       return {
         status: 0,
         stdout: query === 'ListNames' ? dbusOutput(owned) : dbusOutput(activatable),
@@ -30,7 +33,7 @@ test('auto-selects the actual Secret Service even when the desktop session is no
   const selection = selectLinuxPasswordStore({ platform: 'linux', argv: ['electron', 'main.mjs'], run: probe.run });
 
   assert.deepEqual(selection, { status: 'selected', backend: 'gnome-libsecret', explicit: false });
-  assert.equal(probe.calls.length, 2);
+  assert.equal(probe.calls.length, 3);
   assert.equal(probe.calls.every(call => call.command === 'busctl'), true);
 });
 
@@ -41,16 +44,24 @@ test('uses the detected KWallet major version when KWallet is the running provid
   assert.deepEqual(selection, { status: 'selected', backend: 'kwallet6', explicit: false });
 });
 
-test('chooses evidenced KWallet for KDE when both native providers are running', () => {
+test('prefers owned Secret Service for KDE when both providers run and GNOME Keyring owns it', () => {
   const probe = successfulBus({ owned: ['org.freedesktop.secrets', 'org.kde.kwalletd6'] });
   const selection = selectLinuxPasswordStore({
     platform: 'linux', argv: [], environment: { XDG_CURRENT_DESKTOP: 'KDE:Plasma' }, run: probe.run,
   });
 
-  assert.deepEqual(selection, { status: 'selected', backend: 'kwallet6', explicit: false });
+  assert.deepEqual(selection, { status: 'selected', backend: 'gnome-libsecret', explicit: false });
 });
 
-test('chooses evidenced Secret Service for GNOME when both native providers are running', () => {
+test('uses Secret Service for KDE when KWallet owns the Secret Service name', () => {
+  const probe = successfulBus({ owned: ['org.freedesktop.secrets', 'org.kde.kwalletd6'], provider: 'kwalletd6' });
+  const selection = selectLinuxPasswordStore({
+    platform: 'linux', argv: [], environment: { XDG_CURRENT_DESKTOP: 'KDE' }, run: probe.run,
+  });
+  assert.deepEqual(selection, { status: 'selected', backend: 'gnome-libsecret', explicit: false });
+});
+
+test('prefers owned Secret Service when both native providers are running', () => {
   const probe = successfulBus({ owned: ['org.freedesktop.secrets', 'org.kde.kwalletd5'] });
   const selection = selectLinuxPasswordStore({
     platform: 'linux', argv: [], environment: { XDG_CURRENT_DESKTOP: 'GNOME' }, run: probe.run,
@@ -59,7 +70,7 @@ test('chooses evidenced Secret Service for GNOME when both native providers are 
   assert.deepEqual(selection, { status: 'selected', backend: 'gnome-libsecret', explicit: false });
 });
 
-test('preserves the known-native default for both providers on an unknown compositor', () => {
+test('prefers running Secret Service for both providers on an unknown compositor', () => {
   const probe = successfulBus({ owned: ['org.freedesktop.secrets', 'org.kde.kwalletd6'] });
   const selection = selectLinuxPasswordStore({
     platform: 'linux', argv: [], environment: { XDG_CURRENT_DESKTOP: 'Hyprland' }, run: probe.run,
