@@ -10,7 +10,7 @@ const session = async (t: TestApp, id = EXAMPLE_CONTRACT_SESSION_ID) => (await t
 const messages = async (t: TestApp, id = EXAMPLE_CONTRACT_SESSION_ID) => (await t.api('GET', `/api/sessions/${id}/messages`)).json as any[];
 
 describe('session creation', () => {
-  it('creates isolated worktrees with unique branches, and explains non-repo and unborn failures', async () => {
+  it('creates isolated worktrees and falls back to direct sessions for non-repo and unborn folders', async () => {
     const t = await boot({ exampleWorkspace: false });
     const repo = makeRepo();
     const project = (await t.api('POST', '/api/projects', { name: 'repo', path: repo })).json;
@@ -26,8 +26,9 @@ describe('session creation', () => {
 
     const plain = (await t.api('POST', '/api/projects', { name: 'plain', path: (await import('./test-utils.ts')).tmpDir() })).json;
     const nonRepo = await t.api('POST', '/api/sessions', { ...body, projectId: plain.id });
-    expect(nonRepo.status).toBe(422);
-    expect(nonRepo.json.error).toMatch(/not a Git repository/);
+    expect(nonRepo.status).toBe(201);
+    expect(nonRepo.json).toMatchObject({ isolated: false, worktreePath: plain.path, branch: null });
+    expect((await messages(t, nonRepo.json.id)).some((message: any) => message.kind === 'info' && /Set up Git/.test(message.content))).toBe(true);
     const direct = await t.api('POST', '/api/sessions', { ...body, projectId: plain.id, isolated: false });
     expect(direct.json).toMatchObject({ isolated: false, worktreePath: plain.path, branch: null });
 
@@ -36,8 +37,9 @@ describe('session creation', () => {
     runGitForUnborn(unborn, 'init', '-q');
     const emptyProject = (await t.api('POST', '/api/projects', { name: 'unborn', path: unborn })).json;
     const res = await t.api('POST', '/api/sessions', { ...body, projectId: emptyProject.id });
-    expect(res.status).toBe(422);
-    expect(res.json.error).toMatch(/no commits/);
+    expect(res.status).toBe(201);
+    expect(res.json).toMatchObject({ isolated: false, worktreePath: unborn, branch: null });
+    expect((await messages(t, res.json.id)).some((message: any) => message.kind === 'info' && /no commits/.test(message.content))).toBe(true);
   });
 
   it('renames and archives metadata without removing the worktree', async () => {

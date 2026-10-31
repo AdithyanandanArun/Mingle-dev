@@ -19,6 +19,7 @@ export interface Session {
   parentSessionId?: string | null;
   providerSessionId: string | null; createdAt: string; updatedAt: string; error: string | null;
   handoffFromProvider?: Provider | null; handoffFromModel?: string | null; handoffPendingAt?: string | null;
+  isolationNotice?: string;
   inputTokens: number; outputTokens: number; costUsd: number | null;
   pinned: boolean; unread: boolean;
 }
@@ -180,6 +181,8 @@ export type ClientEvent =
 
 export const CreateProjectSchema = z.object({ name: z.string().trim().min(1).max(100), path: z.string().min(1).max(4096) });
 export const UpdateProjectSchema = z.object({ name: z.string().trim().min(1).max(100) }).strict();
+export const InitializeGitSchema = z.object({ createGitHub: z.object({ name: z.string().regex(/^[A-Za-z0-9._-]{1,100}$/), visibility: z.enum(['private', 'public']) }).strict().optional() }).strict();
+export interface InitializeGitResult { repository: import('./repository').RepositoryState; github: { status: 'created'; url: string } | { status: 'unavailable'; reason: string } | null; notices: string[] }
 export const CreateSessionSchema = z.object({
   projectId: z.string().min(1), name: z.string().trim().min(1).max(100).optional(), provider: ProviderSchema.optional(),
   model: z.string().trim().min(1).max(150).optional(), effort: EffortSchema.optional(),

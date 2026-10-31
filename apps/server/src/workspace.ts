@@ -109,9 +109,15 @@ export class WorkspaceService {
     let branch: string | null = null;
     const info = await repoInfo(project.path);
     let worktreeBaseRevision = info.head;
-    if (isolated) {
-      if (!info.isRepo) throw unprocessable('This project is not a Git repository. Choose Project folder in Settings → General → Workspace to work directly in this folder, then create the session again.');
-      if (!info.hasHead) throw unprocessable('This repository has no commits yet. Make an initial commit, or choose Project folder in Settings → General → Workspace, then create the session again.');
+    let isolationNotice: string | undefined;
+    let effectiveIsolated = isolated;
+    if (isolated && (!info.isRepo || !info.hasHead)) {
+      effectiveIsolated = false;
+      isolationNotice = !info.isRepo
+        ? "This folder isn't a Git repository yet, so this session works directly in the folder. Set up Git to give sessions their own isolated copies."
+        : 'This Git repository has no commits yet, so this session works directly in the folder. Create an initial commit to give sessions their own isolated copies.';
+    }
+    if (effectiveIsolated) {
       branch = `mingle/${slugify(name)}-${id.slice(4, 12)}`;
       const target = path.join(this.dataDir, 'worktrees', project.id, id);
       await addWorktree(project.path, target, branch);
@@ -122,10 +128,12 @@ export class WorkspaceService {
       branch = info.branch;
     }
     return this.store.tx(() => {
-      const session = this.store.insertSession({ id, projectId: project.id, name, provider, model, effort, policy, serviceTier, isolated, worktreePath, branch });
+      const session = this.store.insertSession({ id, projectId: project.id, name, provider, model, effort, policy, serviceTier, isolated: effectiveIsolated, worktreePath, branch });
+      if (isolationNotice) session.isolationNotice = isolationNotice;
       this.store.db.prepare(`INSERT INTO session_worktree_bases(session_id,base_revision,created_at) VALUES(?,?,?)`)
         .run(id, worktreeBaseRevision, new Date().toISOString());
       this.store.recordEvent({ projectId: project.id, sessionId: id, type: 'session.created', summary: `Session created: ${session.name}`, payload: { provider: session.provider, model: session.model, isolated: session.isolated, branch } });
+      if (isolationNotice) this.store.insertMessage({ sessionId: id, role: 'system', kind: 'info', content: isolationNotice });
       return session;
     });
   }
