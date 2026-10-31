@@ -84,7 +84,7 @@ export async function initializeRepository(cwd: string, identity: string[] = [])
   await git(cwd, ['init', '-b', 'main']);
   const ignorePath = path.join(cwd, '.gitignore');
   const ignoreStat = await fsp.lstat(ignorePath).catch(() => null);
-  if (!ignoreStat) await fsp.writeFile(ignorePath, 'node_modules/\n.env\n.env.*\ndist/\nbuild/\n.DS_Store\n', { flag: 'wx', mode: 0o600 });
+  if (!ignoreStat) await fsp.writeFile(ignorePath, 'node_modules/\n.env\n.env.*\n!.env.example\n!.env.sample\n!.env.template\ndist/\nbuild/\n.DS_Store\n', { flag: 'wx', mode: 0o600 });
   else if (!ignoreStat.isFile()) throw new HttpError(400, 'The existing .gitignore must be a regular file.');
 
   const notices: string[] = [];
@@ -99,7 +99,9 @@ export async function initializeRepository(cwd: string, identity: string[] = [])
     if (stat.isDirectory() || stat.isSymbolicLink()) continue;
     if (stat.size > 50 * 1024 * 1024) { notices.push(`Skipped ${rel} because it is larger than 50 MB.`); continue; }
     const basename = path.basename(rel);
-    if (/^(?:\.env(?:\..*)?|.*\.pem|id_rsa.*)$/i.test(basename) && !isIgnored(ignore, rel)) {
+    // Templates such as .env.example are meant to be committed.
+    const template = /^\.env\.(?:example|sample|template|dist)$/i.test(basename) || /\.pub$/i.test(basename);
+    if (!template && /^(?:\.env(?:\..*)?|.*\.pem|id_rsa.*)$/i.test(basename) && !isIgnored(ignore, rel)) {
       const pattern = rel.startsWith('.env') ? '.env*' : path.basename(rel);
       if (!extraIgnore.includes(pattern)) extraIgnore.push(pattern);
       notices.push(`Added ${rel} to .gitignore because it looks like a secret or private key.`);
@@ -112,7 +114,8 @@ export async function initializeRepository(cwd: string, identity: string[] = [])
   for (const rel of candidates) {
     try { if ((await fsp.lstat(path.join(cwd, rel))).size > 50 * 1024 * 1024) await git(cwd, ['reset', '-q', '--', rel]); } catch { /* deleted entries need no size check */ }
   }
-  await git(cwd, [...identity, 'commit', '-m', 'Initial commit'], { timeoutMs: 60_000, extraConfig: ['commit.gpgsign=false'] });
+  // --allow-empty: an empty folder still gets a first commit, so sessions can branch from it.
+  await git(cwd, [...identity, 'commit', '--allow-empty', '-m', 'Initial commit'], { timeoutMs: 60_000, extraConfig: ['commit.gpgsign=false'] });
   return { notices };
 }
 

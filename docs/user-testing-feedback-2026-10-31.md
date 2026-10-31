@@ -30,7 +30,8 @@ Feedback from real user testing of Mingle 0.0.9. Each item is checked off once i
 
 ## Projects and worktrees
 
-- [ ] **Normal folders with isolated worktrees on.** In a folder that isn't a Git repository, creating a session and chatting should still work. Instead of refusing, offer to initialise the folder as a Git repository, and optionally create a new GitHub repository for it.
+- [x] **Normal folders with isolated worktrees on.** In a folder that isn't a Git repository, creating a session and chatting should still work. Instead of refusing, offer to initialise the folder as a Git repository, and optionally create a new GitHub repository for it.
+  - Sessions now work directly in a folder that isn't a Git repository (or has no commits yet), with a short note instead of an error. The project bar shows **Set up Git** and **Set up Git and create a GitHub repo**. These run `git init` on `main`, add a starter `.gitignore` only if there isn't one, keep `.env` files and private keys out (templates like `.env.example` stay), skip files over 50 MB, and make an initial commit with your Git identity (or your Mingle account if Git has none). The GitHub option uses GitHub CLI (`gh repo create … --push`); if `gh` isn't installed or signed in, it says how to fix that. Sessions created afterwards get isolated worktrees as usual.
 
 ## Providers
 

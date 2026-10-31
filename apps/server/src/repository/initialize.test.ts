@@ -68,4 +68,16 @@ describe('project Git initialization', () => {
     expect(result.notices.join(' ')).toMatch(/larger than 50 MB/);
     expect((await git(cwd, ['ls-tree', '-r', '--name-only', 'HEAD'])).stdout).not.toContain('large.bin');
   });
+  it('commits an empty folder and keeps .env.example tracked', async () => {
+    const empty = folder();
+    await initializeProjectRepository({ cwd: empty, fallbackIdentity: { name: 'Mingle User', email: 'user@example.test' }, getState: async () => ({}) as never });
+    expect(await repoInfo(empty)).toMatchObject({ isRepo: true, hasHead: true });
+    const cwd = folder();
+    writeFileSync(path.join(cwd, '.env.example'), 'API_KEY=\n');
+    writeFileSync(path.join(cwd, '.env'), 'API_KEY=secret\n');
+    await initializeProjectRepository({ cwd, fallbackIdentity: { name: 'Mingle User', email: 'user@example.test' }, getState: async () => ({}) as never });
+    const tracked = (await git(cwd, ['ls-tree', '-r', '--name-only', 'HEAD'])).stdout.split('\n');
+    expect(tracked).toContain('.env.example');
+    expect(tracked).not.toContain('.env');
+  });
 });
