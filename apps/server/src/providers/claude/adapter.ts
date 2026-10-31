@@ -103,7 +103,7 @@ export function createClaudeAdapter(deps: ClaudeAdapterDeps = {}): AgentAdapter 
       }
       const compactPercent = autoCompactPercent(settings);
       const childEnv = { ...claudeEnvironment(env), ...claudeCompactEnv(compactPercent) };
-      const secrets = [childEnv.ANTHROPIC_API_KEY, childEnv.CLAUDE_CODE_OAUTH_TOKEN, childEnv.ANTHROPIC_AUTH_TOKEN, run.browserMcp?.token, run.teamMcp?.token, run.progressMcp?.token];
+      const secrets = [childEnv.ANTHROPIC_API_KEY, childEnv.CLAUDE_CODE_OAUTH_TOKEN, childEnv.ANTHROPIC_AUTH_TOKEN, run.browserMcp?.token, run.teamMcp?.token, run.progressMcp?.token, run.subagentMcp?.token];
       const resolved = await resolveBinary(settings, env);
       if (!resolved.ok) throw new ProviderError(resolved.reason, { code: 'executable_unavailable' });
       if (signal.aborted) throw abortError();
@@ -121,6 +121,7 @@ export function createClaudeAdapter(deps: ClaudeAdapterDeps = {}): AgentAdapter 
         // Only the six host-backed team tools; the bridge re-checks the run, membership and delivery on every call.
         if (run.teamMcp && TEAM_TOOL_NAMES.has(toolName)) return { behavior: 'allow', updatedInput: input };
         if (run.progressMcp && ['mcp__mingle_progress__mingle_status_set', 'mcp__mingle_progress__mingle_plan_update'].includes(toolName)) return { behavior: 'allow', updatedInput: input };
+        if (run.subagentMcp && toolName.startsWith('mcp__mingle_subagents__')) return { behavior:'allow',updatedInput:input };
         if (toolName === 'AskUserQuestion') {
           const requestId = context.toolUseID;
           const questions = requestId ? claudeQuestionFields(input, requestId) : null;
@@ -171,6 +172,7 @@ export function createClaudeAdapter(deps: ClaudeAdapterDeps = {}): AgentAdapter 
       if (run.browserMcp) mcpServers.mingle_browser = { type: 'http', url: run.browserMcp.url, headers: { Authorization: `Bearer ${run.browserMcp.token}` } };
       if (run.teamMcp) mcpServers.mingle_team = { type: 'http', url: run.teamMcp.url, headers: { Authorization: `Bearer ${run.teamMcp.token}` } };
       if (run.progressMcp) mcpServers.mingle_progress = { type: 'http', url: run.progressMcp.url, headers: { Authorization: `Bearer ${run.progressMcp.token}` } };
+      if (run.subagentMcp) mcpServers.mingle_subagents = { type:'http',url:run.subagentMcp.url,headers:{Authorization:`Bearer ${run.subagentMcp.token}`} };
 
       const options: Options = {
         cwd: session.worktreePath,

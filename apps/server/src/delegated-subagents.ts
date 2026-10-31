@@ -8,14 +8,15 @@ import { defaultModel, providerName } from './provider-config.ts';
 import { conflict, newId, notFound } from './util.ts';
 
 export class DelegatedSubagentService {
+  private pending=new Map<string,number>();
   constructor(private store:Store,private workspace:WorkspaceService,private runtime:SessionRuntime,private providers:()=>ProviderInfo[]|null,private isGroupSession:(id:string)=>boolean=()=>false) {
     runtime.onRunFinished((sessionId,outcome,error)=>this.onRunFinished(sessionId,outcome,error));
-    this.recover();
   }
   async start(parentSessionId:string,input:StartSubagent,requestedBy:'agent'|'user'):Promise<DelegatedSubagent> {
     const parent=this.store.getSession(parentSessionId); if(!parent)throw notFound('Parent session not found');
     if(parent.parentSessionId || this.isGroupSession(parent.id))throw conflict('Subagents can only be started from a single-agent session.');
-    if(this.store.listDelegatedSubagents(parent.id).filter(x=>x.status==='running').length>=MAX_RUNNING_SUBAGENTS)throw conflict(`A session can run at most ${MAX_RUNNING_SUBAGENTS} subagents at once.`);
+    const running=this.store.listDelegatedSubagents(parent.id).filter(x=>x.status==='running').length;
+    if(running+(this.pending.get(parent.id)??0)>=MAX_RUNNING_SUBAGENTS)throw conflict(`A session can run at most ${MAX_RUNNING_SUBAGENTS} subagents at once.`);
     const provider:Provider=input.provider??parent.provider;
     const info=this.providers()?.find(x=>x.id===provider);
     if(!info?.available)throw conflict(`${providerName(provider)} isn't available on this computer`);
@@ -23,7 +24,10 @@ export class DelegatedSubagentService {
     const task=input.task.trim();
     const base=input.name??(task.split(/\s+/u).slice(0,4).join('-').toLowerCase().replace(/[^a-z0-9-]/gu,'').replace(/-+/gu,'-').replace(/^-|-$/gu,'').slice(0,40)||'subagent');
     let name=base, suffix=2; const names=new Set(this.store.listDelegatedSubagents(parent.id).map(x=>x.name));while(names.has(name))name=`${base.slice(0,Math.max(1,39-String(suffix).length))}-${suffix++}`;
-    const child=await this.workspace.createSession({projectId:parent.projectId,name:`↳ ${name}`,provider,model,policy:parent.policy,isolated:false}, {parentSessionId:parent.id,worktreePath:parent.worktreePath,branch:parent.branch});
+    this.pending.set(parent.id,(this.pending.get(parent.id)??0)+1);
+    let child;
+    try { child=await this.workspace.createSession({projectId:parent.projectId,name:`↳ ${name}`,provider,model,policy:parent.policy,isolated:false}, {parentSessionId:parent.id,worktreePath:parent.worktreePath,branch:parent.branch}); }
+    finally { const remaining=(this.pending.get(parent.id)??1)-1;if(remaining)this.pending.set(parent.id,remaining);else this.pending.delete(parent.id); }
     const record:DelegatedSubagent={id:newId('run'),parentSessionId:parent.id,childSessionId:child.id,name,provider,model,task,status:'running',requestedBy,startedAt:new Date().toISOString(),endedAt:null,resultPreview:null,error:null,resultDelivered:false};
     this.store.insertDelegatedSubagent(record);
     try { this.runtime.start(child.id,`You are a subagent working for another agent. Do only this task, then end with a concise final answer that the other agent can use. Don't ask the user questions.\n\nTask:\n${task}`); }
@@ -47,5 +51,5 @@ export class DelegatedSubagentService {
     if(parent.status==='running'||parent.status==='waiting'){this.store.enqueueMessage({id:newId('msg'),sessionId:parentId,content,intent:'normal',skills:[],attachmentIds:[],contextRefs:[]});return;}
     this.runtime.start(parentId,content);
   }
-  private recover():void {for(const row of this.store.listDelegatedSubagents().filter(x=>x.status==='running')){const child=this.store.getSession(row.childSessionId);if(!child||child.status!=='running'&&child.status!=='waiting')this.finish(row.childSessionId,'failed','Mingle restarted before the subagent finished');}}
+  recover():void {for(const row of this.store.listDelegatedSubagents().filter(x=>x.status==='running')){const child=this.store.getSession(row.childSessionId);if(!child||child.status!=='running'&&child.status!=='waiting')this.finish(row.childSessionId,'failed','Mingle restarted before the subagent finished');}}
 }

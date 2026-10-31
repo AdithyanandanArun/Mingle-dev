@@ -216,6 +216,7 @@ export function createApplication(options: ApplicationOptions): MingleApplicatio
   const sessionResume = new SessionResumeService(store, runtime, providers, groups, log);
   const teamMcp = new TeamMcpBridge(groups, store, () => boundPort, () => config.host);
   runtime.setGroupServices(groups, teamMcp);
+  subagents.recover();
   groups.recover();
   const distributed = new DistributedWorkspaceService({ store, account, runtime, providers, recovery, groups, repository, dataDir: config.dataDir });
   const projectCollaboration = new ProjectCollaborationService({ store, account, distributed, workspace, providers, ...options.projectCollaboration });
