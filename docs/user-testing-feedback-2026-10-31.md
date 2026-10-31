@@ -29,8 +29,10 @@ Feedback from real user testing of Mingle 0.0.9. Each item is checked off once i
 
 ## Providers
 
-- [ ] **OpenCode didn't work for one person**, with either OpenCode v1 or v2.
-- [ ] **Antigravity didn't work even after installing its runtime.**
+- [x] **OpenCode didn't work for one person**, with either OpenCode v1 or v2.
+  - Likely cause: Mingle opened from the app menu doesn't see the `PATH` that shell config files add, and OpenCode's installer puts it in `~/.opencode/bin`. Mingle now reads the login shell's `PATH` at startup and also searches common install folders (OpenCode, Bun, Volta, nvm, pnpm, Cargo, Homebrew, npm's prefix). Current OpenCode (1.19.5; there is no OpenCode 2 on npm) passes the connection probe. If it still fails, the error now names the step that failed and shows the last lines of OpenCode's output. We had no logs from the tester, so this fixes the likely cause rather than a confirmed one.
+- [x] **Antigravity didn't work even after installing its runtime.**
+  - Same `PATH` fix. After installing, Mingle checks again and the setup card shows either "Ready" or the exact next step, instead of a bare "Installed".
 
 ## Credentials on Linux
 
