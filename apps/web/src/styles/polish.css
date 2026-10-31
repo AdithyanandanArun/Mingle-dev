@@ -37,3 +37,11 @@
 .startup__progress { display: flex; align-items: center; gap: 9px; color: var(--fg-2); font-size: 12px; }
 @keyframes startup-arrive { from { opacity: 0; transform: scale(.85); } to { opacity: 1; transform: scale(1); } }
 @media (max-width: 600px) { .chat__welcome-hints { gap: 10px; } .chat__empty { padding-top: 36px; } }
+
+.queued-messages { display: grid; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--border); }
+.queued-messages h3 { margin: 0; color: var(--text-muted); font-size: 11px; font-weight: 600; }
+.queued-message { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 8px 10px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); }
+.queued-message__state { color: var(--text-muted); font-size: 11px; white-space: nowrap; }
+.queued-message p { flex: 1; min-width: 0; margin: 0; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; color: var(--text); font-size: 12px; }
+.queued-message small { display: block; color: var(--text-muted); }
+@media (max-width: 620px) { .queued-message { flex-wrap: wrap; } .queued-message__state { flex-basis: 100%; } }
