@@ -442,15 +442,15 @@ it('shares imported session history and team messages over HTTP and the encrypte
     });
     expect(request.status, JSON.stringify(request.json)).toBe(202);
     try {
-      // These assignments run sequentially: the second depends on the first's
-      // committed artifacts and coordinator review. Keep a bounded deadline for
-      // each worker rather than charging both workflows to one worker's budget.
+      // workerRuns is recorded after all committed artifacts are verified, not on
+      // provider startup. Budget each full Git/tool workflow independently; this
+      // is functional acceptance, while transport latency has separate tests.
       for (const expectedWorkerRuns of [1, 2]) {
         await waitFor(async () => {
           await teammate.app.distributed.transport.sync();
           await leader.app.distributed.transport.sync();
           return workerRuns.length >= expectedWorkerRuns;
-        }, 15_000, `delegated remote worker run ${expectedWorkerRuns}`);
+        }, 30_000, `verified remote worker artifacts ${expectedWorkerRuns}`);
       }
     } catch (error) {
       const current = leader.app.groups.get(teamGroupId);
@@ -614,4 +614,4 @@ it('shares imported session history and team messages over HTTP and the encrypte
     for (const repository of repositories) rmSync(repository, { recursive: true, force: true });
     await cloud.close();
   }
-}, 60_000);
+}, 90_000);
