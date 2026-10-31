@@ -55,22 +55,24 @@ function roundTrip(safeStorage) {
   } catch { return false; }
 }
 
-/**
- * Upgrade guard: the first launch that records a choice must also decrypt an account key wrapped by an earlier
- * version, which may have used the other keyring. A key that only the other keyring can read counts as a failure.
- */
-function existingKeyReadable(safeStorage, existingKey, startup) {
-  if (!existingKey || startup.stored) return true;
+/** An existing wrapped account key must remain readable before a provider choice is accepted. */
+function existingKeyReadable(safeStorage, existingKey) {
+  if (!existingKey) return true;
   try { return typeof safeStorage.decryptString(existingKey) === 'string'; } catch { return false; }
 }
 
 export function verifyCredentialStore({ app, safeStorage, userData, startup, argv = process.argv, platform = process.platform, run, fileSystem, existingKey = null }) {
   const actual = startup.backend ?? backendFromArgs(argv);
   if (!actual) return { status: roundTrip(safeStorage) ? 'available' : 'unavailable', backend: null };
-  if (roundTrip(safeStorage) && existingKeyReadable(safeStorage, existingKey, startup)) {
+  const readableExistingKey = existingKeyReadable(safeStorage, existingKey);
+  if (roundTrip(safeStorage) && readableExistingKey) {
     writeCredentialStore(userData, { backend: actual, chosenBy: startup.chosenBy ?? 'auto' }, fileSystem);
     return { status: 'available', backend: actual };
   }
+  // Do not pin an automatically selected provider that can encrypt new values but cannot
+  // decrypt the existing account key. Preserve the saved choice and let the user select
+  // the keyring that owns the old key in Account settings.
+  if (!readableExistingKey) return { status: 'unavailable', backend: actual };
   if (startup.chosenBy === 'user' || argv.includes(RELAUNCH_FLAG)) return { status: 'unavailable', backend: actual };
   const candidates = linuxPasswordStoreCandidates({ platform, argv: [], run });
   const index = candidates.indexOf(actual);

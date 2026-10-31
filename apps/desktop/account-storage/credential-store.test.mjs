@@ -68,7 +68,7 @@ test('relaunches once with the next detected candidate after an automatic store 
   assert.deepEqual(readCredentialStore(userData), { backend: 'kwallet6', chosenBy: 'auto' });
 });
 
-test('first launch after an upgrade relaunches with another keyring when the existing key does not decrypt', t => {
+test('does not change an automatic choice when an existing key does not decrypt', t => {
   const userData = directory(t);
   const relaunched = [];
   const app = { relaunch: (options) => relaunched.push(options), exit: () => undefined, commandLine: { appendSwitch: () => undefined } };
@@ -82,22 +82,56 @@ test('first launch after an upgrade relaunches with another keyring when the exi
     const names = method?.includes('Activatable') ? '' : '"org.freedesktop.secrets" "org.kde.kwalletd6"';
     return { status: 0, stdout: names };
   };
+  writeCredentialStore(userData, { backend: 'gnome-libsecret', chosenBy: 'auto' });
+  const originalChoice = readFileSync(join(userData, 'credential-store.json'), 'utf8');
   const result = verifyCredentialStore({
     app, safeStorage, userData, platform: 'linux', argv: ['mingle'], run,
-    startup: { backend: 'gnome-libsecret', chosenBy: 'auto', explicit: false, stored: null },
+    startup: { backend: 'gnome-libsecret', chosenBy: 'auto', explicit: false, stored: { backend: 'gnome-libsecret', chosenBy: 'auto' } },
     existingKey: Buffer.from('wrapped-by-kwallet'),
   });
-  assert.equal(result.status, 'relaunching');
-  assert.ok(relaunched[0].args.some((value) => value.startsWith('--password-store=kwallet')));
+  assert.deepEqual(result, { status: 'unavailable', backend: 'gnome-libsecret' });
+  assert.deepEqual(relaunched, []);
+  assert.equal(readFileSync(join(userData, 'credential-store.json'), 'utf8'), originalChoice);
 });
 
-test('an existing key is not re-checked once a working choice is stored', t => {
+test('saved automatic and user choices preserve their bytes when the existing key is unreadable', t => {
+  for (const chosenBy of ['auto', 'user']) {
+    const userData = directory(t);
+    writeCredentialStore(userData, { backend: 'gnome-libsecret', chosenBy });
+    const originalChoice = readFileSync(join(userData, 'credential-store.json'), 'utf8');
+    const safeStorage = {
+      isEncryptionAvailable: () => true,
+      encryptString: value => Buffer.from(`encrypted:${value}`),
+      decryptString: value => {
+        if (value.toString() === 'encrypted:mingle credential storage check') return 'mingle credential storage check';
+        throw new Error('wrong keyring');
+      },
+    };
+    const result = verifyCredentialStore({
+      app: { relaunch: () => assert.fail('must not relaunch'), exit: () => assert.fail('must not exit') },
+      safeStorage, userData, platform: 'linux', argv: ['mingle'],
+      startup: { backend: 'gnome-libsecret', chosenBy, explicit: false, stored: { backend: 'gnome-libsecret', chosenBy } },
+      existingKey: Buffer.from('wrapped-by-another-keyring'),
+      run: () => assert.fail('unreadable key must not trigger backend probing'),
+    });
+    assert.deepEqual(result, { status: 'unavailable', backend: 'gnome-libsecret' });
+    assert.equal(readFileSync(join(userData, 'credential-store.json'), 'utf8'), originalChoice);
+  }
+});
+
+test('a saved choice remains available when the existing wrapped key decrypts', t => {
   const userData = directory(t);
-  const safeStorage = { isEncryptionAvailable: () => true, encryptString: (v) => Buffer.from(v), decryptString: (b) => b.toString() };
+  const safeStorage = {
+    isEncryptionAvailable: () => true,
+    encryptString: value => Buffer.from(`encrypted:${value}`),
+    decryptString: value => value.toString() === 'wrapped-account-key' ? 'account-key' : value.toString().slice('encrypted:'.length),
+  };
+  writeCredentialStore(userData, { backend: 'gnome-libsecret', chosenBy: 'auto' });
   const result = verifyCredentialStore({
     app: { relaunch: () => assert.fail('no relaunch'), exit: () => undefined }, safeStorage, userData, platform: 'linux', argv: ['mingle'],
     startup: { backend: 'gnome-libsecret', chosenBy: 'auto', explicit: false, stored: { backend: 'gnome-libsecret', chosenBy: 'auto' } },
-    existingKey: Buffer.from('anything'),
+    existingKey: Buffer.from('wrapped-account-key'),
   });
   assert.equal(result.status, 'available');
+  assert.deepEqual(readCredentialStore(userData), { backend: 'gnome-libsecret', chosenBy: 'auto' });
 });
