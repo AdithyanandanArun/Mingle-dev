@@ -229,6 +229,7 @@ function reconcileBootstrap(prev: Bootstrap | null, next: Bootstrap): Bootstrap 
     ...next,
     runs: reconcile(prev.runs, next.runs ?? []),
     toolCalls: reconcile(prev.toolCalls, next.toolCalls ?? []),
+    delegatedSubagents: reconcile(prev.delegatedSubagents ?? [], next.delegatedSubagents ?? []),
     projects: reconcile<Project>(prev.projects, next.projects),
     sessions: reconcile<Session>(prev.sessions, next.sessions),
     messages: reconcile<Message>(prev.messages, next.messages),

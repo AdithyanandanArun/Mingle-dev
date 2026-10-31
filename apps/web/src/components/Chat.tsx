@@ -85,6 +85,7 @@ function SingleSessionPane() {
   const allToolCalls = useMingle((s) => s.boot?.toolCalls ?? EMPTY_TOOL_CALLS);
   const sessionToolCalls = useMemo(() => allToolCalls.filter((call) => call.sessionId === session?.id), [allToolCalls, session?.id]);
   const subagents = useMemo(() => session ? deriveSubagents(sessionToolCalls, session.provider, session.model) : [], [sessionToolCalls, session?.provider, session?.model]);
+  const delegatedSubagents = useMingle((s) => s.boot?.delegatedSubagents?.filter((item) => item.parentSessionId === session?.id) ?? []);
   const allPlans = useMingle((s) => s.boot?.plans ?? EMPTY_PLANS);
   const allQuestions = useMingle((s) => s.boot?.questions ?? EMPTY_QUESTIONS);
   const allTasks = useMingle((s) => s.boot?.tasks ?? EMPTY_TASKS);
@@ -191,7 +192,9 @@ function SingleSessionPane() {
       {project ? <TeammateConsentBanner projectId={project.id} /> : null}
       {selectedSubagent ? <>
         <SubagentChatView key={selectedSubagent.id} subagent={selectedSubagent} provider={session.provider} calls={sessionToolCalls} onBack={closeSubagent} />
-        <SubagentRail subagents={subagents} provider={session.provider} onOpen={setSelectedSubagentId} />
+        <SubagentRail subagents={subagents} delegated={delegatedSubagents} provider={session.provider} onOpen={setSelectedSubagentId}
+          onOpenDelegated={(item) => useMingle.getState().selectSession(item.childSessionId)}
+          onCancel={(item) => void api.cancelSubagent(item.id).then(() => useMingle.getState().refreshNow()).catch((error) => useMingle.getState().toast('error', errorMessage(error)))} />
       </> : <>
       <div className="chat__history">
       <div
@@ -255,7 +258,9 @@ function SingleSessionPane() {
         </button>
       ) : null}
       </div>
-      <SubagentRail subagents={subagents} provider={session.provider} onOpen={setSelectedSubagentId} />
+      <SubagentRail subagents={subagents} delegated={delegatedSubagents} provider={session.provider} onOpen={setSelectedSubagentId}
+        onOpenDelegated={(item) => useMingle.getState().selectSession(item.childSessionId)}
+        onCancel={(item) => void api.cancelSubagent(item.id).then(() => useMingle.getState().refreshNow()).catch((error) => useMingle.getState().toast('error', errorMessage(error)))} />
       <Composer key={session.id} session={session} statusBar={<StatusBar state={statusBarState} onStop={stopStatusRun} />} />
       </>}
     </div>

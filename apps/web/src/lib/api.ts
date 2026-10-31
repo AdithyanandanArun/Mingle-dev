@@ -2,6 +2,7 @@ import type {
   AddGroupAgent, AntigravityAuthState, AntigravityInstallState, Approval, AppSettings, Bootstrap, BrowserAction, BrowserConnect, BrowserDiscovery, BrowserSessionState, BrowserTab, CreateGroup, DirectoryListing, ExternalConversationDetails, ExternalConversationList, FileEntry, GitHubState, GitStatus, GroupSnapshot, ImportConversationResult, InitializeGitResult, Project, ProjectContext, ProviderCatalog, ProviderInfo,
   RepositoryBranch, RepositoryCommit, RepositoryMutationResult, RepositoryPullRequest, RepositoryPush, RepositoryState, RunChanges, SendGroupMessage, Session, SessionUsage, ToolCall, Task, TaskStatus, WorkspaceEvent, Message, MessageContextRef, EditSessionPlan, SessionPlan, UserInputAnswers, UserQuestion, BrowserImport, BrowserImportSource, BrowserImportResult,
 } from '@mingle/contracts';
+import type { DelegatedSubagent, StartSubagent } from '@mingle/contracts';
 import type { AccountState, AccountConnection, AccountPreferences, SavedAccountPreferences, AttachmentRef, NativeActionCatalog } from '@mingle/contracts';
 import type { ProjectCollaborationSnapshot, SendTeamChatMessage, TeamChatSnapshot, TeamChatMessage } from '@mingle/contracts';
 import type { ProgressBoardResponse } from '@mingle/contracts';
@@ -131,6 +132,9 @@ export const api = {
   accountPreferences: (signal?: AbortSignal) => json<SavedAccountPreferences | null>('/api/account/preferences', 'GET', undefined, signal),
   saveAccountPreferences: (preferences: AccountPreferences, expectedRevision: number | null) => json<SavedAccountPreferences>('/api/account/preferences', 'PUT', { preferences, expectedRevision }),
   bootstrap: (signal?: AbortSignal) => json<Bootstrap>('/api/bootstrap', 'GET', undefined, signal),
+  startSubagent: (sessionId: string, input: StartSubagent) => json<DelegatedSubagent>(`/api/sessions/${encodeURIComponent(sessionId)}/subagents`, 'POST', input),
+  cancelSubagent: (id: string) => json<DelegatedSubagent>(`/api/subagents/${encodeURIComponent(id)}/cancel`, 'POST', {}),
+  listSubagents: (sessionId: string) => json<DelegatedSubagent[]>(`/api/sessions/${encodeURIComponent(sessionId)}/subagents`),
   createProject: (input: { name: string; path: string }) => json<Project>('/api/projects', 'POST', input),
   directories: (path: string, query: string, hidden: boolean, signal?: AbortSignal) =>
     json<DirectoryListing>(`/api/directories${q({ path: path || undefined, query: query || undefined, hidden: hidden ? 'true' : undefined })}`, 'GET', undefined, signal),

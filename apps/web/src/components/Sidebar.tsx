@@ -42,6 +42,8 @@ export function Sidebar() {
   const { value: retainedProject, present: removePresent, closing: removeClosing, key: removeKey } = useRetainedPresence(removingProject, 160);
   const now = useNow();
   const childSessions = groupChildSessionIds(boot?.groups);
+  const delegatedChildren = (boot?.sessions ?? []).filter((item) => item.parentSessionId && item.projectId === project?.id);
+  const [expandedChildren, setExpandedChildren] = useState<Record<string, boolean>>({});
   const sessions = (boot?.sessions ?? []).filter((session) => session.projectId === project?.id && !childSessions.has(session.id)).map((session) => {
     const group = findGroupForSession(boot?.groups, session.id);
     if (!group || group.group.anchorSessionId !== session.id) return session;
@@ -141,7 +143,9 @@ export function Sidebar() {
               const teamAgent = teamStructure && teamStructure.projectId === project?.id
                 ? teamStructure.members.find((member) => member.local && member.sessionId === session.id) : undefined;
               const kind = groupConversation ? 'Shared group conversation' : teamAgent ? `Your agent · @${teamAgent.handle}` : 'Individual session';
-              return <div role="listitem" key={session.id} className={cx('sitem-row', teamAgent && 'sitem-row--agent', groupConversation && 'sitem-row--group')} data-session-id={session.id} onContextMenu={(event) => {
+              const nested = delegatedChildren.filter((child) => child.parentSessionId === session.id);
+              return <div key={session.id}>
+              <div role="listitem" className={cx('sitem-row', teamAgent && 'sitem-row--agent', groupConversation && 'sitem-row--group')} data-session-id={session.id} onContextMenu={(event) => {
               event.preventDefault();
               const row = event.currentTarget.querySelector<HTMLButtonElement>('.sitem')!;
               setMenuOpen(true);
@@ -158,6 +162,7 @@ export function Sidebar() {
                 <span className="sitem__text"><span className="sitem__meta"><span>{kind}</span><span>{relativeTime(session.updatedAt, now)}</span></span><strong>{session.unread ? <i className="sitem__unread" aria-hidden="true" /> : null}<span>{session.name}</span></strong></span>
                 <span className="sitem__state">{session.pinned ? <Pin size={11} aria-hidden="true" /> : null}{session.status !== 'idle' ? <StatusDot status={session.status} label={false} /> : null}{teamAgent ? <span className="agent-session-row__mark">Agent</span> : groupConversation ? <span className="group-session-row__mark">Group</span> : null}</span>
               </button>
+              {nested.length ? <button type="button" className="sitem__child-toggle" aria-expanded={Boolean(expandedChildren[session.id])} onClick={() => setExpandedChildren((state) => ({ ...state, [session.id]: !state[session.id] }))}>{expandedChildren[session.id] ? '▾' : '▸'} {nested.length} subagent{nested.length === 1 ? '' : 's'}</button> : null}
               <button type="button" className="sitem__actions" aria-label={`Actions for ${session.name}`} aria-haspopup="menu" aria-expanded={menuOpen && menu?.sessionId === session.id} onClick={(event) => {
                 const bounds = event.currentTarget.getBoundingClientRect();
                 if (menuOpen && menu?.sessionId === session.id) setMenuOpen(false);
@@ -166,6 +171,10 @@ export function Sidebar() {
                   setMenuOpen(true);
                 }
               }}><MoreHorizontal size={14} /></button>
+            </div>
+            {expandedChildren[session.id] ? nested.map((child) => <div role="listitem" key={child.id} className="sitem-row sitem-row--child" data-session-id={child.id}>
+              <button type="button" className={cx('sitem', child.id === activeSessionId && view === 'workspace' && 'is-active')} onClick={() => selectSession(child.id)} aria-current={child.id === activeSessionId && view === 'workspace' ? 'true' : undefined} aria-label={`Subagent session: ${child.name}`}><span className="sitem__text"><span className="sitem__meta"><span>↳ Subagent · {child.provider}</span><span>{relativeTime(child.updatedAt, now)}</span></span><strong>{child.name}</strong></span><span className="sitem__state">{child.status !== 'idle' ? <StatusDot status={child.status} label={false} /> : null}</span></button>
+            </div>) : null}
             </div>;
             })}
           </div>;
