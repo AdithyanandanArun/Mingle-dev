@@ -1,5 +1,5 @@
 import type {
-  AddGroupAgent, AntigravityAuthState, AntigravityInstallState, Approval, AppSettings, Bootstrap, BrowserAction, BrowserConnect, BrowserDiscovery, BrowserSessionState, BrowserTab, CreateGroup, DirectoryListing, ExternalConversationDetails, ExternalConversationList, FileEntry, GitHubState, GitStatus, GroupSnapshot, ImportConversationResult, Project, ProjectContext, ProviderCatalog, ProviderInfo,
+  AddGroupAgent, AntigravityAuthState, AntigravityInstallState, Approval, AppSettings, Bootstrap, BrowserAction, BrowserConnect, BrowserDiscovery, BrowserSessionState, BrowserTab, CreateGroup, DirectoryListing, ExternalConversationDetails, ExternalConversationList, FileEntry, GitHubState, GitStatus, GroupSnapshot, ImportConversationResult, InitializeGitResult, Project, ProjectContext, ProviderCatalog, ProviderInfo,
   RepositoryBranch, RepositoryCommit, RepositoryMutationResult, RepositoryPullRequest, RepositoryPush, RepositoryState, RunChanges, SendGroupMessage, Session, SessionUsage, ToolCall, Task, TaskStatus, WorkspaceEvent, Message, MessageContextRef, EditSessionPlan, SessionPlan, UserInputAnswers, UserQuestion, BrowserImport, BrowserImportSource, BrowserImportResult,
 } from '@mingle/contracts';
 import type { AccountState, AccountConnection, AccountPreferences, SavedAccountPreferences, AttachmentRef, NativeActionCatalog } from '@mingle/contracts';
@@ -155,6 +155,8 @@ export const api = {
     json<GitStatus>(`/api/projects/${encodeURIComponent(projectId)}/git${q({ sessionId })}`),
   repository: (projectId: string, sessionId: string | null, signal?: AbortSignal) =>
     json<RepositoryState>(`${projectBase(projectId)}/repository${q({ sessionId })}`, 'GET', undefined, signal),
+  initializeGit: (projectId: string, input: { createGitHub?: { name: string; visibility: 'private' | 'public' } }) =>
+    json<InitializeGitResult>(`${projectBase(projectId)}/git/init`, 'POST', input),
   github: (projectId: string, sessionId: string | null, refresh = false, signal?: AbortSignal) =>
     json<GitHubState>(`${projectBase(projectId)}/github${q({ sessionId, refresh: refresh ? 'true' : undefined })}`, 'GET', undefined, signal),
   repositoryCommit: (projectId: string, sessionId: string | null, input: Omit<RepositoryCommit, 'sessionId'>) =>

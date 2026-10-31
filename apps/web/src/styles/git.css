@@ -16,6 +16,24 @@
 .gitbar__pr { color: var(--fg-1); }
 .gitbar__push { color: var(--fg-1); }
 .gitbar__state { display: inline-flex; align-items: center; gap: 8px; min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--fg-2); }
+.gitbar__setup { display: grid; gap: 7px; min-width: min(100%, 520px); padding: 9px 11px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg-surface); color: var(--fg-1); }
+.gitbar__setup-copy { display: grid; gap: 2px; }
+.gitbar__setup-copy strong { color: var(--fg-0); font-size: 12px; font-weight: 600; }
+.gitbar__setup-copy span { font-size: 11px; }
+.gitbar__setup-actions, .gitbar__setup-form { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+.gitbar__setup-button { display: inline-flex; align-items: center; justify-content: center; gap: 5px; min-height: 27px; padding: 0 9px; border: 1px solid var(--line); border-radius: 7px; background: var(--bg); color: var(--fg-1); font: inherit; cursor: pointer; }
+.gitbar__setup-button:hover:not(:disabled) { background: var(--bg-hover); color: var(--fg-0); }
+.gitbar__setup-button--primary { border-color: var(--blue); background: var(--blue); color: white; }
+.gitbar__setup-button--primary:hover:not(:disabled) { filter: brightness(1.08); color: white; }
+.gitbar__setup-button:disabled { opacity: .55; cursor: not-allowed; }
+.gitbar__setup-form { padding-top: 3px; }
+.gitbar__setup-form > label { display: grid; gap: 4px; font-size: 11px; }
+.gitbar__setup-form input:not([type='radio']) { width: 190px; height: 27px; padding: 0 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--fg-0); font: inherit; }
+.gitbar__setup-form fieldset { display: flex; align-items: center; gap: 10px; margin: 0; padding: 4px 7px; border: 1px solid var(--line); border-radius: 6px; font-size: 11px; }
+.gitbar__setup-form fieldset label { display: inline-flex; align-items: center; gap: 4px; }
+.gitbar__setup-result, .gitbar__setup-error { margin: 0; font-size: 11px; overflow-wrap: anywhere; }
+.gitbar__setup-result { color: var(--fg-1); }
+.gitbar__setup-error { color: var(--danger, #e57373); }
 .gitbar__stale { color: var(--warn); height: 22px; font-size: 11px; }
 .gitbar__example { padding: 1px 6px; border-radius: 999px; background: var(--bg-hover); color: var(--fg-2); font-size: 10.5px; }
 .gitbar__split { display: inline-flex; align-items: stretch; height: 26px; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; background: var(--bg-surface); }

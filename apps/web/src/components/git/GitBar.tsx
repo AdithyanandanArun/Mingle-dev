@@ -115,6 +115,18 @@ export function GitBar({ project, session }: { project: Project; session: Sessio
   const guard = useMutationGuard(scope);
   const { repo, repoError, repoLoading, github, githubError, githubLoading } = view.entry;
   const [dialog, setDialog] = useState<DialogKind | null>(null);
+  const [githubForm, setGithubForm] = useState(false);
+  const [githubName, setGithubName] = useState(() => (project.path.split(/[\\/]/).filter(Boolean).at(-1) ?? project.name).replace(/[^A-Za-z0-9._-]/g, '-').slice(0, 100));
+  const [githubVisibility, setGithubVisibility] = useState<'private' | 'public'>('private');
+  const [setupBusy, setSetupBusy] = useState(false);
+  const [setupMessage, setSetupMessage] = useState<{ text: string; url?: string } | null>(null);
+  const [setupError, setSetupError] = useState<string | null>(null);
+  useEffect(() => {
+    setGithubName((project.path.split(/[\\/]/).filter(Boolean).at(-1) ?? project.name).replace(/[^A-Za-z0-9._-]/g, '-').slice(0, 100));
+    setGithubForm(false);
+    setSetupMessage(null);
+    setSetupError(null);
+  }, [project.id, project.path, project.name]);
   const { value: activeDialog, present: dialogPresent, closing: dialogClosing, key: dialogKey } = useRetainedPresence(dialog, 160);
   const [copied, setCopied] = useState(false);
 
@@ -127,6 +139,24 @@ export function GitBar({ project, session }: { project: Project; session: Sessio
       window.setTimeout(() => setCopied(false), 1400);
     } catch (cause) {
       toast('error', errorMessage(cause));
+    }
+  };
+
+  const setupGit = async (createGitHub = false) => {
+    setSetupBusy(true);
+    setSetupError(null);
+    setSetupMessage(null);
+    try {
+      const result = await api.initializeGit(project.id, createGitHub ? { createGitHub: { name: githubName.trim(), visibility: githubVisibility } } : {});
+      await view.refresh();
+      if (result.github?.status === 'created') setSetupMessage({ text: 'Git is ready and the GitHub repository was created.', url: result.github.url });
+      else if (result.github?.status === 'unavailable') setSetupMessage({ text: `Git is ready locally. GitHub setup is unavailable: ${result.github.reason}` });
+      else setSetupMessage({ text: result.notices.length ? `Git is ready. ${result.notices.join(' ')}` : 'Git is ready. New sessions can now use isolated worktrees.' });
+      setGithubForm(false);
+    } catch (cause) {
+      setSetupError(errorMessage(cause));
+    } finally {
+      setSetupBusy(false);
     }
   };
 
@@ -170,7 +200,24 @@ export function GitBar({ project, session }: { project: Project; session: Sessio
       <span className="gitbar__state" role="status"><Loader2 size={12} className="spin" aria-hidden="true" /> {repoLoading ? 'Reading repository…' : 'Waiting for repository status…'}</span>
     );
   } else if (!repo.isRepo) {
-    body = <span className="gitbar__state" title={repo.notices.join('\n') || undefined}>Not a Git repository{repo.notices[0] ? ` · ${repo.notices[0]}` : ''}</span>;
+    body = (
+      <div className="gitbar__setup" aria-label="Set up Git">
+        <div className="gitbar__setup-copy"><strong>This folder isn't a Git repository.</strong><span>Sessions work directly in the folder.</span></div>
+        <div className="gitbar__setup-actions">
+          <button type="button" className="gitbar__setup-button" disabled={setupBusy} onClick={() => void setupGit()}>Set up Git</button>
+          <button type="button" className="gitbar__setup-button gitbar__setup-button--primary" disabled={setupBusy} onClick={() => { setGithubForm((open) => !open); setSetupError(null); setSetupMessage(null); }}>Set up Git and create a GitHub repo</button>
+        </div>
+        {githubForm ? <form className="gitbar__setup-form" onSubmit={(event) => { event.preventDefault(); void setupGit(true); }}>
+          <label>Repository name<input required maxLength={100} pattern="[A-Za-z0-9._-]{1,100}" value={githubName} onChange={(event) => setGithubName(event.target.value)} /></label>
+          <fieldset><legend>Visibility</legend><label><input type="radio" name="github-visibility" value="private" checked={githubVisibility === 'private'} onChange={() => setGithubVisibility('private')} /> Private</label><label><input type="radio" name="github-visibility" value="public" checked={githubVisibility === 'public'} onChange={() => setGithubVisibility('public')} /> Public</label></fieldset>
+          <button type="submit" className="gitbar__setup-button gitbar__setup-button--primary" disabled={setupBusy || !githubName.trim()}>{setupBusy ? <><Loader2 size={13} className="spin" aria-hidden="true" /> Creating…</> : 'Create'}</button>
+          <button type="button" className="gitbar__setup-button" disabled={setupBusy} onClick={() => setGithubForm(false)}>Cancel</button>
+        </form> : null}
+        {setupBusy ? <p className="gitbar__setup-result" role="status" aria-live="polite">Initializing Git…</p> : null}
+        {setupError ? <p className="gitbar__setup-error" role="alert" aria-live="assertive">{setupError}</p> : null}
+        {setupMessage ? <p className="gitbar__setup-result" role="status" aria-live="polite">{setupMessage.text}{setupMessage.url ? <> <button type="button" className="link-btn" onClick={() => openExternal(setupMessage.url!)}>Open repository</button></> : null}</p> : null}
+      </div>
+    );
   } else {
     body = (
       <div className="gitbar__controls">
