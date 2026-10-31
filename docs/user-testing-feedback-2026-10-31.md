@@ -8,8 +8,10 @@ Feedback from real user testing of Mingle 0.0.9. Each item is checked off once i
 
 ## Team sessions
 
-- [ ] **Adding more agents is hard once the first ones are added.** After the initial setup there is no easy way to add another agent to a shared team session.
-- [ ] **The orchestrator can't take its controls back after running out.** When the orchestrator's provider hits its usage limit and later becomes available again, it doesn't regain its orchestrator role and tools.
+- [x] **Adding more agents is hard once the first ones are added.** After the initial setup there is no easy way to add another agent to a shared team session.
+  - Cause: the server refused to add an agent (yours or a teammate's) whenever the orchestrator was busy, which in a working team is most of the time. New agents now join idle while work runs. "Add agent" is always in the team header and at the end of the Agents card. The dialog suggests the next free handle and the provider and model used last, and explains when an agent on a teammate's device needs their consent.
+- [x] **The orchestrator can't take its controls back after running out.** When the orchestrator's provider hits its usage limit and later becomes available again, it doesn't regain its orchestrator role and tools.
+  - Cause: when the usage limit hit, the original orchestrator was handed off and "held", and nothing ever gave the role back. Mingle now remembers the original orchestrator. Once its cooldown has passed and its provider is available, it takes the role back automatically, or when you click "Restore @lead". If the stand-in is mid-task, the restore waits until it finishes. The team chat says "@lead is back and has resumed orchestrating", and the orchestrator instructions and team tools return with the role (covered by a test).
 
 ## Single-agent chat: subagents
 

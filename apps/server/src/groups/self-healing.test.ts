@@ -206,10 +206,17 @@ it('restores a quota-failed coordinator after cooldown and defers while the stan
   const lead = group.members.find((member) => member.role === 'orchestrator')!;
   await t.api('PATCH', `/api/sessions/${lead.sessionId}`, { policy: 'full-access' });
   const standIn = group.workers.find((member) => member.handle === 'claude2')!;
+  await t.api('PATCH', `/api/sessions/${standIn.sessionId}`, { policy: 'full-access' });
+  // Automatic coordinator fallback only runs when the group's recovery policy names a stand-in with the same policy.
+  const policy = await t.api('PATCH', `/api/groups/${group.groupId}`, {
+    recoveryPolicy: { automaticFallback: true, allowUnverifiedQuotaFallback: true, leadFallbackMemberId: standIn.id },
+  });
+  expect(policy.status, JSON.stringify(policy.json)).toBe(200);
   const active = deferred<void>(); const finish = deferred<void>(); let failLead = true;
-  const seen: string[] = [];
+  const seen: string[] = []; const leadPrompts: string[] = []; let leadHadTeamTools = false;
   t.fake.script = async (options, emit) => {
     seen.push(options.session.id);
+    if (options.session.id === lead.sessionId && !failLead) { leadPrompts.push(options.prompt); leadHadTeamTools = Boolean(options.teamMcp); }
     if (options.session.id === lead.sessionId && failLead) {
       (options as typeof options & DispatchAwareOptions).onDispatchState?.('dispatched');
       throw new ProviderError('Account quota exhausted.', { code: 'quota_exhausted', outcomeKnown: true });
@@ -241,8 +248,10 @@ it('restores a quota-failed coordinator after cooldown and defers while the stan
   failLead = false;
   await t.api('POST', `/api/groups/${group.groupId}/messages`, { content: 'Verify restored coordinator tools and role.' });
   await waitFor(() => seen.filter((sessionId) => sessionId === lead.sessionId).length >= 2, 8000, 'restored coordinator prompt');
-  const restoredContext = t.app.groups.contextForRun(lead.sessionId, t.app.groups.get(group.groupId).deliveries.find((delivery) => delivery.memberId === lead.id && delivery.runId)?.runId ?? '');
-  expect(restoredContext?.instructions).toContain('coordinator');
+  // The restored lead runs as orchestrator again: orchestrator instructions and team tools follow the role back.
+  expect(leadPrompts.at(-1)).toContain('You are the orchestrator');
+  expect(leadHadTeamTools).toBe(true);
+  expect(t.app.groups.get(group.groupId).members.find((member) => member.id === lead.id)?.held).toBe(false);
 }, 30_000);
 
 it('pauses after two automatic task fallbacks and after a second stalled attempt', async () => {

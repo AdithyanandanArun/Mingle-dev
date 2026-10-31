@@ -579,7 +579,7 @@ export class GroupService {
     return this.exclusive(async () => {
       this.assertOpen();
       const group = this.requireGroup(groupId);
-      this.assertCanChangeRoster(group);
+      // A new teammate agent joins idle, so a busy orchestrator does not block it (it sees the roster on its next delivery).
       if (this.repo.members(groupId, false).length >= MAX_MEMBERS) throw conflict(`A group supports at most ${MAX_MEMBERS} agents`);
       const session = this.store.getSession(input.sessionId);
       if (!session || session.projectId !== group.projectId) throw conflict('The team proxy session is unavailable in the group project.');
@@ -1724,6 +1724,8 @@ export class GroupService {
     this.store.tx(() => {
       const fresh = this.requireGroup(groupId);
       if (fresh.orchestratorMemberId !== current.id || fresh.preferredCoordinatorMemberId !== preferred.id) throw conflict('The coordinator changed while restoration was being prepared.');
+      // The quota failure held the original coordinator; its cooldown has passed and its provider is available again.
+      if (this.requireMember(fresh, preferred.id).held) this.repo.updateMember(preferred.id, { held: false });
       this.applyCoordinatorReplacement(fresh, preferred.id, false, checkpoint?.id);
       const latest = this.repo.getGroup(groupId)!;
       this.repo.updateGroup(groupId, { preferredCoordinatorMemberId: null });
@@ -1733,6 +1735,21 @@ export class GroupService {
     });
     this.schedule(groupId);
     return this.get(groupId);
+  }
+
+  /**
+   * Runs a deferred restoration once the stand-in's delivery has ended. Its session can still read as busy while the
+   * run is cleaning up, which defers the restore again, so it is retried briefly until the stand-in is idle.
+   */
+  private async retryDeferredCoordinatorRestore(groupId: string, attempt = 0): Promise<void> {
+    this.pendingCoordinatorRestores.delete(groupId);
+    try { await this.restorePreferredCoordinator(groupId); } catch (error) {
+      if (!(error instanceof HttpError)) this.log('warn', `Deferred coordinator restoration failed for ${groupId}`, error);
+      return;
+    }
+    if (!this.pendingCoordinatorRestores.has(groupId) || attempt >= 60) return;
+    const timer = setTimeout(() => { void this.retryDeferredCoordinatorRestore(groupId, attempt + 1); }, 500);
+    timer.unref?.();
   }
 
   private queueCoordinatorContinuation(
@@ -2903,12 +2920,7 @@ ${task ? `Task ${task.id}: ${task.title}\nAcceptance: ${task.acceptanceCriteria}
     });
     if (outcome === 'completed' || outcome === 'failed' || outcome === 'interrupted') this.notifyCoordinator(delivery.requestId);
     if (outcome === 'completed') this.refreshRecoveryState(group.id);
-    if (this.pendingCoordinatorRestores.has(group.id)) {
-      this.pendingCoordinatorRestores.delete(group.id);
-      try { await this.restorePreferredCoordinator(group.id); } catch (error) {
-        if (!(error instanceof HttpError)) this.log('warn', `Deferred coordinator restoration failed for ${group.id}`, error);
-      }
-    }
+    if (this.pendingCoordinatorRestores.has(group.id)) await this.retryDeferredCoordinatorRestore(group.id);
     this.schedule(group.id);
   }
 
@@ -4468,10 +4480,6 @@ ${task ? `Task ${task.id}: ${task.title}\nAcceptance: ${task.acceptanceCriteria}
     return session;
   }
 
-  private assertCanChangeRoster(group: ConversationGroup): void {
-    const lead = group.orchestratorMemberId ? this.repo.getMember(group.orchestratorMemberId) : undefined;
-    if (lead && this.memberBusy(lead)) throw conflict(`@${lead.handle} is busy. Wait for the orchestrator to finish before changing the roster.`);
-  }
 
   private validateHandle(handle: string): string {
     const value = handle.trim().toLowerCase();
