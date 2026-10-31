@@ -85,7 +85,9 @@ function SingleSessionPane() {
   const allToolCalls = useMingle((s) => s.boot?.toolCalls ?? EMPTY_TOOL_CALLS);
   const sessionToolCalls = useMemo(() => allToolCalls.filter((call) => call.sessionId === session?.id), [allToolCalls, session?.id]);
   const subagents = useMemo(() => session ? deriveSubagents(sessionToolCalls, session.provider, session.model) : [], [sessionToolCalls, session?.provider, session?.model]);
-  const delegatedSubagents = useMingle((s) => s.boot?.delegatedSubagents?.filter((item) => item.parentSessionId === session?.id) ?? []);
+  // Select the stable store array, then filter: a selector that returns a new array each time re-renders forever.
+  const allDelegatedSubagents = useMingle((s) => s.boot?.delegatedSubagents);
+  const delegatedSubagents = useMemo(() => (allDelegatedSubagents ?? []).filter((item) => item.parentSessionId === session?.id), [allDelegatedSubagents, session?.id]);
   const continuingSubagent = delegatedSubagents.find((item) => item.status === 'completed' && item.resultDelivered)?.name;
   const usedSubagents = typeof window !== 'undefined' && window.localStorage.getItem('mingle.subagent-tip-dismissed') === '1';
   const allPlans = useMingle((s) => s.boot?.plans ?? EMPTY_PLANS);

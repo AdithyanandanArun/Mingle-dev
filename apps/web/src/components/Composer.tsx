@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useRef, useState } from 'react';
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { ArrowUp, Bot, FilePlus2, Square } from 'lucide-react';
 import type { AttachmentRef, Provider, ProviderModel, Session, StartSubagent } from '@mingle/contracts';
@@ -34,7 +34,10 @@ export function Composer({ session, statusBar }: { session: Session; statusBar?:
   const providers = useMingle((s) => s.boot?.providers);
   const project = useMingle((s) => s.boot?.projects.find((p) => p.id === session.projectId));
   const teamStructure = useTeamStructure().snapshot;
-  const delegatedSubagents = useMingle((s) => s.boot?.delegatedSubagents?.filter((item) => item.parentSessionId === session.id) ?? []);
+  const allDelegatedSubagents = useMingle((s) => s.boot?.delegatedSubagents);
+  const delegatedSubagents = useMemo(() => (allDelegatedSubagents ?? []).filter((item) => item.parentSessionId === session.id), [allDelegatedSubagents, session.id]);
+  const allQueuedMessages = useMingle((s) => s.boot?.queuedMessages);
+  const queuedMessages = useMemo(() => (allQueuedMessages ?? []).filter((item) => item.sessionId === session.id), [allQueuedMessages, session.id]);
   const ref = useRef<HTMLTextAreaElement>(null);
   const compactController = useRef<{ controller: AbortController; targetSessionId: string; operationId: string } | null>(null);
   const [sending, setSending] = useState(false);
@@ -477,7 +480,7 @@ export function Composer({ session, statusBar }: { session: Session; statusBar?:
   }, [activeSuggestion, pickerId, suggestion]);
   return (
     <div className="composer-wrap">
-      <QueuedMessages sessionId={session.id} steerable={steerable} items={(useMingle((s)=>s.boot?.queuedMessages ?? [])).filter((item)=>item.sessionId===session.id)} />
+      <QueuedMessages sessionId={session.id} steerable={steerable} items={queuedMessages} />
       {providerFailureCopy ? <div className="composer__note is-error" role="alert">
         <span>{providerFailureCopy}</span>{' '}
         <button type="button" className="link-btn" onClick={() => setModelOpenRequest((value) => value + 1)} disabled={disabled} title={running ? 'Wait for the active run to finish before switching providers.' : 'Choose another available provider.'}>Switch provider</button>
