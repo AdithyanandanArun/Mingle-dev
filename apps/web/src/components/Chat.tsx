@@ -89,7 +89,6 @@ function SingleSessionPane() {
   const allDelegatedSubagents = useMingle((s) => s.boot?.delegatedSubagents);
   const delegatedSubagents = useMemo(() => (allDelegatedSubagents ?? []).filter((item) => item.parentSessionId === session?.id), [allDelegatedSubagents, session?.id]);
   const continuingSubagent = delegatedSubagents.find((item) => item.status === 'completed' && item.resultDelivered)?.name;
-  const usedSubagents = typeof window !== 'undefined' && window.localStorage.getItem('mingle.subagent-tip-dismissed') === '1';
   const allPlans = useMingle((s) => s.boot?.plans ?? EMPTY_PLANS);
   const allQuestions = useMingle((s) => s.boot?.questions ?? EMPTY_QUESTIONS);
   const allTasks = useMingle((s) => s.boot?.tasks ?? EMPTY_TASKS);
@@ -185,7 +184,7 @@ function SingleSessionPane() {
       <div className="chat chat--projectonly">
         {project ? <TeammateConsentBanner projectId={project.id} /> : null}
         <EmptyState title={hasSessions ? 'Select a session' : 'No sessions yet'} action={<Button variant="primary" busy={creatingSession} disabled={creatingSession} onClick={() => void useMingle.getState().createSession()}>New session</Button>}>
-          {hasSessions ? 'Choose a session from the sidebar.' : <>Start a session to work in this project.{!usedSubagents ? <span className="subagent-tip">Tip: start a subagent on any provider with the Subagent button or /subagent.</span> : null}</>}
+          {hasSessions ? 'Choose a session from the sidebar.' : 'Start a session to work in this project.'}
         </EmptyState>
         <div className="composer-wrap"><GitBar project={project} session={null} /></div>
       </div>

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
-import { ArrowUp, Bot, FilePlus2, Square } from 'lucide-react';
-import type { AttachmentRef, Provider, ProviderModel, Session, StartSubagent } from '@mingle/contracts';
+import { ArrowUp, FilePlus2, Square } from 'lucide-react';
+import type { AttachmentRef, ProviderModel, Session } from '@mingle/contracts';
 import { useMingle } from '../store/store';
 import { api, errorMessage, type ApiProviderFailure, type ProviderCatalog, type SessionPatch } from '../lib/api';
 import { MOD, PROVIDER_NAME, Badge } from './ui';
@@ -34,8 +34,6 @@ export function Composer({ session, statusBar }: { session: Session; statusBar?:
   const providers = useMingle((s) => s.boot?.providers);
   const project = useMingle((s) => s.boot?.projects.find((p) => p.id === session.projectId));
   const teamStructure = useTeamStructure().snapshot;
-  const allDelegatedSubagents = useMingle((s) => s.boot?.delegatedSubagents);
-  const delegatedSubagents = useMemo(() => (allDelegatedSubagents ?? []).filter((item) => item.parentSessionId === session.id), [allDelegatedSubagents, session.id]);
   const allQueuedMessages = useMingle((s) => s.boot?.queuedMessages);
   const queuedMessages = useMemo(() => (allQueuedMessages ?? []).filter((item) => item.sessionId === session.id), [allQueuedMessages, session.id]);
   const ref = useRef<HTMLTextAreaElement>(null);
@@ -70,19 +68,6 @@ export function Composer({ session, statusBar }: { session: Session; statusBar?:
   const pickerId = useId();
   const [modelOpenRequest, setModelOpenRequest] = useState(0);
   const [policyOpenRequest, setPolicyOpenRequest] = useState(0);
-  const [subagentOpen, setSubagentOpen] = useState(false);
-  const [subagentTask, setSubagentTask] = useState('');
-  const [subagentName, setSubagentName] = useState('');
-  const [subagentModel, setSubagentModel] = useState({ provider: session.provider, model: session.model });
-  const subagentLauncher = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    if (!subagentOpen) return;
-    const outside = (event: PointerEvent) => { if (!subagentLauncher.current?.contains(event.target as Node)) setSubagentOpen(false); };
-    const escape = (event: KeyboardEvent) => { if (event.key === 'Escape') { event.preventDefault(); setSubagentOpen(false); } };
-    document.addEventListener('pointerdown', outside);
-    window.addEventListener('keydown', escape);
-    return () => { document.removeEventListener('pointerdown', outside); window.removeEventListener('keydown', escape); };
-  }, [subagentOpen]);
   const [reasoningOpenRequest, setReasoningOpenRequest] = useState(0);
   const modelControl = useRef<HTMLButtonElement>(null);
   const reasoningControl = useRef<HTMLButtonElement>(null);
@@ -173,15 +158,11 @@ export function Composer({ session, statusBar }: { session: Session; statusBar?:
         : provider && !provider.available ? `${PROVIDER_NAME[session.provider]} needs setup before you can send a message.`
           : null;
   const empty = draft.trim().length === 0 && attachments.length === 0 && attachmentDraft.uploads.length === 0;
-  const runningSubagents = delegatedSubagents.filter((item) => item.status === 'running').length;
-  const inGroup = Boolean(teamStructure?.projectId === session.projectId && teamStructure.members.some((member) => member.sessionId === session.id));
-  const subagentDisabledReason = inGroup ? 'Subagents are available in individual sessions.' : session.parentSessionId ? 'Child sessions cannot start more subagents.' : runningSubagents >= 4 ? 'Maximum of 4 running subagents reached.' : undefined;
   const compactDraftCommand = /^\/(compact)(?:\s.*)?$/i.exec(draft.trim());
   const localDraftCommand = compactDraftCommand ?? (attachments.length || attachmentDraft.uploads.length ? null : /^\/(new|stop|settings|model|effort|permissions|tier|skills|usage|import|status|diff|compact|help)(?:\s.*)?$/i.exec(draft.trim()));
   const compactIntent = localDraftCommand?.[1]?.toLowerCase() === 'compact';
 
   const submit = async (sendNow = false) => {
-    const subagentShortcut = /^\/subagent\s+([\s\S]+)$/i.exec(draft.trim());
     const compactCommand = /^\/(compact)(?:\s.*)?$/i.exec(draft.trim());
     const local = compactCommand ?? (attachments.length || attachmentDraft.uploads.length ? null : /^\/(new|stop|settings|model|effort|permissions|tier|skills|usage|import|status|diff|compact|help)(?:\s.*)?$/i.exec(draft.trim()));
     if (local?.[1]?.toLowerCase() === 'compact' && attachmentDraft.isBusy()) {
@@ -190,19 +171,11 @@ export function Composer({ session, statusBar }: { session: Session; statusBar?:
     }
     if (attachmentDraft.isBusy()) return;
     if (attachmentDraft.uploads.length) { setError('Retry or remove each failed attachment before sending.'); return; }
-    if ((blocker && !local && !subagentShortcut) || empty || sending || updating) return;
+    if ((blocker && !local) || empty || sending || updating) return;
     setSending(true);
     setError(null);
     let focusComposerAfter = true;
     try {
-      if (subagentShortcut) {
-        if (subagentDisabledReason) throw new Error(subagentDisabledReason);
-        await api.startSubagent(session.id, { task: subagentShortcut[1]!.trim() });
-        if (useMingle.getState().drafts[session.id] === draft) useMingle.getState().setDraft(session.id, '');
-        window.localStorage.setItem('mingle.subagent-tip-dismissed', '1');
-        await useMingle.getState().refreshNow();
-        return;
-      }
       if (local) {
         const action = local[1]!.toLowerCase();
         if (action === 'compact') {
@@ -553,7 +526,6 @@ export function Composer({ session, statusBar }: { session: Session; statusBar?:
             if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); void submit(); }
           }}
         />
-        {draft.startsWith('/subagent') ? <div className="composer-picker-empty" role="status">/subagent starts a delegated task when sent.</div> : null}
         {pickerPresent && displayedPicker ? <div className={cx('composer-picker', pickerClosing && 'is-closing')} id={pickerId} role="listbox" aria-label={displayedPicker.suggestion.kind === 'skill' ? 'Skills' : 'Commands'} aria-hidden={pickerClosing || undefined} inert={pickerClosing}>
           {displayedPicker.suggestions.map((item, index) => <div key={item.key}>
             {index === 0 || displayedPicker.suggestions[index - 1]?.group !== item.group ? <div className="composer-picker__group" role="presentation">{item.group}</div> : null}
@@ -583,7 +555,6 @@ export function Composer({ session, statusBar }: { session: Session; statusBar?:
               onChange={(value) => void configure({ policy: value as Session['policy'] })} placement="top" />
           </div>
           <div className="composer__send">
-            <button type="button" className="composer__subagent-button" aria-label="Start a subagent" disabled={Boolean(subagentDisabledReason) || connection !== 'online'} title={subagentDisabledReason ?? 'Delegate a task to another provider'} onClick={() => { setSubagentTask(draft); setSubagentOpen((open) => !open); }}><Bot size={14} /> <span>Subagent</span></button>
             <button type="button" className="composer__context-button" onClick={() => openFilePicker()} disabled={!project || disabled} aria-label="Add workspace file context" title="Add a file from this worktree, or type @/path"><FilePlus2 size={15} /></button>
             <AttachmentDrafts scope={{ kind: 'session', id: session.id }} busy={attachmentDraft.busy} onFiles={attachmentDraft.addFiles} disabled={sending || updating || Boolean(blocker)} />
             {compactStatus?.status === 'running' ? (
@@ -598,24 +569,6 @@ export function Composer({ session, statusBar }: { session: Session; statusBar?:
           </div>
         </div>
       </div>
-      {subagentOpen ? <div ref={subagentLauncher} className="subagent-launcher" role="dialog" aria-label="Start a subagent">
-        <header className="subagent-launcher__head"><div><h2>Start a subagent</h2><p>Runs in parallel on any provider. Its result comes back to this chat automatically.</p></div><button type="button" aria-label="Close subagent form" title="Close" onClick={() => setSubagentOpen(false)}>×</button></header>
-        <label>Task<textarea autoFocus value={subagentTask} onChange={(event) => setSubagentTask(event.target.value)} /></label>
-        <label>Name (optional)<input value={subagentName} onChange={(event) => setSubagentName(event.target.value)} /></label>
-        <label className="subagent-launcher__model-label">Provider and model</label><ModelPicker className="subagent-launcher__model" value={subagentModel} providers={providers ?? []} onChange={(value) => setSubagentModel(value)} placement="top" />
-        {subagentDisabledReason ? <p role="status">{subagentDisabledReason}</p> : null}
-        <button type="button" disabled={Boolean(subagentDisabledReason) || !subagentTask.trim() || sending} onClick={() => void (async () => {
-          setSending(true); setError(null);
-          try {
-            const input: StartSubagent = { task: subagentTask.trim(), name: subagentName.trim() || undefined, provider: subagentModel.provider as Provider, model: subagentModel.model };
-            await api.startSubagent(session.id, input);
-            window.localStorage.setItem('mingle.subagent-tip-dismissed', '1');
-            setSubagentOpen(false); setSubagentTask(''); setSubagentName('');
-            await useMingle.getState().refreshNow();
-          } catch (cause) { setError(errorMessage(cause)); }
-          finally { setSending(false); }
-        })()}>Start subagent</button>
-      </div> : null}
       {project ? <GitBar project={project} session={session} /> : null}
       {blocker || error ? (
         <p className={cx('composer__note', error && 'is-error')} role={error ? 'alert' : 'status'}>{error ?? blocker}{!error && provider && !provider.available ? <> <button type="button" className="link-btn" onClick={() => useMingle.getState().openDialog({ kind: 'settings' })}>Open Settings</button></> : null}</p>

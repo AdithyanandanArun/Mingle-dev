@@ -521,7 +521,7 @@ class CodexRun {
   }
 
   private mapSubagentThreads(item: Record<string, unknown>): void {
-    if (item.type !== 'collabAgentToolCall' || !['spawnAgent', 'spawn_agent'].includes(String(item.tool))) return;
+    if (!['collabAgentToolCall', 'collabToolCall'].includes(String(item.type)) || !['spawnAgent', 'spawn_agent'].includes(String(item.tool))) return;
     const parentId = typeof item.id === 'string' ? item.id : null;
     if (!parentId) return;
     const receiverIds = Array.isArray(item.receiverThreadIds) ? item.receiverThreadIds.filter((id): id is string => typeof id === 'string') : [];

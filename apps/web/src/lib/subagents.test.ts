@@ -48,6 +48,16 @@ describe('subagent helpers', () => {
     ]);
   });
 
+  it('discovers native OpenCode tasks from activity without a manual launch record or prompt keyword', () => {
+    const launch = call({ id: 'task', providerId: 'task-native', name: 'task', category: 'agent',
+      input: JSON.stringify({ description: 'Review changes', subagent_type: 'explore', prompt: 'Inspect source' }) });
+    expect(deriveSubagents([launch], 'opencode', 'native-model')).toMatchObject([
+      { id: 'task', label: 'Review changes', model: 'native-model', status: 'running' },
+    ]);
+    expect(deriveSubagents([{ ...launch, status: 'completed', output: 'Reviewed source.' }], 'opencode', 'native-model'))
+      .toMatchObject([{ id: 'task', status: 'completed', finalResult: 'Reviewed source.' }]);
+  });
+
   it('normalizes labels and reports terminal status labels', () => {
     expect(slugSubagentLabel('Éxplore: Auth / Session')).toBe('explore-auth-session');
     expect(subagentStatusLabel('running')).toBe('Running');

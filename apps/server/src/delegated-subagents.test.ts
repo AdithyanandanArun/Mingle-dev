@@ -21,6 +21,40 @@ describe('delegated subagents',()=>{
     expect(t.app.store.getDelegatedSubagent(record.id)).toMatchObject({status:'completed',resultDelivered:true,resultPreview:'Auth is handled in auth.ts.'});
   });
 
+  it('publishes a model-initiated child and returns its result without a manual launch or delegation keyword', async () => {
+    const t = await boot();
+    const childRelease = deferred<void>(); gates.push(childRelease);
+    const resultReceived = deferred<string>();
+    t.fake.script = async (options, emit) => {
+      if (options.session.parentSessionId) {
+        await childRelease.promise;
+        emit({ type: 'text', text: 'Example review complete.' });
+      } else if (options.prompt.includes('Subagent @')) {
+        resultReceived.resolve(options.prompt);
+      } else {
+        expect(options.prompt).toContain('Build a coffee shop website');
+        expect(options.subagentMcp).toBeTruthy();
+        const client = new Client({ name: 'example-autonomous-model', version: '1.0.0' }, { capabilities: {} });
+        clients.push(client);
+        await client.connect(new StreamableHTTPClientTransport(new URL(options.subagentMcp!.url), {
+          requestInit: { headers: { Authorization: `Bearer ${options.subagentMcp!.token}` } },
+        }));
+        const result = await client.callTool({ name: 'mingle_subagent_start', arguments: { task: 'Review the Example source', name: 'reviewer' } });
+        expect(result.isError).not.toBe(true);
+        emit({ type: 'text', text: 'Continuing the website while review runs.' });
+      }
+    };
+    expect((await t.api('POST', `/api/sessions/${EXAMPLE_CLIENT_SESSION_ID}/messages`, { content: 'Build a coffee shop website' })).status).toBe(202);
+    await waitFor(() => t.app.store.listDelegatedSubagents(EXAMPLE_CLIENT_SESSION_ID).length === 1);
+    const snapshot = (await t.api('GET', '/api/bootstrap')).json;
+    const child = snapshot.delegatedSubagents.find((row: any) => row.parentSessionId === EXAMPLE_CLIENT_SESSION_ID);
+    expect(child).toMatchObject({ name: 'reviewer', status: 'running', requestedBy: 'agent' });
+    expect(snapshot.sessions.find((row: any) => row.id === child.childSessionId)).toMatchObject({ parentSessionId: EXAMPLE_CLIENT_SESSION_ID });
+    childRelease.resolve(undefined);
+    expect(await resultReceived.promise).toContain('Example review complete.');
+    expect(t.app.store.getDelegatedSubagent(child.id)).toMatchObject({ status: 'completed', resultDelivered: true });
+  });
+
   it('queues a completed result while the parent is running and drains it after that turn',async()=>{
     const t=await boot();const firstParent=deferred<void>(),parentResult=deferred<string>();let parentRuns=0;
     t.fake.script=async(o,emit)=>{if(o.session.parentSessionId){emit({type:'text',text:'Queued result.'});return;}parentRuns++;if(parentRuns===1)await firstParent.promise;else parentResult.resolve(o.prompt);};

@@ -36,7 +36,7 @@ export function SubagentRail({
       observer?.disconnect();
       window.removeEventListener('resize', update);
     };
-  }, [expandAtWidth, subagents.length]);
+  }, [expandAtWidth, subagents.length, delegated.length]);
 
   useEffect(() => {
     if (subagents.length + delegated.length === 0) preference.current = null;
@@ -44,7 +44,7 @@ export function SubagentRail({
 
   if (subagents.length + delegated.length === 0) return null;
   const total = subagents.length + delegated.length;
-  const announcement = delegated.map((item) => `${item.name} ${item.status}`).join('. ');
+  const announcement = [...subagents.map((item) => `${item.label} ${subagentStatusLabel(item.status)}`), ...delegated.map((item) => `${item.name} ${item.status}`)].join('. ');
   const toggle = () => {
     const next = !expanded;
     preference.current = next;

@@ -82,12 +82,12 @@ describe('codex adapter', () => {
     expect(child.closed).toBe(true);
   });
 
-  it('captures spawned Codex thread messages and tools under the spawning call only', async () => {
+  it.each(['collabAgentToolCall', 'collabToolCall'])('captures automatically spawned Codex thread messages and tools from %s', async (type) => {
     const run = makeRun({ prompt: 'Investigate the auth flow' });
     const { child, adapter } = setup(server((message, c) => {
       if (message.method !== 'turn/start') return;
       c.notify('item/started', { threadId: 'thr_1', turnId: 'turn_1', item: {
-        type: 'collabAgentToolCall', id: 'spawn-1', tool: 'spawnAgent', status: 'inProgress', senderThreadId: 'thr_1',
+        type, id: 'spawn-1', tool: 'spawnAgent', status: 'inProgress', senderThreadId: 'thr_1',
         receiverThreadIds: ['thr_child'], agentsStates: {}, prompt: 'Inspect auth', model: 'gpt-6.1-sol-mini',
       } });
       c.notify('item/agentMessage/delta', { threadId: 'thr_child', turnId: 'turn_child', itemId: 'child-message', delta: 'Auth code is in ' });
@@ -96,7 +96,7 @@ describe('codex adapter', () => {
       c.notify('item/commandExecution/outputDelta', { threadId: 'thr_child', turnId: 'turn_child', itemId: 'child-command', delta: 'src/session.ts\n' });
       c.notify('item/completed', { threadId: 'thr_child', turnId: 'turn_child', item: { type: 'commandExecution', id: 'child-command', command: 'rg auth', cwd: '/workspace', status: 'completed', exitCode: 0, aggregatedOutput: 'src/session.ts\n' } });
       c.notify('item/completed', { threadId: 'thr_child', turnId: 'turn_child', item: { type: 'agentMessage', id: 'child-message', text: 'Auth code is in the session service.' } });
-      c.notify('item/completed', { threadId: 'thr_1', turnId: 'turn_1', item: { type: 'collabAgentToolCall', id: 'spawn-1', tool: 'spawnAgent', status: 'completed', senderThreadId: 'thr_1', receiverThreadIds: ['thr_child'], agentsStates: {}, prompt: 'Inspect auth', model: 'gpt-6.1-sol-mini', output: 'Auth flow located.' } });
+      c.notify('item/completed', { threadId: 'thr_1', turnId: 'turn_1', item: { type, id: 'spawn-1', tool: 'spawnAgent', status: 'completed', senderThreadId: 'thr_1', receiverThreadIds: ['thr_child'], agentsStates: {}, prompt: 'Inspect auth', model: 'gpt-6.1-sol-mini', output: 'Auth flow located.' } });
       c.notify('item/agentMessage/delta', { threadId: 'thr_1', turnId: 'turn_1', itemId: 'root-message', delta: 'Parent summary.' });
       c.notify('turn/completed', completed());
     }));
