@@ -45,3 +45,6 @@
 @media (prefers-reduced-motion: reduce) {
   .single-subagents__spinner { animation: none; }
 }
+
+/* Delegated subagents show a handle, status, provider/model and a result preview: give the expanded rail room for them. */
+.agent-presence.single-subagents.is-expanded { width: min(320px, calc(100% - 24px)); }

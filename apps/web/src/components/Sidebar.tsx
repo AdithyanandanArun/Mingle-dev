@@ -44,7 +44,7 @@ export function Sidebar() {
   const childSessions = groupChildSessionIds(boot?.groups);
   const delegatedChildren = (boot?.sessions ?? []).filter((item) => item.parentSessionId && item.projectId === project?.id);
   const [expandedChildren, setExpandedChildren] = useState<Record<string, boolean>>({});
-  const sessions = (boot?.sessions ?? []).filter((session) => session.projectId === project?.id && !childSessions.has(session.id)).map((session) => {
+  const sessions = (boot?.sessions ?? []).filter((session) => session.projectId === project?.id && !childSessions.has(session.id) && !session.parentSessionId).map((session) => {
     const group = findGroupForSession(boot?.groups, session.id);
     if (!group || group.group.anchorSessionId !== session.id) return session;
     const members = activeMembers(group);
