@@ -15,6 +15,8 @@ export interface Session {
   status: SessionStatus; policy: Policy; serviceTier?: string; isolated: boolean; worktreePath: string; branch: string | null;
   /** True while the active native provider turn accepts steering input. */
   steerable?: boolean;
+  /** Set on a child session that runs a delegated subagent for another session. */
+  parentSessionId?: string | null;
   providerSessionId: string | null; createdAt: string; updatedAt: string; error: string | null;
   handoffFromProvider?: Provider | null; handoffFromModel?: string | null; handoffPendingAt?: string | null;
   inputTokens: number; outputTokens: number; costUsd: number | null;
@@ -146,7 +148,7 @@ export interface AppSettings {
   browserAgentEnabled?: boolean; browserExecutable?: string;
   browserDefaultMode?: 'embedded' | 'managed' | 'existing'; browserExistingSourceId?: string; browserCdpEndpoint?: string;
 }
-export interface Bootstrap { projects: Project[]; sessions: Session[]; messages: Message[]; queuedMessages?: QueuedMessage[]; tasks: Task[]; events: WorkspaceEvent[]; approvals: Approval[]; plans: import('./planning').SessionPlan[]; questions: import('./planning').UserQuestion[]; providers: ProviderInfo[]; settings: AppSettings; version: string; runs: SessionRun[]; toolCalls: ToolCall[]; groups?: import('./groups').GroupSnapshot[] }
+export interface Bootstrap { projects: Project[]; sessions: Session[]; messages: Message[]; queuedMessages?: QueuedMessage[]; delegatedSubagents?: import('./delegated-subagents').DelegatedSubagent[]; tasks: Task[]; events: WorkspaceEvent[]; approvals: Approval[]; plans: import('./planning').SessionPlan[]; questions: import('./planning').UserQuestion[]; providers: ProviderInfo[]; settings: AppSettings; version: string; runs: SessionRun[]; toolCalls: ToolCall[]; groups?: import('./groups').GroupSnapshot[] }
 export interface GitFile { path: string; status: string }
 export interface GitStatus { branch: string; files: GitFile[]; diff: string; isRepo: boolean }
 export interface FileEntry { path: string; name: string; type: 'file' | 'directory' }
@@ -253,6 +255,7 @@ export interface AgentAdapter {
  */
 export { mergeTextDelta } from './stream';
 export * from './browser';
+export * from './delegated-subagents';
 
 export * from './repository';
 export * from './project-context';
