@@ -25,15 +25,15 @@ interface InstallJob { running: boolean; error: string | null; controller: Abort
 const jobs = new Map<string, InstallJob>();
 
 function release() { return RELEASES[`${process.platform}-${process.arch}`]; }
-function directory(dataDir: string): string { return join(dataDir, 'providers', 'antigravity', VERSION); }
-function filenames(): [string, string] {
+export function antigravityRuntimeDirectory(dataDir: string): string { return join(dataDir, 'providers', 'antigravity', VERSION); }
+export function antigravityRuntimeFilenames(): [string, string] {
   return process.platform === 'win32' ? ['agy_acp_server.exe', 'localharness_external.exe'] : ['agy_acp_server.par', 'localharness_external'];
 }
 
 async function installed(dataDir: string): Promise<boolean> {
   try {
-    await Promise.all(filenames().map(async (name) => {
-      const path = join(directory(dataDir), name);
+    await Promise.all(antigravityRuntimeFilenames().map(async (name) => {
+      const path = join(antigravityRuntimeDirectory(dataDir), name);
       const info = await lstat(path);
       if (!info.isFile() || !info.size) throw new Error('Runtime is not a nonempty regular file.');
       await access(path, process.platform === 'win32' ? constants.R_OK : constants.X_OK);
@@ -48,7 +48,7 @@ export async function antigravityInstallState(dataDir: string): Promise<Antigrav
   const exists = await installed(dataDir);
   return { supported: Boolean(release()), version: VERSION,
     state: job?.running ? 'installing' : exists ? 'installed' : job?.error ? 'error' : 'not-installed',
-    executable: exists ? join(directory(dataDir), filenames()[0]) : null,
+    executable: exists ? join(antigravityRuntimeDirectory(dataDir), antigravityRuntimeFilenames()[0]) : null,
     error: job?.error ?? (!release() ? 'Automatic installation is unavailable on this platform. Set a Google Antigravity ACP executable in Settings.' : null) };
 }
 
@@ -80,7 +80,7 @@ async function unpack(archive: string, destination: string, signal: AbortSignal)
     const centralOffset = tail.readUInt32LE(end + 16);
     if (count !== 2 || tail.readUInt16LE(end + 8) !== count || centralSize > 65536 || centralOffset + centralSize > size - tailLength + end) throw new Error('Unexpected Antigravity ZIP contents.');
     const central = await readAt(file, centralOffset, centralSize);
-    const expected = new Set<string>(filenames());
+    const expected = new Set<string>(antigravityRuntimeFilenames());
     let offset = 0; let totalExpanded = 0;
     for (let index = 0; index < count; index++) {
       signal.throwIfAborted();
@@ -147,11 +147,11 @@ async function downloadAndInstall(dataDir: string, signal: AbortSignal): Promise
     await rm(archive);
     await writeFile(join(temporary, 'release.json'), JSON.stringify({ version: VERSION, url, archiveSha256: selected.sha256 }) + '\n', { mode: 0o600 });
     // Atomic publish: an incomplete install never becomes the selected runtime.
-    if (await installed(dataDir)) return join(directory(dataDir), filenames()[0]);
+    if (await installed(dataDir)) return join(antigravityRuntimeDirectory(dataDir), antigravityRuntimeFilenames()[0]);
     signal.throwIfAborted();
-    await rm(directory(dataDir), { recursive: true, force: true });
-    await rename(temporary, directory(dataDir));
-    return join(directory(dataDir), filenames()[0]);
+    await rm(antigravityRuntimeDirectory(dataDir), { recursive: true, force: true });
+    await rename(temporary, antigravityRuntimeDirectory(dataDir));
+    return join(antigravityRuntimeDirectory(dataDir), antigravityRuntimeFilenames()[0]);
   } finally { await rm(temporary, { recursive: true, force: true }); }
 }
 
@@ -164,7 +164,7 @@ export async function startAntigravityInstall(dataDir: string, onInstalled: (exe
   job.settled = (async () => {
     const exists = await installed(dataDir);
     job.controller.signal.throwIfAborted();
-    return exists ? join(directory(dataDir), filenames()[0]) : downloadAndInstall(dataDir, job.controller.signal);
+    return exists ? join(antigravityRuntimeDirectory(dataDir), antigravityRuntimeFilenames()[0]) : downloadAndInstall(dataDir, job.controller.signal);
   })().then((executable) => {
     if (!job.controller.signal.aborted) onInstalled(executable);
   }).catch((error) => {

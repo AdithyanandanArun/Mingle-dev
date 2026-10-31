@@ -232,6 +232,7 @@ export function AntigravityRuntimeSetup({ providerInfo, onProviderChanged }: { p
     {install ? <>
       <p className="agy-runtime__meta"><strong>{stateLabel}</strong>{install.version ? ` · ${install.version}` : ''}</p>
       {install.executable ? <code className="agy-runtime__path">{install.executable}</code> : null}
+      {install.state === 'installed' && providerInfo?.reason ? <p className="agy-runtime__meta" role="status">Provider check: {providerInfo.reason}</p> : null}
       {install.error ? <p className="agy-runtime__error" role="alert">{install.error}</p> : null}
       {!install.supported ? <p className="agy-runtime__meta">Managed installation is not supported on this platform.</p> : null}
       {install.state === 'not-installed' || install.state === 'error' || install.error ? <Button size="sm" busy={installBusy} disabled={!install.supported || blocked} onClick={() => void startInstall()}>{install.state === 'installed' ? 'Retry setup' : install.state === 'error' ? 'Retry installation' : 'Install Antigravity runtime'}</Button> : null}
