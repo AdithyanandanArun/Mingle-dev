@@ -4,7 +4,8 @@ Feedback from real user testing of Mingle 0.0.9. Each item is checked off once i
 
 ## UI
 
-- [ ] **The UI could be a lot better.** Polish the main screens (sidebar, chat, composer, team session, settings): spacing, hierarchy, empty states and clearer actions.
+- [x] **The UI could be a lot better.** Polish the main screens (sidebar, chat, composer, team session, settings): spacing, hierarchy, empty states and clearer actions.
+  - Compact header controls, clearer sidebar session hierarchy, responsive settings tabs and a wider subagent rail are committed. Delegated children appear under their parent instead of duplicating top-level sessions; the automatic-subagent browser checks pass at desktop and narrow widths.
 
 ## Team sessions
 
@@ -15,10 +16,10 @@ Feedback from real user testing of Mingle 0.0.9. Each item is checked off once i
 
 ## Single-agent chat: subagents
 
-- [ ] **Subagents are hard to call.** Make it easy to ask for a subagent from a normal chat, for example with a clear composer action or an `@` mention.
-- [ ] **Show subagents in a side bubble.** List each running subagent next to the chat, with its provider and model.
-- [ ] **Show "Waiting for subagent to finish"** in the task strip while the main agent waits on a subagent.
-- [ ] **Resume automatically.** When a subagent finishes, the main agent picks up the result and carries on by itself.
+- [x] **Automatic model-spawned subagents.** Per the corrected requirement, the main model can delegate from an ordinary chat, whether the user requests subagents or the model chooses to use them. There is no manual launcher or locally intercepted `/subagent` command. Native Claude/Codex/OpenCode activity and model-callable Mingle delegation drive the UI.
+- [x] **Show subagents in a side bubble.** List each running subagent next to the chat, with its provider and model.
+- [x] **Show "Waiting for subagent to finish"** in the task strip while the main agent waits on a subagent.
+- [x] **Resume automatically.** When a subagent finishes, the main agent picks up the result and carries on by itself. Tests cover model-initiated MCP delegation, queued results, idle queue drain and restart interruption. With automatic restart resume disabled, recovery records a note without starting model work.
 
 ## Composer
 
