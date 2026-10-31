@@ -75,6 +75,29 @@ describe('provider runs', () => {
     await waitFor(() => t.fake.runs.length === 2);
     expect(t.fake.runs[1]?.skills).toMatchObject([{ id: 'skill:review', enabled: true }]);
   });
+  it('keeps queued attachments until drain, binds them to the run, and discards them on removal', async () => {
+    const t = await boot(); const gate = deferred(); t.fake.script = async () => { await gate.promise; };
+    const sid = EXAMPLE_CONTRACT_SESSION_ID;
+    await t.api('POST', `/api/sessions/${sid}/messages`, { content: 'first' }); await waitFor(() => t.fake.runs.length === 1);
+    const uploaded = await t.upload(`/api/sessions/${sid}/attachments`, Buffer.from('queue attachment'), 'queued.txt');
+    const queued = await t.api('POST', `/api/sessions/${sid}/messages`, { content: 'with file', attachmentIds: [uploaded.json.id] });
+    expect(queued.status, JSON.stringify(queued.json)).toBe(202); expect(queued.json.queued).toBeTruthy();
+    expect(t.app.attachments.forOwner('message', queued.json.queued.id)).toHaveLength(1);
+    gate.resolve(); await waitFor(() => t.fake.runs.length === 2);
+    expect(t.fake.runs[1]?.attachments).toMatchObject([{ name: 'queued.txt' }]);
+    const startedMessage = t.app.store.listMessages(sid).find((message: any) => message.role === 'user' && message.content === 'with file')!;
+    expect(t.app.attachments.forOwner('message', startedMessage.id)).toHaveLength(1);
+
+    const secondGate = deferred(); t.fake.script = async () => { await secondGate.promise; };
+    await t.api('POST', `/api/sessions/${sid}/messages`, { content: 'second' }); await waitFor(() => t.fake.runs.length === 3);
+    const uploaded2 = await t.upload(`/api/sessions/${sid}/attachments`, Buffer.from('remove attachment'), 'remove.txt');
+    const removable = await t.api('POST', `/api/sessions/${sid}/messages`, { content: 'remove me', attachmentIds: [uploaded2.json.id] });
+    expect(removable.status, JSON.stringify(removable.json)).toBe(202); expect(removable.json.queued).toBeTruthy();
+    const removed = await t.api('DELETE', `/api/sessions/${sid}/queue/${removable.json.queued.id}`);
+    expect(removed.status, JSON.stringify(removed.json)).toBe(200);
+    expect(t.app.attachments.repo.getRow(uploaded2.json.id)).toBeUndefined();
+    secondGate.resolve();
+  });
   it('streams deltas durably, finalises messages and tracks usage', async () => {
     const t = await boot();
     const gate = deferred();

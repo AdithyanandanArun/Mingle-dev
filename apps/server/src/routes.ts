@@ -567,7 +567,12 @@ export function buildRouter(s: Services) {
       if (session.status === 'waiting') throw conflict('A pending question or approval must be resolved before sending a message.');
       const attachments = s.attachments.validate({ kind: 'session', id }, attachmentIds ?? []);
       validateSessionAttachmentSupport(s, session, attachments, content);
-      const queued = s.store.enqueueMessage({ id: `queued:${crypto.randomUUID()}`, sessionId:id, content, intent, skills:[...new Set(selected ?? [])], attachmentIds:attachmentIds ?? [], contextRefs:contextRefs ?? [] });
+      const queuedId = `queued-${crypto.randomUUID()}`;
+      let queued!: import('@mingle/contracts').QueuedMessage;
+      s.store.tx(() => {
+        if (attachmentIds?.length) s.attachments.claim({ kind: 'session', id }, attachmentIds, 'message', queuedId);
+        queued = s.store.enqueueMessage({ id: queuedId, sessionId:id, content, intent, skills:[...new Set(selected ?? [])], attachmentIds:attachmentIds ?? [], contextRefs:contextRefs ?? [] });
+      });
       return new Reply(202, { accepted:true, queued });
     }
     const skillIds = [...new Set(selected ?? [])];
@@ -589,7 +594,7 @@ export function buildRouter(s: Services) {
   });
   add('GET', '/api/sessions/:id/queue', (ctx) => { const id=param(ctx,'id'); if(!s.store.getSession(id)) throw notFound('Session not found'); return s.store.listQueuedMessages(id); });
   add('PATCH', '/api/sessions/:id/queue/:messageId', async (ctx) => { const id=param(ctx,'id'); const {content}=await ctx.body(z.object({content:z.string().trim().min(1).max(100_000)}).strict()); const message=s.store.updateQueuedMessage(id,param(ctx,'messageId'),content); if(!message) throw notFound('Queued message not found'); return message; });
-  add('DELETE', '/api/sessions/:id/queue/:messageId', (ctx) => { const id=param(ctx,'id'); s.store.removeQueuedMessage(id,param(ctx,'messageId')); return {ok:true}; });
+  add('DELETE', '/api/sessions/:id/queue/:messageId', async (ctx) => { const id=param(ctx,'id'); const messageId=param(ctx,'messageId'); s.store.removeQueuedMessage(id,messageId); await s.attachments.discardQueued(messageId); return {ok:true}; });
   add('POST', '/api/sessions/:id/queue/:messageId/send-now', (ctx) => { const id=param(ctx,'id'); if(!s.store.getSession(id)) throw notFound('Session not found'); if(s.store.getSession(id)?.status==='waiting') throw conflict('Resolve the pending question or approval first.'); s.runtime.sendQueuedNow(id,param(ctx,'messageId')); return new Reply(202,{accepted:true}); });
   add('POST', '/api/sessions/:id/interrupt', (ctx) => {
     const id = param(ctx, 'id');

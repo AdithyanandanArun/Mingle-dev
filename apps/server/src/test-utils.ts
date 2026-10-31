@@ -1,6 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import http from 'node:http';
+import { request } from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import type { AdapterEvent, AgentAdapter, AppSettings, Provider, ProviderInfo, RunOptions } from '@mingle/contracts';
@@ -78,6 +79,7 @@ export interface TestApp {
   url: string;
   port: number;
   api<T = any>(method: string, route: string, body?: unknown, headers?: Record<string, string>): Promise<ApiResponse<T>>;
+  upload(route: string, bytes: Buffer, name: string): Promise<ApiResponse>;
   cleanup(): Promise<void>;
 }
 
@@ -107,8 +109,18 @@ export async function startTestApp(options: Partial<ApplicationOptions> & { data
     try { json = res.text ? JSON.parse(res.text) : null; } catch { json = res.text; }
     return { status: res.status, json, headers: res.headers };
   };
+  const upload = async (route: string, bytes: Buffer, name: string): Promise<ApiResponse> => {
+    const res = await new Promise<{ status: number; text: string; headers: http.IncomingHttpHeaders }>((resolve, reject) => {
+      const req = request({ host: '127.0.0.1', port, method: 'POST', path: route, headers: { host: `127.0.0.1:${port}`, 'content-type': 'application/octet-stream', 'content-length': bytes.length, 'x-mingle-filename': name } }, (response) => {
+        const chunks: Buffer[] = []; response.on('data', (chunk) => chunks.push(chunk)); response.on('end', () => resolve({ status: response.statusCode ?? 0, text: Buffer.concat(chunks).toString('utf8'), headers: response.headers }));
+      });
+      req.on('error', reject); req.end(bytes);
+    });
+    let json: any = null; try { json = res.text ? JSON.parse(res.text) : null; } catch { json = res.text; }
+    return { status: res.status, json, headers: res.headers };
+  };
   return {
-    app, fake, dataDir, url, port, api,
+    app, fake, dataDir, url, port, api, upload,
     async cleanup() {
       await app.close();
       if (!options.keepData) rmSync(dataDir, { recursive: true, force: true });

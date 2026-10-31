@@ -5,7 +5,7 @@ import { nowIso } from '../util.ts';
 
 type Row = Record<string, unknown>;
 export type ScopeKind = 'session' | 'group';
-export type OwnerKind = 'message' | 'group_message';
+export type OwnerKind = 'message' | 'group_message' | 'queued';
 export type AttachmentStatus = 'draft' | 'sent' | 'deleted';
 
 export interface AttachmentRow extends AttachmentRef {
@@ -56,6 +56,20 @@ export class AttachmentRepo {
       `SELECT a.* FROM attachments a JOIN attachment_links l ON l.attachment_id = a.id WHERE l.owner_kind = ? AND l.owner_id = ? AND a.status = 'sent' ORDER BY l.position ASC`,
       ownerKind, ownerId,
     ).map(toRow);
+  }
+  transferOwner(fromKind: OwnerKind, fromId: string, toKind: OwnerKind, toId: string): void {
+    this.run('UPDATE attachment_links SET owner_kind = ?, owner_id = ? WHERE owner_kind = ? AND owner_id = ?', toKind, toId, fromKind, fromId);
+  }
+  deleteOwner(ownerKind: OwnerKind, ownerId: string): string[] {
+    const ids = this.all('SELECT attachment_id FROM attachment_links WHERE owner_kind = ? AND owner_id = ?', ownerKind, ownerId).map((row) => row.attachment_id as string);
+    this.run('DELETE FROM attachment_links WHERE owner_kind = ? AND owner_id = ?', ownerKind, ownerId);
+    return ids;
+  }
+  markOwnerDeleted(ownerKind: OwnerKind, ownerId: string): string[] {
+    const ids = this.all('SELECT attachment_id FROM attachment_links WHERE owner_kind = ? AND owner_id = ?', ownerKind, ownerId).map((row) => row.attachment_id as string);
+    if (ids.length) this.run(`UPDATE attachments SET status = 'deleted', deleted_at = ? WHERE id IN (${ids.map(() => '?').join(',')}) AND status = 'sent'`, nowIso(), ...ids);
+    this.run('DELETE FROM attachment_links WHERE owner_kind = ? AND owner_id = ?', ownerKind, ownerId);
+    return ids;
   }
   /** Metadata for many owners at once, grouped by owner id. */
   refsForOwners(ownerKind: OwnerKind, ownerIds: readonly string[]): Map<string, AttachmentRef[]> {

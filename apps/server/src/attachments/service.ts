@@ -227,6 +227,16 @@ export class AttachmentService {
 
   forOwner(ownerKind: OwnerKind, ownerId: string): AttachmentRow[] { return this.repo.forOwner(ownerKind, ownerId); }
 
+  transferQueuedToMessage(queuedId: string, messageId: string): void {
+    this.repo.transferOwner('message', queuedId, 'message', messageId);
+  }
+
+  async discardQueued(queuedId: string): Promise<void> {
+    const ids = this.repo.markOwnerDeleted('message', queuedId);
+    await Promise.all(ids.map((id) => unlink(this.blobPath(id)).catch(() => undefined)));
+    this.store.touch();
+  }
+
   /** Copies one failed message's sent files into fresh draft rows for a new retry message. */
   async cloneMessageAttachments(sessionId: string, sourceMessageId: string): Promise<string[]> {
     const scope: UploadScope = { kind: 'session', id: sessionId };

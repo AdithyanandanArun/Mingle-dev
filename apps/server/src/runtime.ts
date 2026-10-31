@@ -109,6 +109,7 @@ interface ActiveRun {
   deferContextResolution?: boolean;
   resolveSkills?: () => Promise<ProviderSkill[]>;
   attachmentOwnerKind?: 'message' | 'group_message';
+  queuedAttachmentOwnerId?: string;
   attachmentOwnerId?: string;
   changeBaseline: RunTreeSnapshot | null;
   dispatchState: DispatchState;
@@ -134,7 +135,7 @@ interface ActiveCompaction {
 
 export interface StartOptions {
   groupDeliveryId?: string; taskId?: string; userMessage?: { content: string; kind?: string }; skills?: ProviderSkill[];
-  attachmentIds?: string[]; attachmentOwnerKind?: 'message' | 'group_message'; attachmentOwnerId?: string;
+  attachmentIds?: string[]; attachmentOwnerKind?: 'message' | 'group_message'; attachmentOwnerId?: string; queuedAttachmentOwnerId?: string;
   invocation?: NativeInvocation; context?: string; contextRefs?: Message['contextRefs']; deferContextResolution?: boolean;
   resolveSkills?: () => Promise<ProviderSkill[]>; intent?: 'normal' | 'plan'; executionPlanId?: string;
   /** Device-owned team delivery: bypass local group context and use its encrypted Team MCP proxy. */
@@ -185,7 +186,7 @@ function sanitizeProviderFailureInput(error: unknown, scrub: (value: string) => 
 
 export class SessionRuntime {
   sendQueuedNow(sessionId:string,messageId:string): void { const item=this.store.listQueuedMessages(sessionId).find((m)=>m.id===messageId); if(!item) throw notFound('Queued message not found'); this.store.removeQueuedMessage(sessionId,messageId); this.interrupt(sessionId); void this.waitAndStartQueued(sessionId,item); }
-  private async waitAndStartQueued(sessionId:string,item:import('@mingle/contracts').QueuedMessage): Promise<void> { const run=this.active.get(sessionId); if(run) await run.promise; if(this.store.getSession(sessionId)?.status==='waiting') { this.store.enqueueMessage({...item,createdAt:item.createdAt}); return; } const session=this.store.getSession(sessionId); this.start(sessionId,item.content,{intent:item.intent,attachmentIds:item.attachmentIds,contextRefs:item.contextRefs,deferContextResolution:true,resolveSkills:session ? this.resolveQueuedSkills?.(session,item.skills) : undefined}); }
+  private async waitAndStartQueued(sessionId:string,item:import('@mingle/contracts').QueuedMessage): Promise<void> { const run=this.active.get(sessionId); if(run) await run.promise; if(this.store.getSession(sessionId)?.status==='waiting') { this.store.enqueueMessage({...item,createdAt:item.createdAt}); return; } const session=this.store.getSession(sessionId); this.start(sessionId,item.content,{intent:item.intent,attachmentIds:item.attachmentIds,contextRefs:item.contextRefs,deferContextResolution:true,resolveSkills:session ? this.resolveQueuedSkills?.(session,item.skills) : undefined,queuedAttachmentOwnerId:item.id}); }
   private shutdownStartedAt: number | null = null;
   private readonly active = new Map<string, ActiveRun>();
   private readonly compactions = new Map<string, ActiveCompaction>();
@@ -326,7 +327,8 @@ export class SessionRuntime {
       run.attachmentOwnerId ??= userMessage.id;
       if (options.attachmentIds?.length) {
         if (!this.attachmentService) throw conflict('Attachments are unavailable in this Mingle session.');
-        this.attachmentService.claim({ kind: 'session', id: sessionId }, options.attachmentIds, 'message', userMessage.id);
+        if (options.queuedAttachmentOwnerId) this.attachmentService.transferQueuedToMessage(options.queuedAttachmentOwnerId, userMessage.id);
+        else this.attachmentService.claim({ kind: 'session', id: sessionId }, options.attachmentIds, 'message', userMessage.id);
       }
       this.store.insertRun({ id: run.id, sessionId, userMessageId: userMessage.id, provider: session.provider, model: session.model, startedAt: run.startedAt });
       if (options.executionPlanId) {
@@ -1401,7 +1403,7 @@ export class SessionRuntime {
     catch (error) { this.log('error', `Failed to record group delivery outcome for ${run.sessionId}`, error); }
     if (!run.cleanupPending && !run.teamRun && this.store.getSession(run.sessionId)?.status !== 'waiting') {
       const queued=this.store.dequeueMessage(run.sessionId);
-      if(queued) queueMicrotask(()=>{ try { const session=this.store.getSession(run.sessionId); this.start(run.sessionId,queued.content,{intent:queued.intent,attachmentIds:queued.attachmentIds,contextRefs:queued.contextRefs,deferContextResolution:true,resolveSkills:session ? this.resolveQueuedSkills?.(session,queued.skills) : undefined}); } catch(error) { this.log('error',`Could not drain queued message for ${run.sessionId}`,error); } });
+      if(queued) queueMicrotask(()=>{ try { const session=this.store.getSession(run.sessionId); this.start(run.sessionId,queued.content,{intent:queued.intent,attachmentIds:queued.attachmentIds,contextRefs:queued.contextRefs,deferContextResolution:true,resolveSkills:session ? this.resolveQueuedSkills?.(session,queued.skills) : undefined,queuedAttachmentOwnerId:queued.id}); } catch(error) { this.log('error',`Could not drain queued message for ${run.sessionId}`,error); } });
     }
   }
 
