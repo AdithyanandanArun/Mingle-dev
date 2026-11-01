@@ -86,7 +86,7 @@ export function BrowserConnect({ sessionId, state, onState }: { sessionId: strin
     <div className="browser-connect">
       <div className="browser-connect__head">
         <h2>Browser for this session</h2>
-        <p>Watch the agent work, take control when you want to, and hand it back.</p>
+        <p>Watch the agent work. Click or type in the page whenever you want to step in.</p>
         {settings?.browserAgentEnabled === false ? <p className="browser-connect__note">Agent access is off in Settings → Browser. You can still browse here yourself.</p> : null}
       </div>
       {shownError ? <InlineError>{shownError}</InlineError> : null}
