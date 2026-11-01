@@ -1,11 +1,12 @@
 import { afterEach, expect, it, vi } from 'vitest';
 
-const { bootstrap } = vi.hoisted(() => ({ bootstrap: vi.fn() }));
-vi.mock('../lib/api', () => ({ api: { bootstrap }, errorMessage: (error: unknown) => String(error) }));
+const { bootstrap, rememberProject } = vi.hoisted(() => ({ bootstrap: vi.fn(), rememberProject: vi.fn().mockResolvedValue({}) }));
+vi.mock('../lib/api', () => ({ api: { bootstrap, rememberProject }, errorMessage: (error: unknown) => String(error) }));
 
 let useMingle: typeof import('./store').useMingle | undefined;
 afterEach(() => {
   bootstrap.mockReset();
+  rememberProject.mockClear();
   useMingle?.setState({
     boot: null, bootError: null, bootLoading: true, staleError: null,
     activeProjectId: null, sessionByProject: {}, selectedTeamSessionByProject: {}, teamSessionsByProject: {},

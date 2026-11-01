@@ -245,10 +245,16 @@ function reconcileBootstrap(prev: Bootstrap | null, next: Bootstrap): Bootstrap 
 }
 
 /** Choose valid selections without disturbing choices that are still valid. */
-function resolveSelection(s: Pick<MingleState, 'activeProjectId' | 'sessionByProject' | 'teamSessionsByProject' | 'selectedTeamSessionByProject'>, boot: Bootstrap): Pick<MingleState, 'activeProjectId' | 'sessionByProject'> {
+function resolveSelection(s: Pick<MingleState, 'boot' | 'activeProjectId' | 'sessionByProject' | 'teamSessionsByProject' | 'selectedTeamSessionByProject'>, boot: Bootstrap): Pick<MingleState, 'activeProjectId' | 'sessionByProject'> {
   let projectId = s.activeProjectId;
-  if (!projectId || !boot.projects.some((p) => p.id === projectId)) {
-    projectId = (boot.projects.find((p) => p.isExample) ?? boot.projects[0])?.id ?? null;
+  const realProjects = boot.projects.filter((project) => !project.isExample);
+  // Electron reserves a new loopback port each launch. Restore the durable device selection
+  // on first load, then leave navigation in this window alone during background refreshes.
+  if (!s.boot && realProjects.some((project) => project.id === boot.lastProjectId)) projectId = boot.lastProjectId!;
+  if (!projectId || !realProjects.some((project) => project.id === projectId)) {
+    const recentSession = [...boot.sessions].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+      .find((session) => realProjects.some((project) => project.id === session.projectId));
+    projectId = recentSession?.projectId ?? realProjects[realProjects.length - 1]?.id ?? null;
   }
   const map = { ...s.sessionByProject };
   let changed = false;
@@ -313,6 +319,8 @@ const send = (event: ClientEvent): boolean => {
 export const useMingle = create<MingleState>((set, get) => {
   let lastBootstrapText: string | null = null;
   let lastBootstrapStartedAt = Number.NEGATIVE_INFINITY;
+  let savedProjectId: string | null = null;
+  let projectSave = Promise.resolve();
   const refreshScheduler = createRefreshScheduler(() => { void get().refreshNow(); }, () => lastBootstrapStartedAt);
   cancelScheduledRefresh = refreshScheduler.cancel;
   const savePersisted = (): void => {
@@ -327,6 +335,19 @@ export const useMingle = create<MingleState>((set, get) => {
       localStorage.setItem(LS, JSON.stringify(data));
     } catch {
       /* storage may be unavailable */
+    }
+    const projectId = s.activeProjectId;
+    const isPopout = typeof window !== 'undefined' && new URLSearchParams(window.location.search).has('browserPopout');
+    if (projectId && projectId !== savedProjectId && !isPopout
+      && s.boot?.projects.some((project) => project.id === projectId && !project.isExample)) {
+      savedProjectId = projectId;
+      // Only navigation writes this preference; serialize quick switches so an older
+      // request cannot overwrite the last project after a newer request completes.
+      projectSave = projectSave.then(async () => {
+        if (get().activeProjectId !== projectId) return;
+        try { await api.rememberProject(projectId); }
+        catch { if (savedProjectId === projectId) savedProjectId = null; }
+      });
     }
   };
   const patch = (p: Partial<MingleState>): void => {

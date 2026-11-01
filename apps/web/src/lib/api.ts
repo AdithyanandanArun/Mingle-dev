@@ -132,6 +132,7 @@ export const api = {
   accountPreferences: (signal?: AbortSignal) => json<SavedAccountPreferences | null>('/api/account/preferences', 'GET', undefined, signal),
   saveAccountPreferences: (preferences: AccountPreferences, expectedRevision: number | null) => json<SavedAccountPreferences>('/api/account/preferences', 'PUT', { preferences, expectedRevision }),
   bootstrap: (signal?: AbortSignal) => json<Bootstrap>('/api/bootstrap', 'GET', undefined, signal),
+  rememberProject: (projectId: string) => json<{ projectId: string }>('/api/workspace/selection', 'PUT', { projectId }),
   startSubagent: (sessionId: string, input: StartSubagent) => json<DelegatedSubagent>(`/api/sessions/${encodeURIComponent(sessionId)}/subagents`, 'POST', input),
   cancelSubagent: (id: string) => json<DelegatedSubagent>(`/api/subagents/${encodeURIComponent(id)}/cancel`, 'POST', {}),
   listSubagents: (sessionId: string) => json<DelegatedSubagent[]>(`/api/sessions/${encodeURIComponent(sessionId)}/subagents`),

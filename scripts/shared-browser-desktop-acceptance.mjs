@@ -1,6 +1,6 @@
 // Native Electron acceptance. Run after building apps/web; uses only disposable local Example data.
-import { spawn } from 'node:child_process';
-import { mkdtemp, writeFile } from 'node:fs/promises';
+import { execFileSync, spawn } from 'node:child_process';
+import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -93,9 +93,17 @@ async function until(fn, label) {
         const api = async (path, method = 'GET', body) => { const r = await fetch(origin + path, { method, headers: body ? { 'content-type': 'application/json' } : {}, ...(body ? { body: JSON.stringify(body) } : {}) }); const b = await r.json(); if (!r.ok)
             throw new Error(`${method} ${path}: ${r.status} ${JSON.stringify(b)}`); return b; };
         const boot = await api('/api/bootstrap');
-        const sid = boot.sessions[0].id;
+        assert.equal(boot.projects.length, 0, 'native startup has no example workspace');
+        const fixturePath = join(dir, 'example-project');
+        await mkdir(fixturePath);
+        execFileSync('git', ['-c', 'core.hooksPath=/dev/null', 'init', '--quiet', '--initial-branch=main', '--template='], { cwd: fixturePath });
+        execFileSync('git', ['-c', 'core.hooksPath=/dev/null', '-c', 'commit.gpgsign=false', '-c', 'user.name=Mingle Example', '-c', 'user.email=example@mingle.invalid', 'commit', '--quiet', '--allow-empty', '-m', 'Example browser fixture'], { cwd: fixturePath });
+        const project = await api('/api/projects', 'POST', { name: 'Example browser acceptance', path: fixturePath });
+        const session = await api('/api/sessions', 'POST', { projectId: project.id, isolated: false });
+        const second = await api('/api/sessions', 'POST', { projectId: project.id, isolated: false });
+        const sid = session.id;
         assert.equal(boot.settings.browserDefaultMode, 'embedded');
-        const automaticBase = `/api/sessions/${boot.sessions[1].id}/browser`;
+        const automaticBase = `/api/sessions/${second.id}/browser`;
         await api(automaticBase + '/tabs', 'POST', {});
         assert.equal((await api(automaticBase)).mode, 'embedded');
         await api(automaticBase + '/disconnect', 'POST', {});

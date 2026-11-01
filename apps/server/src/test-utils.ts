@@ -101,6 +101,8 @@ export async function startTestApp(options: Partial<ApplicationOptions> & { data
   const dataDir = options.dataDir ?? tmpDir('mingle-data-');
   const fake = options.fake ?? new FakeProviders();
   const app = createApplication({
+    // Suites using sample sessions opt into the fixture; production starts empty.
+    exampleWorkspace: true,
     dataDir, port: 0, webDistDir: null, providers: fake, log: () => undefined, runtime: { abortGraceMs: 250, flushIntervalMs: 20 }, detectOnStart: false, ...options,
   });
   const { port, url } = await app.listen();

@@ -51,7 +51,7 @@ export interface ApplicationOptions extends ConfigOptions {
   providers: ProviderRuntime;
   env?: NodeJS.ProcessEnv;
   log?: Logger;
-  /** Create the labelled example workspace on first start (default true). */
+  /** Explicitly create the labelled example fixture (default false). */
   exampleWorkspace?: boolean;
   /** Probe provider executables in the background after start (default true). */
   detectOnStart?: boolean;
@@ -83,7 +83,7 @@ export interface MingleApplication {
   readonly projectCollaboration: ProjectCollaborationService;
   readonly teamChat: TeamChatService;
   readonly teamOrchestration: ReturnType<typeof createTeamOrchestration>;
-  /** Runs recovery-independent async setup (example workspace). Called by listen(); safe to call repeatedly. */
+  /** Runs recovery-independent async setup (workspace initialization). Called by listen(); safe to call repeatedly. */
   initialize(): Promise<void>;
   listen(): Promise<{ host: string; port: number; url: string }>;
   address(): { host: string; port: number; url: string };
@@ -349,7 +349,11 @@ export function createApplication(options: ApplicationOptions): MingleApplicatio
     config, store, server, runtime, groups, terminals, hub, providers, browser, intelligence, repository, attachments, recovery, distributed, projectCollaboration, teamChat, teamOrchestration,
     initialize() {
       initialized ??= (async () => {
-        if (options.exampleWorkspace !== false) await seedExampleWorkspace(store, config.dataDir, log);
+        if (options.exampleWorkspace === true) await seedExampleWorkspace(store, config.dataDir, log);
+        else {
+          // Retire starter data from older versions without deleting its files or history.
+          for (const project of store.listProjects()) if (project.isExample) store.removeProject(project.id);
+        }
         intelligence.start();
         attachments.start();
         distributed.start();

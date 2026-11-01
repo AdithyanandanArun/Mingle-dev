@@ -230,10 +230,19 @@ export function buildRouter(s: Services) {
     const body: Bootstrap = {
       groups: s.groups.snapshots(), runs, toolCalls: s.store.bootstrapToolCalls(runs.map((run) => run.id)),
       delegatedSubagents: s.subagents.list(),
+      lastProjectId: s.store.getProject(s.store.getMeta('workspace.lastProjectId') ?? '')?.id ?? null,
       projects: s.store.listProjects(), sessions: s.store.listSessions().map((session) => ({ ...session, steerable: s.runtime.isSteerable(session.id) })), messages: s.store.bootstrapMessages(300), queuedMessages: s.store.listSessions().flatMap((session) => s.store.listQueuedMessages(session.id)), tasks: s.store.listTasks(),
       events: s.store.recentEvents(500), approvals: s.store.bootstrapApprovals(50), plans: s.store.bootstrapPlans(), questions: s.store.bootstrapQuestions(), providers, settings: s.store.getSettings(), version: s.config.version,
     };
     return body;
+  });
+
+  add('PUT', '/api/workspace/selection', async (ctx) => {
+    const { projectId } = await ctx.body(z.object({ projectId: z.string().regex(ID) }).strict());
+    const project = s.store.getProject(projectId);
+    if (!project || project.isExample) throw notFound('Project not found');
+    s.store.setMeta('workspace.lastProjectId', project.id);
+    return { projectId: project.id };
   });
 
   add('GET', '/api/runs/:id/tools', (ctx) => {

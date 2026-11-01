@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -62,15 +62,21 @@ async function api(path, method = 'GET', body) {
 try {
   await start();
   const boot = await api('/bootstrap');
-  const project = boot.projects.find(item => item.isExample);
-  assert.ok(project, 'An explicitly labeled example project exists');
-  const sessions = boot.sessions.filter(item => item.projectId === project.id);
-  assert.ok(sessions.length >= 2, 'Example includes independent sessions');
-  assert.ok(sessions.every(item => item.status === 'idle'), 'Example starts no inference');
+  assert.equal(boot.projects.length, 0, 'Fresh startup does not create an example workspace');
+  assert.equal(boot.sessions.length, 0, 'Fresh startup creates no sessions or inference');
+  const fixturePath = join(dataDir, 'smoke-fixture');
+  await mkdir(fixturePath);
+  await writeFile(join(fixturePath, 'README.md'), '# Disposable smoke fixture\n');
+  const gitArgs = ['-c', 'core.hooksPath=/dev/null', '-c', 'commit.gpgsign=false', '-c', 'user.name=Mingle Smoke', '-c', 'user.email=example@mingle.invalid'];
+  execFileSync('git', [...gitArgs, 'init', '--quiet', '--initial-branch=main', '--template='], { cwd: fixturePath });
+  execFileSync('git', [...gitArgs, 'add', '--', 'README.md'], { cwd: fixturePath });
+  execFileSync('git', [...gitArgs, 'commit', '--quiet', '-m', 'Smoke fixture'], { cwd: fixturePath });
+  const project = await api('/projects', 'POST', { name: 'Smoke fixture', path: fixturePath });
+  await api('/workspace/selection', 'PUT', { projectId: project.id });
   const files = await api(`/projects/${project.id}/files`);
-  assert.ok(files.some(item => item.type === 'file'), 'File API lists actual example files');
+  assert.ok(files.some(item => item.type === 'file'), 'File API lists actual fixture files');
   const git = await api(`/projects/${project.id}/git`);
-  assert.equal(git.isRepo, true, 'Example is a real Git repository');
+  assert.equal(git.isRepo, true, 'Fixture is a real Git repository');
 
   const isolated = await api('/sessions', 'POST', {
     projectId: project.id, name: 'Smoke isolation', provider: 'codex', model: 'gpt-6.1-sol', effort: 'high', policy: 'supervised', isolated: true,
@@ -121,6 +127,7 @@ try {
   await stop();
   await start();
   const restored = await api('/bootstrap');
+  assert.equal(restored.lastProjectId, project.id, 'Last project persists across a real process restart');
   assert.ok(restored.tasks.some(item => item.id === prerequisite.id && item.status === 'done'), 'Tasks persist across a real process restart');
   assert.ok(restored.sessions.some(item => item.id === isolated.id), 'Sessions persist across restart');
   assert.ok(restored.events.length > boot.events.length, 'Mutations emit durable events');

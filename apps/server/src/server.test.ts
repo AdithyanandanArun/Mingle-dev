@@ -32,9 +32,36 @@ describe('bootstrap and example workspace', () => {
     expect(t.fake.runs).toHaveLength(0);
   });
 
-  it('can start without the example workspace', async () => {
-    const t = await boot({ exampleWorkspace: false });
+  it('starts empty by default without creating the example workspace', async () => {
+    const t = await boot({ exampleWorkspace: undefined });
     expect((await t.api('GET', '/api/bootstrap')).json.projects).toEqual([]);
+    expect(existsSync(path.join(t.dataDir, 'example-workspace'))).toBe(false);
+    expect(t.fake.runs).toHaveLength(0);
+  });
+
+  it('retires old example data and remembers the last real project across desktop origins and restarts', async () => {
+    const first = await boot({ keepData: true });
+    const example = first.app.store.getProject(EXAMPLE_PROJECT_ID)!;
+    const project = (await first.api('POST', '/api/projects', { name: 'My project', path: makeRepo() })).json;
+    expect((await first.api('PUT', '/api/workspace/selection', { projectId: project.id })).status).toBe(200);
+    expect((await first.api('PUT', '/api/workspace/selection', { projectId: 'missing' })).status).toBe(404);
+    expect((await first.api('PUT', '/api/workspace/selection', { projectId: EXAMPLE_PROJECT_ID })).status).toBe(404);
+    expect((await first.api('PUT', '/api/workspace/selection', { projectId: project.id, extra: true })).status).toBe(400);
+    await first.app.close();
+    apps.pop();
+
+    const second = await boot({ dataDir: first.dataDir, exampleWorkspace: undefined });
+    const state = (await second.api('GET', '/api/bootstrap')).json;
+    expect(state.projects.map((row: any) => row.id)).toEqual([project.id]);
+    expect(state.lastProjectId).toBe(project.id);
+    expect(state.sessions).toEqual([]);
+    expect(second.app.store.getProject(EXAMPLE_PROJECT_ID, true)).toMatchObject({ path: example.path });
+    expect(existsSync(path.join(example.path, 'README.md'))).toBe(true);
+    expect(second.fake.runs).toHaveLength(0);
+
+    await second.api('DELETE', `/api/projects/${project.id}`);
+    expect((await second.api('GET', '/api/bootstrap')).json.lastProjectId).toBeNull();
+    expect((await second.api('PUT', '/api/workspace/selection', { projectId: project.id })).status).toBe(404);
   });
 
   it('reports health with database and runtime details', async () => {

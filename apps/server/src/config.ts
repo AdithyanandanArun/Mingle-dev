@@ -26,7 +26,7 @@ function defaultDataDirectory(sourceRoot: string): string {
 }
 
 export interface ConfigOptions {
-  /** Directory for the database, example workspace and session worktrees. Defaults to MINGLE_DATA_DIR (or legacy RELAY_DATA_DIR) or <sourceRoot>/.mingle, reusing an existing .relay directory. */
+  /** Directory for the database and session worktrees. Defaults to MINGLE_DATA_DIR (or legacy RELAY_DATA_DIR) or <sourceRoot>/.mingle, reusing an existing .relay directory. */
   dataDir?: string;
   host?: string;
   /** 0 picks a free port (tests). */
