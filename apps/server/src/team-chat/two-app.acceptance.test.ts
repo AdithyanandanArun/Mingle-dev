@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { readFileSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
@@ -11,6 +11,27 @@ import { ProjectInvitationCloudFixture } from '../project-collaboration-cloud.te
 
 const FULL_ACCESS_POLICIES = ['supervised', 'balanced', 'auto', 'full-access'] as const;
 const toolTimings: Array<{ name: string; startedAt: number; repliedAt?: number; closedAt?: number }> = [];
+
+/** A real Git origin reached only through an argv-only local SSH fixture; no external network or credentials. */
+function localGitOrigin() {
+  const root = tmpDir('mingle-team-chat-origin-');
+  const origin = path.join(root, 'origin.git');
+  runGit(root, 'init', '--bare', '--quiet', '--initial-branch=main', origin);
+  const bridge = path.join(root, 'ssh-fixture.mjs');
+  writeFileSync(bridge, `import { spawnSync } from 'node:child_process';
+const args = process.argv.slice(2);
+const command = args.at(-1);
+const operation = command === "git-upload-pack '/team-chat-acceptance.git'" ? 'upload-pack'
+  : command === "git-receive-pack '/team-chat-acceptance.git'" ? 'receive-pack' : null;
+if (!operation || !args.includes('mingle-fixture.invalid')) process.exit(2);
+const result = spawnSync('git', [operation, ${JSON.stringify(origin)}], { stdio: 'inherit' });
+process.exit(result.status ?? 1);
+`);
+  // Git invokes core.sshCommand through its shell; quote both fixed fixture paths.
+  const quote = (value: string) => `'${value.replace(/'/g, `'\\''`)}'`;
+  return { root, origin, url: 'ssh://mingle-fixture.invalid/team-chat-acceptance.git',
+    sshCommand: `${quote(process.execPath)} ${quote(bridge)}` };
+}
 
 async function callTeamTool(connection: TeamMcpConnection, name: string, args: Record<string, unknown> = {}): Promise<any> {
   const timing = { name, startedAt: Date.now() } as typeof toolTimings[number];
@@ -55,6 +76,7 @@ it('shares imported session history and team messages over HTTP and the encrypte
   const accounts = new Map<string, typeof users[number]>();
   const apps: TestApp[] = [];
   const repositories: string[] = [];
+  const gitOrigin = localGitOrigin();
   let invitationToken = '';
   try {
     await cloud.initialize(users);
@@ -83,8 +105,12 @@ it('shares imported session history and team messages over HTTP and the encrypte
       repositories.push(repo);
       runGit(repo, 'config', 'user.name', 'Team acceptance');
       runGit(repo, 'config', 'user.email', `team-acceptance-${repositories.length}@example.invalid`);
-      if (repositories.length === 1) runGit(repo, 'remote', 'add', 'origin', 'https://github.com/example/team-chat-acceptance.git');
-      else runGit(repo, 'remote', 'set-url', 'origin', 'https://github.com/example/team-chat-acceptance.git');
+      if (repositories.length === 1) {
+        runGit(repo, 'remote', 'add', 'origin', gitOrigin.url);
+        runGit(repo, 'push', '--quiet', gitOrigin.origin, 'HEAD:refs/heads/main');
+      } else runGit(repo, 'remote', 'set-url', 'origin', gitOrigin.url);
+      runGit(repo, 'config', 'core.sshCommand', gitOrigin.sshCommand);
+      runGit(repo, 'config', 'ssh.variant', 'simple');
     }
     const [leader, teammate] = apps as [TestApp, TestApp];
     const projects: string[] = [];
@@ -326,6 +352,22 @@ it('shares imported session history and team messages over HTTP and the encrypte
       return originalHostSend(input);
     });
     let orchestratorAssignments = 0;
+    let questionAnswered = false;
+    const acceptReviewedTask = async (connection: TeamMcpConnection, taskId: string) => {
+      const accepted = await callTeamTool(connection, 'team_accept', {
+        taskId, verificationSummary: 'Inspected the exact fetched HTML and CSS revision against the task criteria and requested button treatment.',
+      });
+      if (accepted.status !== 'done') throw new Error('The verified remote assignment was not accepted.');
+      if (accepted.pushFailure || !accepted.integrationPush) throw new Error('The accepted result was not published to the configured integration target.');
+      acceptedTaskIds.push(taskId);
+    };
+    const readReviewFile = (worktree: string, taskId: string, file: string) => {
+      const assignment = leader.app.groups.get(teamGroupId).assignments.find((item) => item.taskId === taskId);
+      const review = leader.app.store.db.prepare('SELECT review_ref FROM mingle_team_host_review_branches WHERE delivery_id=?')
+        .get(assignment?.deliveryId ?? '') as { review_ref: string | null } | undefined;
+      if (!review?.review_ref) throw new Error('The worker result has no verified fetched ref to review.');
+      return runGit(worktree, 'show', `${review.review_ref}:${file}`);
+    };
     leader.fake.script = async (options, emit) => {
       if (options.session.id !== sessionId) { emit({ type: 'text', text: 'Unrelated local turn.' }); return; }
       if (!options.teamMcp) throw new Error('The local orchestrator did not receive the host Team MCP connection.');
@@ -349,7 +391,8 @@ it('shares imported session history and team messages over HTTP and the encrypte
         const inbox = await callTeamTool(options.teamMcp, 'team_inbox');
         const workspace = options.session.worktreePath;
         const workerQuestion = inbox.messages.find((message: { content: string }) => message.content.includes('Should the primary button use mint or amber?'));
-        if (workerQuestion && !existsSync(path.join(workspace, 'index.html'))) {
+        if (workerQuestion && !questionAnswered) {
+          questionAnswered = true;
           await callTeamTool(options.teamMcp, 'team_message', {
             recipient: secondAgent.handle, content: 'Use a mint primary accent with an amber hover state.',
             replyToId: workerQuestion.id, expectsReply: false,
@@ -357,11 +400,12 @@ it('shares imported session history and team messages over HTTP and the encrypte
           emit({ type: 'text', text: 'Answered the worker’s design question while its assignment is still running.' });
           return;
         }
-        const html = readFileSync(path.join(workspace, 'index.html'), 'utf8');
-        const css = readFileSync(path.join(workspace, 'styles.css'), 'utf8');
+        const html = readReviewFile(workspace, assignmentTaskIds[0]!, 'index.html');
+        const css = readReviewFile(workspace, assignmentTaskIds[0]!, 'styles.css');
+        if (!html.includes('Welcome to Northstar') || !css.includes('.hero')) throw new Error('The fetched worker result failed review.');
+        await acceptReviewedTask(options.teamMcp, assignmentTaskIds[0]!);
         const head = runGit(workspace, 'rev-parse', '--verify', 'HEAD').trim();
         leadReviews.push({ head, html, css, workerAsked: inbox.messages.some((message: { content: string }) => message.content.includes('ready for review')) });
-        if (!html.includes('Welcome to Northstar') || !css.includes('.hero')) throw new Error('The remote files were not integrated before orchestrator review.');
         const assigned = await callTeamTool(options.teamMcp, 'team_assign', {
           recipient: firstHostAgent.handle, title: 'Polish the landing page button',
           objective: 'Add a visible hover treatment to the primary landing-page button.',
@@ -374,16 +418,10 @@ it('shares imported session history and team messages over HTTP and the encrypte
         emit({ type: 'text', text: 'I reviewed the delivered files in the host workspace and requested a focused CSS fix.' });
         return;
       }
+      const css = readReviewFile(options.session.worktreePath, assignmentTaskIds[1]!, 'styles.css');
+      if (!css.includes('.hero__cta:hover')) throw new Error('The fetched follow-up fix failed review.');
+      await acceptReviewedTask(options.teamMcp, assignmentTaskIds[1]!);
       const html = readFileSync(path.join(options.session.worktreePath, 'index.html'), 'utf8');
-      const css = readFileSync(path.join(options.session.worktreePath, 'styles.css'), 'utf8');
-      if (!css.includes('.hero__cta:hover')) throw new Error('The follow-up fix did not arrive in the host group workspace.');
-      for (const taskId of assignmentTaskIds) {
-        const accepted = await callTeamTool(options.teamMcp, 'team_accept', {
-          taskId, verificationSummary: 'Inspected the integrated HTML and CSS, including the requested visible button hover treatment.',
-        });
-        if (accepted.status !== 'done') throw new Error('The verified remote assignment was not accepted.');
-        acceptedTaskIds.push(taskId);
-      }
       emit({ type: 'text', text: `The landing page is integrated in the host group workspace. It includes ${html.includes('Northstar') ? 'the Northstar page' : 'the requested page'} and the reviewed button fix.` });
     };
 
@@ -562,6 +600,8 @@ it('shares imported session history and team messages over HTTP and the encrypte
     expect(leadReviews[0]!.css).toContain('.hero__cta');
     const groupWorkspace = leader.app.store.getSession(sessionId)!.worktreePath;
     expect(runGit(groupWorkspace, 'rev-parse', '--verify', 'HEAD').trim()).toBe(secondWorkerRevision);
+    expect(runGit(gitOrigin.origin, 'rev-parse', '--verify', 'refs/heads/main').trim()).toBe(secondWorkerRevision);
+    expect(runGit(gitOrigin.origin, 'tag', '--list').trim()).toBe('');
     expect(readFileSync(path.join(groupWorkspace, 'index.html'), 'utf8')).toContain('Welcome to Northstar');
     expect(readFileSync(path.join(groupWorkspace, 'styles.css'), 'utf8')).toContain('.hero__cta:hover');
     expect(teammate.fake.runs).toHaveLength(2);
@@ -627,6 +667,7 @@ it('shares imported session history and team messages over HTTP and the encrypte
     while (apps.length) await apps.pop()!.cleanup();
     vi.restoreAllMocks();
     for (const repository of repositories) rmSync(repository, { recursive: true, force: true });
+    rmSync(gitOrigin.root, { recursive: true, force: true });
     await cloud.close();
   }
 }, 90_000);
