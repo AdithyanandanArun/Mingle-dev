@@ -35,5 +35,6 @@ describe('Claude model metadata mapping', () => {
     const [model] = sdkModels([{ value: 'claude-bounded', supportedEffortLevels: efforts, supportsEffort: true }]);
     expect(model?.reasoningEfforts).toHaveLength(32);
     expect(model?.reasoningEfforts?.some((effort) => effort.id === 'Invalid')).toBe(false);
+    expect(sdkModels([{ value: '' }, { value: '   ' }, { value: 42 }])).toEqual([]);
   });
 });

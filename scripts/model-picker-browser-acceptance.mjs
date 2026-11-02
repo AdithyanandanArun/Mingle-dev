@@ -101,6 +101,19 @@ try {
   assert.equal(await lockedPopup.getByRole('tab', { name: 'Claude', exact: true }).getAttribute('aria-selected'), 'true');
   await page.keyboard.press('Escape');
 
+  await modelTrigger.click();
+  await picker.getByRole('tab', { name: 'Claude', exact: true }).click();
+  const custom = picker.getByRole('textbox', { name: 'Use a Claude model ID' });
+  await custom.fill('--invalid-model');
+  assert.equal(await picker.getByRole('button', { name: 'Use ID', exact: true }).isDisabled(), true);
+  await custom.fill('claude-haiku-fixture-next');
+  await custom.press('Enter');
+  await page.getByText('claude · claude-haiku-fixture-next', { exact: true }).waitFor();
+  assert.equal(await page.locator('#model-fixture-submits').textContent(), 'Composer submits: 0', 'custom selection cannot submit its ancestor composer form');
+  await modelTrigger.click();
+  await picker.getByRole('tab', { name: 'Codex', exact: true }).click();
+  await picker.getByRole('option', { name: /Fixture Codex Search Model 11/ }).click();
+
   const savedTrigger = page.getByRole('combobox', { name: 'Saved model', exact: true });
   await savedTrigger.click();
   const savedPopup = page.getByRole('dialog', { name: 'Choose a model' });
@@ -142,6 +155,10 @@ try {
   await page.setViewportSize({ width: 360, height: 800 });
   await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => resolve(null))));
   await page.screenshot({ path: screenshots.narrow, fullPage: true });
+  await picker.getByRole('tab', { name: 'Claude', exact: true }).click();
+  await custom.waitFor();
+  assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), 'custom model form fits a narrow viewport');
+  await page.screenshot({ path: path.join(output, 'model-picker-custom-360px.png'), fullPage: true });
   await page.keyboard.press('Escape');
 
   assert.deepEqual(pageErrors, [], 'the picker fixture should not produce uncaught errors');

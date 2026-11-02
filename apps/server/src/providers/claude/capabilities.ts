@@ -8,8 +8,8 @@ import { claudeEnvironment } from './auth.js';
 export const CLAUDE_POLICIES: Policy[] = ['supervised', 'balanced', 'auto', 'full-access'];
 
 /** Accept only bounded protocol identifiers, while preserving future SDK-advertised efforts exactly. */
-const safeEffort = (value: string): boolean => value.length <= 40 && /^[a-z][a-z0-9_-]*$/.test(value);
-const safeModelId = (value: string): boolean => value.length <= 150 && !/[\u0000-\u001f\u007f]/.test(value);
+const safeEffort = (value: unknown): value is string => typeof value === 'string' && value.length <= 40 && /^[a-z][a-z0-9_-]*$/.test(value);
+const safeModelId = (value: unknown): value is string => typeof value === 'string' && value.length > 0 && value.length <= 150 && !/[\u0000-\u001f\u007f]/.test(value);
 
 async function* holdOpenWithoutPrompt(signal: AbortSignal): AsyncGenerator<SDKUserMessage, void, unknown> {
   // Keep SDK stdin open for control RPCs, but never yield a user message or start a model turn.
@@ -83,7 +83,7 @@ export async function withClaudeMetadataQuery<T>(
 /** Map the SDK's live model catalog to Mingle metadata without advertising unsupported controls. */
 export function claudeModelsFromSdk(models: ModelInfo[]): ProviderModel[] {
   return models.flatMap((model) => {
-    const id = model.value.trim();
+    const id = typeof model.value === 'string' ? model.value.trim() : '';
     if (!safeModelId(id)) return [];
     const sdkEfforts = model.supportedEffortLevels?.filter((effort) => safeEffort(effort)).slice(0, 32);
     const reasoningEfforts = model.supportsEffort === false

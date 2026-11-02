@@ -25,7 +25,8 @@ export class FakeProviders implements ProviderRuntime {
     this.detections++;
     return [
       { id: 'codex', name: 'Codex', available: false, version: null, executable: null, reason: 'fake: not installed', models: [] },
-      { id: 'claude', name: 'Claude', available: true, version: 'fake', executable: '/fake/claude', reason: null, models: [{ id: 'claude-sonnet-5-5', name: 'Sonnet' }] },
+      { id: 'claude', name: 'Claude', available: true, version: 'fake', executable: '/fake/claude', reason: null,
+        models: [{ id: 'claude-sonnet-5-5', name: 'Sonnet', reasoningEfforts: ['low', 'medium', 'high'].map((id) => ({ id, label: id })), defaultReasoningEffort: 'high' }] },
     ];
   }
   async getCatalog() { return { commands: [], skills: this.catalogSkills, warnings: [] }; }

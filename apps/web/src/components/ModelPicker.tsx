@@ -220,7 +220,7 @@ export function ModelPicker({
 
   const chooseCustomClaudeModel = () => {
     const model = customModelId.trim();
-    if (activeProvider?.id !== 'claude' || !activeProvider.available || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,149}$/.test(model)) return;
+    if (disabled || providerIsLocked || activeProvider?.id !== 'claude' || !activeProvider.available || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,149}$/.test(model)) return;
     close();
     if (activeProvider.id !== value.provider || model !== selectedModelId) onChange({ provider: 'claude', model });
   };
@@ -391,7 +391,7 @@ export function ModelPicker({
               </button>;
             }) : <p className="model-picker__empty" role="status">No models match “{query}”.</p>}
           </div> : <p className="model-picker__empty" role="status">No model options are reported for this provider.</p>}
-          {activeProvider?.id === 'claude' && activeProvider.available ? <form className="model-picker__custom" onSubmit={(event) => { event.preventDefault(); chooseCustomClaudeModel(); }}>
+          {activeProvider?.id === 'claude' && activeProvider.available && !providerIsLocked ? <form className="model-picker__custom" onSubmit={(event) => { event.preventDefault(); event.stopPropagation(); chooseCustomClaudeModel(); }}>
             <label htmlFor={`${popupId}-custom-model`}>Use a Claude model ID</label>
             <div><input id={`${popupId}-custom-model`} value={customModelId} maxLength={150} autoComplete="off" spellCheck={false}
               placeholder="Enter exact model ID" onChange={(event) => setCustomModelId(event.target.value)} />

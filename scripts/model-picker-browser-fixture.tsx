@@ -43,6 +43,7 @@ function Fixture() {
   const [selection, setSelection] = useState<ModelSelection>({ provider: 'codex', model: 'fixture-codex-search-04' });
   const [lockedSelection, setLockedSelection] = useState<ModelSelection>({ provider: 'claude', model: 'fixture-claude-model' });
   const [savedUnknown, setSavedUnknown] = useState<ModelSelection>({ provider: 'antigravity', model: 'saved-model-not-in-fixture-catalog' });
+  const [submitted, setSubmitted] = useState(0);
 
   return <main className="model-fixture">
     <header>
@@ -50,11 +51,12 @@ function Fixture() {
       <h1>Model picker acceptance</h1>
       <p>All catalog entries below are synthetic test data. No provider runtime, inference or cloud service is used.</p>
     </header>
-    <section className="model-fixture__card" aria-labelledby="unlocked-heading">
+    <form onSubmit={(event) => { event.preventDefault(); setSubmitted((count) => count + 1); }}><section className="model-fixture__card" aria-labelledby="unlocked-heading">
       <h2 id="unlocked-heading">Provider switching and catalog search</h2>
       <ModelPicker label="Model" value={selection} providers={fixtureProviders} onChange={setSelection} />
       <p id="model-fixture-selection" role="status">{selection.provider} · {selection.model}</p>
-    </section>
+      <output id="model-fixture-submits">Composer submits: {submitted}</output>
+    </section></form>
     <section className="model-fixture__card" aria-labelledby="locked-heading">
       <h2 id="locked-heading">Provider-locked configuration</h2>
       <ModelPicker label="Locked model" value={lockedSelection} providers={fixtureProviders} lockProvider onChange={setLockedSelection} />
