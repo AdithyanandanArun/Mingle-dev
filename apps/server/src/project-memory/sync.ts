@@ -183,6 +183,13 @@ export class ProjectMemoryTeamSync implements MemoryTeamHooks {
     return flight;
   }
 
+  private publicationCurrent(projectId: string, teamId: string, sharedProjectId: string, accountId: string, deviceId: string): boolean {
+    const current = this.bindingFor(projectId);
+    return !this.closed && this.options.authority.localAccountId() === accountId
+      && this.options.transport.snapshot(teamId).deviceId === deviceId
+      && current?.teamId === teamId && current.sharedProjectId === sharedProjectId;
+  }
+
   private async publishNow(projectId: string): Promise<void> {
     const binding = this.bindingFor(projectId);
     const { repo } = this.options.service;
@@ -191,14 +198,21 @@ export class ProjectMemoryTeamSync implements MemoryTeamHooks {
     try {
       const deviceId = this.options.transport.snapshot(teamId).deviceId;
       if (!deviceId) throw new Error('Register this device with the team to share project memory.');
+      const accountId = this.options.authority.localAccountId();
+      if (!accountId) return;
+      const isCurrent = () => this.publicationCurrent(projectId, teamId, sharedProjectId, accountId, deviceId);
       const peers = this.peers(teamId);
       for (const row of repo.unpublished(projectId, MAX_ROWS_PER_PUBLISH)) {
+        if (!isCurrent()) return;
+        if ((row.author.accountId && row.author.accountId !== accountId) || (row.author.deviceId && row.author.deviceId !== deviceId)) {
+          throw new Error('A pending memory revision belongs to another account or registered device. Restore its original identity to publish it.');
+        }
         let record: ProjectMemorySyncRecord;
         if (row.signature && row.teamId === teamId && row.sharedProjectId === sharedProjectId && row.authorDeviceId === deviceId) {
           record = this.options.service.toSyncRecord(row, teamId, sharedProjectId, deviceId, row.signature);
         } else {
           // Fill in the attribution that was unknown when an unregistered or signed-out device wrote the revision.
-          const author = { ...row.author, deviceId: row.author.deviceId ?? deviceId, accountId: row.author.accountId ?? this.options.authority.localAccountId() } as RevisionRow['author'];
+          const author = { ...row.author, deviceId: row.author.deviceId ?? deviceId, accountId: row.author.accountId ?? accountId } as RevisionRow['author'];
           const lineage = row.lineage;
           let causalProof: ProjectMemoryCausalProof | undefined;
           if (lineage) {
@@ -208,6 +222,7 @@ export class ProjectMemoryTeamSync implements MemoryTeamHooks {
               pinned: row.snapshot.pinned, retired: row.snapshot.retired, humanVerified: row.snapshot.humanVerified,
             };
             const proofSignature = await this.options.transport.signPayload(teamId, deviceId, causalProofPayload(proofBody));
+            if (!isCurrent()) return;
             causalProof = ProjectMemoryCausalProofSchema.parse({ ...proofBody, signature: proofSignature });
           }
           const unsigned: Omit<ProjectMemorySyncRecord, 'signature'> = {
@@ -216,12 +231,15 @@ export class ProjectMemoryTeamSync implements MemoryTeamHooks {
             ...(lineage ? { lineage, causalProof } : {}),
           };
           const signature = await this.options.transport.signPayload(teamId, deviceId, signingPayload(unsigned));
+          if (!isCurrent()) return;
           repo.markSigned(row.recordId, teamId, sharedProjectId, deviceId, signature, author, causalProof);
           record = ProjectMemorySyncRecordSchema.parse({ ...unsigned, signature });
         }
         for (const peer of peers) {
+          if (!isCurrent()) return;
           await this.options.transport.send({ teamId, toDeviceId: peer, kind: 'projectmemory.record', payload: record, idempotencyKey: `pmem:${record.id}:${peer}` });
         }
+        if (!isCurrent()) return;
         repo.markPublished(row.recordId, this.iso());
       }
       repo.patchSyncState(projectId, { error: null });
@@ -415,7 +433,12 @@ export class ProjectMemoryTeamSync implements MemoryTeamHooks {
         this.peerRequestAt.set(rateKey, this.now());
         if (this.peerRequestAt.size > 1_000) this.peerRequestAt.delete(this.peerRequestAt.keys().next().value!);
       }
+      const accountId = this.options.authority.localAccountId();
+      const deviceId = this.options.transport.snapshot(envelope.teamId).deviceId;
+      if (!accountId || !deviceId) return;
+      const isCurrent = () => this.publicationCurrent(projectId, envelope.teamId, request.sharedProjectId, accountId, deviceId);
       await this.publish(projectId); // make sure our own revisions are signed before serving history
+      if (!isCurrent()) return;
       const { repo } = this.options.service;
       const rows = request.want?.length
         ? repo.signedRecordsByIds(projectId, request.sharedProjectId, request.want)
@@ -425,9 +448,11 @@ export class ProjectMemoryTeamSync implements MemoryTeamHooks {
       const more = rows.length > RESPONSE_RECORD_CEILING;
       const records = rows.slice(0, RESPONSE_RECORD_CEILING).map((row) => this.options.service.toSyncRecord(row, row.teamId!, row.sharedProjectId!, row.authorDeviceId!, row.signature!));
       if (request.want?.length) await this.signCompactProofs(projectId, envelope.teamId, request.sharedProjectId, request.want);
+      if (!isCurrent()) return;
       const proofs = request.want?.length ? repo.causalProofs(request.want, projectId) : [];
       const batches = this.batches(request.sharedProjectId, request.requestId, records, more, proofs);
       for (const batch of batches) {
+        if (!isCurrent()) return;
         const digest = createHash('sha256').update(JSON.stringify(batch)).digest('hex').slice(0, 32);
         await this.options.transport.send({ teamId: envelope.teamId, toDeviceId: envelope.fromDeviceId, kind: 'projectmemory.sync.response', payload: batch,
           idempotencyKey: `pmem-resp:${request.requestId}:${batch.batchIndex}:${digest}` });

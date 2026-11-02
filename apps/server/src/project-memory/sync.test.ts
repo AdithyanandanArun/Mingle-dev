@@ -60,6 +60,7 @@ class Node {
   sends = 0;
   authorizations = 0;
   snapshots = 0;
+  beforeSign?: () => Promise<void>;
 
   constructor(readonly mesh: Mesh, readonly accountId: string, kind: 'owner' | 'joined', options: { retryBaseMs?: number; bind?: boolean } = {}) {
     mkdirSync(path.join(this.root, 'src'), { recursive: true });
@@ -88,7 +89,7 @@ class Node {
         mesh.queue.push(message);
         return message.id;
       },
-      signPayload: async (_team, _device, payload) => signDevicePayload(payload, node.keys),
+      signPayload: async (_team, _device, payload) => { await node.beforeSign?.(); return signDevicePayload(payload, node.keys); },
       onMessage: (handler) => { node.handler = handler; return () => { node.handler = null; }; },
     };
     this.sync = new ProjectMemoryTeamSync({
@@ -137,6 +138,21 @@ async function pair(options: { bindB?: boolean } = {}) {
 }
 
 describe('team project memory sync (two-device fixture)', () => {
+  it.each(['binding', 'account', 'device'] as const)('stops publication if the %s changes while signing is pending', async (change) => {
+    const { mesh, a } = await pair();
+    let entered!: () => void; let release!: () => void;
+    const started = new Promise<void>((resolve) => { entered = resolve; });
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    a.beforeSign = async () => { entered(); await gate; };
+    const { entry } = await a.service.agentRemember(a.agent(), { kind: 'fact', title: 'Fence sharing context', body: 'Must stay on this device after a sharing change.' });
+    const publication = a.settle(); await started;
+    if (change === 'binding') a.store.db.prepare('DELETE FROM mingle_project_collaboration_sources WHERE local_project_id=?').run(a.projectId);
+    else Object.defineProperty(a, change === 'account' ? 'accountId' : 'deviceId', { value: randomUUID() });
+    release(); await publication;
+    expect(mesh.log.filter((message) => message.kind === 'projectmemory.record')).toEqual([]);
+    expect(a.service.repo.getRecord(entry.headRecordId)).toMatchObject({ signature: null, publishedAt: null });
+  });
+
   it('backfills a late-bound project after more than 50 offline writes and pruned unsigned ancestors', async () => {
     const mesh = new Mesh();
     const a = new Node(mesh, randomUUID(), 'owner', { bind: false });
