@@ -10,7 +10,7 @@ import { dispatchTeamUpdate } from '../lib/team-live-updates';
 export type View = 'workspace' | 'tasks' | 'activity' | 'map' | 'team-structure' | 'settings';
 export type SettingsSection = 'account' | 'general' | 'project' | 'agents' | 'team' | 'providers' | 'browser' | 'appearance';
 export type TeamWorkspaceTab = 'people' | 'projects' | 'devices' | 'agents' | 'conversation' | 'recovery' | 'transfers';
-export type ContextTab = 'overview' | 'files' | 'changes' | 'browser';
+export type ContextTab = 'overview' | 'files' | 'changes' | 'memory' | 'browser';
 export type Scope = 'session' | 'project';
 export type Connection = 'connecting' | 'online' | 'offline';
 export type TerminalStatus = 'idle' | 'starting' | 'running' | 'exited' | 'lost';

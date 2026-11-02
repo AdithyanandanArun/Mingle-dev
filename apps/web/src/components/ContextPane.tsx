@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { FileText, GitCompare, Globe, Info, X } from 'lucide-react';
+import { BookOpen, FileText, GitCompare, Globe, Info, X } from 'lucide-react';
 import { useActiveSession, useMingle, type ContextTab } from '../store/store';
 import { useBrowserStore } from '../store/browser';
 import { cx } from '../lib/format';
@@ -8,11 +8,13 @@ import { Overview } from './context/Overview';
 import { Files } from './context/Files';
 import { Changes } from './context/Changes';
 import { Browser } from './context/Browser';
+import { ProjectMemory } from './context/ProjectMemory';
 
 const TABS: { id: ContextTab; label: string; icon: typeof Info }[] = [
   { id: 'overview', label: 'Overview', icon: Info },
   { id: 'files', label: 'Files', icon: FileText },
   { id: 'changes', label: 'Changes', icon: GitCompare },
+  { id: 'memory', label: 'Memory', icon: BookOpen },
   { id: 'browser', label: 'Browser', icon: Globe },
 ];
 
@@ -62,7 +64,7 @@ export function ContextPane() {
           <div key={id} role="tabpanel" id={`ctx-panel-${id}`} aria-labelledby={`ctx-tab-${id}`} hidden={tab !== id} className="context__panel">
             {visited.has(id) ? (
               <Boundary label={`${id[0]!.toUpperCase()}${id.slice(1)}`}>
-                {id === 'overview' ? <Overview /> : id === 'files' ? <Files active={tab === id} /> : id === 'changes' ? <Changes active={tab === id} /> : <Browser active={tab === id && open} />}
+                {id === 'overview' ? <Overview /> : id === 'files' ? <Files active={tab === id} /> : id === 'changes' ? <Changes active={tab === id} /> : id === 'memory' ? <ProjectMemory active={tab === id && open} /> : <Browser active={tab === id && open} />}
               </Boundary>
             ) : null}
           </div>
