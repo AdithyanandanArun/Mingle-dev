@@ -64,6 +64,7 @@ export function ModelPicker({
   const [activeProviderId, setActiveProviderId] = useState<Provider>(value.provider);
   const [activeModelId, setActiveModelId] = useState(value.model);
   const [query, setQuery] = useState('');
+  const [customModelId, setCustomModelId] = useState('');
   const effectiveOpen = open && !disabled;
   const { present, closing } = usePresence(effectiveOpen);
 
@@ -123,6 +124,7 @@ export function ModelPicker({
     setActiveProviderId(value.provider);
     setActiveModelId(selectedModelId);
     setQuery('');
+    setCustomModelId('');
     setPosition(null);
     setOpen(true);
   };
@@ -216,6 +218,13 @@ export function ModelPicker({
     }
   };
 
+  const chooseCustomClaudeModel = () => {
+    const model = customModelId.trim();
+    if (activeProvider?.id !== 'claude' || !activeProvider.available || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,149}$/.test(model)) return;
+    close();
+    if (activeProvider.id !== value.provider || model !== selectedModelId) onChange({ provider: 'claude', model });
+  };
+
   const focusModel = (id: string) => {
     setActiveModelId(id);
     popup.current?.querySelector<HTMLElement>(`[data-model-id="${CSS.escape(id)}"]`)?.focus({ preventScroll: true });
@@ -226,6 +235,7 @@ export function ModelPicker({
     if (provider.id === activeProviderId) return;
     setActiveProviderId(provider.id);
     setQuery('');
+    setCustomModelId('');
   };
 
   const keyDown = (event: KeyboardEvent<HTMLDivElement>) => {
@@ -381,6 +391,14 @@ export function ModelPicker({
               </button>;
             }) : <p className="model-picker__empty" role="status">No models match “{query}”.</p>}
           </div> : <p className="model-picker__empty" role="status">No model options are reported for this provider.</p>}
+          {activeProvider?.id === 'claude' && activeProvider.available ? <form className="model-picker__custom" onSubmit={(event) => { event.preventDefault(); chooseCustomClaudeModel(); }}>
+            <label htmlFor={`${popupId}-custom-model`}>Use a Claude model ID</label>
+            <div><input id={`${popupId}-custom-model`} value={customModelId} maxLength={150} autoComplete="off" spellCheck={false}
+              placeholder="Enter exact model ID" onChange={(event) => setCustomModelId(event.target.value)} />
+              <button type="submit" disabled={!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,149}$/.test(customModelId.trim())}>Use ID</button></div>
+            <small>Custom ID · account access is unverified until Claude accepts a run. Mingle sends this exact ID without substituting another model.</small>
+          </form> : null}
+          {activeProvider?.modelDiscovery?.status === 'unavailable' ? <p className="model-picker__notice" role="status">Live model catalog unavailable: {activeProvider.modelDiscovery.reason ?? 'Refresh providers to try again.'}</p> : null}
           <div className="model-picker__foot"><span>Models reported by the provider</span>{query ? <button type="button" onClick={() => { setQuery(''); searchInput.current?.focus(); }}>Clear search</button> : null}</div>
         </section>
       </div>, document.body,

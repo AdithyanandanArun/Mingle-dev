@@ -6,6 +6,7 @@ import { api, errorMessage } from '../lib/api';
 import { Button, InlineError } from './ui';
 import { copyText } from '../lib/clipboard';
 import { SelectMenu } from './SelectMenu';
+import { ModelPicker } from './ModelPicker';
 import { SettingRow } from './SettingRow';
 import { BrowserSettings } from './browser/BrowserSettings';
 import { AccountSettings } from './AccountSettings';
@@ -73,18 +74,17 @@ export function SettingsPage({ onReplayOnboarding }: { onReplayOnboarding: () =>
   const providerInfo = boot.providers.find((p) => p.id === settings.defaultProvider);
   const models = providerModelChoices(providerInfo, defaultModel);
   const selectedModel = models.find((m) => m.id === defaultModel || m.aliases?.includes(defaultModel));
-  const selectedModelId = selectedModel?.id ?? defaultModel;
   const efforts = selectedModel?.reasoningEfforts ?? [];
   const tiers = serviceTiersFor(selectedModel);
   const policies = selectedModel?.policies ?? boot.providers.find((p) => p.id === settings.defaultProvider)?.policies ?? [];
   const updateDefaultModel = (value: string) => {
     const nextModel = models.find((model) => model.id === value);
-    if (!nextModel) return;
+    if (!nextModel && !(settings.defaultProvider === 'claude' && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,149}$/.test(value))) return;
     const patch: Partial<AppSettings> = { [modelKey]: value };
-    const nextEfforts = nextModel.reasoningEfforts ?? [];
-    if (nextEfforts.length && !nextEfforts.some((item) => item.id === settings.defaultEffort)) patch.defaultEffort = nextModel.defaultReasoningEffort ?? nextEfforts[0]!.id;
+    const nextEfforts = nextModel?.reasoningEfforts ?? [];
+    if (nextEfforts.length && !nextEfforts.some((item) => item.id === settings.defaultEffort)) patch.defaultEffort = nextModel?.defaultReasoningEffort ?? nextEfforts[0]!.id;
     const nextTiers = serviceTiersFor(nextModel);
-    if (nextTiers.length && !nextTiers.some((item) => item.id === (settings.defaultServiceTier ?? 'standard'))) patch.defaultServiceTier = nextModel.defaultServiceTier ?? nextTiers[0]!.id;
+    if (nextTiers.length && !nextTiers.some((item) => item.id === (settings.defaultServiceTier ?? 'standard'))) patch.defaultServiceTier = nextModel?.defaultServiceTier ?? nextTiers[0]!.id;
     void update(patch, 'model');
   };
   const updateDefaultProvider = (provider: AppSettings['defaultProvider']) => {
@@ -129,10 +129,11 @@ export function SettingsPage({ onReplayOnboarding }: { onReplayOnboarding: () =>
           <SelectMenu id="st-provider" label="Default provider" value={settings.defaultProvider} disabled={disabled} options={boot.providers.map((provider) => ({ value: provider.id, label: PROVIDER_NAMES[provider.id], description: provider.available ? 'Available' : provider.reason ?? 'Needs setup' }))} onChange={(value) => updateDefaultProvider(value as AppSettings['defaultProvider'])} />
         </SettingRow>
         <SettingRow title="Model" description={`Default for ${PROVIDER_NAMES[settings.defaultProvider]} sessions.`} htmlFor="st-model">
-          <SelectMenu id="st-model" label="Default model" value={selectedModelId} disabled={disabled || models.length === 0} options={models.map((m) => ({ value: m.id, label: m.name }))} onChange={updateDefaultModel} />
+          <ModelPicker id="st-model" label="Default model" value={{ provider: settings.defaultProvider, model: defaultModel }} providers={boot.providers} lockProvider
+            disabled={disabled} onChange={({ model }) => updateDefaultModel(model)} />
         </SettingRow>
         <SettingRow title="Reasoning effort" description="How much reasoning to use for a response." htmlFor="st-effort">
-          <SelectMenu id="st-effort" label="Default effort" value={settings.defaultEffort} displayValue={efforts.length ? efforts.some((item) => item.id === settings.defaultEffort) ? undefined : 'Not available' : usesNativeModelDefault(settings.defaultProvider) ? 'Native/default' : effortName(settings.defaultEffort, settings.defaultEffort)} disabled={disabled || efforts.length === 0} options={efforts.map((item) => ({ value: item.id, label: `${effortName(item.id, item.label)}${item.id === selectedModel?.defaultReasoningEffort ? ' · Default' : ''}`, description: item.description }))} onChange={(value) => void update({ defaultEffort: value }, 'effort')} />
+          <SelectMenu id="st-effort" label="Default effort" value={settings.defaultEffort} displayValue={efforts.length ? efforts.some((item) => item.id === settings.defaultEffort) ? undefined : 'Not available' : selectedModel?.reasoningEfforts ? 'Native/default' : 'Not reported'} disabled={disabled || efforts.length === 0} options={efforts.map((item) => ({ value: item.id, label: `${effortName(item.id, item.label)}${item.id === selectedModel?.defaultReasoningEffort ? ' · Default' : ''}`, description: item.description }))} onChange={(value) => void update({ defaultEffort: value }, 'effort')} />
         </SettingRow>
         <SettingRow title="Service tier" description="Request speed for the default model." htmlFor="st-tier">
           <SelectMenu id="st-tier" label="Default service tier" value={settings.defaultServiceTier ?? 'standard'} displayValue={tiers.length ? tiers.some((item) => item.id === (settings.defaultServiceTier ?? 'standard')) ? undefined : 'Not available' : 'Native/default'} disabled={disabled || tiers.length === 0} options={tiers.map((item) => ({ value: item.id, label: `${item.id === 'priority' ? 'Fast' : item.name}${item.id === selectedModel?.defaultServiceTier ? ' · Default' : ''}`, description: item.description }))} onChange={(value) => void update({ defaultServiceTier: value }, 'tier')} />

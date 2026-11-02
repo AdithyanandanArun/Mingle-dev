@@ -5,15 +5,13 @@ export interface RunConfig {
   provider: Provider; model: string; effort: string; policy: Policy; serviceTier?: string;
 }
 /** Providers whose reasoning control comes from native metadata; without it only the native default exists. */
-const NATIVE_EFFORT_PROVIDERS = new Set<Provider>(['antigravity', 'opencode']);
 type Explicit = Partial<Record<'effort' | 'policy' | 'serviceTier', boolean>>;
 
 /** Resolve inherited defaults against model capabilities; explicit unsupported choices always fail. */
 export function resolveRunConfig(info: ProviderInfo | undefined, config: RunConfig, explicit: Explicit = {}): RunConfig & { serviceTier: string } {
   const model = info?.models.find((row) => row.id === config.model || row.aliases?.includes(config.model));
-  const efforts = model?.reasoningEfforts?.map((row) => row.id) ?? (NATIVE_EFFORT_PROVIDERS.has(config.provider) ? ['none'] : ['low', 'medium', 'high']);
-  // A model can explicitly advertise no reasoning control.
-  if (!efforts.length) efforts.push('none');
+  // Missing catalog metadata and an explicitly empty list both mean: leave the provider's native default in control.
+  const efforts = model?.reasoningEfforts?.length ? model.reasoningEfforts.map((row) => row.id) : ['none'];
   const defaultEffort = model?.defaultReasoningEffort && efforts.includes(model.defaultReasoningEffort)
     ? model.defaultReasoningEffort : efforts.includes('high') ? 'high' : efforts[0]!;
   let effort = config.effort;

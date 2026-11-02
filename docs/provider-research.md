@@ -129,7 +129,7 @@ Executable choice (`discovery.ts`): a non-empty `codexExecutable`/`claudeExecuta
 
 * **Claude:** `available` requires a working executable plus either a nonblank `ANTHROPIC_API_KEY` or a CLI auth-status response with `loggedIn: true`. The key/login is not validated against a model without a run; `reason` says so. A missing login gives the resolved executable's `auth login` command and an optional API-key path. Failed, timed-out or unrecognized auth-status output is shown as a setup diagnostic. Only known authentication-method labels are exposed; email, account identifiers, raw auth-status output and credentials never enter the public result.
 * **Codex:** `available` requires a working executable, a responding app-server and an account from `account/read` (the account type is reported; the email is not read into the result). `account: null` with `requiresOpenaiAuth` yields unavailable plus a `codex login` hint. If `account/read` itself fails the provider stays available with a note that login could not be verified.
-* **Models:** Codex lists come from `model/list` with effort/tier metadata. Claude uses an initialization-only SDK `supportedModels()` query, preserving canonical aliases, effort levels, Fast support and Auto support. Discovery failures retain baseline model entries with limited controls. Relay does not issue an inference prompt during discovery.
+* **Models:** Codex lists come from `model/list` with effort/tier metadata. Claude uses an initialization-only SDK `supportedModels()` query, preserving exact model IDs, aliases, advertised effort strings, Fast support and Auto support. Discovery failure is retained as unavailable metadata with its reason; Claude does not substitute a static model list or guessed effort controls. Saved model IDs remain visible, and an optional bounded custom Claude model ID can be entered; account access remains unverified until an actual run. Relay does not issue an inference prompt during discovery.
 
 ## Policy mapping
 
@@ -178,5 +178,5 @@ Not covered automatically: real model turns, real approvals from the live CLIs a
 * Codex `inputTokens` includes cached input; Claude's includes cache reads and writes. Neither is a billing figure.
 * Claude project `.claude/settings.json` allow rules are still honoured (user-level settings are not); hooks are disabled.
 * Cloud-provider authentication for Claude (Bedrock, Vertex, Foundry) is not implemented.
-* The Claude model list is static; entries may need updating as models are released.
+* Claude's model catalog depends on the installed SDK and runtime. Custom IDs can be attempted, but neither discovery nor the custom-ID entry verifies account access; Claude checks access when a real session starts.
 * The `claude_code` system prompt preset and tool set are whatever the installed Claude Code version provides.

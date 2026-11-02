@@ -4,7 +4,7 @@ import type { AppSettings, ProviderInfo, ProviderModel } from '@mingle/contracts
 import { CODEX_CLIENT_INFO } from './codex/adapter.js';
 import { CODEX_POLICIES, parseCodexModel } from './codex/capabilities.js';
 import { JsonRpcConnection, RpcError } from './codex/rpc.js';
-import { CLAUDE_DEFAULT_MODEL, CLAUDE_MODELS } from './claude/messages.js';
+import { CLAUDE_DEFAULT_MODEL } from './claude/messages.js';
 import { claudeEnvironment } from './claude/auth.js';
 import { CLAUDE_POLICIES, probeClaudeModels } from './claude/capabilities.js';
 import { TextTail, cleanEnv, errorMessage, isRecord, redactSecrets, truncate } from './common.js';
@@ -66,19 +66,20 @@ function skippedNote(executable: ResolvedExecutable, label: string): string | nu
 
 export async function detectClaude(settings: AppSettings, deps: DetectDeps = {}): Promise<ProviderInfo> {
   const env = deps.env ?? process.env;
-  const baselinePolicies = CLAUDE_POLICIES.filter((policy) => policy !== 'auto');
   const base: ProviderInfo = { id: 'claude', name: 'Claude', available: false, version: null, executable: null, reason: null,
     // These describe the official SDK input transport. Model-specific input modalities are not reported by ModelInfo.
     promptCapabilities: { image: true, embeddedContext: true },
-    models: CLAUDE_MODELS.map((model) => ({ ...model, policies: baselinePolicies })), policies: baselinePolicies };
+    models: [], policies: CLAUDE_POLICIES.filter((policy) => policy !== 'auto'), modelDiscovery: { status: 'unavailable', source: 'native-sdk', reason: 'Claude model metadata has not been read yet.' } };
   const withModels = async (info: ProviderInfo): Promise<ProviderInfo> => {
     // Injected probes own their entire environment; never escape them by launching a real SDK process.
     if (deps.probe || deps.spawn || deps.env || deps.home) return info;
     try {
       const models = await probeClaudeModels(settings);
-      return models.length ? { ...info, models } : { ...info, reason: `${info.reason ?? ''} Model capabilities were not reported; showing baseline controls.`.trim() };
+      return models.length ? { ...info, models, modelDiscovery: { status: 'reported', source: 'native-sdk' } }
+        : { ...info, modelDiscovery: { status: 'unavailable', source: 'native-sdk', reason: 'Claude returned an empty model catalog.' }, reason: `${info.reason ?? ''} Claude reported no models; custom model IDs can be entered but account access is unverified until a run.`.trim() };
     } catch (error) {
-      return { ...info, reason: `${info.reason ?? ''} Model capabilities unavailable: ${truncate(redactSecrets(errorMessage(error)), 250)}`.trim() };
+      const reason = `Claude model capabilities unavailable: ${truncate(redactSecrets(errorMessage(error)), 250)}`;
+      return { ...info, modelDiscovery: { status: 'unavailable', source: 'native-sdk', reason }, reason: [info.reason, reason].filter(Boolean).join(' ') };
     }
   };
   const resolved = await resolveExecutable({ name: 'claude', override: settings.claudeExecutable, env, home: deps.home, probe: deps.probe, extraCandidates: bundledClaudeCandidates() });
@@ -193,25 +194,29 @@ export async function probeCodexAppServer(executable: string, deps: DetectDeps =
 
 export async function detectCodex(settings: AppSettings, deps: DetectDeps = {}): Promise<ProviderInfo> {
   const env = deps.env ?? process.env;
-  const base: ProviderInfo = { id: 'codex', name: 'Codex', available: false, version: null, executable: null, reason: null, models: [], policies: CODEX_POLICIES };
+  const base: ProviderInfo = { id: 'codex', name: 'Codex', available: false, version: null, executable: null, reason: null, models: [], policies: CODEX_POLICIES,
+    modelDiscovery: { status: 'unavailable', source: 'native-app-server', reason: 'Codex model metadata has not been read yet.' } };
   const resolved = await resolveExecutable({ name: 'codex', override: settings.codexExecutable, env, home: deps.home, probe: deps.probe });
   if (!resolved.ok) return { ...base, reason: resolved.reason };
   const { executable } = resolved;
   const info = { ...base, version: executable.version, executable: executable.path };
   const probe = await probeCodexAppServer(executable.path, deps);
   const models = probe.models && probe.models.length > 0 ? probe.models : [CODEX_DEFAULT_MODEL_ENTRY];
+  const modelDiscovery = probe.models?.length
+    ? { status: 'reported' as const, source: 'native-app-server' as const }
+    : { status: 'unavailable' as const, source: 'native-app-server' as const, reason: probe.models === null ? 'Codex model/list did not return a catalog.' : 'Codex returned an empty model catalog.' };
   const note = skippedNote(executable, 'Codex');
   if (probe.account === 'none') {
-    return { ...info, models, reason: `Codex ${executable.version} is installed at ${executable.path} but no Codex login was found. Run \`codex login\` in a terminal, then refresh.` };
+    return { ...info, models, modelDiscovery, reason: `Codex ${executable.version} is installed at ${executable.path} but no Codex login was found. Run \`codex login\` in a terminal, then refresh.` };
   }
   if (probe.models === null && probe.account === 'unknown') {
-    return { ...info, models, reason: `Codex ${executable.version} is installed at ${executable.path}, but its app-server did not respond: ${truncate(probe.error ?? 'unknown error', 400)}` };
+    return { ...info, models, modelDiscovery, reason: `Codex ${executable.version} is installed at ${executable.path}, but its app-server did not respond: ${truncate(probe.error ?? 'unknown error', 400)}` };
   }
   const authText = probe.account === 'present'
     ? `Codex account detected${probe.accountType ? ` (${probe.accountType})` : ''}; the login is not validated until a session runs.`
     : 'Could not verify whether Codex is logged in.';
   const modelText = probe.models === null ? 'Model list unavailable; showing the default model only.' : null;
-  return { ...info, available: true, models, reason: [authText, modelText, probe.error && probe.models !== null ? truncate(probe.error, 300) : null, note].filter(Boolean).join(' ') };
+  return { ...info, available: true, models, modelDiscovery, reason: [authText, modelText, probe.error && probe.models !== null ? truncate(probe.error, 300) : null, note].filter(Boolean).join(' ') };
 }
 
 // ---- Public entry ----------------------------------------------------------------------------------------------

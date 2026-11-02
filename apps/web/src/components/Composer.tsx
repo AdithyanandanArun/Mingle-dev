@@ -380,7 +380,7 @@ export function Composer({ session, statusBar }: { session: Session; statusBar?:
   const selectedTier = tierChoices.find((item) => item.id === currentTier);
   const combinedDisplay = hasCurrentEffort
     ? `${effortLabel(session.effort)}${currentTier === 'standard' ? '' : ` · ${selectedTier ? tierName(selectedTier.id, selectedTier.name) : currentTier}`}`
-    : selectedTier ? tierName(selectedTier.id, selectedTier.name) : currentTier;
+    : `${currentModel?.reasoningEfforts ? 'Native/default' : 'Effort not reported'}${currentTier === 'standard' ? '' : ` · ${selectedTier ? tierName(selectedTier.id, selectedTier.name) : currentTier}`}`;
   const availablePolicyChoices = currentModel?.policies ?? currentProvider?.policies ?? [];
   const isTeamSessionAnchor = teamStructure?.projectId === session.projectId && teamStructure.host.isThisDevice
     && teamStructure.teamSession?.sessionId === session.id;

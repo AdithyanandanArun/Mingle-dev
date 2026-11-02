@@ -128,15 +128,16 @@ export function normalizeConfig(config: AgentConfiguration, providers: readonly 
   const reportedCurrent = modelOf(info, config.model);
   const nativeDefault = usesNativeModelDefault(config.provider);
   const preserveNativeDefault = nativeDefault && config.model === 'default' && !reportedCurrent;
-  const model = reportedCurrent ?? (preserveNativeDefault ? undefined : modelOf(info, configuredDefault))
-    ?? (nativeDefault && (config.model === 'default' || configuredDefault === 'default') ? undefined : info?.models[0]);
+  const preserveUnreportedClaudeModel = config.provider === 'claude' && !reportedCurrent;
+  const model = reportedCurrent ?? (preserveNativeDefault || preserveUnreportedClaudeModel ? undefined : modelOf(info, configuredDefault))
+    ?? (preserveNativeDefault || preserveUnreportedClaudeModel || nativeDefault && (config.model === 'default' || configuredDefault === 'default') ? undefined : info?.models[0]);
   const efforts = effortChoices(model);
   const tiers = tierChoices(model);
   const policies = policyChoices(info, model);
   return {
     provider: config.provider,
     model: model?.id ?? (nativeDefault && (preserveNativeDefault || configuredDefault === 'default' && !reportedCurrent) ? 'default' : config.model),
-    effort: efforts.some((item) => item.id === config.effort) ? config.effort : model?.defaultReasoningEffort ?? efforts[0]?.id ?? config.effort,
+    effort: efforts.some((item) => item.id === config.effort) ? config.effort : model?.defaultReasoningEffort && efforts.some((item) => item.id === model.defaultReasoningEffort) ? model.defaultReasoningEffort : efforts[0]?.id ?? 'none',
     policy: policies.includes(config.policy) ? config.policy : policies.includes(settings.defaultPolicy) ? settings.defaultPolicy : policies[0] ?? config.policy,
     serviceTier: tiers.some((item) => item.id === config.serviceTier) ? config.serviceTier : model?.defaultServiceTier ?? 'standard',
   };

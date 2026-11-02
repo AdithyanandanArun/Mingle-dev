@@ -78,6 +78,14 @@ describe('claude adapter', () => {
     expect(text(run.events)).toBe('No streaming here');
   });
 
+  it('forwards a newly advertised safe effort identifier without translating it', async () => {
+    const run = makeRun({ session: { provider: 'claude', model: 'claude-haiku-5-5-20261101', effort: 'ultra' } });
+    const { adapter, calls } = adapterFor([init(), success()]);
+    await adapter.run(run.options);
+    expect(calls[0]!.options.model).toBe('claude-haiku-5-5-20261101');
+    expect(calls[0]!.options.effort).toBe('ultra');
+  });
+
   it('captures Claude subagent assistant text by parent tool use without adding it to the main transcript', async () => {
     const run = makeRun({ session: { provider: 'claude' } });
     const { adapter } = adapterFor([

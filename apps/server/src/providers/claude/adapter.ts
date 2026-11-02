@@ -95,8 +95,8 @@ export function createClaudeAdapter(deps: ClaudeAdapterDeps = {}): AgentAdapter 
       const prompt = [userText || NO_TEXT_PROMPT, note].filter(Boolean).join('\n\n');
       const images = imagesOf(run.attachments);
       for (const image of images) imageMime(image, ATTACHMENT_LIMITS.claudeImageBytes);
-      if (session.effort !== 'none' && !['low', 'medium', 'high', 'xhigh', 'max'].includes(session.effort)) {
-        throw new ProviderError(`Claude does not support reasoning effort "${session.effort}". Refresh the model capabilities and choose a listed effort.`, { code: 'unsupported_effort' });
+      if (session.effort !== 'none' && (session.effort.length > 40 || !/^[a-z][a-z0-9_-]*$/.test(session.effort))) {
+        throw new ProviderError(`Claude reasoning effort "${session.effort}" is not a valid bounded identifier.`, { code: 'unsupported_effort' });
       }
       if (session.serviceTier && !['standard', 'fast'].includes(session.serviceTier)) {
         throw new ProviderError(`Claude does not support service tier "${session.serviceTier}".`, { code: 'unsupported_service_tier' });
@@ -261,8 +261,8 @@ export function createClaudeAdapter(deps: ClaudeAdapterDeps = {}): AgentAdapter 
       });
       if (!session.providerSessionId) return result('unsupported', 'Claude has no native conversation to compact yet.', null);
       if (signal.aborted) return result('failed', 'Claude compaction was interrupted before it started.', 'interrupted');
-      if (session.effort !== 'none' && !['low', 'medium', 'high', 'xhigh', 'max'].includes(session.effort)) {
-        return result('failed', `Claude does not support reasoning effort "${session.effort}".`, 'unsupported_effort');
+      if (session.effort !== 'none' && (session.effort.length > 40 || !/^[a-z][a-z0-9_-]*$/.test(session.effort))) {
+        return result('failed', `Claude reasoning effort "${session.effort}" is not a valid bounded identifier.`, 'unsupported_effort');
       }
       if (session.serviceTier && !['standard', 'fast'].includes(session.serviceTier)) return result('failed', 'Claude does not support this service tier.', 'unsupported_service_tier');
       const env = deps.env ?? process.env;

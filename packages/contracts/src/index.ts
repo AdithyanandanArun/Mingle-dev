@@ -76,6 +76,8 @@ export interface ProviderModel {
 }
 export interface ProviderInfo {
   id: Provider; name: string; available: boolean; version: string | null; executable: string | null; reason: string | null; models: ProviderModel[]; policies?: Policy[];
+  /** Whether model capabilities are a live native catalog or unavailable; absent on providers with other discovery flows. */
+  modelDiscovery?: { status: 'reported' | 'unavailable'; source: 'native-sdk' | 'native-app-server'; reason?: string };
   /** Native input transport capabilities; ACP values are negotiated during discovery and SDK values describe its supported content API. A model modality, when reported, takes precedence. */
   promptCapabilities?: { image: boolean; embeddedContext: boolean };
 }

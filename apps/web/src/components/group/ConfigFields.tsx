@@ -35,7 +35,7 @@ export function ConfigFields({ value, onChange, idPrefix, lockProvider = false, 
         </Field>
         <Field label="Reasoning effort" htmlFor={`${idPrefix}-effort`}>
           <SelectMenu id={`${idPrefix}-effort`} label="Reasoning effort" value={value.effort} disabled={disabled || efforts.length === 0}
-            displayValue={efforts.length ? efforts.some((item) => item.id === value.effort) ? undefined : 'Not available' : 'Native/default'}
+            displayValue={efforts.length ? efforts.some((item) => item.id === value.effort) ? undefined : 'Not available' : model?.reasoningEfforts ? 'Native/default' : 'Not reported'}
             options={efforts.map((item) => ({ value: item.id, label: item.label, badge: item.id === model?.defaultReasoningEffort ? 'Default' : undefined, description: item.description }))}
             onChange={(next) => patch({ effort: next })} />
         </Field>

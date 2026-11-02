@@ -7,8 +7,9 @@ import { claudeEnvironment } from './auth.js';
 /** Provider-wide policies with a direct native Claude Code mode mapping. */
 export const CLAUDE_POLICIES: Policy[] = ['supervised', 'balanced', 'auto', 'full-access'];
 
-/** Effort values accepted by Claude Code's Agent SDK. */
-const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'] as const;
+/** Accept only bounded protocol identifiers, while preserving future SDK-advertised efforts exactly. */
+const safeEffort = (value: string): boolean => value.length <= 40 && /^[a-z][a-z0-9_-]*$/.test(value);
+const safeModelId = (value: string): boolean => value.length <= 150 && !/[\u0000-\u001f\u007f]/.test(value);
 
 async function* holdOpenWithoutPrompt(signal: AbortSignal): AsyncGenerator<SDKUserMessage, void, unknown> {
   // Keep SDK stdin open for control RPCs, but never yield a user message or start a model turn.
@@ -83,12 +84,11 @@ export async function withClaudeMetadataQuery<T>(
 export function claudeModelsFromSdk(models: ModelInfo[]): ProviderModel[] {
   return models.flatMap((model) => {
     const id = model.value.trim();
-    if (!id) return [];
-    const sdkEfforts = model.supportedEffortLevels?.filter((effort) => (EFFORTS as readonly string[]).includes(effort));
-    const supportedEfforts = sdkEfforts ?? ['low', 'medium', 'high'];
+    if (!safeModelId(id)) return [];
+    const sdkEfforts = model.supportedEffortLevels?.filter((effort) => safeEffort(effort)).slice(0, 32);
     const reasoningEfforts = model.supportsEffort === false
       ? []
-      : supportedEfforts.map((effort) => ({ id: effort, label: effort }));
+      : sdkEfforts?.map((effort) => ({ id: effort, label: effort }));
     const serviceTiers = [
       { id: 'standard', name: 'Standard' },
       ...(model.supportsFastMode ? [{ id: 'fast', name: 'Fast', description: 'Claude Code fast mode; account and usage availability is checked by Claude at run time.' }] : []),
@@ -96,9 +96,9 @@ export function claudeModelsFromSdk(models: ModelInfo[]): ProviderModel[] {
     const policies = CLAUDE_POLICIES.filter((policy) => policy !== 'auto' || model.supportsAutoMode === true);
     return [{
       id,
-      name: model.displayName || id,
-      ...(model.resolvedModel && model.resolvedModel !== id ? { aliases: [model.resolvedModel] } : {}),
-      reasoningEfforts,
+      name: model.displayName?.trim().slice(0, 120) || id,
+      ...(model.resolvedModel && model.resolvedModel !== id && safeModelId(model.resolvedModel) ? { aliases: [model.resolvedModel] } : {}),
+      ...(reasoningEfforts !== undefined ? { reasoningEfforts } : {}),
       ...(model.supportsEffort === false ? { defaultReasoningEffort: 'none' } : {}),
       policies,
       serviceTiers,

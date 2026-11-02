@@ -117,7 +117,8 @@ echo "2.1.292 (Claude Code)"`);
     expect(withKey.available).toBe(true);
     expect(withKey.reason).toContain('not validated');
     expect(JSON.stringify(withKey)).not.toContain('sk-ant-secret');
-    expect(withKey.models.map((m) => m.id)).toEqual(['claude-sonnet-5-5', 'claude-opus-5-5', 'claude-fable-5-1', 'claude-haiku-4-5-20251001']);
+    expect(withKey.models).toEqual([]);
+    expect(withKey.modelDiscovery).toMatchObject({ status: 'unavailable', source: 'native-sdk' });
   });
 
   it('reports a missing Claude executable', async () => {
@@ -131,6 +132,7 @@ echo "2.1.292 (Claude Code)"`);
     const info = await detectCodex({ ...settings, codexExecutable: codex }, { env: { PATH: '', FAKE_CODEX_ACCOUNT: 'chatgpt' } });
     expect(info).toMatchObject({ id: 'codex', available: true, version: '9.9.9', executable: codex });
     expect(info.models).toMatchObject([{ id: 'gpt-6.1-sol', name: 'GPT-6.1 Sol' }]);
+    expect(info.modelDiscovery).toMatchObject({ status: 'reported', source: 'native-app-server' });
     expect(info.reason).toContain('chatgpt');
     expect(info.reason).toContain('not validated');
   });
@@ -148,6 +150,7 @@ echo "2.1.292 (Claude Code)"`);
     const info = await detectCodex({ ...settings, codexExecutable: codex }, { env: { PATH: '', FAKE_CODEX_MODE: 'no-initialize' }, codexProbeTimeoutMs: 1_200 });
     expect(info.available).toBe(false);
     expect(info.models).toEqual([{ id: 'gpt-6.1-sol', name: 'GPT-6.1 Sol' }]);
+    expect(info.modelDiscovery).toMatchObject({ status: 'unavailable', source: 'native-app-server' });
     expect(info.reason).toContain('did not respond');
   });
 
