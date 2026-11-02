@@ -15,7 +15,7 @@ Contract: `packages/contracts/src/project-memory.ts` (Zod schemas + types, expor
 | `lifecycle` | `active`, `stale` (a referenced file's content no longer matches what was recorded, *on this device*), or `retired` (tombstone). |
 | `pinned` | A person pinned it. Pinned entries are always offered to runs first (max 3) and **agents cannot edit or retire them**. |
 | `humanVerified` | A person created, edited or re-verified it. Any later agent edit clears it. |
-| `revision` | Integer starting at 1; increases by one on every durable change (content, pin, retire, restore). Stale marking does **not** change it (it is per-device state). |
+| `revision` | Integer starting at 1; local writes increment the selected head (content, pin, retire, restore). Sync can select another branch, so use `headRecordId` for exact identity. Stale marking does **not** change it (it is per-device state). |
 | `author` / `updatedBy` | `{kind:'agent', sessionId, runId, name, provider, model, accountId, deviceId}` or `{kind:'human', displayName, accountId, deviceId}`. Always taken from the authenticated run or the signed-in account — never from tool arguments or request bodies. |
 | `files[]` | `{path, revision, baseRevision, verifiedAt}`; `path` is project-relative, `revision` is a SHA-256 prefix computed by the server. |
 | `sources[]` | Server-verified non-file provenance: `commit` (exists in the project repo), `command` (a completed tool call in the authoring run that exited 0), and `run` (the authoring run, added automatically as provenance). Unverifiable references are dropped with a notice. |
