@@ -425,7 +425,7 @@ export class ProjectMemoryTeamSync implements MemoryTeamHooks {
       const more = rows.length > RESPONSE_RECORD_CEILING;
       const records = rows.slice(0, RESPONSE_RECORD_CEILING).map((row) => this.options.service.toSyncRecord(row, row.teamId!, row.sharedProjectId!, row.authorDeviceId!, row.signature!));
       if (request.want?.length) await this.signCompactProofs(projectId, envelope.teamId, request.sharedProjectId, request.want);
-      const proofs = request.want?.length ? repo.causalProofs(request.want) : [];
+      const proofs = request.want?.length ? repo.causalProofs(request.want, projectId) : [];
       const batches = this.batches(request.sharedProjectId, request.requestId, records, more, proofs);
       for (const batch of batches) {
         const digest = createHash('sha256').update(JSON.stringify(batch)).digest('hex').slice(0, 32);
@@ -494,13 +494,20 @@ export class ProjectMemoryTeamSync implements MemoryTeamHooks {
     const binding = this.bindingFor(projectId);
     const deviceId = this.options.transport.snapshot(teamId).deviceId;
     if (!binding || binding.teamId !== teamId || binding.sharedProjectId !== sharedProjectId || !deviceId) return;
+    const accountId = this.options.authority.localAccountId();
+    if (!accountId) return;
     for (const basis of repo.unsignedCausalProofBases(projectId, ids)) {
+      if ((basis.author.accountId && basis.author.accountId !== accountId)
+        || (basis.author.deviceId && basis.author.deviceId !== deviceId)) continue;
       const proofBody: Omit<ProjectMemoryCausalProof, 'signature'> = {
         recordId: basis.recordId, entryId: basis.entryId, parentId: basis.parentId, parentRevision: basis.parentRevision,
         revision: basis.revision, op: basis.op, authorKind: basis.authorKind, authorDeviceId: deviceId,
         controlId: basis.controlId, epoch: basis.epoch, pinned: basis.pinned, retired: basis.retired, humanVerified: basis.humanVerified,
       };
       const signature = await this.options.transport.signPayload(teamId, deviceId, causalProofPayload(proofBody));
+      const current = this.bindingFor(projectId);
+      if (this.closed || this.options.authority.localAccountId() !== accountId || this.options.transport.snapshot(teamId).deviceId !== deviceId
+        || current?.teamId !== teamId || current.sharedProjectId !== sharedProjectId) return;
       repo.saveCausalProof(ProjectMemoryCausalProofSchema.parse({ ...proofBody, signature }), true);
     }
   }

@@ -216,10 +216,10 @@ export class MemoryRepo {
   pendingCausalRecords(entryId: string): RevisionRow[] {
     return this.all("SELECT * FROM mingle_project_memory_revisions WHERE entry_id=? AND causal_state='pending' ORDER BY revision,at,record_id", entryId).map(revisionRow);
   }
-  causalProofs(ids: string[]): ProjectMemoryCausalProof[] {
+  causalProofs(ids: string[], projectId: string): ProjectMemoryCausalProof[] {
     if (!ids.length) return [];
     const placeholders = ids.map(() => '?').join(',');
-    return this.all(`SELECT proof_json FROM mingle_project_memory_causality WHERE valid=1 AND record_id IN (${placeholders})`, ...ids)
+    return this.all(`SELECT c.proof_json FROM mingle_project_memory_causality c JOIN mingle_project_memory_entries e ON e.id=c.entry_id WHERE e.project_id=? AND c.valid=1 AND c.record_id IN (${placeholders})`, projectId, ...ids)
       .flatMap((row) => row.proof_json ? [json<ProjectMemoryCausalProof>(row.proof_json)] : []);
   }
   unsignedCausalProofBases(projectId: string, ids: string[]): CausalProofBasis[] {

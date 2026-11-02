@@ -408,6 +408,26 @@ describe('project memory service', () => {
     await expect(w.service.agentRemember(w.run(ctx.session), { kind: 'fact', title: 'Fresh run budget', body: 'allowed again' })).resolves.toMatchObject({ outcome: 'created' });
   });
 
+  it('retains body-free local ancestry across pruning and reopening a persisted project', async () => {
+    const file = path.join(tmpDir('mingle-memory-ancestry-'), 'memory.sqlite');
+    const w = world({ file }); const session = w.session();
+    const created = await w.service.agentRemember(w.run(session), { kind: 'fact', title: 'Before team binding', body: 'Original offline memory.' });
+    let ancestor = '';
+    for (let i = 0; i < 65; i++) {
+      const update = await w.service.agentUpdate(w.run(session), { id: created.entry.id, body: `Offline persisted update ${i}.` });
+      if (i === 1) ancestor = update.entry.headRecordId;
+    }
+    expect(w.service.repo.getRecord(ancestor)).toBeUndefined();
+    w.service.close(); w.db.close();
+    const restored = world({ file });
+    const bases = restored.service.repo.unsignedCausalProofBases(w.project.id, [ancestor]);
+    expect(bases).toHaveLength(1);
+    expect(bases[0]).toMatchObject({ recordId: ancestor, entryId: created.entry.id, revision: 3, authorKind: 'agent' });
+    expect(bases[0]).not.toHaveProperty('snapshot');
+    expect(bases[0]).not.toHaveProperty('body');
+    expect(restored.service.repo.unsignedCausalProofBases(restored.project.id, [ancestor])).toEqual([]);
+  });
+
   it('survives a restart with history, dedup keys and tombstones intact', async () => {
     const dir = tmpDir('mingle-memory-db-');
     const file = path.join(dir, 'relay.sqlite');
@@ -432,6 +452,8 @@ describe('project memory service', () => {
     const db = openDatabase(file);
     const store = new Store(db);
     const service = new ProjectMemoryService(store, { scanMinIntervalMs: 0 });
+    expect(service.repo.causalProofs([proof.recordId], first.project.id)).toHaveLength(1);
+    expect(service.repo.causalProofs([proof.recordId], 'another-project')).toEqual([]);
     expect(service.repo.causalProofFor(proof.recordId)).toMatchObject({ proof: { recordId: proof.recordId }, valid: true });
     cleanup.push(() => { service.close(); try { db.close(); } catch { /* closed */ } });
     const list = await service.list(first.project.id, { include: 'all', limit: 50 } as never);
