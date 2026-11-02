@@ -389,6 +389,7 @@ export const useMingle = create<MingleState>((set, get) => {
       }
       case 'state.changed': {
         const incoming = ev.event;
+        if (incoming?.type === 'provider.updates.updated') window.dispatchEvent(new Event('mingle:provider-updates-changed'));
         if (incoming?.type === 'team.agent.activity.updated') {
           window.dispatchEvent(new CustomEvent('mingle:team-activity-updated', { detail: incoming.payload }));
           break;

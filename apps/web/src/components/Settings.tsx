@@ -16,6 +16,7 @@ import { AntigravityRuntimeSetup } from './AntigravityRuntimeSetup';
 import { ProviderExecutableSetting, executableSetting } from './ProviderExecutableSetting';
 import { RemoveProjectButton } from './RemoveProjectDialog';
 import { TeamWorkspace } from './distributed/TeamWorkspace';
+import { ProviderUpdates } from './ProviderUpdates';
 
 const CATEGORIES: { id: SettingsSection; name: string }[] = [
   { id: 'general', name: 'General' }, { id: 'account', name: 'Account' }, { id: 'team', name: 'Team workspace' }, { id: 'project', name: 'Project' }, { id: 'agents', name: 'Agents' }, { id: 'providers', name: 'Providers' }, { id: 'browser', name: 'Browser' }, { id: 'appearance', name: 'Appearance' },
@@ -159,6 +160,7 @@ export function SettingsPage({ onReplayOnboarding }: { onReplayOnboarding: () =>
       {category === 'browser' ? <BrowserSettings settings={settings} disabled={disabled} update={update} /> : null}
       {category === 'project' && project ? <ProjectSettings key={`${project.id}:${project.name}`} project={project} /> : null}
       {category === 'providers' ? <div className="settings-page__section">
+        <ProviderUpdates />
         <div className="settings-page__section-head settings-page__section-head--actions"><div><h2>Connected agents</h2><p>Local installations and login status.</p></div><Button size="sm" disabled={disabled} busy={busy === 'providers'} onClick={() => void refreshProviders()}><RefreshCw size={12} /> Re-check</Button></div>
         <p className="settings-page__hint">Set a full executable path or command name below. Leave it empty for automatic detection.</p>
         {boot.providers.map((provider) => <ProviderStatus key={provider.id} provider={provider} settings={settings} disabled={disabled} onSavePath={async (value) => {

@@ -20,6 +20,7 @@ import { ProjectInviteJoinDialog, ProjectTeammatesDialog } from './components/pr
 import { TeamStructureProvider } from './lib/team-structure-context';
 import { teamSessionsApi } from './lib/team-sessions';
 import { Onboarding } from './components/onboarding/Onboarding';
+import { ProviderUpdates } from './components/ProviderUpdates';
 
 declare global {
   interface Window {
@@ -120,6 +121,11 @@ export function App() {
   onboardingVisibleRef.current = onboardingVisible;
 
   useEffect(() => { useMingle.getState().init(); }, []);
+  useEffect(() => {
+    const open = () => useMingle.getState().openSettings({ section: 'providers' });
+    window.addEventListener('mingle:open-provider-settings', open);
+    return () => window.removeEventListener('mingle:open-provider-settings', open);
+  }, []);
   useEffect(() => {
     const openInvitation = (token: string | null) => {
       if (!token) return;
@@ -243,6 +249,7 @@ export function App() {
       <main className="main" id="main" tabIndex={-1}>
         <Header />
         <ConnectionBanner />
+        <ProviderUpdates noticeOnly />
         <div className="main__body">
           <Boundary label="This view">
             {view === 'workspace' ? <Workspace /> : null}

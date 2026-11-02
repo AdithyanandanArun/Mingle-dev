@@ -6,6 +6,7 @@ import type { DelegatedSubagent, StartSubagent } from '@mingle/contracts';
 import type { AccountState, AccountConnection, AccountPreferences, SavedAccountPreferences, AttachmentRef, NativeActionCatalog } from '@mingle/contracts';
 import type { ProjectCollaborationSnapshot, SendTeamChatMessage, TeamChatSnapshot, TeamChatMessage } from '@mingle/contracts';
 import type { ProgressBoardResponse } from '@mingle/contracts';
+import type { ProviderUpdateInfo, ProviderUpdatesSnapshot } from '@mingle/contracts';
 import type {
   ContextCompactionResult as ContractContextCompactionResult,
   ProviderFailure as ContractProviderFailure,
@@ -269,6 +270,10 @@ export const api = {
   decideApproval: (id: string, decision: 'approved' | 'denied') => json<Approval>(`/api/approvals/${encodeURIComponent(id)}`, 'POST', { decision }),
   updateSettings: (patch: Partial<AppSettings>) => json<AppSettings>('/api/settings', 'PATCH', patch),
   refreshProviders: () => json<ProviderInfo[]>('/api/providers/refresh', 'POST'),
+  providerUpdates: (signal?: AbortSignal) => json<ProviderUpdatesSnapshot>('/api/providers/updates', 'GET', undefined, signal),
+  checkProviderUpdates: (provider?: ProviderInfo['id']) => json<ProviderUpdateInfo | ProviderUpdatesSnapshot>('/api/providers/updates/check', 'POST', provider ? { provider } : {}),
+  applyProviderUpdate: (provider: ProviderInfo['id'], expectedVersion: string | null) => json<ProviderUpdateInfo>('/api/providers/updates/apply', 'POST', { provider, expectedVersion }),
+  dismissProviderUpdate: (provider: ProviderInfo['id'], version: string) => json<{ ok: boolean }>('/api/providers/updates/dismiss', 'POST', { provider, version }),
   antigravityInstallState: (signal?: AbortSignal) => json<AntigravityInstallState>('/api/providers/antigravity/install', 'GET', undefined, signal),
   installAntigravityRuntime: () => json<AntigravityInstallState>('/api/providers/antigravity/install', 'POST', {}),
   antigravityAuthState: (signal?: AbortSignal) => json<AntigravityAuthState>('/api/providers/antigravity/auth', 'GET', undefined, signal),
