@@ -13,6 +13,8 @@ import type { TeamMcpBridge } from './team-mcp.ts';
 import type { BrowserMcpBridge } from './browser-mcp.ts';
 import type { ProgressMcpBridge } from './progress-mcp.ts';
 import type { SubagentMcpBridge } from './subagent-mcp.ts';
+import type { ProjectMemoryService } from './project-memory/service.ts';
+import type { ProjectMemoryMcpBridge } from './project-memory/mcp.ts';
 import type { AttachmentService } from './attachments/service.ts';
 import type { NativeInvocation, RunAttachment } from '@mingle/contracts';
 import type { RecoveryService } from './recovery/service.ts';
@@ -213,6 +215,8 @@ export class SessionRuntime {
   private teamMcp?: TeamMcpBridge;
   private progressMcp?: ProgressMcpBridge;
   private subagentMcp?: SubagentMcpBridge;
+  private projectMemory?: ProjectMemoryService;
+  private memoryMcp?: ProjectMemoryMcpBridge;
   private runFinishedListeners = new Set<(sessionId:string,outcome:'completed'|'failed'|'interrupted',failure:string|null)=>void>();
   private teamProxy?: TeamProxyRuntimeService;
   private attachmentService?: AttachmentService;
@@ -238,6 +242,7 @@ export class SessionRuntime {
   }
   setProgressMcp(progressMcp: ProgressMcpBridge): void { this.progressMcp = progressMcp; }
   setSubagentMcp(bridge:SubagentMcpBridge):void {this.subagentMcp=bridge;}
+  setProjectMemory(service: ProjectMemoryService, bridge: ProjectMemoryMcpBridge): void { this.projectMemory = service; this.memoryMcp = bridge; }
   onRunFinished(listener:(sessionId:string,outcome:'completed'|'failed'|'interrupted',failure:string|null)=>void):()=>void { this.runFinishedListeners.add(listener);return()=>this.runFinishedListeners.delete(listener); }
   setTeamProxyService(service: TeamProxyRuntimeService): void { this.teamProxy = service; }
 
@@ -605,6 +610,14 @@ export class SessionRuntime {
       const subagentMcp = run.intent !== 'plan' && !session.parentSessionId && !this.groups?.forSession(session.id)
         ? this.subagentMcp?.create({runId:run.id,session,signal:run.controller.signal,live:()=>this.isRunLive(run.sessionId,run.id)}) : undefined;
       if(subagentMcp) capabilityTokens.push(subagentMcp.token);
+      // Project memory: agent tools exist only for runs that may act (never read-only planning); recalled entries are reference data in every run.
+      const memoryMcp = run.intent !== 'plan' ? this.memoryMcp?.create({
+        runId: run.id, session, signal: run.controller.signal, isLive: () => this.isRunLive(run.sessionId, run.id),
+      }) : undefined;
+      if (memoryMcp) capabilityTokens.push(memoryMcp.token);
+      let memoryContext: string | undefined;
+      try { memoryContext = this.projectMemory?.buildRunContext({ session, runId: run.id, prompt, tools: Boolean(memoryMcp) }); }
+      catch (error) { this.log('warn', `Project memory context was skipped: ${redactSecrets(errorMessage(error)).slice(0, 200)}`); }
       const explicit = run.invocation;
       const providerHandoffBlock = await this.providerHandoffBlock(run, session);
       const progressInstructions = progressMcp
@@ -612,15 +625,15 @@ export class SessionRuntime {
         : undefined;
       const subagentInstructions=subagentMcp?'Mingle provides subagent tools for parallel self-contained tasks. Start them, continue your work, and finish your turn when ready; Mingle will resume you with each result automatically.':'';
       const effectivePrompt = explicit ? prompt : [providerHandoffBlock, run.intent !== 'plan' ? groupContext?.instructions : undefined, run.context, prompt].filter(Boolean).join('\n\n');
-      if (explicit && (providerHandoffBlock || progressInstructions || subagentInstructions)) run.context = [providerHandoffBlock, progressInstructions, subagentInstructions, run.context].filter(Boolean).join('\n\n');
+      if (explicit && (providerHandoffBlock || progressInstructions || subagentInstructions || memoryContext)) run.context = [providerHandoffBlock, progressInstructions, subagentInstructions, memoryContext, run.context].filter(Boolean).join('\n\n');
       if (explicit && groupContext) run.context = [run.context, groupContext.instructions].filter(Boolean).join('\n\n');
       const stagedAttachments = this.attachmentService && run.attachmentOwnerId
         ? await this.attachmentService.stage(run.id, run.attachmentOwnerKind ?? 'message', run.attachmentOwnerId)
         : [];
       if (run.controller.signal.aborted) throw conflict('The run was interrupted before the provider started.');
-      const injectedContext = [explicit ? run.context : undefined, progressInstructions, subagentInstructions].filter(Boolean).join('\n\n');
+      const injectedContext = [explicit ? run.context : undefined, progressInstructions, subagentInstructions, explicit ? undefined : memoryContext].filter(Boolean).join('\n\n');
       const runOptions: RunOptions & DispatchAwareOptions = {
-        session, prompt: effectivePrompt, intent: run.intent, ...(explicit ? { invocation: explicit } : {}), ...(injectedContext ? { context: injectedContext } : {}), attachments: stagedAttachments, teamMcp, progressMcp, subagentMcp, providerTaskState: this.nativeTaskState(session), skills: run.skills, browserMcp, signal: run.controller.signal, settings,
+        session, prompt: effectivePrompt, intent: run.intent, ...(explicit ? { invocation: explicit } : {}), ...(injectedContext ? { context: injectedContext } : {}), attachments: stagedAttachments, teamMcp, progressMcp, subagentMcp, memoryMcp, providerTaskState: this.nativeTaskState(session), skills: run.skills, browserMcp, signal: run.controller.signal, settings,
         onEvent: (event) => this.handleEvent(run, capabilityTokens.length ? JSON.parse(scrubCapabilities(JSON.stringify(event))) as AdapterEvent : event),
         requestApproval: (request) => this.requestApproval(run, JSON.parse(scrubCapabilities(JSON.stringify(request)))),
         requestUserInput: (request) => this.requestUserInput(run, request),
@@ -670,6 +683,7 @@ export class SessionRuntime {
     this.teamMcp?.revoke(run.id);
     this.progressMcp?.revoke(run.id);
     this.subagentMcp?.revoke(run.id);
+    this.memoryMcp?.revoke(run.id);
     let changes: RunChanges;
     try {
       changes = run.cleanupPending

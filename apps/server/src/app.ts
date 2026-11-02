@@ -45,6 +45,9 @@ import { createDeviceSide } from './team-orchestration/device/index.ts';
 import { SessionResumeService } from './session-resume.ts';
 import { DelegatedSubagentService } from './delegated-subagents.ts';
 import { SubagentMcpBridge } from './subagent-mcp.ts';
+import { ProjectMemoryService } from './project-memory/service.ts';
+import { ProjectMemoryMcpBridge } from './project-memory/mcp.ts';
+import { ProjectMemoryTeamSync } from './project-memory/sync.ts';
 
 export interface ApplicationOptions extends ConfigOptions {
   /** Provider adapters and detection. Inject a fake in tests; the CLI entry passes ./providers/index.ts. */
@@ -181,6 +184,13 @@ export function createApplication(options: ApplicationOptions): MingleApplicatio
   const browser = new BrowserService({ dataDir: config.dataDir, getSettings: () => store.getSettings(), onChange: () => store.touch(), log, sessionExists: (id) => Boolean(store.getSession(id)) });
   const browserMcp = new BrowserMcpBridge(browser, store, () => boundPort, (sessionId, tabId) => hub.broadcast({ type: 'browser.opened', sessionId, tabId }), () => config.host);
   const progressMcp = new ProgressMcpBridge(store, () => boundPort, () => config.host);
+  const localUser = () => {
+    const state = account.snapshot();
+    return state.status === 'signed-in' && state.user ? { accountId: state.user.id, displayName: state.user.name ?? state.user.email } : { accountId: null, displayName: null };
+  };
+  const projectMemory = new ProjectMemoryService(store, { log, localUser });
+  const memoryMcp = new ProjectMemoryMcpBridge(store, projectMemory, () => boundPort, () => config.host);
+  let memorySync: ProjectMemoryTeamSync | null = null;
   const intelligence = new ProjectIntelligenceService({ store, tasks, log });
   const runtime = new SessionRuntime(store, hub, options.providers, tasks, log, options.runtime, (session) => {
     repository.assertSessionAvailable(session);
@@ -197,6 +207,7 @@ export function createApplication(options: ApplicationOptions): MingleApplicatio
     };
   });
   runtime.setProgressMcp(progressMcp);
+  runtime.setProjectMemory(projectMemory, memoryMcp);
   const terminals = new TerminalManager(store, hub, log, options.terminal);
   const workspace = new WorkspaceService(store, config.dataDir, runtime, () => providers.cached());
   const subagents = new DelegatedSubagentService(store,workspace,runtime,()=>providers.cached(),(id)=>Boolean(groups?.forSession(id)));
@@ -221,6 +232,14 @@ export function createApplication(options: ApplicationOptions): MingleApplicatio
   const distributed = new DistributedWorkspaceService({ store, account, runtime, providers, recovery, groups, repository, dataDir: config.dataDir });
   const projectCollaboration = new ProjectCollaborationService({ store, account, distributed, workspace, providers, ...options.projectCollaboration });
   const teamChat = new TeamChatService({ store, account, distributed, collaboration: projectCollaboration });
+  memorySync = new ProjectMemoryTeamSync({
+    store, service: projectMemory, transport: distributed.transport, log,
+    authority: {
+      authorizeTeam: (input) => distributed.authorizeTeam(input),
+      members: async (projectId) => (await projectCollaboration.snapshot(projectId)).members.map((member) => ({ accountId: member.accountId })),
+      localAccountId: () => localUser().accountId,
+    },
+  });
   const teamOrchestration = createTeamOrchestration({
     deliveryWorktreeRoot: path.join(config.dataDir, 'team-worktrees'),
     store, runtime, hub, transport: distributed.transport, account, distributed, collaboration: projectCollaboration,
@@ -273,7 +292,7 @@ export function createApplication(options: ApplicationOptions): MingleApplicatio
     },
   });
   const services: Services = {
-    config, store, hub, runtime, tasks, terminals, providers, browser, intelligence, repository, groups, handoffs, workspace, attachments, account, recovery, distributed, projectCollaboration, teamChat, teamOrchestration, subagents, setupSignal: setupLifecycle.signal,
+    config, store, hub, runtime, tasks, terminals, providers, browser, intelligence, repository, groups, handoffs, workspace, attachments, account, recovery, distributed, projectCollaboration, teamChat, projectMemory, memorySync: () => memorySync, teamOrchestration, subagents, setupSignal: setupLifecycle.signal,
     imports: new ImportService(store, options.providers, providers, runtime), directories: new DirectoryService(), projectSources: new ProjectSources(workspace), startedAt: Date.now(), getPort: () => boundPort,
   };
   hub.bind({ onMessage: (socket, raw) => terminals.handleMessage(socket, raw), onClose: (socket) => terminals.releaseSocket(socket) });
@@ -307,6 +326,7 @@ export function createApplication(options: ApplicationOptions): MingleApplicatio
       if (url.pathname === '/api/team/mcp') return await teamMcp.handle(req, res);
       if (url.pathname === '/api/browser/mcp') return await browserMcp.handle(req, res);
       if (url.pathname === '/api/progress/mcp') return await progressMcp.handle(req, res);
+      if (url.pathname === '/api/memory/mcp') return await memoryMcp.handle(req, res);
       if (url.pathname === '/api/subagents/mcp') return await subagentMcp.handle(req,res);
       if (url.pathname === '/api' || url.pathname.startsWith('/api/')) {
         if (await handleAttachmentRequest(attachments, req, res, url)) return;
@@ -381,6 +401,7 @@ export function createApplication(options: ApplicationOptions): MingleApplicatio
       closing ??= (async () => {
         setupLifecycle.abort();
         await teamOrchestration.close();
+        await memorySync?.close();
         await teamChat.close();
         await projectCollaboration.close();
         await distributed.close();
@@ -402,6 +423,8 @@ export function createApplication(options: ApplicationOptions): MingleApplicatio
         await repository.close();
         browserMcp.close();
         progressMcp.close();
+        memoryMcp.close();
+        projectMemory.close();
         subagentMcp.close();
         await browser.close();
         terminals.killAll();

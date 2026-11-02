@@ -44,11 +44,16 @@ import { registerTeamChatRoutes } from './team-chat/routes.ts';
 import type { TeamOrchestrationSubsystem } from './team-orchestration/index.ts';
 import { buildProgressBoard } from './progress-board.ts';
 import { ProgressBoardResponseSchema } from '@mingle/contracts';
+import type { ProjectMemoryService } from './project-memory/service.ts';
+import type { ProjectMemoryTeamSync } from './project-memory/sync.ts';
+import { registerProjectMemoryRoutes } from './project-memory/routes.ts';
 
 export interface Services {
   distributed: DistributedWorkspaceService;
   projectCollaboration: ProjectCollaborationService;
   teamChat: TeamChatService;
+  projectMemory: ProjectMemoryService;
+  memorySync: () => ProjectMemoryTeamSync | null;
   teamOrchestration: TeamOrchestrationSubsystem;
   account: AccountService;
   setupSignal: AbortSignal;
@@ -152,6 +157,7 @@ export function buildRouter(s: Services) {
   registerDistributedRoutes(add, s.distributed);
   registerProjectCollaborationRoutes(add, s.projectCollaboration);
   registerTeamChatRoutes(add, s.teamChat);
+  registerProjectMemoryRoutes(add, s.projectMemory, s.memorySync, Reply);
   s.teamOrchestration.routes(add);
   const touch = () => s.store.touch();
   const param = (ctx: Ctx, key: string) => {
