@@ -28,6 +28,13 @@ export interface RevisionRow {
 
 export interface SyncStateRow { projectId: string; lastBackfillAt: string | null; lastReceivedAt: string | null; error: string | null; tombstoneFloorAt: string | null }
 
+/** Body-free material retained for a locally authored revision until its device can sign the ancestry proof. */
+export interface CausalProofBasis {
+  recordId: string; entryId: string; parentId: string | null; parentRevision: number | null; revision: number;
+  op: ProjectMemoryOp; authorKind: ProjectMemoryAuthor['kind']; author: ProjectMemoryAuthor;
+  controlId: string | null; epoch: number; pinned: boolean; retired: boolean; humanVerified: boolean;
+}
+
 const json = <T>(value: unknown): T => JSON.parse(String(value)) as T;
 
 function entryRow(row: Row): EntryRow {
@@ -96,6 +103,7 @@ export class MemoryRepo {
     const causalCols = this.db.prepare('PRAGMA table_info(mingle_project_memory_causality)').all() as Array<{ name: string }>;
     if (!causalCols.some((c) => c.name === 'proof_json')) this.db.exec('ALTER TABLE mingle_project_memory_causality ADD COLUMN proof_json TEXT');
     if (!causalCols.some((c) => c.name === 'valid')) this.db.exec('ALTER TABLE mingle_project_memory_causality ADD COLUMN valid INTEGER NOT NULL DEFAULT 0');
+    if (!causalCols.some((c) => c.name === 'basis_json')) this.db.exec('ALTER TABLE mingle_project_memory_causality ADD COLUMN basis_json TEXT');
   }
 
   tx<T>(fn: () => T): T {
@@ -162,8 +170,18 @@ export class MemoryRepo {
         record.causalProof ? JSON.stringify(record.causalProof) : null, record.causalProof ? (record.causalValid ? 'valid' : 'pending') : 'legacy');
     if (record.causalProof) this.saveCausalProof(record.causalProof, record.causalValid);
     // Local pre-proof rows are trusted durable state. A legacy peer's signed lineage is still an assertion, not a validated ancestry chain.
-    else if (record.lineage && !record.received) this.db.prepare('INSERT OR REPLACE INTO mingle_project_memory_causality (record_id,entry_id,parent_id,control_id,epoch,human,proof_json,valid) VALUES (?,?,?,?,?,?,NULL,1)')
-      .run(record.recordId, record.entryId, record.lineage.parentId, record.lineage.controlId, record.lineage.epoch, record.author.kind === 'human' ? 1 : 0);
+    else if (record.lineage && !record.received) {
+      const basis: CausalProofBasis = {
+        recordId: record.recordId, entryId: record.entryId, parentId: record.lineage.parentId, parentRevision: record.parentRevision,
+        revision: record.revision, op: record.op, authorKind: record.author.kind, author: record.author,
+        controlId: record.lineage.controlId, epoch: record.lineage.epoch, pinned: record.snapshot.pinned,
+        retired: record.snapshot.retired, humanVerified: record.snapshot.humanVerified,
+      };
+      this.db.prepare(`INSERT OR REPLACE INTO mingle_project_memory_causality
+        (record_id,entry_id,parent_id,control_id,epoch,human,proof_json,valid,basis_json) VALUES (?,?,?,?,?,?,NULL,1,?)`)
+        .run(record.recordId, record.entryId, record.lineage.parentId, record.lineage.controlId, record.lineage.epoch,
+          record.author.kind === 'human' ? 1 : 0, JSON.stringify(basis));
+    }
   }
 
   lineageFor(id: string): ProjectMemoryLineage | undefined {
@@ -203,6 +221,14 @@ export class MemoryRepo {
     const placeholders = ids.map(() => '?').join(',');
     return this.all(`SELECT proof_json FROM mingle_project_memory_causality WHERE valid=1 AND record_id IN (${placeholders})`, ...ids)
       .flatMap((row) => row.proof_json ? [json<ProjectMemoryCausalProof>(row.proof_json)] : []);
+  }
+  unsignedCausalProofBases(projectId: string, ids: string[]): CausalProofBasis[] {
+    if (!ids.length) return [];
+    const placeholders = ids.map(() => '?').join(',');
+    return this.all(`SELECT c.basis_json FROM mingle_project_memory_causality c
+      JOIN mingle_project_memory_entries e ON e.id=c.entry_id
+      WHERE e.project_id=? AND c.record_id IN (${placeholders}) AND c.proof_json IS NULL AND c.valid=1`, projectId, ...ids)
+      .flatMap((row) => row.basis_json ? [json<CausalProofBasis>(row.basis_json)] : []);
   }
   validRecords(entryId: string): RevisionRow[] {
     return this.all("SELECT * FROM mingle_project_memory_revisions WHERE entry_id=? AND causal_state IN ('valid','legacy') ORDER BY revision,at,record_id", entryId).map(revisionRow);

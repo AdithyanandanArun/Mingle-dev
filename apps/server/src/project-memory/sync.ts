@@ -424,6 +424,7 @@ export class ProjectMemoryTeamSync implements MemoryTeamHooks {
         : repo.signedRecordsSince(projectId, request.sharedProjectId, request.since, RESPONSE_RECORD_CEILING + 1);
       const more = rows.length > RESPONSE_RECORD_CEILING;
       const records = rows.slice(0, RESPONSE_RECORD_CEILING).map((row) => this.options.service.toSyncRecord(row, row.teamId!, row.sharedProjectId!, row.authorDeviceId!, row.signature!));
+      if (request.want?.length) await this.signCompactProofs(projectId, envelope.teamId, request.sharedProjectId, request.want);
       const proofs = request.want?.length ? repo.causalProofs(request.want) : [];
       const batches = this.batches(request.sharedProjectId, request.requestId, records, more, proofs);
       for (const batch of batches) {
@@ -485,6 +486,23 @@ export class ProjectMemoryTeamSync implements MemoryTeamHooks {
       return;
     }
     throw new HttpError(400, 'Unsupported project memory message.');
+  }
+
+  /** Signs retained body-free ancestry metadata on demand after a local project is bound to a registered device. */
+  private async signCompactProofs(projectId: string, teamId: string, sharedProjectId: string, ids: string[]): Promise<void> {
+    const { repo } = this.options.service;
+    const binding = this.bindingFor(projectId);
+    const deviceId = this.options.transport.snapshot(teamId).deviceId;
+    if (!binding || binding.teamId !== teamId || binding.sharedProjectId !== sharedProjectId || !deviceId) return;
+    for (const basis of repo.unsignedCausalProofBases(projectId, ids)) {
+      const proofBody: Omit<ProjectMemoryCausalProof, 'signature'> = {
+        recordId: basis.recordId, entryId: basis.entryId, parentId: basis.parentId, parentRevision: basis.parentRevision,
+        revision: basis.revision, op: basis.op, authorKind: basis.authorKind, authorDeviceId: deviceId,
+        controlId: basis.controlId, epoch: basis.epoch, pinned: basis.pinned, retired: basis.retired, humanVerified: basis.humanVerified,
+      };
+      const signature = await this.options.transport.signPayload(teamId, deviceId, causalProofPayload(proofBody));
+      repo.saveCausalProof(ProjectMemoryCausalProofSchema.parse({ ...proofBody, signature }), true);
+    }
   }
 
   private batches(sharedProjectId: string, requestId: string, records: ProjectMemorySyncRecord[], more: boolean, proofs: ProjectMemoryCausalProof[] = []) {

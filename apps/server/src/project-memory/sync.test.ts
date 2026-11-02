@@ -137,6 +137,31 @@ async function pair(options: { bindB?: boolean } = {}) {
 }
 
 describe('team project memory sync (two-device fixture)', () => {
+  it('backfills a late-bound project after more than 50 offline writes and pruned unsigned ancestors', async () => {
+    const mesh = new Mesh();
+    const a = new Node(mesh, randomUUID(), 'owner', { bind: false });
+    const { entry: created } = await a.service.agentRemember(a.agent(), { kind: 'fact', title: 'Offline ancestry', body: 'Initial offline value.' });
+    let entry = created;
+    let prunedAncestorId = '';
+    for (let i = 1; i <= 64; i++) {
+      entry = (await a.service.agentUpdate(a.agent(), { id: entry.id, body: `Offline value ${i}.` })).entry;
+      if (i === 2) prunedAncestorId = entry.headRecordId;
+    }
+    expect(a.service.repo.countRecords(entry.id)).toBeLessThanOrEqual(PROJECT_MEMORY_LIMITS.maxRevisionsPerEntry);
+    expect(a.service.repo.getRecord(prunedAncestorId)).toBeUndefined();
+    expect(a.service.repo.unpublishedCount(a.projectId)).toBe(a.service.repo.countRecords(entry.id));
+
+    a.bind('owner');
+    const c = new Node(mesh, randomUUID(), 'joined');
+    mesh.link(a, c);
+    expect(await c.sync.requestBackfill(c.projectId, true)).toBe(1);
+    await mesh.deliver();
+
+    expect(c.service.repo.getEntry(entry.id)).toMatchObject({ headRecordId: entry.headRecordId, revision: entry.revision, body: entry.body });
+    expect(c.service.repo.pendingCausalRecords(entry.id)).toHaveLength(0);
+    expect(mesh.rejected).toEqual([]);
+  }, 30_000);
+
   it('replicates create, update, human pin and retire in both directions with attribution intact', async () => {
     const { mesh, a, b } = await pair();
     const ctx = a.agent('Alpha agent');
