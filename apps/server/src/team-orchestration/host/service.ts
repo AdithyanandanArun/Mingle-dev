@@ -237,11 +237,13 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
     }
     const task = this.options.store.getTask(input.taskId);
     const delivery = this.delivery(assignment.deliveryId);
-    if (!task || task.status !== 'review' || !delivery || delivery.status !== 'completed') {
+    const localWorker = !delivery ? group.members.find((member) => member.id === assignment.toMemberId && !member.removedAt && !this.proxy(member.sessionId)) : undefined;
+    if (!task || task.status !== 'review' || (!delivery && !localWorker) || (delivery && delivery.status !== 'completed')) {
       throw new HttpError(409, 'The worker assignment must have a completed delivery and be in Review before acceptance.');
     }
     const verificationSummary = redactSecrets(input.verificationSummary).replace(/[\u0000-\u001f\u007f]/g, ' ').trim().slice(0, 4_000);
     if (verificationSummary.length < 8) throw new HttpError(400, 'Provide a meaningful verification summary before accepting this task.');
+    if (!delivery) return this.acceptLocalWorkerTask(context, host, group.group.id, input, verificationSummary);
 
     return this.mutations.run(`${host.team_id}\0${host.shared_project_id}`, async () => this.deliveryMutations.run(delivery.delivery_id, async () => {
       const latestHost = this.readHost(host.team_id, host.shared_project_id);
@@ -254,8 +256,30 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
         throw new HttpError(409, 'The task or worker delivery changed before acceptance.');
       }
       await this.assertCompletionAuthority(currentDelivery);
-      const review = this.hostRows.prepare(`SELECT branch,commit_sha,base_commit_sha,review_ref,fetch_failure FROM mingle_team_host_review_branches WHERE delivery_id=?`)
-        .get(delivery.delivery_id) as { branch: string | null; commit_sha: string | null; base_commit_sha: string | null; review_ref: string | null; fetch_failure: string | null } | undefined;
+      const reviewRow = this.hostRows.prepare(`SELECT branch,commit_sha,base_commit_sha,review_ref,fetch_failure,push_failure FROM mingle_team_host_review_branches WHERE delivery_id=?`)
+        .get(delivery.delivery_id) as { branch: string | null; commit_sha: string | null; base_commit_sha: string | null; review_ref: string | null; fetch_failure: string | null; push_failure: string | null } | undefined;
+      let review = reviewRow;
+      if (review && !review.review_ref && review.branch && review.commit_sha) {
+        // The completion-time fetch failed (offline origin, branch not yet visible). Retry it now instead of accepting unverified work.
+        const retryWorkspace = this.groupWorkspace(group.group.id);
+        if (retryWorkspace) {
+          try {
+            const fetched = await this.fetchReviewRef(currentDelivery, retryWorkspace.worktreePath,
+              { name: review.branch, commitSha: review.commit_sha, baseCommitSha: review.base_commit_sha });
+            this.hostRows.prepare(`UPDATE mingle_team_host_review_branches SET review_ref=?,commit_sha=?,fetch_failure=NULL WHERE delivery_id=?`)
+              .run(fetched.ref, fetched.commitSha, delivery.delivery_id);
+            review = { ...review, review_ref: fetched.ref, commit_sha: fetched.commitSha, fetch_failure: null };
+          } catch (error) {
+            const reason = safeRemoteText(error instanceof Error ? error.message : 'unknown error').slice(0, 600);
+            this.hostRows.prepare(`UPDATE mingle_team_host_review_branches SET fetch_failure=? WHERE delivery_id=?`).run(reason, delivery.delivery_id);
+            // The P2P artifact fallback may already have integrated the same commits; only then can acceptance proceed without a review ref.
+            const fallbackIntegrated = (safeJson(currentDelivery.artifacts_json, []) as unknown[]).length > 0
+              && await this.assertRemoteWorkNotStranded(currentDelivery, undefined).then(() => true, () => false);
+            if (!fallbackIntegrated) throw new HttpError(409, `The worker branch ${review.branch} could not be fetched and verified, so the task stays in Review: ${reason}. Ask the worker to publish it again, or integrate it manually, then retry team_accept.`);
+          }
+        }
+      }
+      if (!review?.review_ref) await this.assertRemoteWorkNotStranded(currentDelivery, review);
       let merged = false;
       let mergedRef: string | undefined;
       let integrationWorktree: string | null = null;
@@ -332,14 +356,8 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
       let pushed: { branch: string; commitSha: string } | undefined;
       let pushFailure: string | undefined;
       if (integrationWorktree && integrationBranch && integrationHead) {
-        try {
-          pushed = await pushTeamIntegrationBranch({ worktreePath: integrationWorktree, branch: integrationBranch,
-            sourceBranch: integrationSourceBranch ?? integrationBranch, destinationBranch: integrationBranch, expectedHead: integrationHead });
-        } catch (error) {
-          pushFailure = safeRemoteText(error instanceof Error ? error.message : 'The integration branch push failed.').slice(0, 1_500);
-        }
-        this.options.groups.recordIntegrationPublication?.({ ...context }, { branch: integrationBranch, commitSha: integrationHead, ...(pushFailure ? { error: pushFailure } : {}) });
-        if (pushed) this.options.groups.notifyIntegrationBranch?.({ ...context }, pushed);
+        ({ pushed, pushFailure } = await this.publishIntegration(context, { worktreePath: integrationWorktree, targetBranch: integrationBranch,
+          sourceBranch: integrationSourceBranch ?? integrationBranch, head: integrationHead }));
       }
       return { ...acceptedResult, acceptedBy: 'orchestrator', verificationSummary,
         ...(review?.branch ? { branch: review.branch } : {}), ...(review?.commit_sha ? { commitSha: review.commit_sha } : {}),
@@ -348,6 +366,90 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
         ...(mergedRef || acceptedResult.integrationBranch ? { merged } : {}), ...(pushed ? { integrationPush: pushed } : {}),
         ...(pushFailure ? { pushFailure } : {}) };
     }));
+  }
+
+  /** Normal, non-force publication of the integration worktree to the team's target; a failure is recorded without undoing the merge. */
+  private async publishIntegration(context: import('@mingle/contracts').GroupRunContext, input: {
+    worktreePath: string; targetBranch: string; sourceBranch: string; head: string;
+  }): Promise<{ pushed?: { branch: string; commitSha: string }; pushFailure?: string }> {
+    let pushed: { branch: string; commitSha: string } | undefined;
+    let pushFailure: string | undefined;
+    try {
+      pushed = await pushTeamIntegrationBranch({ worktreePath: input.worktreePath, branch: input.targetBranch,
+        sourceBranch: input.sourceBranch, destinationBranch: input.targetBranch, expectedHead: input.head });
+    } catch (error) {
+      pushFailure = safeRemoteText(error instanceof Error ? error.message : 'The integration branch push failed.').slice(0, 1_500);
+    }
+    this.options.groups.recordIntegrationPublication?.({ ...context }, { branch: input.targetBranch, commitSha: input.head, ...(pushFailure ? { error: pushFailure } : {}) });
+    if (pushed) this.options.groups.notifyIntegrationBranch?.({ ...context }, pushed);
+    return { ...(pushed ? { pushed } : {}), ...(pushFailure ? { pushFailure } : {}) };
+  }
+
+  /**
+   * A host-device worker in a team group has no remote delivery or review ref: the group merges its branch locally,
+   * then the host reconciles and publishes the team's integration target exactly as for a remote worker.
+   */
+  private async acceptLocalWorkerTask(
+    context: import('@mingle/contracts').GroupRunContext, host: HostRow, groupId: string, input: TeamAcceptTask, verificationSummary: string,
+  ): Promise<unknown> {
+    return this.mutations.run(`${host.team_id}\0${host.shared_project_id}`, async () => {
+      const latestHost = this.readHost(host.team_id, host.shared_project_id);
+      if (!latestHost || latestHost.group_id !== groupId || this.settings(latestHost).permissionLevel !== 'full-access') {
+        throw new HttpError(403, 'Team permission changed; only full-access orchestrators may accept tasks.');
+      }
+      const accepted = await this.options.groups.acceptTask(context, { taskId: input.taskId, verificationSummary });
+      const result = accepted && typeof accepted === 'object' ? accepted as Record<string, unknown> : {};
+      const worktreePath = typeof result.integrationWorktree === 'string' ? result.integrationWorktree : null;
+      const sourceBranch = typeof result.integrationBranch === 'string' ? result.integrationBranch : null;
+      if (!worktreePath || !sourceBranch) return result;
+      const target = this.settings(latestHost).integrationTarget;
+      let head = typeof result.integrationHead === 'string' ? result.integrationHead : null;
+      let pushed: { branch: string; commitSha: string } | undefined;
+      let pushFailure: string | undefined;
+      try {
+        const ownerSnapshot = await this.options.collaboration.snapshot(host.local_project_id);
+        const owner = ownerSnapshot.members.find((member) => member.accountId === host.owner_account_id);
+        await mergeTeamIntegrationTarget({ worktreePath, targetBranch: target, identity: { name: owner?.displayName, email: owner?.email } });
+        head = (await git(worktreePath, ['rev-parse', '--verify', 'HEAD'])).stdout.trim();
+      } catch (error) {
+        pushFailure = safeRemoteText(error instanceof Error ? error.message : 'Could not reconcile the integration target.').slice(0, 1_500);
+        this.options.groups.recordIntegrationPublication?.({ ...context }, { branch: target, commitSha: head ?? '', error: pushFailure });
+      }
+      if (!pushFailure && head) ({ pushed, pushFailure } = await this.publishIntegration(context, { worktreePath, targetBranch: target, sourceBranch, head }));
+      return { ...result, ...(head ? { integrationHead: head } : {}), integrationBranch: target,
+        ...(pushed ? { integrationPush: pushed } : {}), ...(pushFailure ? { pushFailure } : {}) };
+    });
+  }
+
+  /** Fetches the reported worker turn into its pinned review ref and verifies its history against the saved assignment authority. */
+  private async fetchReviewRef(delivery: DeliveryRow, worktreePath: string, pushed: { name: string; commitSha: string; baseCommitSha?: string | null }): Promise<{ ref: string; commitSha: string }> {
+    await this.options.authorizeTeam({ teamId: delivery.team_id, peerDeviceId: delivery.owner_device_id });
+    const fetched = await fetchTeamCompletionBranch({ worktreePath, branch: pushed.name, commitSha: pushed.commitSha, deliveryId: delivery.delivery_id });
+    await git(worktreePath, ['fetch', '--no-tags', 'origin', `refs/heads/${pushed.name}:refs/remotes/origin/${pushed.name}`],
+      { network: true, allowFailure: true, timeoutMs: 120_000 });
+    const authority = this.artifactAuthority(delivery);
+    const reviewArtifact = TeamArtifactRefSchema.parse({ revision: fetched.commitSha, ref: fetched.ref, ...(authority.task_id ? { taskId: authority.task_id } : {}) });
+    await this.validateArtifactHistory(delivery, authority, reviewArtifact, worktreePath, false, pushed.baseCommitSha ?? undefined);
+    return { ref: fetched.ref, commitSha: fetched.commitSha };
+  }
+
+  /** Without a verified review ref, acceptance is allowed only when nothing was reported or every reported artifact is already in the integration branch. */
+  private async assertRemoteWorkNotStranded(delivery: DeliveryRow, review: { push_failure: string | null; fetch_failure: string | null } | undefined): Promise<void> {
+    const artifacts = safeJson(delivery.artifacts_json, []) as Array<{ revision?: unknown }>;
+    if (review?.push_failure && !artifacts.length) {
+      throw new HttpError(409, `The worker's branch push failed (${safeRemoteText(review.push_failure).slice(0, 600)}) and no artifact was transferred, so its commits exist only on the owner's device. The task stays in Review; ask the worker to publish again, then retry team_accept.`);
+    }
+    if (!artifacts.length) return;
+    const workspace = this.groupWorkspace(delivery.group_id);
+    if (!workspace) throw new HttpError(409, 'The team integration worktree is unavailable, so the worker artifacts cannot be verified as integrated.');
+    for (const artifact of artifacts) {
+      const revision = typeof artifact.revision === 'string' ? artifact.revision : '';
+      const contained = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(revision)
+        && (await git(workspace.worktreePath, ['merge-base', '--is-ancestor', revision, 'HEAD'], { allowFailure: true })).code === 0;
+      if (!contained) {
+        throw new HttpError(409, `Worker artifact ${revision.slice(0, 12) || 'unknown'} is not in the team integration branch, so the task stays in Review. Resolve the integration failure reported for this delivery, then retry team_accept.`);
+      }
+    }
   }
 
   private assertSafeIntegrationBranch(branch: string): void {
@@ -2472,17 +2574,7 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
           try {
             this.assertCompletionStillLive(deliveryId);
             if (!workspace) throw new Error('The host team integration worktree is unavailable.');
-            await this.options.authorizeTeam({ teamId: delivery.team_id, peerDeviceId: delivery.owner_device_id });
-            this.assertCompletionStillLive(deliveryId);
-            const fetched = await fetchTeamCompletionBranch({ worktreePath: workspace.worktreePath,
-              branch: pushedBranch.name, commitSha: pushedBranch.commitSha, deliveryId });
-            await git(workspace.worktreePath, ['fetch', '--no-tags', 'origin',
-              `refs/heads/${pushedBranch.name}:refs/remotes/origin/${pushedBranch.name}`],
-            { network: true, allowFailure: true, timeoutMs: 120_000 });
-            const authority = this.artifactAuthority(delivery);
-            const reviewArtifact = TeamArtifactRefSchema.parse({ revision: fetched.commitSha, ref: fetched.ref,
-              ...(authority.task_id ? { taskId: authority.task_id } : {}) });
-            await this.validateArtifactHistory(delivery, authority, reviewArtifact, workspace.worktreePath, false, pushedBranch.baseCommitSha);
+            const fetched = await this.fetchReviewRef(delivery, workspace.worktreePath, pushedBranch);
             this.assertCompletionStillLive(deliveryId);
             intent = { ...intent, reviewRef: fetched.ref };
             this.hostRows.prepare(`INSERT INTO mingle_team_host_review_branches(delivery_id,branch,commit_sha,base_commit_sha,review_ref,fetch_failure,push_failure)
