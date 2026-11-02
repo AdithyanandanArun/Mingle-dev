@@ -124,6 +124,8 @@ Same pattern as `mingle_progress`: a per-run bearer token on `/api/memory/mcp`, 
 | `mingle_memory_update` | `id, expectedRevision?, expectedHeadId?, kind?, title?, body?, files?, commits?, commands?, evidence?, note?` | Optional head identity binds the update to the exact result returned by search; stale identities conflict. Refuses pinned or retired entries. Passing `files` re-verifies and clears staleness. |
 | `mingle_memory_retire` | `id, reason, expectedRevision?` | Tombstones the entry; refuses pinned entries. |
 
+Search and write tool results include `headRecordId`. Agents should pass it as `expectedHeadId` alongside `expectedRevision` when updating or retiring an entry; this rejects a stale edit even when offline conflict resolution selects a different head with the same revision number. The human API requires both values, and the editor retains the exact head that was displayed when the correction began.
+
 ## Run context
 
 Before each non-plan run, Mingle adds a bounded `Project memory` block (see `PROJECT_MEMORY_LIMITS`) to the run's injected context: up to 3 pinned entries, then entries ranked by relevance to the prompt (title/body token overlap, file-path mentions, evidence, recency), up to 2 stale ones clearly labelled. The block states that it is reference data. No model is invoked to build it and nothing runs at startup. Each injection is recorded (see `memory-injections`).

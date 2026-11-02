@@ -254,7 +254,7 @@ export const MemoryUpdateToolSchema = z.object({
   note: z.string().trim().max(300).optional(),
 }).strict();
 export const MemoryRetireToolSchema = z.object({
-  id: z.string().uuid(), reason: z.string().trim().min(3).max(300), expectedRevision: z.number().int().min(1).optional(),
+  id: z.string().uuid(), reason: z.string().trim().min(3).max(300), expectedRevision: z.number().int().min(1).optional(), expectedHeadId: z.string().uuid().optional(),
 }).strict();
 
 /** ---- Team replication (carried inside the existing authenticated, encrypted device transport) ---- */

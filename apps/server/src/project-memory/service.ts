@@ -604,6 +604,7 @@ export class ProjectMemoryService {
     if (prior.retired) return { entry: toEntry(prior, null), outcome: 'unchanged', notices: [] };
     if (prior.pinned) throw conflict('This memory entry is pinned by a person and is locked against agent edits.');
     if (input.expectedRevision !== undefined && input.expectedRevision !== prior.revision) throw conflict(`Memory entry changed; current revision is ${prior.revision}. Search again.`);
+    if (input.expectedHeadId !== undefined && input.expectedHeadId !== prior.headRecordId) throw conflict(`Memory entry changed; current revision is ${prior.revision}. Search again.`);
     this.screen(input.reason);
     this.checkWriteBudget(ctx.runId);
     const entry = this.commit({ projectId: prior.projectId, prior, op: 'retire', author: this.agentAuthor(ctx.session, ctx.runId), note: cleanText(input.reason),

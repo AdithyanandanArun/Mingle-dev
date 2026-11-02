@@ -66,11 +66,15 @@ describe('project memory HTTP API, MCP tools and run wiring', () => {
         outputs.secret = await client.callTool({ name: 'mingle_memory_remember', arguments: { kind: 'fact', title: 'Leaked credential', body: 'password = correcthorsebattery' } });
         outputs.search = payload(await client.callTool({ name: 'mingle_memory_search', arguments: { query: 'webhook retries' } }));
         outputs.update = payload(await client.callTool({ name: 'mingle_memory_update', arguments: {
-          id: outputs.remember.id, expectedRevision: outputs.remember.revision, body: 'Billing webhooks retry three times; dedupe handlers by event id and store the id.',
+          id: outputs.remember.id, expectedRevision: outputs.remember.revision, expectedHeadId: outputs.remember.headRecordId, body: 'Billing webhooks retry three times; dedupe handlers by event id and store the id.',
         } }));
+        outputs.staleHead = await client.callTool({ name: 'mingle_memory_update', arguments: {
+          id: outputs.remember.id, expectedRevision: outputs.update.revision, expectedHeadId: outputs.remember.headRecordId, body: 'A stale head must not overwrite newer knowledge.',
+        } });
         outputs.staleUpdate = await client.callTool({ name: 'mingle_memory_update', arguments: { id: outputs.remember.id, expectedRevision: 1, body: 'x'.repeat(20) } });
         const second = payload(await client.callTool({ name: 'mingle_memory_remember', arguments: { kind: 'fact', title: 'Temporary scratch fact', body: 'Will be retired within the same run.' } }));
-        outputs.retire = payload(await client.callTool({ name: 'mingle_memory_retire', arguments: { id: second.id, reason: 'Was only scratch information' } }));
+        outputs.staleRetire = await client.callTool({ name: 'mingle_memory_retire', arguments: { id: second.id, expectedRevision: second.revision, expectedHeadId: outputs.remember.headRecordId, reason: 'A different head must not authorize retirement' } });
+        outputs.retire = payload(await client.callTool({ name: 'mingle_memory_retire', arguments: { id: second.id, expectedHeadId: second.headRecordId, reason: 'Was only scratch information' } }));
       }
     };
     const first = await runMessage(t, a.id, 'Investigate the webhook retries.');
@@ -82,8 +86,11 @@ describe('project memory HTTP API, MCP tools and run wiring', () => {
     expect(outputs.secret.isError).toBe(true);
     expect(text(outputs.secret)).not.toContain('correcthorsebattery');
     expect(outputs.search.entries).toHaveLength(1);
+    expect(outputs.search.entries[0].headRecordId).toBe(outputs.remember.headRecordId);
     expect(outputs.update).toMatchObject({ revision: 2, outcome: 'updated' });
     expect(outputs.staleUpdate.isError).toBe(true);
+    expect(outputs.staleHead.isError).toBe(true);
+    expect(outputs.staleRetire.isError).toBe(true);
     expect(text(outputs.staleUpdate)).toMatch(/current revision is 2/);
     expect(outputs.retire).toMatchObject({ outcome: 'updated' });
 

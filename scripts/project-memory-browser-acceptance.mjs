@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // Disposable Example fixtures. Exercises the real component and HTTP boundary; no cloud or provider calls.
 import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
 import { createRequire } from 'node:module';
 import { mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -14,7 +15,7 @@ const { chromium } = serverRequire('playwright');
 const output = join(tmpdir(), `mingle-memory-acceptance-${process.pid}`);
 await mkdir(output, { recursive: true });
 let server, browser;
-const entry = { id: 'example-memory', title: 'Keep the UI neutral', body: 'Use existing flat surfaces and design tokens.', kind: 'convention', status: 'tentative', lifecycle: 'active', pinned: false, revision: 1, files: [{ path: 'src/theme.css' }], updatedAt: '2026-11-02T00:00:00.000Z', sources: [{ type: 'run', ref: 'example-run' }], updatedBy: { kind: 'agent', name: 'Example agent' }, origin: { local: true } };
+const entry = { id: 'example-memory', headRecordId: randomUUID(), title: 'Keep the UI neutral', body: 'Use existing flat surfaces and design tokens.', kind: 'convention', status: 'tentative', lifecycle: 'active', pinned: false, revision: 1, files: [{ path: 'src/theme.css' }], updatedAt: '2026-11-02T00:00:00.000Z', sources: [{ type: 'run', ref: 'example-run' }], updatedBy: { kind: 'agent', name: 'Example agent' }, origin: { local: true } };
 try {
   server = await createServer({ configFile: join(root, 'apps/web/vite.config.ts'), root, appType: 'mpa', server: { host: '127.0.0.1', port: 0 }, optimizeDeps: { entries: [join(root, 'scripts/project-memory-browser-fixture.html')] }, resolve: { alias: [{ find: 'react', replacement: join(root, 'apps/web/node_modules/react') }, { find: 'react-dom', replacement: join(root, 'apps/web/node_modules/react-dom') }], dedupe: ['react', 'react-dom'] } });
   await server.listen();
@@ -36,9 +37,9 @@ try {
     if (url.pathname.includes('example-b')) return route.fulfill({ json: { entries: [], nextCursor: null, total: 0, sharing: { shared: false } } });
     if (url.pathname.endsWith('/history')) return route.fulfill({ json: { revisions: [{ id: 'revision-one', revision: 1, snapshot: { body: entry.body } }] } });
     if (request.method() === 'PATCH') {
-      const { expectedRevision, ...patch } = request.postDataJSON();
-      if (rejectEdit || expectedRevision !== saved.revision) return route.fulfill({ status: 409, json: { error: 'Memory changed on another device. Refresh before correcting it.' } });
-      saved = { ...saved, ...patch, revision: saved.revision + 1 };
+      const { expectedRevision, expectedHeadId, ...patch } = request.postDataJSON();
+      if (rejectEdit || expectedRevision !== saved.revision || expectedHeadId !== saved.headRecordId) return route.fulfill({ status: 409, json: { error: 'Memory changed on another device. Refresh before correcting it.' } });
+      saved = { ...saved, ...patch, revision: saved.revision + 1, headRecordId: randomUUID() };
       return route.fulfill({ json: { entry: saved, notices: [] } });
     }
     searchCount++;
@@ -69,13 +70,23 @@ try {
   await page.getByRole('button', { name: 'Refresh project memory' }).click();
   await page.getByRole('button', { name: 'Correct', exact: true }).click();
   await edit.fill('My correction started before the teammate update.');
-  saved = { ...saved, body: 'Newer teammate knowledge.', revision: saved.revision + 1 };
+  saved = { ...saved, body: 'Newer teammate knowledge.', revision: saved.revision + 1, headRecordId: randomUUID() };
   await page.getByRole('button', { name: 'Refresh project memory' }).click();
   await page.getByText(`Agent: Example agent · Revision ${saved.revision}`, { exact: true }).waitFor();
   assert.equal(await edit.inputValue(), 'My correction started before the teammate update.');
   await page.getByRole('button', { name: 'Save correction' }).click();
   await page.getByText('Memory changed on another device. Refresh before correcting it.', { exact: true }).waitFor();
   assert.equal(saved.body, 'Newer teammate knowledge.', 'live refresh cannot silently rebase an old correction');
+  await page.getByRole('button', { name: 'Cancel', exact: true }).click();
+  await page.getByRole('button', { name: 'Refresh project memory' }).click();
+  await page.getByRole('button', { name: 'Correct', exact: true }).click();
+  await edit.fill('Old draft against a different head with the same revision.');
+  saved = { ...saved, title: 'Keep the UI neutral — updated', body: 'Concurrent head at the same revision.', headRecordId: randomUUID() };
+  await page.getByRole('button', { name: 'Refresh project memory' }).click();
+  await page.getByRole('heading', { name: saved.title, exact: true }).waitFor();
+  await page.getByRole('button', { name: 'Save correction' }).click();
+  await page.getByText('Memory changed on another device. Refresh before correcting it.', { exact: true }).waitFor();
+  assert.equal(saved.body, 'Concurrent head at the same revision.', 'a repeated revision cannot authorize a stale head edit');
   await page.getByRole('button', { name: 'Cancel', exact: true }).click();
   await page.getByRole('button', { name: 'Refresh project memory' }).click();
   await page.screenshot({ path: join(output, 'memory-desktop.png') });
@@ -90,5 +101,5 @@ try {
   await page.waitForTimeout(400);
   assert.equal(searchCount, before, 'hidden panel does not poll');
   assert.deepEqual(errors, []);
-  console.log(JSON.stringify({ passed: 9, output, fixtureOnly: true }));
+  console.log(JSON.stringify({ passed: 10, output, fixtureOnly: true }));
 } finally { await browser?.close(); await server?.close(); }

@@ -13,6 +13,6 @@ async function request<T>(url: string, method = 'GET', body?: unknown, signal?: 
 const base = (projectId: string) => `/api/projects/${encodeURIComponent(projectId)}/memory`;
 export const memoryApi = {
   list: (projectId: string, query: string, includeRetired: boolean, cursor?: string | null, signal?: AbortSignal) => request<ProjectMemoryListResponse>(`${base(projectId)}?${new URLSearchParams({ q: query, include: includeRetired ? 'retired' : 'live', ...(cursor ? { cursor } : {}) })}`, 'GET', undefined, signal),
-  patch: (projectId: string, entry: MemoryRecord, patch: Omit<PatchProjectMemoryInput, 'expectedRevision'>) => request<ProjectMemoryWriteResult>(`${base(projectId)}/${encodeURIComponent(entry.id)}`, 'PATCH', { ...patch, expectedRevision: entry.revision }),
+  patch: (projectId: string, entry: MemoryRecord, patch: Omit<PatchProjectMemoryInput, 'expectedRevision' | 'expectedHeadId'>) => request<ProjectMemoryWriteResult>(`${base(projectId)}/${encodeURIComponent(entry.id)}`, 'PATCH', { ...patch, expectedRevision: entry.revision, expectedHeadId: entry.headRecordId }),
   history: (projectId: string, id: string, signal?: AbortSignal) => request<ProjectMemoryHistoryResponse>(`${base(projectId)}/${encodeURIComponent(id)}/history`, 'GET', undefined, signal),
 };

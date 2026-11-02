@@ -87,7 +87,7 @@ const TOOLS_LINE = 'Maintain this memory with mingle_memory_search, mingle_memor
 
 function entryLine(entry: EntryRow): string {
   const line = JSON.stringify({
-    id: entry.id, rev: entry.revision, kind: entry.kind, status: entry.status, stale: Boolean(entry.stale), pinned: entry.pinned,
+    id: entry.id, rev: entry.revision, headRecordId: entry.headRecordId, kind: entry.kind, status: entry.status, stale: Boolean(entry.stale), pinned: entry.pinned,
     humanVerified: entry.humanVerified, title: entry.title, body: entry.body, files: entry.files.map((file) => file.path),
   });
   // Entry text can never close or forge the surrounding block.
