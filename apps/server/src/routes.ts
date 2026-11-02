@@ -10,6 +10,7 @@ import { gitStatus } from './git.ts';
 import type { Hub } from './hub.ts';
 import { listDirectory, readTextFile, searchFiles, writeTextFile } from './paths.ts';
 import type { ProviderService } from './provider-service.ts';
+import type { ProviderUpdateService } from './provider-update/service.ts';
 import type { SessionRuntime } from './runtime.ts';
 import type { Store } from './store.ts';
 import type { TaskService } from './tasks.ts';
@@ -17,7 +18,7 @@ import type { HandoffService } from './handoffs.ts';
 import type { WorkspaceService } from './workspace.ts';
 import type { ServerConfig } from './config.ts';
 import type { TerminalManager } from './terminal.ts';
-import { HttpError, badRequest, conflict, notFound, nowIso } from './util.ts';
+import { HttpError, badRequest, conflict, errorMessage, notFound, nowIso } from './util.ts';
 import { resolveRunConfig } from './session-config.ts';
 import type { ImportService } from './imports.ts';
 import { defaultModel } from './provider-config.ts';
@@ -58,7 +59,7 @@ export interface Services {
   account: AccountService;
   setupSignal: AbortSignal;
   config: ServerConfig; store: Store; hub: Hub; workspace: WorkspaceService; runtime: SessionRuntime; tasks: TaskService; handoffs: HandoffService;
-  groups: GroupService; attachments: AttachmentService; recovery: RecoveryService; intelligence: ProjectIntelligenceService; repository: RepositoryService; browser: BrowserService; providers: ProviderService; imports: ImportService; directories: DirectoryService; projectSources: ProjectSources; terminals: TerminalManager; startedAt: number; getPort: () => number;
+  groups: GroupService; attachments: AttachmentService; recovery: RecoveryService; intelligence: ProjectIntelligenceService; repository: RepositoryService; browser: BrowserService; providers: ProviderService; providerUpdates: ProviderUpdateService; imports: ImportService; directories: DirectoryService; projectSources: ProjectSources; terminals: TerminalManager; startedAt: number; getPort: () => number;
   subagents: DelegatedSubagentService;
 }
 
@@ -695,6 +696,20 @@ export function buildRouter(s: Services) {
     return next;
   });
   add('GET', '/api/providers', () => s.providers.list());
+  add('GET', '/api/providers/updates', () => s.providerUpdates.snapshot());
+  add('POST', '/api/providers/updates/check', async (ctx) => {
+    const { provider } = await ctx.body(z.object({ provider: ProviderSchema.optional() }).strict());
+    return provider ? s.providerUpdates.checkOne(provider, true) : (await s.providerUpdates.checkAll(true), s.providerUpdates.snapshot());
+  });
+  add('POST', '/api/providers/updates/dismiss', async (ctx) => {
+    const { provider, version } = await ctx.body(z.object({ provider: ProviderSchema, version: z.string().trim().min(1).max(100) }).strict());
+    s.providerUpdates.dismiss(provider, version); return { ok: true };
+  });
+  add('POST', '/api/providers/updates/apply', async (ctx) => {
+    const { provider, expectedVersion } = await ctx.body(z.object({ provider: ProviderSchema, expectedVersion: z.string().max(100).nullable() }).strict());
+    try { return await s.providerUpdates.update(provider, expectedVersion); }
+    catch (error) { const status = (error as { status?: number }).status; if (status === 409) throw conflict(errorMessage(error)); throw badRequest(errorMessage(error)); }
+  });
   add('GET', '/api/providers/antigravity/auth', () => antigravityAuthState(s.config.dataDir, s.store.getSettings()));
   add('POST', '/api/providers/antigravity/auth', async (ctx) => {
     const body = await ctx.body(z.object({ refresh: z.boolean().optional() }).strict());

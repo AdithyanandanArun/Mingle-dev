@@ -1,7 +1,7 @@
 import { ContextCompactionResultSchema, EditSessionPlanSchema, NativeUserInputRequestSchema, ProviderTaskPlanSchema, SessionPlanProposalSchema, SessionPlanStepsSchema, UserInputAnswersSchema } from '@mingle/contracts';
 import type { ProjectIntelligenceService } from './project-intelligence/service.ts';
 import { existsSync, statSync } from 'node:fs';
-import type { ProviderTaskPlan, AdapterEvent, Approval, ContextCompactionResult, EditSessionPlan, Message, MinglePlanUpdate, MingleStatusSet, ProviderFailure, ProviderSkill, RunChanges, RunOptions, Session, SessionPlan, SubagentMessage, Task, UserInputAnswers, UserQuestion, ToolActivity, ToolCall } from '@mingle/contracts';
+import type { ProviderTaskPlan, AdapterEvent, Approval, ContextCompactionResult, EditSessionPlan, Message, MinglePlanUpdate, MingleStatusSet, Provider, ProviderFailure, ProviderSkill, RunChanges, RunOptions, Session, SessionPlan, SubagentMessage, Task, UserInputAnswers, UserQuestion, ToolActivity, ToolCall } from '@mingle/contracts';
 import type { Hub } from './hub.ts';
 import type { Store } from './store.ts';
 import type { TaskService } from './tasks.ts';
@@ -209,6 +209,7 @@ export class SessionRuntime {
   private shutdownStartedAt: number | null = null;
   private readonly active = new Map<string, ActiveRun>();
   private readonly compactions = new Map<string, ActiveCompaction>();
+  private readonly providerMaintenance = new Set<Provider>();
   private readonly stopping = new Set<string>();
   private readonly questionTimers = new Map<string, NodeJS.Timeout>();
   private groups?: GroupService;
@@ -259,9 +260,18 @@ export class SessionRuntime {
   activeCount(): number {
     return this.active.size + this.compactions.size + (this.teamProxy?.activeCount() ?? 0);
   }
+  reserveProviderMaintenance(provider: Provider): (() => void) | null {
+    if (this.shutdownStartedAt !== null || this.providerMaintenance.has(provider)) return null;
+    const sessions = this.store.listSessions().filter((session) => session.provider === provider);
+    if (sessions.some((session) => this.isActive(session.id) || session.status === 'running' || session.status === 'waiting')) return null;
+    this.providerMaintenance.add(provider);
+    let released = false;
+    return () => { if (!released) { released = true; this.providerMaintenance.delete(provider); } };
+  }
   isActive(sessionId: string): boolean {
     return this.active.has(sessionId) || this.compactions.has(sessionId) || Boolean(this.teamProxy?.isActive(sessionId));
   }
+  isProviderUnderMaintenance(provider: Provider): boolean { return this.providerMaintenance.has(provider); }
   canQueue(sessionId:string): boolean { const run=this.active.get(sessionId); return Boolean(run && !run.cleanupPending && !run.closed); }
   isSteerable(sessionId: string): boolean { const run=this.active.get(sessionId); return Boolean(run && run.providerPhase && !run.closed && !run.cleanupPending && run.provider==='codex' && run.adapter?.steer && run.adapter.isSteerable?.()); }
   async steer(sessionId: string, content: string): Promise<boolean> {
@@ -287,6 +297,7 @@ export class SessionRuntime {
   start(sessionId: string, content: string, options: StartOptions = {}): string {
     const session = this.store.getSession(sessionId);
     if (!session) throw notFound('Session not found');
+    if (this.providerMaintenance.has(session.provider)) throw conflict(`${session.provider} is being updated. Wait for the provider update to finish before starting work.`);
     if (this.stopping.has(sessionId)) throw conflict('This session is being removed from Mingle.');
     if (options.intent === 'plan' && (options.invocation || options.skills?.length || options.resolveSkills)) throw badRequest('Native plan generation cannot run provider commands or skills. Send a regular planning prompt instead.');
     const executionPlan = options.executionPlanId ? this.store.getSessionPlan(options.executionPlanId) : undefined;
@@ -1206,6 +1217,7 @@ export class SessionRuntime {
   compact(sessionId: string, operationId = newId('cmp')): Promise<ContextCompactionResult> {
     const session = this.store.getSession(sessionId);
     if (!session) throw notFound('Session not found');
+    if (this.providerMaintenance.has(session.provider)) throw conflict(`${session.provider} is being updated. Wait for the provider update to finish before compacting.`);
     if (this.stopping.has(sessionId)) throw conflict('This session is being removed from Mingle.');
     const compactOperationId = operationId.trim();
     if (!compactOperationId || compactOperationId.length > 100) throw conflict('A valid compaction operation ID is required.');

@@ -8,6 +8,7 @@ import { seedExampleWorkspace } from './example.ts';
 import { HandoffService } from './handoffs.ts';
 import { Hub } from './hub.ts';
 import { ProviderService } from './provider-service.ts';
+import { ProviderUpdateService } from './provider-update/service.ts';
 import { buildRouter, type Services } from './routes.ts';
 import { SessionRuntime, type RuntimeOptions } from './runtime.ts';
 import { Security } from './security.ts';
@@ -77,6 +78,7 @@ export interface MingleApplication {
   readonly terminals: TerminalManager;
   readonly hub: Hub;
   readonly providers: ProviderService;
+  readonly providerUpdates: ProviderUpdateService;
   readonly browser: BrowserService;
   readonly intelligence: ProjectIntelligenceService;
   readonly repository: RepositoryService;
@@ -206,6 +208,7 @@ export function createApplication(options: ApplicationOptions): MingleApplicatio
       return skills as import('@mingle/contracts').ProviderSkill[];
     };
   });
+  const providerUpdates = new ProviderUpdateService(store, providers, runtime);
   runtime.setProgressMcp(progressMcp);
   runtime.setProjectMemory(projectMemory, memoryMcp);
   const terminals = new TerminalManager(store, hub, log, options.terminal);
@@ -227,7 +230,7 @@ export function createApplication(options: ApplicationOptions): MingleApplicatio
   const sessionResume = new SessionResumeService(store, runtime, providers, groups, log);
   const teamMcp = new TeamMcpBridge(groups, store, () => boundPort, () => config.host);
   runtime.setGroupServices(groups, teamMcp);
-  subagents.recover();
+
   groups.recover();
   const distributed = new DistributedWorkspaceService({ store, account, runtime, providers, recovery, groups, repository, dataDir: config.dataDir });
   const projectCollaboration = new ProjectCollaborationService({ store, account, distributed, workspace, providers, ...options.projectCollaboration });
@@ -292,7 +295,7 @@ export function createApplication(options: ApplicationOptions): MingleApplicatio
     },
   });
   const services: Services = {
-    config, store, hub, runtime, tasks, terminals, providers, browser, intelligence, repository, groups, handoffs, workspace, attachments, account, recovery, distributed, projectCollaboration, teamChat, projectMemory, memorySync: () => memorySync, teamOrchestration, subagents, setupSignal: setupLifecycle.signal,
+    config, store, hub, runtime, tasks, terminals, providers, providerUpdates, browser, intelligence, repository, groups, handoffs, workspace, attachments, account, recovery, distributed, projectCollaboration, teamChat, projectMemory, memorySync: () => memorySync, teamOrchestration, subagents, setupSignal: setupLifecycle.signal,
     imports: new ImportService(store, options.providers, providers, runtime), directories: new DirectoryService(), projectSources: new ProjectSources(workspace), startedAt: Date.now(), getPort: () => boundPort,
   };
   hub.bind({ onMessage: (socket, raw) => terminals.handleMessage(socket, raw), onClose: (socket) => terminals.releaseSocket(socket) });
@@ -366,7 +369,7 @@ export function createApplication(options: ApplicationOptions): MingleApplicatio
   const address = () => ({ host: config.host, port: boundPort, url: `http://${config.host.includes(':') ? `[${config.host}]` : config.host}:${boundPort}` });
 
   const app: MingleApplication = {
-    config, store, server, runtime, groups, terminals, hub, providers, browser, intelligence, repository, attachments, recovery, distributed, projectCollaboration, teamChat, teamOrchestration,
+    config, store, server, runtime, groups, terminals, hub, providers, providerUpdates, browser, intelligence, repository, attachments, recovery, distributed, projectCollaboration, teamChat, teamOrchestration,
     initialize() {
       initialized ??= (async () => {
         if (options.exampleWorkspace === true) await seedExampleWorkspace(store, config.dataDir, log);
@@ -391,7 +394,14 @@ export function createApplication(options: ApplicationOptions): MingleApplicatio
       });
       boundPort = (server.address() as AddressInfo).port;
       store.recordEvent({ type: 'runtime.started', summary: `Mingle server started on ${address().url}`, payload: { version: config.version, port: boundPort } });
-      if (options.detectOnStart !== false) providers.warm();
+      if (options.detectOnStart !== false) {
+        providers.warm();
+        void providers.list().then(() => providerUpdates.checkAll()).catch((error) => log('warn', 'Provider update check could not start', error));
+      }
+      if (store.listDelegatedSubagents().some((row) => row.status === 'running')) {
+        // Resuming a parent requires checked native capabilities, even on a cold diagnostics cache.
+        void providers.list().then(() => { if (!setupLifecycle.signal.aborted) subagents.recover(); }).catch((error) => log('warn', 'Subagent recovery diagnostics failed', error));
+      }
       sessionResume.start(setupLifecycle.signal);
       return address();
     },
@@ -400,6 +410,7 @@ export function createApplication(options: ApplicationOptions): MingleApplicatio
       runtime.beginShutdown();
       closing ??= (async () => {
         setupLifecycle.abort();
+        await providerUpdates.close();
         await teamOrchestration.close();
         await memorySync?.close();
         await teamChat.close();

@@ -595,6 +595,20 @@ export class Store {
     return this.getSettings();
   }
 
+  providerUpdateDismissed(provider: string, version: string): boolean {
+    return this.all('SELECT 1 AS found FROM provider_update_dismissals WHERE provider = ? AND version = ?', provider, version).length > 0;
+  }
+  dismissProviderUpdate(provider: string, version: string): void {
+    this.run('INSERT INTO provider_update_dismissals(provider, version, dismissed_at) VALUES (?, ?, ?) ON CONFLICT(provider,version) DO UPDATE SET dismissed_at=excluded.dismissed_at', provider, version, new Date().toISOString());
+  }
+  getProviderUpdateChecks(): Record<string, unknown> {
+    return Object.fromEntries(this.all('SELECT provider, data_json FROM provider_update_checks').map((row) => [row.provider as string, JSON.parse(row.data_json as string)]));
+  }
+  saveProviderUpdateCheck(provider: string, data: unknown): void {
+    const checkedAt = typeof data === 'object' && data && 'checkedAt' in data ? String((data as { checkedAt: unknown }).checkedAt) : new Date().toISOString();
+    this.run('INSERT INTO provider_update_checks(provider,data_json,checked_at) VALUES (?,?,?) ON CONFLICT(provider) DO UPDATE SET data_json=excluded.data_json, checked_at=excluded.checked_at', provider, JSON.stringify(data), checkedAt);
+  }
+
   // tasks
   private depsOf(taskId: string): string[] {
     return this.all('SELECT depends_on FROM task_deps WHERE task_id = ? ORDER BY rowid ASC', taskId).map((r) => r.depends_on as string);

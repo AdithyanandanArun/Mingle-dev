@@ -7,6 +7,7 @@ import { ProviderSchema, PolicySchema, EffortSchema, ServiceTierSchema } from '.
 import type { Provider, Policy, Effort } from './provider-config';
 import type { ContextCompactionResult } from './resilience';
 export * from './provider-config';
+export * from './provider-updates';
 export type SessionStatus = 'idle' | 'running' | 'waiting' | 'interrupted' | 'error';
 export type TaskStatus = 'backlog' | 'ready' | 'running' | 'blocked' | 'review' | 'done';
 export interface Project { id: string; name: string; path: string; createdAt: string; isExample: boolean }

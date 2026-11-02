@@ -436,6 +436,12 @@ const MIGRATIONS: (string | ((db: DatabaseSync) => void))[] = [
      );
      CREATE INDEX IF NOT EXISTS delegated_subagents_parent ON delegated_subagents(parent_session_id);`);
     },
+    `CREATE TABLE IF NOT EXISTS provider_update_dismissals (
+      provider TEXT NOT NULL, version TEXT NOT NULL, dismissed_at TEXT NOT NULL,
+      PRIMARY KEY(provider, version)
+    ); CREATE TABLE IF NOT EXISTS provider_update_checks (
+      provider TEXT PRIMARY KEY, data_json TEXT NOT NULL, checked_at TEXT NOT NULL
+    );`,
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;
