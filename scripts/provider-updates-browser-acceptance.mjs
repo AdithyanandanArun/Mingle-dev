@@ -23,7 +23,7 @@ try {
   const errors = []; page.on('pageerror', (error) => errors.push(error.message));
   const row = { provider: 'codex', installedVersion: '1.0.0', latestVersion: '1.1.0', source: 'Example public registry', checkedAt: '2026-11-02T00:00:00Z', status: 'available', channel: 'stable', method: 'native', message: 'Example newer release.', dismissed: false };
   let rows = [row, { ...row, provider: 'claude', method: 'unsupported', message: 'Example package-managed installation.', instructions: 'Use the original package manager.' }, { ...row, provider: 'antigravity', status: 'unknown', latestVersion: null, method: 'unsupported', message: 'Managed pinned runtime.' }];
-  let applies = 0, checks = 0, finishUpdate, rejectCheck = false;
+  let applies = 0, checks = 0, finishUpdate, rejectCheck = false, malformed = false;
   await page.route('**/api/**', async (route) => {
     const request = route.request(), path = new URL(request.url()).pathname;
     if (path.endsWith('/updates/apply')) {
@@ -34,7 +34,7 @@ try {
     }
     if (path.endsWith('/updates/dismiss')) { const body = request.postDataJSON(); rows = rows.map((r) => r.provider === body.provider ? { ...r, dismissed: true } : r); return route.fulfill({ json: { ok: true } }); }
     if (path.endsWith('/updates/check')) { checks++; return rejectCheck ? route.fulfill({ status: 503, json: { error: 'Example offline check.' } }) : route.fulfill({ json: { providers: rows } }); }
-    if (path.endsWith('/updates')) return route.fulfill({ json: { providers: rows } });
+    if (path.endsWith('/updates')) return route.fulfill({ json: malformed ? [] : { providers: rows } });
     return route.fulfill({ status: 404, json: { error: 'Example fixture route only.' } });
   });
   const url = `http://127.0.0.1:${server.httpServer.address().port}/scripts/provider-updates-browser-fixture.html`;
@@ -57,9 +57,14 @@ try {
   await claudeRow.getByRole('button', { name: 'Copy instructions', exact: true }).waitFor();
   rejectCheck = true; await page.getByRole('button', { name: 'Check again', exact: true }).click();
   await page.getByRole('alert').filter({ hasText: 'Example offline check.' }).waitFor();
+  malformed = true; await page.evaluate(() => window.dispatchEvent(new Event('mingle:provider-updates-changed')));
+  await page.getByRole('alert').filter({ hasText: 'Provider update status is unavailable.' }).waitFor();
+  await page.getByRole('heading', { name: 'Provider CLI updates' }).waitFor();
+  malformed = false; await page.evaluate(() => window.dispatchEvent(new Event('mingle:provider-updates-changed')));
+  await page.getByRole('alert').filter({ hasText: 'Provider update status is unavailable.' }).waitFor({ state: 'hidden' });
   await page.setViewportSize({ width: 390, height: 850 });
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
   await page.screenshot({ path: join(output, 'provider-updates-390px.png'), fullPage: true });
   assert.deepEqual(errors, []);
-  console.log(`8 provider update browser checks passed. Screenshots: ${output}`);
+  console.log(`9 provider update browser checks passed. Screenshots: ${output}`);
 } finally { await browser?.close(); await server?.close(); }

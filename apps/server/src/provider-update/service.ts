@@ -1,5 +1,5 @@
 import { spawn as nodeSpawn } from 'node:child_process';
-import path, { basename, resolve } from 'node:path';
+import path, { basename, join, resolve } from 'node:path';
 import { realpath, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { conflict } from '../util.ts';
@@ -193,7 +193,7 @@ export class ProviderUpdateService {
 
   async close(): Promise<void> {
     this.closed = true; this.lifecycle.abort();
-    for (const child of this.children) child.kill('SIGKILL');
+    for (const child of this.children) this.killUpdater(child);
     await Promise.allSettled([...this.inflight.values(), ...this.jobs]);
   }
 
@@ -248,13 +248,24 @@ export class ProviderUpdateService {
     }
   }
 
+  private killUpdater(child: ReturnType<SpawnLike>): void {
+    try {
+      if (child.pid && process.platform === 'win32') {
+        const killer = this.spawn(join(process.env.SystemRoot ?? process.env.SYSTEMROOT ?? 'C:\\Windows', 'System32', 'taskkill.exe'),
+          ['/PID', String(child.pid), '/T', '/F'], { shell: false, windowsHide: true, stdio: 'ignore' });
+        killer.once('error', () => { try { child.kill('SIGKILL'); } catch { /* already exited */ } });
+      } else if (child.pid) process.kill(-child.pid, 'SIGKILL');
+      else child.kill('SIGKILL');
+    } catch { try { child.kill('SIGKILL'); } catch { /* already exited */ } }
+  }
+
   private runFixed(executable: string, args: string[]): Promise<string> {
     if (this.closed) return Promise.reject(new Error('Mingle is shutting down.'));
     return new Promise((resolvePromise, reject) => {
-      const child = this.spawn(executable, args, { shell: false, windowsHide: true, env: { PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? '', USERPROFILE: process.env.USERPROFILE ?? '', TMP: process.env.TMP ?? '', TEMP: process.env.TEMP ?? '', SYSTEMROOT: process.env.SYSTEMROOT ?? '' }, stdio: ['ignore', 'pipe', 'pipe'] });
+      const child = this.spawn(executable, args, { shell: false, windowsHide: true, detached: process.platform !== 'win32', env: { PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? '', USERPROFILE: process.env.USERPROFILE ?? '', TMP: process.env.TMP ?? '', TEMP: process.env.TEMP ?? '', SYSTEMROOT: process.env.SYSTEMROOT ?? '' }, stdio: ['ignore', 'pipe', 'pipe'] });
       this.children.add(child);
       let output = ''; let settled = false; let timeoutError: Error | undefined;
-      const timer = setTimeout(() => { timeoutError = new Error('Provider update exceeded the 5 minute time limit.'); child.kill('SIGKILL'); }, PROCESS_TIMEOUT_MS); timer.unref();
+      const timer = setTimeout(() => { timeoutError = new Error('Provider update exceeded the 5 minute time limit.'); this.killUpdater(child); }, PROCESS_TIMEOUT_MS); timer.unref();
       const onData = (chunk: Buffer) => { output = (output + chunk.toString('utf8')).slice(-4000); };
       child.stdout?.on('data', onData); child.stderr?.on('data', onData);
       const done = (error?: Error) => { if (settled) return; settled = true; clearTimeout(timer); this.children.delete(child); if (error) reject(new Error(`${error.message}${output ? ` ${redactSecrets(output).slice(-500)}` : ''}`)); else resolvePromise(output); };

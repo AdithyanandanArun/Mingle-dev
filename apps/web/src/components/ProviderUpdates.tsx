@@ -14,8 +14,8 @@ export function ProviderUpdates({ noticeOnly = false }: { noticeOnly?: boolean }
   const [errors, setErrors] = useState<Record<string, string>>({});
   const load = useCallback(async (signal?: AbortSignal) => {
     const generation = ++readGeneration.current;
-    try { const result = await api.providerUpdates(signal); if (!signal?.aborted && generation === readGeneration.current) setRows(result.providers); }
-    catch (error) { if (!signal?.aborted) setErrors((old) => ({ ...old, load: errorMessage(error) })); }
+    try { const result = await api.providerUpdates(signal); if (!Array.isArray(result.providers)) throw new Error('Provider update status is unavailable. Check again in Settings.'); if (!signal?.aborted && generation === readGeneration.current) { setRows(result.providers); setErrors((old) => ({ ...old, load: '' })); } }
+    catch (error) { if (!signal?.aborted && generation === readGeneration.current) setErrors((old) => ({ ...old, load: errorMessage(error) })); }
   }, []);
   useEffect(() => { const controller = new AbortController(); const refresh = () => void load(controller.signal); refresh(); window.addEventListener('mingle:provider-updates-changed', refresh); return () => { controller.abort(); window.removeEventListener('mingle:provider-updates-changed', refresh); }; }, [load]);
 

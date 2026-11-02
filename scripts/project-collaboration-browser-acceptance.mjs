@@ -546,6 +546,7 @@ async function main() {
       await route.fulfill({ response, body: JSON.stringify(latestBootstrapFixture) });
       return;
     }
+    if (url.pathname === '/api/providers/updates' && method === 'GET') { await jsonResponse(route, 200, { providers: [], exampleFixture: true }); return; }
     if (url.pathname === '/api/account') {
       const status = accountMode === 'signed-out' ? 'signed-out' : 'signed-in';
       await jsonResponse(route, 200, accountState(status, accountMode === 'wrong-account' ? 'other@example.invalid' : INVITED_EMAIL));
