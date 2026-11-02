@@ -95,6 +95,8 @@ const DEFAULT_PROVIDER_COOLDOWN_MS = 15 * 60 * 1000;
 const DEFAULT_STALL_TIMEOUT_MS = 10 * 60 * 1000;
 const DEFAULT_STALL_SWEEP_INTERVAL_MS = 30 * 1000;
 const MAX_AUTONOMOUS_TURNS = 200;
+/** Bounded orchestrator reminders per request before the pending acceptance is left for the human. */
+const ACCEPTANCE_FOLLOW_UP_ROUNDS = 2;
 const MAX_AUTONOMOUS_HOPS = 24;
 const MAX_RESTART_RESUME_AGE_MS = 24 * 60 * 60 * 1000;
 const RESTART_RESUME_PAUSE_REASON = 'Waiting for provider availability before restart continuation.';
@@ -459,6 +461,10 @@ export class GroupService {
     this.repo = new GroupRepo(options.store.db);
     this.store.db.exec(`CREATE TABLE IF NOT EXISTS group_remote_completion_notifications (
       delivery_id TEXT PRIMARY KEY, result_delivery_id TEXT NOT NULL, created_at TEXT NOT NULL
+    )`);
+    this.store.db.exec(`CREATE TABLE IF NOT EXISTS group_acceptance_followups (
+      request_id TEXT NOT NULL, member_id TEXT NOT NULL, round INTEGER NOT NULL, result_delivery_id TEXT NOT NULL, created_at TEXT NOT NULL,
+      PRIMARY KEY(request_id, member_id, round)
     )`);
     this.workspace = options.workspace;
     this.tasks = options.tasks;
@@ -3692,6 +3698,64 @@ ${task ? `Task ${task.id}: ${task.title}\nAcceptance: ${task.acceptanceCriteria}
     return '';
   }
 
+  /**
+   * Full access promises integration without a human step, but acceptance (merge, verification, publication) is an orchestrator
+   * tool call. When a request would complete while a delegated task is still in Review with a completed worker delivery, wake the
+   * issuing orchestrator once more per round, durably and without polling; after the cap the pending state is recorded for the human.
+   */
+  private queueAcceptanceFollowUp(group: ConversationGroup, request: NonNullable<ReturnType<GroupRepo['getRequest']>>): boolean {
+    const pending = this.repo.requestAssignments(request.id).filter((assignment) => {
+      const delivery = this.repo.getDelivery(assignment.deliveryId);
+      // An unnotified assignment is still owed its ordinary result delivery; this follow-up covers only batches the coordinator has already seen.
+      return assignment.notified && delivery?.status === 'completed' && this.store.getTask(assignment.taskId)?.status === 'review' && !this.repo.isAssignmentAccepted(assignment.id);
+    });
+    if (!pending.length) return false;
+    let queued = false;
+    for (const delegatorId of new Set(pending.map((assignment) => assignment.fromMemberId))) {
+      const delegator = this.repo.getMember(delegatorId);
+      const batch = pending.filter((assignment) => assignment.fromMemberId === delegatorId);
+      const lines = batch.map((assignment) => `- @${this.repo.getMember(assignment.toMemberId)?.handle ?? 'worker'} · ${clean(this.store.getTask(assignment.taskId)?.title ?? assignment.taskId, 120)} (task ${assignment.taskId})`);
+      const round = (this.store.db.prepare('SELECT COUNT(*) AS n FROM group_acceptance_followups WHERE request_id=? AND member_id=?')
+        .get(request.id, delegatorId) as { n: number }).n + 1;
+      const record = (resultDeliveryId: string) => this.store.db.prepare('INSERT INTO group_acceptance_followups(request_id,member_id,round,result_delivery_id,created_at) VALUES(?,?,?,?,?)')
+        .run(request.id, delegatorId, round, resultDeliveryId, nowIso());
+      if (!delegator || delegator.removedAt || round > ACCEPTANCE_FOLLOW_UP_ROUNDS) {
+        if (round === ACCEPTANCE_FOLLOW_UP_ROUNDS + 1 || !delegator || delegator.removedAt) {
+          record('');
+          this.repo.insertMessage({ groupId: group.id, senderMemberId: null, recipients: [], kind: 'status', requestId: request.id,
+            content: clean(`These worker tasks are still in Review and Mingle cannot confirm they were integrated:\n${lines.join('\n')}\nAsk the orchestrator to run team_accept after verification, or integrate the worker branches manually.`, LIMITS.message) });
+          this.event(group, 'group.acceptance.pending', 'Worker tasks remain in Review without orchestrator acceptance',
+            { requestId: request.id, taskIds: batch.map((assignment) => assignment.taskId) });
+        }
+        continue;
+      }
+      // Continue after the latest coordinator/result delivery, not from the worker's assignment hop.
+      // This preserves the request's durable hop ceiling across multiple review attempts.
+      const hop = Math.max(...this.repo.requestDeliveries(request.id).map((delivery) => delivery.hop), 0) + 1;
+      const resultDeliveryId = deliveryId();
+      const message = this.repo.insertMessage({ groupId: group.id, senderMemberId: null, recipients: [delegator.id], kind: 'status', requestId: request.id,
+        content: clean([
+          `Acceptance follow-up ${round}/${ACCEPTANCE_FOLLOW_UP_ROUNDS}: these worker tasks completed but are still in Review, so their changes are not confirmed as integrated:`,
+          ...lines,
+          'Review each exact fetched branch/ref or artifact, run the applicable checks, then call team_accept with a verification summary for every task that passes.',
+          'If a task fails review, team_assign the specific fix; if it is blocked, say what is needed. Do not report these tasks as complete until team_accept succeeds; otherwise state plainly that integration is pending.',
+        ].join('\n'), LIMITS.message) });
+      this.repo.insertDelivery({ id: resultDeliveryId, groupId: group.id, requestId: request.id, messageId: message.id, memberId: delegator.id, kind: 'result', hop });
+      record(resultDeliveryId);
+      this.repo.updateRequest(request.id, { status: 'active' });
+      this.event(group, 'group.acceptance.followup', 'Orchestrator asked to accept completed worker tasks',
+        { requestId: request.id, round, taskIds: batch.map((assignment) => assignment.taskId), resultDeliveryId });
+      queued = true;
+      const committed = request.turnsUsed + this.repo.requestDeliveries(request.id, ['queued']).length;
+      const turnLimit = this.requestTurnLimit(group, request);
+      if (hop > this.requestHopLimit(group, request) || (turnLimit !== null && committed > turnLimit)) {
+        this.holdBudget(group, request.id, 'Completed worker tasks await acceptance, but the follow-up needs another model turn or message hop. The follow-up is retained; resume after raising the applicable limit.');
+      }
+    }
+    if (queued) this.schedule(group.id);
+    return queued;
+  }
+
   /** Request status follows its deliveries. `hold` marks unfinished work as waiting for an explicit resume. */
   private refreshRequest(id: string, hold = false): void {
     const request = this.repo.getRequest(id);
@@ -3706,6 +3770,8 @@ ${task ? `Task ${task.id}: ${task.title}\nAcceptance: ${task.acceptanceCriteria}
       : open.length || retry ? (hold || group?.paused || retry ? 'paused' : 'active') : 'completed';
     if (status !== request.status) this.repo.updateRequest(id, { status });
     if (status === 'completed' && group && this.isFullAccessGroup(group)) {
+      // A request whose coordinator ended its turn with worker tasks still in Review has not integrated them.
+      if (request.status !== 'completed' && this.queueAcceptanceFollowUp(group, request)) return;
       const coordinator = this.repo.getMember(request.plannerMemberId);
       if (coordinator) {
         const completedRuns = this.store.db.prepare(`SELECT run_id FROM group_deliveries

@@ -421,6 +421,9 @@ export class GroupRepo {
     return { ...assignment, ...(acceptanceProvenance ? { acceptanceProvenance } : {}), ...(milestones.length ? { milestones } : {}),
       ...(acceptance ? { acceptedBy: acceptance.accepted_by as 'orchestrator', verificationSummary: acceptance.verification_summary as string } : {}) };
   }
+  isAssignmentAccepted(assignmentId: string): boolean {
+    return Boolean(this.get('SELECT 1 AS found FROM group_assignment_acceptances WHERE assignment_id=?', assignmentId));
+  }
   acceptAssignment(assignmentId: string, verificationSummary: string): void {
     this.run(`INSERT INTO group_assignment_acceptances(assignment_id,accepted_by,verification_summary,accepted_at)
       VALUES(?,'orchestrator',?,?) ON CONFLICT(assignment_id) DO UPDATE SET

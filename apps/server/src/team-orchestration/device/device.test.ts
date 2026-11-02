@@ -35,7 +35,7 @@ interface Fixture {
   collaborationRefreshCount(): number; revokeDevice(deviceId: string): void;
   authenticatedCalls(): number;
   setFreshCollaborationSnapshot(members: any[], agents: any[], otherDeviceOwner?: string): void;
-  setConsent(permission?: 'supervised' | 'full-access', settingsVersion?: number): Promise<any>;
+  setConsent(permission?: 'supervised' | 'full-access', settingsVersion?: number, sessionIds?: string[]): Promise<any>;
   failTerminalStatusSends(count: number): void;
   failChatReplies(count: number): void;
   holdImports(gate: Promise<void>): void;
@@ -228,7 +228,7 @@ async function fixture(): Promise<Fixture> {
       snapshot: async () => ({ agents: [...roster] }),
       publishAgents: async (input: { sessionIds: string[] }) => {
         for (const id of input.sessionIds) {
-          if (!roster.some((agent) => agent.sessionId === id)) roster.push({ id: AGENT_ID, name: 'Local agent', accountId: ACCOUNT, deviceId: OWN_DEVICE,
+          if (!roster.some((agent) => agent.sessionId === id)) roster.push({ id: id === session.id ? AGENT_ID : `agent_${id}`, name: 'Local agent', accountId: ACCOUNT, deviceId: OWN_DEVICE,
             sessionId: id, provider: 'claude', model: 'claude-sonnet-5-5', state: 'idle' });
         }
         return [...roster];
@@ -273,8 +273,8 @@ async function fixture(): Promise<Fixture> {
     failChatReplies(count) { chatFailures = count; },
     holdImports(gate) { importGate = gate; },
     async restartSide() { await side.close(); routes.length = 0; startSide(); },
-    async setConsent(permission = 'supervised', settingsVersion = 1) {
-      const body = { sessionIds: [session.id], permissionLevel: permission, settingsVersion, disclaimerVersion: TEAM_CONSENT_DISCLAIMER_VERSION };
+    async setConsent(permission = 'supervised', settingsVersion = 1, sessionIds = [session.id]) {
+      const body = { sessionIds, permissionLevel: permission, settingsVersion, disclaimerVersion: TEAM_CONSENT_DISCLAIMER_VERSION };
       return callRoute(result, 'POST', '/api/projects/:projectId/team-consent', { projectId: project.id }, body);
     },
     async deliver(overrides = {}, sender = HOST_DEVICE) {
@@ -1109,6 +1109,49 @@ describe('owner-device team orchestration', () => {
     else await callRoute(f, 'PATCH', '/api/projects/:projectId/team-consent', { projectId: f.projectId }, { state: 'paused' });
     await waitFor(() => f.sent.some((message) => message.payload?.deliveryId === payload.deliveryId && message.payload?.status === 'interrupted'), 5_000, change);
     expect(f.runtime.isActive(sessionId)).toBe(false);
+  });
+
+  it('interrupts every previously selected native Full-access agent when permission is lowered in the same save that removes one', async () => {
+    const f = await fixture();
+    await sendStructure(f, structure(2, 'full-access'));
+    const primarySessionId = f.store.listSessions(f.projectId)[0]!.id;
+    const removedSession = f.store.insertSession({ projectId: f.projectId, name: 'Second local agent', provider: 'claude', model: 'claude-sonnet-5-5',
+      effort: 'high', policy: 'supervised', isolated: true, worktreePath: f.worktree, branch: 'agent-worker' });
+    const granted = await f.setConsent('full-access', 2, [primarySessionId, removedSession.id]);
+    const first = deliveryPayload({ deliveryId: `delivery-${randomUUID()}`, agentId: granted.agentIds[0], permissionLevel: 'full-access', settingsVersion: 2 });
+    const second = deliveryPayload({ deliveryId: `delivery-${randomUUID()}`, agentId: granted.agentIds[1], workerHandle: 'worker-two', permissionLevel: 'full-access', settingsVersion: 2 });
+    f.runtime.mode = 'manual';
+    await f.deliver(first);
+    await f.deliver(second);
+    await waitFor(() => f.runtime.startCount === 2);
+    expect(f.runtime.optionsByRun.size).toBe(2);
+
+    await f.setConsent('supervised', 2, [primarySessionId]);
+    await waitFor(() => f.sent.some((message) => message.payload?.deliveryId === first.deliveryId && message.payload?.status === 'interrupted')
+      && f.sent.some((message) => message.payload?.deliveryId === second.deliveryId && message.payload?.status === 'interrupted'));
+    expect(f.runtime.isActive(primarySessionId)).toBe(false);
+    expect(f.runtime.isActive(removedSession.id)).toBe(false);
+  });
+
+  it('interrupts only agents removed from an unchanged Full-access consent selection', async () => {
+    const f = await fixture();
+    await sendStructure(f, structure(2, 'full-access'));
+    const primarySessionId = f.store.listSessions(f.projectId)[0]!.id;
+    const removedSession = f.store.insertSession({ projectId: f.projectId, name: 'Second local agent', provider: 'claude', model: 'claude-sonnet-5-5',
+      effort: 'high', policy: 'supervised', isolated: true, worktreePath: f.worktree, branch: 'agent-worker' });
+    const granted = await f.setConsent('full-access', 2, [primarySessionId, removedSession.id]);
+    const first = deliveryPayload({ deliveryId: `delivery-${randomUUID()}`, agentId: granted.agentIds[0], permissionLevel: 'full-access', settingsVersion: 2 });
+    const removed = deliveryPayload({ deliveryId: `delivery-${randomUUID()}`, agentId: granted.agentIds[1], workerHandle: 'worker-two', permissionLevel: 'full-access', settingsVersion: 2 });
+    f.runtime.mode = 'manual';
+    await f.deliver(first);
+    await f.deliver(removed);
+    await waitFor(() => f.runtime.startCount === 2);
+
+    await f.setConsent('full-access', 2, [primarySessionId]);
+    await waitFor(() => f.sent.some((message) => message.payload?.deliveryId === removed.deliveryId && message.payload?.status === 'interrupted'));
+    expect(f.runtime.isActive(primarySessionId)).toBe(true);
+    expect(f.runtime.isActive(removedSession.id)).toBe(false);
+    expect(f.sent.some((message) => message.payload?.deliveryId === first.deliveryId && message.payload?.status === 'interrupted')).toBe(false);
   });
 
   it('imports delivery input artifacts into the owner repository before starting the provider run', async () => {

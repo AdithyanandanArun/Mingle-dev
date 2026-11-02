@@ -411,6 +411,10 @@ export function createDeviceSide(deps: DeviceSideDeps): {
       && agent.ownerId === accountId).map((agent) => agent.sessionId);
     const toPublish = [...new Set([...ownPublished, ...input.sessionIds])];
     const published = await deps.distributed.execution.publishAgents({ teamId: shared.teamId, sharedProjectId: shared.sharedProjectId, sessionIds: toPublish });
+    const latestStructureAfterPublish = latestStructure(shared.sharedProjectId);
+    if (latestStructureAfterPublish && input.settingsVersion !== latestStructureAfterPublish.settings.version) {
+      throw new HttpError(409, 'Team settings changed while agents were being published. Review the current permission level and settings version before accepting consent.');
+    }
     const bySession = new Map(published.map((agent) => [agent.sessionId, agent.id]));
     const agentIds = input.sessionIds.map((sessionId) => bySession.get(sessionId)).filter((id): id is string => Boolean(id));
     if (agentIds.length !== input.sessionIds.length) throw new HttpError(409, 'The selected agents could not be verified in the shared roster.');
@@ -424,8 +428,12 @@ export function createDeviceSide(deps: DeviceSideDeps): {
       disclaimerVersion: input.disclaimerVersion, state: 'granted', acceptedAt: at, updatedAt: at,
     };
     saveConsent(consent);
-    if (permissionRank(consent.permissionLevel) < permissionRank('full-access')) {
-      curtailNativeFullAccess(shared.sharedProjectId, 'The owner now consents only to Supervised work, so this Full-access turn was interrupted.', agentIds);
+    if (previous?.permissionLevel === 'full-access') {
+      const lowered = permissionRank(consent.permissionLevel) < permissionRank('full-access');
+      const removed = previous.agentIds.filter((agentId) => !agentIds.includes(agentId));
+      const curtailed = lowered ? [...new Set([...previous.agentIds, ...agentIds])] : removed;
+      if (curtailed.length) curtailNativeFullAccess(shared.sharedProjectId,
+        lowered ? 'The owner lowered consent, so this Full-access turn was interrupted.' : 'The owner removed this agent from consent, so its Full-access turn was interrupted.', curtailed);
     }
     recordStructureUpdated(shared.sharedProjectId, 'Team consent updated');
     const payload = TeamConsentPayloadSchema.parse({ sharedProjectId: shared.sharedProjectId, agentIds,
@@ -461,6 +469,12 @@ export function createDeviceSide(deps: DeviceSideDeps): {
     // Resolve the host binding before recording the structure event: that event invalidates the
     // collaboration read model, and resolving afterwards would wait on an authoritative cloud read.
     const hostBinding = await binding(projectId).catch(() => null);
+    const latestRow = db.prepare(`SELECT consent_json FROM mingle_team_device_consents WHERE shared_project_id=? AND account_id=? AND device_id=?`)
+      .get(previous.sharedProjectId, previous.accountId, previous.deviceId) as { consent_json: string } | undefined;
+    const latestConsent = latestRow ? parseConsent(JSON.parse(latestRow.consent_json)) : undefined;
+    if (!latestConsent || latestConsent.updatedAt !== previous.updatedAt) {
+      throw new HttpError(409, 'Team consent changed while this update was being prepared. Review the current consent state and try again.');
+    }
     saveConsent(consent);
     recordStructureUpdated(consent.sharedProjectId, 'Team consent updated');
     if (consent.state === 'paused' || consent.state === 'revoked') {
