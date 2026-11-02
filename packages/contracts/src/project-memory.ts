@@ -31,7 +31,10 @@ export const PROJECT_MEMORY_LIMITS = {
 } as const;
 
 export const ProjectMemoryKindSchema = z.enum(['decision', 'convention', 'gotcha', 'fact', 'verification']);
-/** `evidenced` is only ever assigned by the server, after verifying at least one reference; everything else is `tentative`. */
+/**
+ * `evidenced` is only ever assigned by the server and means its references were checked (a file at a recorded revision, a commit that exists,
+ * a command that completed with exit 0 in the authoring run). It does not mean the text is true. The automatic `run` provenance reference never counts.
+ */
 export const ProjectMemoryStatusSchema = z.enum(['tentative', 'evidenced']);
 /** `stale` is per device: a referenced file changed since the entry was written. `retired` entries are tombstones. */
 export const ProjectMemoryLifecycleSchema = z.enum(['active', 'stale', 'retired']);
@@ -56,7 +59,7 @@ export const ProjectMemoryFileRefSchema = z.object({
   baseRevision: z.string().regex(/^[0-9a-f]{32}$/).nullable(),
   verifiedAt: z.string().datetime({ offset: true }),
 }).strict();
-/** Non-file provenance. Only references the server could verify are stored. */
+/** Non-file provenance. Only references the server could verify are stored; `run` is automatic provenance and never certifies a claim. */
 export const ProjectMemorySourceRefSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('commit'), ref: z.string().regex(/^[0-9a-f]{40,64}$/) }).strict(),
   z.object({ type: z.literal('run'), ref: z.string().min(1).max(100) }).strict(),
@@ -292,8 +295,8 @@ export type ProjectMemoryWriteResult = z.infer<typeof ProjectMemoryWriteResultSc
 export type ProjectMemoryInjection = z.infer<typeof ProjectMemoryInjectionSchema>;
 export type ProjectMemoryInjectionsResponse = z.infer<typeof ProjectMemoryInjectionsResponseSchema>;
 export type ProjectMemoryContextPreview = z.infer<typeof ProjectMemoryContextPreviewSchema>;
-export type MemoryRememberToolInput = z.infer<typeof MemoryRememberToolSchema>;
-export type MemorySearchToolInput = z.infer<typeof MemorySearchToolSchema>;
-export type MemoryUpdateToolInput = z.infer<typeof MemoryUpdateToolSchema>;
-export type MemoryRetireToolInput = z.infer<typeof MemoryRetireToolSchema>;
+export type MemoryRememberToolInput = z.input<typeof MemoryRememberToolSchema>;
+export type MemorySearchToolInput = z.input<typeof MemorySearchToolSchema>;
+export type MemoryUpdateToolInput = z.input<typeof MemoryUpdateToolSchema>;
+export type MemoryRetireToolInput = z.input<typeof MemoryRetireToolSchema>;
 export interface MemoryMcpConnection { url: string; token: string }

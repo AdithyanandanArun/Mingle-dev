@@ -11,23 +11,25 @@ Contract: `packages/contracts/src/project-memory.ts` (Zod schemas + types, expor
 | Field | Meaning |
 |---|---|
 | `kind` | `decision` \| `convention` \| `gotcha` \| `fact` \| `verification` |
-| `status` | `tentative` or `evidenced`. **Only the server assigns `evidenced`**, and only when at least one reference was verified (see Evidence). An agent asking for `evidenced` without a verifiable reference gets `tentative` plus a notice. |
+| `status` | `tentative` or `evidenced`. **Only the server assigns `evidenced`**, and it means *references were checked*, not that the text is true (see Evidence). An agent asking for `evidenced` without a checkable reference gets `tentative` plus a notice. An agent edit that changes the text without re-supplying evidence also resets the entry to `tentative`. |
 | `lifecycle` | `active`, `stale` (a referenced file's content no longer matches what was recorded, *on this device*), or `retired` (tombstone). |
 | `pinned` | A person pinned it. Pinned entries are always offered to runs first (max 3) and **agents cannot edit or retire them**. |
 | `humanVerified` | A person created, edited or re-verified it. Any later agent edit clears it. |
 | `revision` | Integer starting at 1; increases by one on every durable change (content, pin, retire, restore). Stale marking does **not** change it (it is per-device state). |
 | `author` / `updatedBy` | `{kind:'agent', sessionId, runId, name, provider, model, accountId, deviceId}` or `{kind:'human', displayName, accountId, deviceId}`. Always taken from the authenticated run or the signed-in account — never from tool arguments or request bodies. |
 | `files[]` | `{path, revision, baseRevision, verifiedAt}`; `path` is project-relative, `revision` is a SHA-256 prefix computed by the server. |
-| `sources[]` | Server-verified non-file provenance: `commit` (exists in the project repo), `run` (belongs to this project), `command` (ran in this run and exited 0). Unverifiable references are dropped with a notice. |
+| `sources[]` | Server-verified non-file provenance: `commit` (exists in the project repo), `command` (a completed tool call in the authoring run that exited 0), and `run` (the authoring run, added automatically as provenance). Unverifiable references are dropped with a notice. |
 | `stale` | `null`, or `{since, reason, paths}` explaining which files changed. |
 | `origin` | `{local:true}` if last written on this device, else `{local:false, deviceId}` of the teammate device that sent it. |
 | `match` | Only on search results: `{score, fields}`. |
 
 ### Evidence rules
 
-- A file reference is verified by the server reading the file inside the run's worktree (symlinks resolved, must stay inside it) and hashing it.
-- `verification` entries need a verified `command` (the run's recorded tool call exited 0) or `run` reference to be `evidenced`.
-- Humans' entries are `tentative` unless they carry a verified reference, but are marked `humanVerified`.
+- A file reference is checked by the server reading the file inside the run's worktree (symlinks resolved, must stay inside it) and hashing it. A commit reference is checked with `git cat-file` in the project repository. A command reference is kept only if the same run recorded a *completed* command tool call containing it with exit code 0.
+- `evidenced` requires at least one checked file, commit or command. The automatic `run` provenance reference **never** counts on its own.
+- A `verification` entry needs a checked **command** (a completed, successful result in the authoring run); files or commits alone leave it `tentative`.
+- People's entries get the same treatment (their file references are checked too); `humanVerified` is the separate signal that a person vouched for the text. Pinning alone does not set it.
+- Changing an entry's text as an agent without supplying evidence again resets it to `tentative`.
 
 ### Safety filters (applied to agent and human writes, and re-applied to every received team record)
 
@@ -36,7 +38,7 @@ Contract: `packages/contracts/src/project-memory.ts` (Zod schemas + types, expor
 
 ### Bounds
 
-500 live entries per project, 2,000 retired tombstones, 50 revisions per entry (first revision kept), 8 files, 120-char titles, 1,500-char bodies, ≤25 agent writes per run, ≤10 search results, run context ≤8 entries / ≤4,000 chars. Duplicates are merged: writing an entry with the same normalized kind+title or body as a live one updates it (`outcome: 'merged'` / `'unchanged'`) instead of adding a second.
+500 live entries per project, 2,000 retired tombstones, 50 revisions per entry (first revision kept), 8 files, 120-char titles, 1,500-char bodies, ≤25 agent writes per run, ≤10 search results, run context ≤8 entries / ≤4,000 chars. Duplicates are merged: writing an entry with the same normalized body, the same kind and normalized title, or near-identical title *and* body wording as a live one updates it (`outcome: 'merged'` / `'unchanged'`) instead of adding a second. Normalization is Unicode-aware (NFKC, letters and numbers of every script; text with no letters or digits is compared exactly together with its body), and search tokenizes unspaced scripts (Chinese, Japanese, Korean, Thai…) into character pairs, so non-Latin entries are never collapsed into each other and are searchable. An agent cannot recreate an entry a person retired.
 
 ## HTTP API (local, loopback, same security guard as the rest of `/api`)
 
@@ -104,7 +106,7 @@ At least one change besides `expectedRevision`/`note` is required. Returns `Proj
 
 ### `POST /api/projects/:projectId/memory/sync`
 
-Asks linked teammate devices to resend memory this device is missing (also happens automatically when the project is opened and periodically). Body `{}`. Returns `202 { "requested": <peer count> }`; `409` when the project is not team-shared or this device is not registered.
+Asks linked teammate devices to resend memory this device is missing (it also happens automatically when the project's memory is opened, rate-limited, and when team topology changes — there is no periodic poll). Body `{}`. Returns `202 { "requested": <peer count> }`; `409` when the project is not team-shared or this device is not registered.
 
 ### Workspace events
 
@@ -127,16 +129,26 @@ Before each non-plan run, Mingle adds a bounded `Project memory` block (see `PRO
 
 ## Staleness
 
-An entry is marked stale when the SHA-256 of a referenced file in the project root no longer matches the recorded `revision` (or `baseRevision`, for an author who worked in an isolated worktree). Checked: when a run finishes (its changed paths), when the list/detail/context endpoints are read (rate-limited per project), and when a retrieval is built. Stale state is per device and does not create a revision or replicate. An update that supplies fresh `files`, or a human `lifecycle:"active"`, clears it.
+An entry is marked stale when the SHA-256 of a referenced file in the project root no longer matches the recorded `revision` (or `baseRevision`, for an author who worked in an isolated worktree). Checked: after every run ends, and when the list/detail/search/context endpoints are read (rate-limited per project). Referenced paths are de-duplicated across entries, hashes are cached against each file's (mtime, size) so unchanged files cost one `stat`, and every scan has a wall-clock budget (≈200 ms; 250 ms on reads) after which it stops and resumes from the same position on the next scan. Building a run's context never waits for a scan: it uses the last known stale marks and starts a background scan. Stale state is per device and does not create a revision or replicate. An update that supplies fresh `files`, or a human `lifecycle:"active"`, clears it.
 
 ## Team sharing
 
-When the local project is bound to a team shared project (the same binding the team chat uses), every revision is signed by this device and sent to each mutually linked teammate device as `projectmemory.record` over the existing encrypted transport (no cloud schema change; the only contract change is allowing the `projectmemory.*` message kind namespace). New or reconnecting devices ask for missed records with `projectmemory.sync.request` / `.response` (bounded batches, resumable via `more`).
+When the local project is bound to a team shared project (the same binding the team chat uses, read from local tables), every revision is signed by this device and sent to each mutually linked teammate device as `projectmemory.record` over the existing encrypted transport. No cloud schema or Supabase client change is involved: the only contract change is allowing the `projectmemory.*` message-kind namespace, which the cloud only length-checks. New or reconnecting devices ask for missed records with `projectmemory.sync.request` / `.response` (bounded batches of ≤50 records, ≤400 per request, resumable via `more`, requests served at most once per 10 s per peer).
 
-A received record is accepted only if: the transport authenticated its sender device, the team and shared project match this device's exact local binding, the sender's account is an active member, the record's `authorDeviceId` and signature verify against that device's registered key (for backfill, any non-revoked team device), the claimed account matches the device owner, the timestamp is not in the future, the content passes the secret/path filters, and it is not a replay (record ids are unique) or older than a purged tombstone. Concurrent writes to one revision number are both kept in history; the head is the highest `(revision, at, id)`. Agents' records are rejected when they target a pinned entry or would resurrect a retired one; only a person can restore.
+**Event-driven only — nothing polls.** Publishing runs on a local write, when the Memory list for a team-bound project is opened (rate-limited to once per 30 s), and when the local transport topology (device, links, peers) changes; process start schedules one topology check. A failed send keeps the revision unpublished and arms a single exponential-backoff retry (15 s → 5 min) **only while unpublished work exists**; the timer is cleared when the queue drains. Unshared projects never send, never retry and report `unpublished: 0`. Binding and roster lookups read local SQLite caches; the only cloud-touching calls are the existing `authorizeTeam` and collaboration-members reads, made once per *received* envelope.
 
-Local writes are durable first and published afterwards (`sharing.unpublished` shows the queue); a retry timer republishes after outages or restarts.
+A received record is accepted only if: the transport authenticated its sender device and the envelope is addressed to this device, the sender is an active, mutually linked, non-revoked roster device, fresh team authorization passes, the team and shared project match this device's exact local binding, the sender's account is an active member, the record's `authorDeviceId` and Ed25519 signature verify against that device's registered key (direct records must be signed by the sending device; backfilled records may be relayed from any non-revoked team device), any claimed author account/device matches the device owner, the timestamp is not in the future, the content passes the secret/path/control-character filters, and it is not a replay (record ids are unique) or older than a purged tombstone. Permanently invalid records are dropped and logged, not retried; transient failures use the transport's bounded retry.
 
+Conflict handling is deterministic: the head of an entry is the record with the highest revision, then a person over an agent, then the later write, then the larger record id; concurrent writes to one revision number are all kept in history (`superseded` marks the losers). Agents' records are rejected on receipt when they would modify a pinned entry or resurrect a retired one; only a person can restore. Local writes are durable first and published afterwards (`sharing.unpublished` is the queue).
+
+## Known limitations
+
+- Memory is shared with the whole team as soon as the project is team-bound; there is no per-entry "local only" switch (the secret filter and review UI are the safeguards). Retiring an entry replicates a tombstone but cannot unsend text a peer already received.
+- Staleness is content-hash based, per device: a teammate with uncommitted edits can see an entry as stale that is fresh elsewhere.
+- Search is deterministic token scoring over a bounded candidate set, not semantic/embedding search.
+- Replication is eventually consistent. If two devices make *conflicting* offline edits where one is a person's pin and the other is a later agent revision, the pinned side rejects the agent record, so the devices can stay different until a later write on either side; reconnecting normally converges, and concurrent same-revision writes converge by the head rule above.
+- Only devices that have signed a record can serve it in backfill; records written before a device was registered are signed and published once it registers.
+- Backfill of more than 400 records per request needs several round trips (the requester chains them automatically).
 ## Known limitations
 
 - Memory is shared with the whole team as soon as the project is team-bound; there is no per-entry "local only" switch (the secret filter and review UI are the safeguards). Retiring an entry replicates a tombstone but cannot unsend text a peer already received.
