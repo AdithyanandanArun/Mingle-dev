@@ -243,12 +243,12 @@ export function createApplication(options: ApplicationOptions): MingleApplicatio
   const teamOrchestration = createTeamOrchestration({
     deliveryWorktreeRoot: path.join(config.dataDir, 'team-worktrees'),
     store, runtime, hub, transport: distributed.transport, account, distributed, collaboration: projectCollaboration,
-    groups, teamChat, teamMcp, recovery, changed: () => store.touch(),
+    groups, teamChat, teamMcp, recovery, changed: () => store.touch(), providers: () => providers.cached(),
     integrateTeamArtifact: (input) => distributed.integrateTeamArtifact(input),
     // Every device can contribute agents, so the owner-side executor is on by default; tests may substitute it.
     deviceSideFactory: options.teamOrchestrationDeviceSideFactory ?? (() => createDeviceSide({
       deliveryWorktreeRoot: path.join(config.dataDir, 'team-worktrees'),
-      store, runtime, transport: distributed.transport, account, distributed, collaboration: projectCollaboration, teamChat, hub, changed: () => store.touch(),
+      store, runtime, transport: distributed.transport, account, distributed, collaboration: projectCollaboration, teamChat, hub, changed: () => store.touch(), providers: () => providers.cached(),
     })),
   });
   runtime.setTeamProxyService(teamOrchestration.host);

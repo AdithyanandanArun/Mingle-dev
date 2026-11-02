@@ -24,6 +24,7 @@ export interface TeamOrchestrationOptions {
   teamMcp: TeamMcpProxy;
   recovery: Pick<RecoveryService, 'recordFailure' | 'clearFailure'>;
   changed?: () => void;
+  providers?: () => import('@mingle/contracts').ProviderInfo[] | null | undefined;
   integrateTeamArtifact?: (input: Parameters<TeamOrchestrationDeviceDependencies['distributed']['integrateTeamArtifact']>[0]) => ReturnType<TeamOrchestrationDeviceDependencies['distributed']['integrateTeamArtifact']>;
   now?: () => number;
   deliveryTimeoutMs?: number;
@@ -44,7 +45,7 @@ export function createTeamOrchestration(options: TeamOrchestrationOptions): {
     deviceSide = options.deviceSideFactory({
       store: options.store, runtime: options.runtime, hub: options.hub, transport: options.transport, account: options.account,
       distributed: options.distributed, collaboration: options.collaboration, teamChat: options.teamChat,
-      changed: options.changed ?? (() => undefined), deliveryWorktreeRoot: options.deliveryWorktreeRoot,
+      changed: options.changed ?? (() => undefined), deliveryWorktreeRoot: options.deliveryWorktreeRoot, providers: options.providers,
     });
   }
   const host = new TeamOrchestrationHost({

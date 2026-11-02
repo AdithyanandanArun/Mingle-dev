@@ -10,7 +10,7 @@ import {
   TeamStructurePayloadSchema, TeamAgentActivityEntrySchema, TeamArtifactRefSchema, TeamArtifactSchema, UpdateTeamConsentSchema,
 } from '@mingle/contracts';
 import type {
-  ProviderFailure, TeamAgentActivity, TeamAgentActivityEntry, TeamArtifactRef, TeamConsent, TeamConsentState,
+  ProviderFailure, ProviderInfo, TeamAgentActivity, TeamAgentActivityEntry, TeamArtifactRef, TeamConsent, TeamConsentState,
   TeamDeliveryPayload, TeamPermissionLevel, TeamStructurePayload,
 } from '@mingle/contracts';
 import { ProviderFailureSchema } from '@mingle/contracts';
@@ -31,6 +31,7 @@ import { signingConfigured } from '../../repository/inspect.ts';
 import { fetchTeamAgentBranch, fetchTeamIntegrationBranch, pushTeamCompletionBranch, teamAgentBranch } from '../../repository/team-branch.ts';
 import { isDeniedName, normalizeRelative } from '../../paths.ts';
 import { normalizeScopes, safeArtifactPath, scopesOverlap } from '../../groups/routing.ts';
+import { resolveRunConfig } from '../../session-config.ts';
 
 type AddRoute = (method: string, path: string, handler: (context: Ctx) => unknown | Promise<unknown>) => unknown;
 type DeviceTransport = DistributedWorkspaceService['transport'];
@@ -49,6 +50,8 @@ export interface DeviceSideDeps {
   teamChat: Pick<TeamChatService, 'postAgentReply'>;
   /** Durable runtime-data root for retained remote delivery worktrees. */
   deliveryWorktreeRoot?: string;
+  /** Provider capability cache; native Full access is used for a team run only when the session's provider/model advertises it. */
+  providers?: () => ProviderInfo[] | null | undefined;
   hub?: { broadcast(event: unknown): void };
   changed?: () => void;
   /** Injectable timing bounds keep transport/runtime tests deterministic. */
@@ -80,6 +83,8 @@ interface ActiveDelivery {
   heartbeatSequence: number;
   controller: AbortController;
   artifactFailures: string[];
+  /** True when the provider gate was opened by the owner's Full-access consent; it cannot be tightened mid-run, so lowering authority interrupts the turn. */
+  nativeFullAccess: boolean;
 }
 interface SharedBinding {
   projectId: string;
@@ -245,10 +250,37 @@ export function createDeviceSide(deps: DeviceSideDeps): {
       if (consent.state === 'granted' && (disclaimerChanged || permissionRaised)) {
         const downgraded = { ...consent, state: 'needs-reconsent' as const, updatedAt: nextConsentAt(consent) };
         saveConsent(downgraded);
+        curtailNativeFullAccess(sharedProjectId, 'Team consent needs renewal, so this Full-access turn was interrupted.', consent.agentIds);
         return downgraded;
       }
       return consent;
     } catch { return null; }
+  }
+
+  /** Native provider policy for a team delivery; never wider than the owner's current consent and the team's current setting. */
+  function nativeRunPolicy(payload: TeamDeliveryPayload, session: import('@mingle/contracts').Session): 'supervised' | 'full-access' {
+    if (payload.permissionLevel !== 'full-access') return 'supervised';
+    const consent = localConsent(payload.sharedProjectId);
+    const structure = latestStructure(payload.sharedProjectId);
+    if (consent?.state !== 'granted' || consent.permissionLevel !== 'full-access' || !consent.agentIds.includes(payload.agentId)
+      || structure?.settings.permissionLevel !== 'full-access') return 'supervised';
+    const info = deps.providers?.()?.find((row) => row.id === session.provider);
+    if (!info) return 'supervised';
+    try { return resolveRunConfig(info, { provider: session.provider, model: session.model, effort: session.effort, policy: 'full-access', serviceTier: session.serviceTier }, { policy: true }).policy === 'full-access' ? 'full-access' : 'supervised'; }
+    catch { return 'supervised'; }
+  }
+
+  /** A native Full-access gate cannot be tightened mid-run, so lowered authority interrupts the turn and reports why. */
+  function curtailNativeFullAccess(sharedProjectId: string, reason: string, agentIds?: string[]): void {
+    for (const live of [...active.values()]) {
+      if (!live.nativeFullAccess || live.payload.sharedProjectId !== sharedProjectId) continue;
+      if (agentIds && !agentIds.includes(live.payload.agentId)) continue;
+      live.nativeFullAccess = false;
+      live.entries.push(TeamAgentActivityEntrySchema.parse({ id: randomUUID(), runId: live.runId, at: ISO(), kind: 'status', text: safeText(reason, 500) }));
+      scheduleActivity(live);
+      live.controller.abort();
+      deps.runtime.interrupt(live.sessionId);
+    }
   }
 
   function parseConsent(input: unknown): TeamConsent {
@@ -392,6 +424,9 @@ export function createDeviceSide(deps: DeviceSideDeps): {
       disclaimerVersion: input.disclaimerVersion, state: 'granted', acceptedAt: at, updatedAt: at,
     };
     saveConsent(consent);
+    if (permissionRank(consent.permissionLevel) < permissionRank('full-access')) {
+      curtailNativeFullAccess(shared.sharedProjectId, 'The owner now consents only to Supervised work, so this Full-access turn was interrupted.', agentIds);
+    }
     recordStructureUpdated(shared.sharedProjectId, 'Team consent updated');
     const payload = TeamConsentPayloadSchema.parse({ sharedProjectId: shared.sharedProjectId, agentIds,
       permissionLevel: input.permissionLevel, settingsVersion: input.settingsVersion,
@@ -496,6 +531,9 @@ export function createDeviceSide(deps: DeviceSideDeps): {
         }
       }
     });
+    if (permissionRank(parsed.data.settings.permissionLevel) < permissionRank('full-access')) {
+      curtailNativeFullAccess(sharedProjectId, 'The team lowered its permission level, so this Full-access turn was interrupted. Re-dispatch it under the new level.');
+    }
     const sessionChanged = JSON.stringify(prior?.teamSession ?? null) !== JSON.stringify(parsed.data.teamSession ?? null);
     if (sessionChanged) {
       deps.store.recordEvent({ projectId: localBinding.projectId, type: 'team.session.updated', summary: 'Shared team session updated',
@@ -1266,11 +1304,12 @@ export function createDeviceSide(deps: DeviceSideDeps): {
       const consent = localConsent(payload.sharedProjectId);
       const session = deps.store.getSession(sessionId);
       if (!consent || consent.state !== 'granted' || !session) throw new HttpError(409, 'The local agent consent or session changed before execution.');
-      // Keep the owner runtime's native gate at its conservative mode for the whole delivery.
-      // The host can then raise or lower team authority while the provider is still running:
-      // each native approval is mirrored, and the host auto-approves only when current team
-      // settings and the owner's consent both permit it.
-      const runPolicy = 'supervised' as const;
+      // Full access is one explicit owner grant: while the team setting and this owner's consent both
+      // remain Full access, a provider that advertises a native Full-access mode runs without a per-tool
+      // gate (no approval prompt and no host round trip). Anything weaker, or a provider that does not
+      // advertise it, keeps the conservative gate with host-mirrored approvals. Lowering the team
+      // setting, pausing or revoking later interrupts a native Full-access turn (see curtailNativeFullAccess).
+      const runPolicy = nativeRunPolicy(payload, session);
       const controller = new AbortController();
       const deliveryContent = isolated.integrationNote ? `${payload.content}\n\n${isolated.integrationNote}` : payload.content;
       const requestEntry = TeamAgentActivityEntrySchema.parse({ id: randomUUID(), runId: null, at: ISO(), kind: 'request',
@@ -1296,7 +1335,7 @@ export function createDeviceSide(deps: DeviceSideDeps): {
         turnBase: isolated.turnBase, worktreePath: isolated.path, branch: isolated.branch,
         scope: payload.scope ? normalizeScopes(payload.scope) : null,
         entries: [requestEntry], text: '', activityState: 'working', activityWaiters: [],
-        timer: null, heartbeatTimer: null, heartbeatSequence: 0, controller, artifactFailures: [] };
+        timer: null, heartbeatTimer: null, heartbeatSequence: 0, controller, artifactFailures: [], nativeFullAccess: runPolicy === 'full-access' };
       active.set(payload.deliveryId, live);
       if (isolated.integrationNote) live.entries.push(TeamAgentActivityEntrySchema.parse({ id: randomUUID(), runId,
         at: ISO(), kind: 'status', text: isolated.integrationNote }));

@@ -33,6 +33,8 @@ export interface TeamOrchestrationDeviceDependencies {
   collaboration: TeamOrchestrationCollaboration;
   teamChat: TeamOrchestrationChat;
   changed(): void;
+  /** Provider capability cache used to decide whether native Full access can be used for a team run. */
+  providers?: () => import('@mingle/contracts').ProviderInfo[] | null | undefined;
 }
 export type TeamOrchestrationDeviceSideFactory = (dependencies: TeamOrchestrationDeviceDependencies) => TeamOrchestrationDeviceSide;
 

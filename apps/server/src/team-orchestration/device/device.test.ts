@@ -120,6 +120,11 @@ class FakeRuntime {
 
 const fixtures: Fixture[] = [];
 let roots: string[] = [];
+/** Provider capability cache the owner device sees; tests flip it to model a provider without native Full access. */
+let advertiseFullAccess = true;
+const fakeProviders = () => [{ id: 'claude' as const, name: 'Claude', available: true, version: 'fake', executable: '/fake/claude', reason: null,
+  policies: advertiseFullAccess ? ['supervised' as const, 'full-access' as const] : ['supervised' as const],
+  models: [{ id: 'claude-sonnet-5-5', name: 'Sonnet', policies: advertiseFullAccess ? ['supervised' as const, 'full-access' as const] : ['supervised' as const] }] }];
 
 let sharedRoot = '';
 let sharedRepo = '';
@@ -136,7 +141,7 @@ afterAll(() => {
   rmSync(sharedRoot, { recursive: true, force: true });
   rmSync(sharedRepo, { recursive: true, force: true });
 });
-beforeEach(() => { roots = []; });
+beforeEach(() => { roots = []; advertiseFullAccess = true; });
 afterEach(async () => {
   while (fixtures.length) await fixtures.pop()!.close();
   for (const root of roots) rmSync(root, { recursive: true, force: true });
@@ -251,7 +256,7 @@ async function fixture(): Promise<Fixture> {
   const startSide = () => {
     side = createDeviceSide({ store, runtime: runtime as any, transport, account, distributed, collaboration, teamChat: teamChat as any,
       hub: { broadcast: (event) => hubEvents.push(event) },
-      deliveryWorktreeRoot: worktreeRoot,
+      deliveryWorktreeRoot: worktreeRoot, providers: fakeProviders,
       activityThrottleMs: 15, toolTimeoutMs: 30, heartbeatIntervalMs: 15, terminalStatusRetryMs: 15 });
     side.routes((method, route, routeHandler) => routes.push({ method, path: route, handler: routeHandler }));
   };
@@ -1038,28 +1043,72 @@ describe('owner-device team orchestration', () => {
     expect(f.runtime.startCount).toBe(2);
   });
 
-  it('keeps teammate-triggered runs dynamically permissioned by the host for their full duration', async () => {
+  it('uses native Full access for a team run only when the team level, owner consent and provider all grant it', async () => {
     const f = await fixture();
     const sessionId = f.store.listSessions(f.projectId)[0]!.id;
-    f.store.db.prepare("UPDATE sessions SET policy = 'full-access' WHERE id = ?").run(sessionId);
     await sendStructure(f, structure(1, 'supervised'));
     await f.setConsent('supervised', 1);
 
     const supervisedDelivery = deliveryPayload({ deliveryId: `delivery-${randomUUID()}`, permissionLevel: 'supervised', settingsVersion: 1 });
     await f.deliver(supervisedDelivery);
     await waitFor(() => f.sent.some((message) => message.payload.deliveryId === supervisedDelivery.deliveryId && message.payload.status === 'completed'));
-    const supervisedRun = [...f.runtime.optionsByRun.entries()].find(([runId]) => f.store.getRun(runId)?.sessionId === sessionId);
-    expect(supervisedRun?.[1]).toMatchObject({ runPolicy: 'supervised' });
-    expect(f.store.getSession(sessionId)?.policy).toBe('full-access');
+    expect(f.store.getSession(sessionId)?.policy).toBe('supervised');
 
     await sendStructure(f, structure(2, 'full-access'));
+    // Raising the team level invalidated the supervised consent; a delivery is rejected until the owner grants Full access once.
+    const blocked = deliveryPayload({ deliveryId: `delivery-${randomUUID()}`, permissionLevel: 'full-access', settingsVersion: 2 });
+    await f.deliver(blocked);
+    await waitFor(() => f.sent.some((message) => message.payload.deliveryId === blocked.deliveryId && message.payload.status === 'rejected'));
+    expect(f.runtime.startCount).toBe(1);
+
     await f.setConsent('full-access', 2);
     const fullAccessDelivery = deliveryPayload({ deliveryId: `delivery-${randomUUID()}`, permissionLevel: 'full-access', settingsVersion: 2 });
     await f.deliver(fullAccessDelivery);
     await waitFor(() => f.sent.some((message) => message.payload.deliveryId === fullAccessDelivery.deliveryId && message.payload.status === 'completed'));
-    const startedRuns = [...f.runtime.optionsByRun.values()];
-    expect(startedRuns.map((options) => options.runPolicy)).toEqual(['supervised', 'supervised']);
-    expect(f.store.getSession(sessionId)?.policy).toBe('full-access');
+    expect([...f.runtime.optionsByRun.values()].map((options) => options.runPolicy)).toEqual(['supervised', 'full-access']);
+    // Per-run only: the owner's saved session policy is untouched, and no approval was mirrored to the host.
+    expect(f.store.getSession(sessionId)?.policy).toBe('supervised');
+    expect(f.sent.filter((message) => message.kind === 'teamgroup.approval.request')).toEqual([]);
+  });
+
+  it('keeps the conservative native gate and host-mirrored approvals when the provider does not advertise Full access', async () => {
+    advertiseFullAccess = false;
+    const f = await fixture();
+    await sendStructure(f, structure(2, 'full-access'));
+    await f.setConsent('full-access', 2);
+    f.runtime.mode = 'approval';
+    const payload = deliveryPayload({ deliveryId: `delivery-${randomUUID()}`, permissionLevel: 'full-access', settingsVersion: 2 });
+    await f.deliver(payload);
+    await waitFor(() => f.sent.some((message) => message.kind === 'teamgroup.approval.request'));
+    expect([...f.runtime.optionsByRun.values()].map((options) => options.runPolicy)).toEqual(['supervised']);
+  });
+
+  it('never widens a Supervised delivery or a Supervised owner consent to native Full access', async () => {
+    const f = await fixture();
+    await sendStructure(f, structure(2, 'full-access'));
+    await f.setConsent('full-access', 2);
+    // A delivery issued below the current team level is rejected as stale instead of running with any wider gate.
+    const stale = deliveryPayload({ deliveryId: `delivery-${randomUUID()}`, permissionLevel: 'supervised', settingsVersion: 2 });
+    await f.deliver(stale);
+    await waitFor(() => f.sent.some((message) => message.payload.deliveryId === stale.deliveryId && message.payload.status === 'rejected'));
+    expect(f.runtime.startCount).toBe(0);
+  });
+
+  it.each(['team-lowered', 'consent-narrowed', 'paused'] as const)('interrupts a native Full-access turn when %s', async (change) => {
+    const f = await fixture();
+    await sendStructure(f, structure(2, 'full-access'));
+    await f.setConsent('full-access', 2);
+    f.runtime.mode = 'manual';
+    const payload = deliveryPayload({ deliveryId: `delivery-${randomUUID()}`, permissionLevel: 'full-access', settingsVersion: 2 });
+    await f.deliver(payload);
+    await waitFor(() => f.runtime.startCount === 1);
+    expect([...f.runtime.optionsByRun.values()][0]!.runPolicy).toBe('full-access');
+    const sessionId = f.store.listSessions(f.projectId)[0]!.id;
+    if (change === 'team-lowered') await sendStructure(f, structure(3, 'supervised'));
+    else if (change === 'consent-narrowed') await f.setConsent('supervised', 2);
+    else await callRoute(f, 'PATCH', '/api/projects/:projectId/team-consent', { projectId: f.projectId }, { state: 'paused' });
+    await waitFor(() => f.sent.some((message) => message.payload?.deliveryId === payload.deliveryId && message.payload?.status === 'interrupted'), 5_000, change);
+    expect(f.runtime.isActive(sessionId)).toBe(false);
   });
 
   it('imports delivery input artifacts into the owner repository before starting the provider run', async () => {
