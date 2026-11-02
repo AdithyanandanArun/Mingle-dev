@@ -217,14 +217,21 @@ export class MemoryRepo {
   }
   countRecords(entryId: string): number { return Number(this.one('SELECT COUNT(*) AS n FROM mingle_project_memory_revisions WHERE entry_id=?', entryId)?.n ?? 0); }
 
-  /** Keeps the first revision and the newest `keep - 1`; returns the number of rows removed. */
+  /** Preserve the first body, selected head and unresolved descendants; fill the remaining budget with recent history. */
   pruneRecords(entryId: string, keep = PROJECT_MEMORY_LIMITS.maxRevisionsPerEntry): number {
-    const result = this.db.prepare(`DELETE FROM mingle_project_memory_revisions WHERE entry_id=? AND record_id NOT IN (
-      SELECT record_id FROM mingle_project_memory_revisions WHERE entry_id=? ORDER BY revision DESC, at DESC, record_id DESC LIMIT ?)
-      AND record_id NOT IN (SELECT record_id FROM mingle_project_memory_revisions WHERE entry_id=? AND causal_state='pending')
-      AND record_id != (SELECT record_id FROM mingle_project_memory_revisions WHERE entry_id=? ORDER BY revision ASC, at ASC, record_id ASC LIMIT 1)`)
-      .run(entryId, entryId, keep - 1, entryId, entryId);
-    return Number(result.changes);
+    const rows = this.listRecords(entryId, Number.MAX_SAFE_INTEGER, 0);
+    const protectedIds = new Set<string>();
+    const head = this.getEntry(entryId);
+    if (head) protectedIds.add(head.headRecordId);
+    const first = rows.at(-1);
+    if (first) protectedIds.add(first.recordId);
+    for (const row of this.pendingCausalRecords(entryId)) protectedIds.add(row.recordId);
+    const retained = new Set(protectedIds);
+    for (const row of rows) { if (retained.size >= keep) break; retained.add(row.recordId); }
+    const remove = this.db.prepare('DELETE FROM mingle_project_memory_revisions WHERE entry_id=? AND record_id=?');
+    let count = 0;
+    for (const row of rows) if (!retained.has(row.recordId)) count += Number(remove.run(entryId, row.recordId).changes);
+    return count;
   }
 
   markSigned(recordId: string, teamId: string, sharedProjectId: string, authorDeviceId: string, signature: string, author: ProjectMemoryAuthor, proof?: ProjectMemoryCausalProof): void {

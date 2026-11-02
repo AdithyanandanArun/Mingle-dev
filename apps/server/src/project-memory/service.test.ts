@@ -1,6 +1,6 @@
 import { mkdirSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ProjectMemoryCausalProof, Session, ToolCall } from '@mingle/contracts';
 import { PROJECT_MEMORY_LIMITS } from '@mingle/contracts';
 import { openDatabase } from '../db.ts';
@@ -41,6 +41,27 @@ function commandCall(runId: string, sessionId: string, command: string, exitCode
 }
 
 describe('project memory service', () => {
+  it.each(['agent', 'human'] as const)('rejects an async %s edit if a person pins while evidence is checked', async (kind) => {
+    const w = world(); const ctx = w.run(w.session());
+    const { entry } = await w.service.agentRemember(ctx, { kind: 'fact', title: 'Concurrent evidence check', body: 'Keep this original value.' });
+    const seam = w.service as unknown as { verifyRefs: (...args: unknown[]) => Promise<unknown> };
+    const verify = seam.verifyRefs.bind(w.service);
+    let release!: () => void; let entered!: () => void;
+    const blocked = new Promise<void>((resolve) => { release = resolve; });
+    const started = new Promise<void>((resolve) => { entered = resolve; });
+    const spy = vi.spyOn(seam, 'verifyRefs').mockImplementation(async (...args) => { entered(); await blocked; return verify(...args); });
+    const edit = kind === 'agent'
+      ? w.service.agentUpdate(ctx, { id: entry.id, body: 'Stale edit must not overwrite a pin.', files: ['src/a.ts'] })
+      : w.service.humanPatch(w.project.id, entry.id, { expectedRevision: entry.revision, expectedHeadId: entry.headRecordId, body: 'Stale human edit.', files: ['src/a.ts'] });
+    await started;
+    const pin = await w.service.humanPatch(w.project.id, entry.id, { expectedRevision: entry.revision, expectedHeadId: entry.headRecordId, pinned: true });
+    release();
+    await expect(edit).rejects.toMatchObject({ status: 409 });
+    spy.mockRestore();
+    expect(w.service.repo.getEntry(entry.id)).toMatchObject({ headRecordId: pin.entry.headRecordId, pinned: true, body: entry.body });
+    expect(w.service.repo.countRecords(entry.id)).toBe(2);
+  });
+
   it('records the authenticated run as author and keeps status truthful', async () => {
     const w = world();
     const s = w.session();

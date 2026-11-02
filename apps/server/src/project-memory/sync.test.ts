@@ -171,6 +171,33 @@ describe('team project memory sync (two-device fixture)', () => {
     expect(mesh.rejected).toEqual([]);
   });
 
+  it('preserves a low-revision human control head across a full history, pruning and third-device backfill', async () => {
+    const { mesh, a, b } = await pair();
+    const ctx = a.agent();
+    const { entry } = await a.service.agentRemember(ctx, { kind: 'fact', title: 'Protected pruned head', body: 'Original pinned value.' });
+    await a.settle(); await mesh.deliver();
+    const pin = await b.service.humanPatch(b.projectId, entry.id, { expectedRevision: 1, expectedHeadId: entry.headRecordId, pinned: true });
+    await b.settle();
+    const controls = mesh.queue.splice(0);
+    for (let i = 0; i < 60; i++) {
+      await a.service.agentUpdate(a.agent(), { id: entry.id, body: `Offline body version ${i}.` });
+      await a.settle();
+    }
+    await mesh.deliver();
+    mesh.queue.push(...controls); await mesh.deliver();
+    for (const n of [a, b]) {
+      expect(n.service.repo.getEntry(entry.id)).toMatchObject({ headRecordId: pin.entry.headRecordId, pinned: true, body: entry.body });
+      expect(n.service.repo.getRecord(pin.entry.headRecordId)).toBeDefined();
+      expect(n.service.repo.countRecords(entry.id)).toBeLessThanOrEqual(PROJECT_MEMORY_LIMITS.maxRevisionsPerEntry);
+      n.service.repo.pruneRecords(entry.id);
+      expect(n.service.repo.getRecord(pin.entry.headRecordId)).toBeDefined();
+    }
+    const c = new Node(mesh, randomUUID(), 'joined'); mesh.link(a, c);
+    await c.sync.requestBackfill(c.projectId, true); await mesh.deliver();
+    expect(c.service.repo.getEntry(entry.id)).toMatchObject({ headRecordId: pin.entry.headRecordId, pinned: true, body: entry.body });
+    expect(mesh.rejected).toEqual([]);
+  });
+
   it('is idempotent under replay and tolerates out-of-order delivery', async () => {
     const { mesh, a, b } = await pair();
     const ctx = a.agent();

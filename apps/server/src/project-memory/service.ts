@@ -9,7 +9,7 @@ import type {
 import { PROJECT_MEMORY_LIMITS, ProjectMemorySyncRecordSchema } from '@mingle/contracts';
 import { git } from '../git.ts';
 import type { Store } from '../store.ts';
-import { badRequest, conflict, notFound } from '../util.ts';
+import { HttpError, badRequest, conflict, notFound } from '../util.ts';
 import { MemoryRepo, type EntryRow, type RevisionRow } from './repo.ts';
 import { profileQuery, rank, renderContext, selectForContext, toEntry } from './retrieval.ts';
 import { bodyKey, checkMemoryPath, cleanText, detectSecret, jaccard, titleKey, tokenize } from './safety.ts';
@@ -349,6 +349,16 @@ export class ProjectMemoryService {
   }
 
   /** Persists one new revision of an entry (local authorship). */
+  private assertCurrentHead(prior: EntryRow): EntryRow {
+    const current = this.repo.getEntry(prior.id);
+    if (!current || current.revision !== prior.revision || current.headRecordId !== prior.headRecordId) {
+      const revision = current?.revision ?? 0;
+      const pinned = current?.pinned ? ' The current entry is pinned.' : '';
+      throw conflict(`Memory entry changed while the update was being prepared; current revision is ${revision}.${pinned} Refetch and retry.`);
+    }
+    return current;
+  }
+
   private commit(input: {
     projectId: string; prior: EntryRow | null; entryId?: string; op: ProjectMemoryOp; draft: Draft; author: ProjectMemoryAuthor; note?: string | null;
     keepStale?: boolean; sessionId?: string;
@@ -374,6 +384,7 @@ export class ProjectMemoryService {
       originDeviceId: null, stale: input.keepStale && !draft.retired ? prior?.stale ?? null : null,
     };
     this.repo.tx(() => {
+      if (prior) this.assertCurrentHead(prior);
       this.repo.insertRecord({
         recordId, entryId: row.id, projectId: row.projectId, revision, parentRevision: prior?.revision ?? null, op: input.op, at, createdAt: at, author,
         note: input.note ? input.note.slice(0, 300) : null, snapshot: draft, changed: changedFields(prior ? snapshotOf(prior) : null, draft),
@@ -460,6 +471,7 @@ export class ProjectMemoryService {
     commands: ProjectMemorySourceRef[]; newCommits: boolean; newCommands: boolean; claim?: Claim; pinned?: boolean; notices: string[]; note?: string;
     merged?: boolean; provenance?: ProjectMemorySourceRef[]; reverify?: boolean;
   }): ProjectMemoryWriteResult {
+    this.assertCurrentHead(prior);
     const kind = change.kind ?? prior.kind;
     const title = change.title ?? prior.title;
     const body = change.body ?? prior.body;
@@ -530,7 +542,7 @@ export class ProjectMemoryService {
       const refs = await this.verifyRefs({ files: prior.files.map((file) => file.path), commits: [], commands: [], projectRoot: project.path, workRoot: project.path });
       if (refs.files.length < prior.files.length) {
         notices.push(...refs.notices);
-        if (!restoring) return { entry: toEntry(prior, null), outcome: 'unchanged', notices: [...notices, 'A referenced file no longer exists, so the entry stays stale. Edit its files to re-verify.'] };
+        if (!restoring) { this.assertCurrentHead(prior); return { entry: toEntry(prior, null), outcome: 'unchanged', notices: [...notices, 'A referenced file no longer exists, so the entry stays stale. Edit its files to re-verify.'] }; }
       }
       files = refs.files; newFiles = true;
     }
@@ -712,6 +724,7 @@ export class ProjectMemoryService {
     const next = this.makeHead(current, winner);
     this.repo.tx(() => {
       this.repo.upsertEntry(next);
+      this.repo.pruneRecords(entryId);
       if (next.retired && !current?.retired) this.compactTombstones(projectId);
     });
     return next;
@@ -765,6 +778,9 @@ export class ProjectMemoryService {
       causalState = this.causalProofState(proof);
       if (causalState === 'invalid') throw badRequest('The memory ancestry proof does not follow its parent control state.');
     }
+    if (causalState === 'pending' && this.repo.pendingCausalRecords(record.entryId).length >= 128) {
+      throw new HttpError(429, 'Too many unresolved memory revisions; sync missing ancestry before retrying.');
+    }
     const row: RevisionRow = {
       recordId: record.id, entryId: record.entryId, projectId, revision: record.revision, parentRevision: record.parentRevision, op: record.op, at: record.at,
       createdAt: record.createdAt, author: record.author, note: record.note, snapshot: content,
@@ -774,11 +790,10 @@ export class ProjectMemoryService {
     };
     this.repo.tx(() => {
       this.repo.insertRecord(row);
-      this.repo.pruneRecords(record.entryId);
       this.repo.patchSyncState(projectId, { lastReceivedAt: this.iso() });
     });
     let applied: EntryRow | null = null;
-    if (causalState === 'pending') return 'pending';
+    if (causalState === 'pending') { this.repo.pruneRecords(record.entryId); return 'pending'; }
     if (record.causalProof) applied = this.promoteCausal(projectId, record.entryId);
     else {
       const newer = !current || outranks(record, current, this.repo.lineageFor(current.headRecordId));
@@ -791,6 +806,7 @@ export class ProjectMemoryService {
         });
       }
     }
+    this.repo.pruneRecords(record.entryId);
     const head: EntryRow | null = applied;
     if (head) {
       this.emit(head, record.op, 'peer');
