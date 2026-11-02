@@ -39,6 +39,7 @@ Mingle brings that work into a desktop workspace. Start with one agent, add othe
 | Bring in a teammate | Invite them by email to a Git project. They choose their checkout and providers, then join the shared conversation from their device. |
 | Keep changes separate | Use **isolated Git worktrees**, inspect diffs, and explicitly commit, push, or merge. |
 | Work through a website together | Use the **shared browser** with your agent; interact directly in the embedded desktop browser to take control. |
+| Keep project knowledge | Let agents record and recall shared decisions, conventions, gotchas, and verification references automatically, with editable history. |
 | Know where things stand | See real tool activity, task progress, approvals, failures, and results. Finished work enters review rather than silently becoming accepted. |
 
 ## Get started
@@ -116,7 +117,7 @@ pnpm install --frozen-lockfile
 pnpm dev
 ```
 
-Open **http://127.0.0.1:5173**. The local API runs on **127.0.0.1:4310**. The initial Example workspace starts no paid inference.
+Open **http://127.0.0.1:5173**. The local API runs on **127.0.0.1:4310**. Startup restores your last project; a fresh workspace starts empty and runs no paid inference.
 
 ```sh
 pnpm typecheck
@@ -136,6 +137,7 @@ Built with **React · TypeScript · Vite · Node.js · WebSockets · SQLite · E
 | [Onboarding](ONBOARDING.md) | Installation, first session, accounts, and contributor setup |
 | [Group sessions](docs/group-sessions.md) | Agent roles, routing, tasks, handoffs, and recovery |
 | [Shared browser](docs/shared-browser.md) | Browser setup, human/agent control, and platform limits |
+| [Project memory](docs/project-memory.md) | Autonomous project knowledge, provenance, retrieval, and team synchronization |
 | [Accounts](docs/accounts.md) | Sign-in, secure storage, and preferences |
 | [Architecture](docs/architecture.md) | How the UI, runtime, provider processes, and persistence fit together |
 | [Project context](CONTEXT.md) | Implementation state and handoff notes for developers |
