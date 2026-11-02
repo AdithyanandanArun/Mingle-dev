@@ -527,7 +527,9 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
     const message = this.options.store.listMessages(delivery.session_id, { limit: 100 })
       .find((entry) => entry.role === 'assistant' && entry.runId === delivery.run_id);
     if (!message || message.content.includes(`published origin/${branch} @ ${revision}`)) return;
-    const note = `\n\nIntegrated into the host group workspace; published origin/${safeArtifactText(branch, 200)} @ ${revision}. Integration worktree: ${safeArtifactText(worktreePath, 4_096)}.`;
+    const changes = this.options.store.getRun(delivery.run_id)?.changes?.files ?? [];
+    const files = changes.length ? ` Changed files: ${changes.map((file) => safeArtifactText(file.path, 500)).join(', ')}.` : '';
+    const note = `\n\nIntegrated into the host group workspace; published origin/${safeArtifactText(branch, 200)} @ ${revision}. Integration worktree: ${safeArtifactText(worktreePath, 4_096)}.${files}`;
     this.options.store.updateMessage(message.id, { content: `${message.content}${note}`.slice(0, 50_000) });
   }
 
