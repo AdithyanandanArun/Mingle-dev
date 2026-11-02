@@ -238,6 +238,7 @@ it('shares imported session history and team messages over HTTP and the encrypte
     expect(fullAccess.json.settings.permissionLevel).toBe('full-access');
 
     const assignmentTaskIds: string[] = [];
+    const acceptedTaskIds: string[] = [];
     const workerRuns: Array<{ baseRevision: string; worktreePath: string }> = [];
     const leadReviews: Array<{ head: string; html: string; css: string; workerAsked: boolean }> = [];
     const groupArtifactErrors: string[] = [];
@@ -376,11 +377,19 @@ it('shares imported session history and team messages over HTTP and the encrypte
       const html = readFileSync(path.join(options.session.worktreePath, 'index.html'), 'utf8');
       const css = readFileSync(path.join(options.session.worktreePath, 'styles.css'), 'utf8');
       if (!css.includes('.hero__cta:hover')) throw new Error('The follow-up fix did not arrive in the host group workspace.');
+      for (const taskId of assignmentTaskIds) {
+        const accepted = await callTeamTool(options.teamMcp, 'team_accept', {
+          taskId, verificationSummary: 'Inspected the integrated HTML and CSS, including the requested visible button hover treatment.',
+        });
+        if (accepted.status !== 'done') throw new Error('The verified remote assignment was not accepted.');
+        acceptedTaskIds.push(taskId);
+      }
       emit({ type: 'text', text: `The landing page is integrated in the host group workspace. It includes ${html.includes('Northstar') ? 'the Northstar page' : 'the requested page'} and the reviewed button fix.` });
     };
 
     teammate.fake.runs.length = 0;
     teammate.fake.script = async (options, emit) => {
+      if (options.session.policy !== 'full-access') throw new Error('An explicitly consented Full-access remote run used a per-tool approval policy.');
       const runIndex = workerRuns.length;
       const taskId = assignmentTaskIds[runIndex];
       if (!taskId || !options.teamMcp) throw new Error('The remote worker did not receive its assignment task or Team MCP connection.');
@@ -508,7 +517,8 @@ it('shares imported session history and team messages over HTTP and the encrypte
       };
       throw new Error(`${error instanceof Error ? error.message : String(error)}\nAcceptance diagnostics: ${JSON.stringify(diagnostics).slice(0, 10_000)}`);
     }
-    await waitFor(() => orchestratorAssignments === 2 && leader.fake.runs.length === 4, 15_000, 'one active-work question answer, one review/fix turn, and one final summary');
+    await waitFor(() => orchestratorAssignments === 2 && leader.fake.runs.length === 4 && acceptedTaskIds.length === 2 && leader.app.runtime.activeCount() === 0,
+      15_000, 'one active-work question answer, one review/fix turn, and one final acceptance');
     await waitFor(() => leader.app.groups.get(teamGroupId).requests.some((item) => item.status === 'completed'), 15_000, 'completed cross-device group request');
 
     expect(groupArtifactErrors).toEqual([]);
@@ -556,6 +566,11 @@ it('shares imported session history and team messages over HTTP and the encrypte
     expect(readFileSync(path.join(groupWorkspace, 'styles.css'), 'utf8')).toContain('.hero__cta:hover');
     expect(teammate.fake.runs).toHaveLength(2);
     expect(leader.fake.runs).toHaveLength(4);
+    expect(acceptedTaskIds).toEqual(assignmentTaskIds);
+    expect(assignmentTaskIds.map((taskId) => leader.app.store.getTask(taskId)?.status)).toEqual(['done', 'done']);
+    expect(leader.app.groups.get(teamGroupId).requests[0]?.status).toBe('completed');
+    expect(leader.app.store.db.prepare('SELECT COUNT(*) AS count FROM approvals').get()).toEqual({ count: 0 });
+    expect(teammate.app.store.db.prepare('SELECT COUNT(*) AS count FROM approvals').get()).toEqual({ count: 0 });
 
     const remoteProxyIds = new Set([proxySessionId, firstProxySessionId]);
     const completedRemoteRuns = leader.app.store.bootstrapRuns().filter((run) => remoteProxyIds.has(run.sessionId) && run.status === 'completed')
