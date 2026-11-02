@@ -1,8 +1,9 @@
+import path from 'node:path';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import { describe, expect, it, vi } from 'vitest';
 import type { ProviderInfo } from '@mingle/contracts';
-import { ProviderUpdateService } from './service.ts';
+import { ProviderUpdateService, withinNativeInstallRoot } from './service.ts';
 
 const diagnostic = (version = '1.0.0', executable = '/home/test/.local/bin/codex'): ProviderInfo => ({
   id: 'codex', name: 'Codex', available: true, version, executable, reason: null, models: [],
@@ -118,4 +119,12 @@ describe('provider update bounds and cached state', () => {
     expect((await app.service.snapshot()).providers[0]!.status).toBe('failed');
     expect(app.release).toHaveBeenCalledOnce();
   });
+});
+
+ it('recognizes Windows native roots while rejecting siblings and other drives', () => {
+  expect(withinNativeInstallRoot('C:\\Users\\Example\\.local\\bin', 'c:\\Users\\Example\\.local\\bin\\codex.exe', path.win32)).toBe(true);
+  expect(withinNativeInstallRoot('C:\\Users\\Example\\.local\\bin', 'C:\\Users\\Example\\.local\\binary\\codex.exe', path.win32)).toBe(false);
+  expect(withinNativeInstallRoot('C:\\Users\\Example\\.local\\bin', 'D:\\Users\\Example\\.local\\bin\\codex.exe', path.win32)).toBe(false);
+  expect(withinNativeInstallRoot('/home/example/.local/bin', '/home/example/.local/bin/codex', path.posix)).toBe(true);
+  expect(withinNativeInstallRoot('/home/example/.local/bin', '/home/example/.local/bin/../other/codex', path.posix)).toBe(false);
 });

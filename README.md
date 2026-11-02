@@ -137,6 +137,7 @@ Built with **React · TypeScript · Vite · Node.js · WebSockets · SQLite · E
 | [Onboarding](ONBOARDING.md) | Installation, first session, accounts, and contributor setup |
 | [Group sessions](docs/group-sessions.md) | Agent roles, routing, tasks, handoffs, and recovery |
 | [Shared browser](docs/shared-browser.md) | Browser setup, human/agent control, and platform limits |
+| [Provider updates](docs/provider-updates.md) | Native catalogs, startup release checks, and explicit safe CLI updates |
 | [Project memory](docs/project-memory.md) | Autonomous project knowledge, provenance, retrieval, and team synchronization |
 | [Accounts](docs/accounts.md) | Sign-in, secure storage, and preferences |
 | [Architecture](docs/architecture.md) | How the UI, runtime, provider processes, and persistence fit together |

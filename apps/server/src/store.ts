@@ -600,6 +600,7 @@ export class Store {
   }
   dismissProviderUpdate(provider: string, version: string): void {
     this.run('INSERT INTO provider_update_dismissals(provider, version, dismissed_at) VALUES (?, ?, ?) ON CONFLICT(provider,version) DO UPDATE SET dismissed_at=excluded.dismissed_at', provider, version, new Date().toISOString());
+    this.run('DELETE FROM provider_update_dismissals WHERE provider=? AND version NOT IN (SELECT version FROM provider_update_dismissals WHERE provider=? ORDER BY dismissed_at DESC LIMIT 8)', provider, provider);
   }
   getProviderUpdateChecks(): Record<string, unknown> {
     return Object.fromEntries(this.all('SELECT provider, data_json FROM provider_update_checks').map((row) => [row.provider as string, JSON.parse(row.data_json as string)]));

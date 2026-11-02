@@ -1,5 +1,5 @@
 import { spawn as nodeSpawn } from 'node:child_process';
-import { basename, resolve } from 'node:path';
+import path, { basename, resolve } from 'node:path';
 import { realpath, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { conflict } from '../util.ts';
@@ -54,6 +54,12 @@ function methodFor(provider: Provider, executable: string | null, version: strin
   return 'unsupported';
 }
 
+/** Uses the host platform's separators and drive rules; never accepts sibling-prefix paths. */
+export function withinNativeInstallRoot(root: string, executable: string, paths: Pick<typeof path, 'relative' | 'isAbsolute' | 'sep'> = path): boolean {
+  const relative = paths.relative(root, executable);
+  return relative !== '' && !paths.isAbsolute(relative) && relative !== '..' && !relative.startsWith('..' + paths.sep);
+}
+
 /** Bounded public metadata checks and explicit fixed-argv updates. No provider auth/config files are read. */
 export class ProviderUpdateService {
   private readonly fetcher: FetchLike;
@@ -78,7 +84,7 @@ export class ProviderUpdateService {
       if (canonical.includes('node_modules') || canonical.includes('Cellar') || canonical.includes('WindowsApps')) return false;
       const roots = provider === 'opencode' ? [resolve(homedir(), '.opencode', 'bin')]
         : [resolve(homedir(), '.local', 'bin'), resolve(homedir(), '.local', 'share', provider)];
-      if (!roots.some((root) => canonical.startsWith(root + '/'))) return false;
+      if (!roots.some((root) => withinNativeInstallRoot(root, canonical))) return false;
       if (provider === 'codex') return /^\s*update(?:\s|$)/m.test(await this.runFixed(executable, ['--help']));
       return true;
     });
@@ -115,16 +121,20 @@ export class ProviderUpdateService {
   async checkAll(force = false): Promise<void> {
     if (this.closed) return;
     const diagnostics = await this.providers.list();
+    if (this.closed) return;
     await Promise.all(diagnostics.map((diagnostic) => this.check(diagnostic, force)));
   }
 
   async checkOne(provider: Provider, force = false): Promise<ProviderUpdateInfo> {
+    if (this.closed) throw conflict('Mingle is shutting down.');
     const diagnostic = (await this.providers.list()).find((row) => row.id === provider);
+    if (this.closed) throw conflict('Mingle is shutting down.');
     if (!diagnostic) return empty(provider);
     return this.check(diagnostic, force);
   }
 
   private async check(diagnostic: ProviderInfo, force: boolean): Promise<ProviderUpdateInfo> {
+    if (this.closed) return empty(diagnostic.id, diagnostic);
     const provider = diagnostic.id;
     const previous = (this.store.getProviderUpdateChecks() as Record<string, ProviderUpdateInfo>)[provider];
     if (!force && previous?.checkedAt && this.now() - Date.parse(previous.checkedAt) < CACHE_MS) return { ...this.recompare(previous, diagnostic), installedVersion: diagnostic.version };
