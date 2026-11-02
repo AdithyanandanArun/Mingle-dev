@@ -35,6 +35,11 @@ async function runAssignments(t: TestApp, snapshot: GroupSnapshot, maxRuns: numb
     if (!active?.runId) throw new Error('Budget fixture run is missing its group delivery');
     const context = t.app.groups.contextForRun(options.session.id, active.runId);
     if (!context) throw new Error('Budget fixture run has no group context');
+    if (options.session.id === lead.sessionId) {
+      for (const assignment of t.app.groups.get(snapshot.group.id).assignments) {
+        if (t.app.store.getTask(assignment.taskId)?.status === 'review') await t.app.groups.acceptTask(context, { taskId: assignment.taskId, verificationSummary: 'Verified this fixture deliberately made no file changes.' });
+      }
+    }
     if (options.session.id === lead.sessionId && taskNumber < maxRuns) {
       taskNumber++;
       t.app.groups.assign(context, {

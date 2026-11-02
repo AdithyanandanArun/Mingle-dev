@@ -45,8 +45,9 @@ it('serializes matching joins, resumes after roster failure without duplicate se
   store.updateSettings({ defaultIsolated: false });
   const fakeProviders = new FakeProviders();
   fakeProviders.detectProviders = async () => [{ id: 'claude', name: 'Claude', available: true, version: 'fake', executable: '/fake/claude', reason: null,
-    policies: ['supervised', 'balanced', 'auto', 'full-access'], models: [{ id: 'claude-sonnet-5-5', name: 'Sonnet', policies: ['supervised', 'balanced', 'auto', 'full-access'] }] }];
+    policies: ['supervised', 'balanced', 'auto', 'full-access'], models: [{ id: 'claude-sonnet-5-5', name: 'Sonnet', reasoningEfforts: ['low', 'medium', 'high'].map((id) => ({ id, label: id })), defaultReasoningEffort: 'high', policies: ['supervised', 'balanced', 'auto', 'full-access'] }] }];
   const providers = new ProviderService(fakeProviders, () => store.getSettings(), () => undefined);
+  await providers.list();
   const workspace = new WorkspaceService(store, dataDir, { isActive: () => false }, () => providers.cached());
   const preexistingSession = await workspace.createSession({ projectId: project.id, name: 'Existing published agent',
     provider: 'claude', model: 'claude-sonnet-5-5', effort: 'high', policy: 'supervised', isolated: false });

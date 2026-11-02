@@ -174,9 +174,9 @@ describe('group native planning', () => {
     const fake = new FakeProviders();
     fake.detectProviders = async () => [
       { id: 'claude', name: 'Claude', available: true, version: 'fake', executable: '/fake/claude', reason: null,
-        promptCapabilities: { image: true, embeddedContext: true }, models: [{ id: 'claude-sonnet-5-5', name: 'Claude fake', inputModalities: ['text', 'image'] }] },
+        promptCapabilities: { image: true, embeddedContext: true }, models: [{ id: 'claude-sonnet-5-5', name: 'Claude fake', reasoningEfforts: ['low', 'medium', 'high'].map((id) => ({ id, label: id })), defaultReasoningEffort: 'high', inputModalities: ['text', 'image'] }] },
       { id: 'codex', name: 'Codex', available: true, version: 'fake', executable: '/fake/codex', reason: null,
-        promptCapabilities: { image: true, embeddedContext: true }, models: [{ id: 'gpt-6.1-sol', name: 'Codex fake', inputModalities: ['text', 'image'] }] },
+        promptCapabilities: { image: true, embeddedContext: true }, models: [{ id: 'gpt-6.1-sol', name: 'Codex fake', reasoningEfforts: ['low', 'medium', 'high'].map((id) => ({ id, label: id })), defaultReasoningEffort: 'high', inputModalities: ['text', 'image'] }] },
     ];
     const t = await startTestApp({ fake });
     apps.push(t);

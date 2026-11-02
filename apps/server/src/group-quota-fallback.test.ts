@@ -12,8 +12,8 @@ afterEach(async () => { await testApp?.cleanup(); testApp = undefined; });
 it('captures dirty source references before sending quota fallback to an isolated target worktree', async () => {
   const t = testApp = await startTestApp();
   t.fake.detectProviders = async () => {
-    const claude: ProviderInfo = { id: 'claude', name: 'Claude', available: true, version: 'fake', executable: '/fake/claude', reason: null, models: [{ id: 'claude-sonnet-5-5', name: 'Sonnet' }] };
-    const codex: ProviderInfo = { id: 'codex', name: 'Codex', available: true, version: 'fake', executable: '/fake/codex', reason: null, models: [{ id: 'gpt-5-codex', name: 'Codex' }] };
+    const claude: ProviderInfo = { id: 'claude', name: 'Claude', available: true, version: 'fake', executable: '/fake/claude', reason: null, models: [{ id: 'claude-sonnet-5-5', name: 'Sonnet', reasoningEfforts: ['low', 'medium', 'high'].map((id) => ({ id, label: id })), defaultReasoningEffort: 'high' }] };
+    const codex: ProviderInfo = { id: 'codex', name: 'Codex', available: true, version: 'fake', executable: '/fake/codex', reason: null, models: [{ id: 'gpt-5-codex', name: 'Codex', reasoningEfforts: ['low', 'medium', 'high'].map((id) => ({ id, label: id })), defaultReasoningEffort: 'high' }] };
     return [claude, codex];
   };
   await t.api('POST', '/api/providers/refresh', {});
@@ -80,8 +80,8 @@ it('captures dirty source references before sending quota fallback to an isolate
 it('captures a fresh checkpoint before an isolated coordinator successor takes over', async () => {
   const t = testApp = await startTestApp();
   t.fake.detectProviders = async () => {
-    const claude: ProviderInfo = { id: 'claude', name: 'Claude', available: true, version: 'fake', executable: '/fake/claude', reason: null, models: [{ id: 'claude-sonnet-5-5', name: 'Sonnet' }] };
-    const codex: ProviderInfo = { id: 'codex', name: 'Codex', available: true, version: 'fake', executable: '/fake/codex', reason: null, models: [{ id: 'gpt-5-codex', name: 'Codex' }] };
+    const claude: ProviderInfo = { id: 'claude', name: 'Claude', available: true, version: 'fake', executable: '/fake/claude', reason: null, models: [{ id: 'claude-sonnet-5-5', name: 'Sonnet', reasoningEfforts: ['low', 'medium', 'high'].map((id) => ({ id, label: id })), defaultReasoningEffort: 'high' }] };
+    const codex: ProviderInfo = { id: 'codex', name: 'Codex', available: true, version: 'fake', executable: '/fake/codex', reason: null, models: [{ id: 'gpt-5-codex', name: 'Codex', reasoningEfforts: ['low', 'medium', 'high'].map((id) => ({ id, label: id })), defaultReasoningEffort: 'high' }] };
     return [claude, codex];
   };
   await t.api('POST', '/api/providers/refresh', {});

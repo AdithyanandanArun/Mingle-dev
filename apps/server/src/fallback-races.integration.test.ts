@@ -23,8 +23,8 @@ const codexConfig = {
 async function bootWithCodexAndClaude(): Promise<TestApp> {
   const fake = new FakeProviders();
   fake.detectProviders = async () => [
-    { id: 'codex', name: 'Codex', available: true, version: 'fake', executable: '/fake/codex', reason: null, policies: ['supervised', 'full-access'], models: [{ id: 'gpt-6.1-sol', name: 'Codex fake', policies: ['supervised', 'full-access'] }] },
-    { id: 'claude', name: 'Claude', available: true, version: 'fake', executable: '/fake/claude', reason: null, models: [{ id: 'claude-sonnet-5-5', name: 'Claude fake' }] },
+    { id: 'codex', name: 'Codex', available: true, version: 'fake', executable: '/fake/codex', reason: null, policies: ['supervised', 'full-access'], models: [{ id: 'gpt-6.1-sol', name: 'Codex fake', reasoningEfforts: ['low', 'medium', 'high'].map((id) => ({ id, label: id })), defaultReasoningEffort: 'high', policies: ['supervised', 'full-access'] }] },
+    { id: 'claude', name: 'Claude', available: true, version: 'fake', executable: '/fake/claude', reason: null, models: [{ id: 'claude-sonnet-5-5', name: 'Claude fake', reasoningEfforts: ['low', 'medium', 'high'].map((id) => ({ id, label: id })), defaultReasoningEffort: 'high' }] },
   ] satisfies ProviderInfo[];
   return boot({ fake });
 }

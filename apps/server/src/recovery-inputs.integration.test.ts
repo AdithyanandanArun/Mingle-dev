@@ -14,10 +14,10 @@ function imageCapableProviders(): FakeProviders {
   fake.detectProviders = async () => [
     { id: 'claude', name: 'Claude', available: true, version: 'fake', executable: '/fake/claude', reason: null,
       promptCapabilities: { image: true, embeddedContext: true },
-      models: [{ id: 'claude-sonnet-5-5', name: 'Claude fake', inputModalities: ['text', 'image'] }] },
+      models: [{ id: 'claude-sonnet-5-5', name: 'Claude fake', reasoningEfforts: ['low', 'medium', 'high'].map((id) => ({ id, label: id })), defaultReasoningEffort: 'high', inputModalities: ['text', 'image'] }] },
     { id: 'codex', name: 'Codex', available: true, version: 'fake', executable: '/fake/codex', reason: null,
       policies: ['supervised'], promptCapabilities: { image: true, embeddedContext: true },
-      models: [{ id: 'gpt-6.1-sol', name: 'Codex fake', policies: ['supervised'], inputModalities: ['text', 'image'] }] },
+      models: [{ id: 'gpt-6.1-sol', name: 'Codex fake', reasoningEfforts: ['low', 'medium', 'high'].map((id) => ({ id, label: id })), defaultReasoningEffort: 'high', policies: ['supervised'], inputModalities: ['text', 'image'] }] },
   ] satisfies ProviderInfo[];
   return fake;
 }

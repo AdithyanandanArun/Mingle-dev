@@ -1378,7 +1378,7 @@ it('merges concurrent origin advances with accepted worker results before publis
     status: 'running', runId: 'host-branch-run', hop: 0, error: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), kind: 'assignment' });
   group.assignments.push({ id: 'team-branch-review-assignment', groupId: group.group.id, requestId, fromMemberId: orchestrator.id,
     toMemberId: worker.id, taskId, deliveryId, scope: ['src/features/landing.ts'], createdAt: new Date().toISOString() });
-  group.requests.push({ id: requestId, groupId: group.group.id, messageId: 'review-message', plannerMemberId: orchestrator.id, status: 'active', turnsUsed: 0, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() });
+  group.requests.push({ id: requestId, groupId: group.group.id, messageId: 'review-message', plannerMemberId: orchestrator.id, status: 'active', intent: 'normal', turnsUsed: 0, createdAt: new Date().toISOString() });
   const userMessage = fx.store.insertMessage({ sessionId: worker.sessionId, role: 'user', content: 'Add the scoped output', runId: 'host-branch-run', kind: 'group-delivery' });
   fx.store.insertRun({ id: 'host-branch-run', sessionId: worker.sessionId, userMessageId: userMessage.id, provider: 'codex', model: 'gpt-6-codex', startedAt: new Date().toISOString() });
   fx.host.start({ session: proxySession, runId: 'host-branch-run', content: 'Add the scoped output', options: { groupDeliveryId: deliveryId },
@@ -1476,7 +1476,7 @@ it('merges concurrent origin advances with accepted worker results before publis
   const secondDeliveryId = 'team-branch-review-delivery-two';
   const secondRequestId = 'team-branch-review-request-two';
   const secondRunId = 'host-branch-run-two';
-  secondGroup.requests.push({ id: secondRequestId, groupId: secondGroup.group.id, messageId: 'review-message', plannerMemberId: orchestrator.id, status: 'active', turnsUsed: 0, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() });
+  secondGroup.requests.push({ id: secondRequestId, groupId: secondGroup.group.id, messageId: 'review-message', plannerMemberId: orchestrator.id, status: 'active', intent: 'normal', turnsUsed: 0, createdAt: new Date().toISOString() });
   fx.store.insertTask({ id: secondTaskId, projectId: PROJECT, title: 'Add another scoped output', description: '',
     acceptanceCriteria: 'The second output exists.', sessionId: secondWorker.sessionId, dependsOn: [], status: 'review' });
   secondGroup.deliveries.push({ id: secondDeliveryId, groupId: secondGroup.group.id, requestId: secondRequestId,
@@ -2276,7 +2276,7 @@ async function reviewFixture(options: { publishBranch: boolean; reportBranch?: b
     status: 'running', runId, hop: 0, error: null, createdAt: now, updatedAt: now, kind: 'assignment' });
   group.assignments.push({ id: `a-${deliveryId}`, groupId: group.group.id, requestId, fromMemberId: orchestrator.id, toMemberId: worker.id,
     taskId, deliveryId, scope: ['src/features/landing.ts'], createdAt: now });
-  group.requests.push({ id: requestId, groupId: group.group.id, messageId: 'review-message', plannerMemberId: orchestrator.id, status: 'active', turnsUsed: 0, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() });
+  group.requests.push({ id: requestId, groupId: group.group.id, messageId: 'review-message', plannerMemberId: orchestrator.id, status: 'active', intent: 'normal', turnsUsed: 0, createdAt: new Date().toISOString() });
   const userMessage = fx.store.insertMessage({ sessionId: worker.sessionId, role: 'user', content: 'Add the scoped output', runId, kind: 'group-delivery' });
   fx.store.insertRun({ id: runId, sessionId: worker.sessionId, userMessageId: userMessage.id, provider: 'codex', model: 'gpt-6-codex', startedAt: now });
   fx.host.start({ session: proxySession, runId, content: 'Add the scoped output', options: { groupDeliveryId: deliveryId },

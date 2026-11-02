@@ -5,7 +5,7 @@ import { EXAMPLE_CONTRACT_SESSION_ID } from './example.ts';
 import { deferred, FakeProviders, startTestApp, waitFor, type TestApp } from './test-utils.ts';
 
 const apps: TestApp[] = [];
-const boot = async (fake = new FakeProviders()) => { const app = await startTestApp({ fake }); apps.push(app); return app; };
+const boot = async (fake = new FakeProviders()) => { const app = await startTestApp({ fake }); apps.push(app); await app.app.providers.list(); return app; };
 afterEach(async () => { while (apps.length) await apps.pop()!.cleanup(); });
 
 const handoffFixture = (messages: Message[], maxChars?: number) => {
@@ -60,8 +60,8 @@ describe('buildProviderHandoff', () => {
 });
 
 const providers = (): ProviderInfo[] => [
-  { id: 'codex', name: 'Codex', available: true, version: 'test', executable: '/fake/codex', reason: null, models: [{ id: 'gpt-6.1-sol', name: 'GPT-6.1' }, { id: 'gpt-6.1-fast', name: 'GPT-6.1 Fast' }] },
-  { id: 'claude', name: 'Claude', available: true, version: 'test', executable: '/fake/claude', reason: null, models: [{ id: 'claude-sonnet-5-5', name: 'Sonnet 5.5' }, { id: 'claude-opus-5-5', name: 'Opus 5.5' }] },
+  { id: 'codex', name: 'Codex', available: true, version: 'test', executable: '/fake/codex', reason: null, models: [{ id: 'gpt-6.1-sol', name: 'GPT-6.1', reasoningEfforts: ['low', 'medium', 'high'].map((id) => ({ id, label: id })) }, { id: 'gpt-6.1-fast', name: 'GPT-6.1 Fast' }] },
+  { id: 'claude', name: 'Claude', available: true, version: 'test', executable: '/fake/claude', reason: null, models: [{ id: 'claude-sonnet-5-5', name: 'Sonnet 5.5', reasoningEfforts: ['low', 'medium', 'high'].map((id) => ({ id, label: id })) }, { id: 'claude-opus-5-5', name: 'Opus 5.5' }] },
 ];
 
 describe('single-session provider switching', () => {

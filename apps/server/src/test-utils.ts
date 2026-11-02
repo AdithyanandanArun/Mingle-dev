@@ -24,7 +24,7 @@ export class FakeProviders implements ProviderRuntime {
   async detectProviders(_settings: AppSettings): Promise<ProviderInfo[]> {
     this.detections++;
     return [
-      { id: 'codex', name: 'Codex', available: false, version: null, executable: null, reason: 'fake: not installed', models: [] },
+      { id: 'codex', name: 'Codex', available: false, version: null, executable: null, reason: 'fake: not installed', models: [{ id: 'gpt-6.1-sol', name: 'Example Codex', reasoningEfforts: ['low', 'medium', 'high'].map((id) => ({ id, label: id })), defaultReasoningEffort: 'high' }] },
       { id: 'claude', name: 'Claude', available: true, version: 'fake', executable: '/fake/claude', reason: null,
         models: [{ id: 'claude-sonnet-5-5', name: 'Sonnet', reasoningEfforts: ['low', 'medium', 'high'].map((id) => ({ id, label: id })), defaultReasoningEffort: 'high' }] },
     ];
@@ -107,6 +107,8 @@ export async function startTestApp(options: Partial<ApplicationOptions> & { data
     dataDir, port: 0, webDistDir: null, providers: fake, log: () => undefined, runtime: { abortGraceMs: 250, flushIntervalMs: 20 }, detectOnStart: false, ...options,
   });
   const { port, url } = await app.listen();
+  // Default fake metadata is deterministic; custom/deferred probes remain controlled by their tests.
+  if (fake.detectProviders === FakeProviders.prototype.detectProviders && !options.providers) await app.providers.list();
   const api = async <T = any>(method: string, route: string, body?: unknown, headers: Record<string, string> = {}): Promise<ApiResponse<T>> => {
     const res = await rawRequest(port, method, route, headers, body === undefined ? undefined : JSON.stringify(body));
     let json: any = null;
