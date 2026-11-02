@@ -232,6 +232,7 @@ export function createApplication(options: ApplicationOptions): MingleApplicatio
   runtime.setGroupServices(groups, teamMcp);
 
   groups.recover();
+  if (store.getSettings().autoResumeOnRestart === false) subagents.recover();
   const distributed = new DistributedWorkspaceService({ store, account, runtime, providers, recovery, groups, repository, dataDir: config.dataDir });
   const projectCollaboration = new ProjectCollaborationService({ store, account, distributed, workspace, providers, ...options.projectCollaboration });
   const teamChat = new TeamChatService({ store, account, distributed, collaboration: projectCollaboration });
