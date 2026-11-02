@@ -9,6 +9,7 @@ import {
   type ProviderFailure, type TeamAgentRole, type TeamAgentState, type TeamConsentState,
   type TeamAvailableAgentsSnapshot, type TeamLeaderChange, type TeamPermissionLevel, type TeamStructureMember, type TeamSessionRef,
   type TeamAcceptTask, type TeamArtifactRef, type TeamOrchestrationSettings, type TeamStructureSnapshot, type Session,
+  type RunChanges,
 } from '@mingle/contracts';
 import { ProviderFailureSchema, ProviderSchema, TeamStructurePayloadSchema as StructureSchema } from '@mingle/contracts';
 import type { DatabaseSync } from 'node:sqlite';
@@ -23,7 +24,7 @@ import type {
 import type { TransportMessageContext } from '../../distributed/transport.ts';
 import { HttpError } from '../../util.ts';
 import { git } from '../../repository/git-run.ts';
-import { captureRunTree, compareRunTrees, type RunTreeSnapshot } from '../../run-changes.ts';
+import { captureRunTree, compareRunTrees, unavailableRunChanges, type RunTreeSnapshot } from '../../run-changes.ts';
 import { redactSecrets } from '../../providers/common.ts';
 import type { ProjectCollaborationSnapshot } from '../../../../../packages/contracts/src/project-collaboration.ts';
 import { KeyedLock } from '../../repository/lock.ts';
@@ -146,6 +147,7 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
     this.deliveryTimeoutMs = Math.min(15 * 60_000, Math.max(1_000, options.deliveryTimeoutMs ?? 90_000));
     this.deliveryMaxDurationMs = Math.min(24 * 60 * 60_000,
       Math.max(this.deliveryTimeoutMs, options.deliveryMaxDurationMs ?? 2 * 60 * 60_000));
+    options.groups.setTeamAcceptanceFinalizer?.((context, integration) => this.finalizeLocalTeamIntegration(context, integration));
     this.hostRows.exec(`CREATE TABLE IF NOT EXISTS mingle_team_host_artifact_authority (
       delivery_id TEXT PRIMARY KEY, team_id TEXT NOT NULL, shared_project_id TEXT NOT NULL, group_id TEXT NOT NULL,
       session_id TEXT NOT NULL, run_id TEXT NOT NULL, agent_id TEXT NOT NULL, owner_account_id TEXT NOT NULL,
@@ -232,7 +234,9 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
     if (this.settings(host).permissionLevel !== 'full-access') throw new HttpError(403, 'Orchestrator acceptance is available only while the team permission level is full-access.');
     const caller = group.members.find((member) => member.id === context.memberId && !member.removedAt);
     const assignment = group.assignments.find((row) => row.taskId === input.taskId);
-    if (!caller || caller.sessionId !== sessionId || !assignment || assignment.fromMemberId !== caller.id || assignment.requestId !== context.requestId) {
+    const request = group.requests.find((row) => row.id === context.requestId);
+    if (!caller || caller.sessionId !== sessionId || !assignment || assignment.requestId !== context.requestId
+      || request?.plannerMemberId !== caller.id) {
       throw new HttpError(403, 'Only the active request orchestrator may accept a worker assignment.');
     }
     const task = this.options.store.getTask(input.taskId);
@@ -266,6 +270,7 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
           try {
             const fetched = await this.fetchReviewRef(currentDelivery, retryWorkspace.worktreePath,
               { name: review.branch, commitSha: review.commit_sha, baseCommitSha: review.base_commit_sha });
+            await this.recordVerifiedBranchChanges(currentDelivery, retryWorkspace.worktreePath, review.base_commit_sha, fetched.commitSha);
             this.hostRows.prepare(`UPDATE mingle_team_host_review_branches SET review_ref=?,commit_sha=?,fetch_failure=NULL WHERE delivery_id=?`)
               .run(fetched.ref, fetched.commitSha, delivery.delivery_id);
             review = { ...review, review_ref: fetched.ref, commit_sha: fetched.commitSha, fetch_failure: null };
@@ -287,6 +292,21 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
       let integrationSourceBranch: string | null = null;
       const integrationTarget = this.settings(latestHost).integrationTarget;
       let integrationHead: string | null = null;
+      // An imported artifact can be the verified completion source when the owner's worker
+      // branch could not be fetched. It must still pass through the normal target reconciliation
+      // and publication path before acceptance is finalized.
+      if (!review?.review_ref && (safeJson(currentDelivery.artifacts_json, []) as unknown[]).length > 0) {
+        const workspace = this.groupWorkspace(group.group.id);
+        if (!workspace) throw new HttpError(409, 'The team integration worktree is unavailable for artifact-backed acceptance.');
+        integrationWorktree = workspace.worktreePath;
+        const branch = await git(integrationWorktree, ['symbolic-ref', '--quiet', '--short', 'HEAD'], { allowFailure: true });
+        if (branch.code !== 0 || !branch.stdout.trim()) throw new HttpError(409, 'The team integration worktree is detached and cannot publish artifact-backed acceptance.');
+        this.assertSafeIntegrationBranch(branch.stdout.trim());
+        integrationSourceBranch = branch.stdout.trim();
+        integrationBranch = integrationTarget;
+        integrationHead = (await git(integrationWorktree, ['rev-parse', '--verify', 'HEAD'])).stdout.trim();
+        merged = true;
+      }
       if (review?.review_ref && review.branch && review.commit_sha) {
         const workspace = this.groupWorkspace(group.group.id);
         if (!workspace) throw new HttpError(409, 'The team integration worktree is unavailable for the accepted worker branch.');
@@ -307,7 +327,8 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
         if (branchResult.code !== 0 || !branchResult.stdout.trim()) throw new HttpError(409, 'The team integration worktree is detached and cannot accept a worker branch.');
         this.assertSafeIntegrationBranch(branchResult.stdout.trim());
         const alreadyIntegrated = await git(workspace.worktreePath, ['merge-base', '--is-ancestor', review.review_ref, head], { allowFailure: true });
-        if (alreadyIntegrated.code !== 0) {
+        if (alreadyIntegrated.code === 0) merged = true;
+        else {
           const integrationIsAncestor = await git(workspace.worktreePath, ['merge-base', '--is-ancestor', head, review.review_ref], { allowFailure: true });
           const mergeArgs = ['-c', 'commit.gpgSign=false'];
           if (integrationIsAncestor.code !== 0) {
@@ -344,26 +365,33 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
         this.hostRows.prepare(`UPDATE mingle_team_host_review_branches SET merged_at=COALESCE(merged_at,?) WHERE delivery_id=?`)
           .run(new Date(this.now()).toISOString(), delivery.delivery_id);
       }
+      let pushed: { branch: string; commitSha: string } | undefined;
+      let pushFailure: string | undefined;
+      if (integrationWorktree && integrationBranch && integrationHead) {
+        this.assertCurrentAcceptanceAuthority(context, sessionId, input.taskId);
+        ({ pushed, pushFailure } = await this.publishIntegration(context, { worktreePath: integrationWorktree, targetBranch: integrationBranch,
+          sourceBranch: integrationSourceBranch ?? integrationBranch, head: integrationHead }));
+        if (pushFailure) {
+          this.options.groups.recordIntegrationPublication?.({ ...context }, { branch: integrationBranch, commitSha: integrationHead, error: pushFailure });
+          throw new HttpError(409, `Integration publication failed, so the task stays in Review and team_accept can be retried: ${pushFailure}`);
+        }
+      }
+      this.assertCurrentAcceptanceAuthority(context, sessionId, input.taskId);
       const result = await this.options.groups.acceptTask(context, { taskId: input.taskId, verificationSummary });
       this.hostRows.prepare(`UPDATE mingle_team_host_review_branches SET accepted_at=?,verification_summary=? WHERE delivery_id=?`)
         .run(new Date(this.now()).toISOString(), verificationSummary, delivery.delivery_id);
       const acceptedResult = result && typeof result === 'object' ? result as Record<string, unknown> : {};
-      integrationWorktree ??= typeof acceptedResult.integrationWorktree === 'string' ? acceptedResult.integrationWorktree : null;
-      integrationBranch ??= typeof acceptedResult.integrationBranch === 'string' ? acceptedResult.integrationBranch : null;
-      integrationHead ??= typeof acceptedResult.integrationHead === 'string' ? acceptedResult.integrationHead : null;
       merged ||= acceptedResult.merged === true;
-
-      let pushed: { branch: string; commitSha: string } | undefined;
-      let pushFailure: string | undefined;
-      if (integrationWorktree && integrationBranch && integrationHead) {
-        ({ pushed, pushFailure } = await this.publishIntegration(context, { worktreePath: integrationWorktree, targetBranch: integrationBranch,
-          sourceBranch: integrationSourceBranch ?? integrationBranch, head: integrationHead }));
+      if (pushed && integrationWorktree && integrationBranch) {
+        this.options.groups.recordIntegrationPublication?.({ ...context }, pushed);
+        this.options.groups.notifyIntegrationBranch?.({ ...context }, pushed);
+        this.appendAcceptedIntegrationNote(currentDelivery, integrationWorktree, integrationBranch, pushed.commitSha);
       }
       return { ...acceptedResult, acceptedBy: 'orchestrator', verificationSummary,
         ...(review?.branch ? { branch: review.branch } : {}), ...(review?.commit_sha ? { commitSha: review.commit_sha } : {}),
         ...(mergedRef ? { localRef: mergedRef } : {}), ...(integrationWorktree ? { integrationWorktree } : {}),
         ...(integrationBranch ? { integrationBranch } : {}), ...(integrationHead ? { integrationHead } : {}),
-        ...(mergedRef || acceptedResult.integrationBranch ? { merged } : {}), ...(pushed ? { integrationPush: pushed } : {}),
+        ...(integrationWorktree || mergedRef || acceptedResult.integrationBranch ? { merged } : {}), ...(pushed ? { integrationPush: pushed } : {}),
         ...(pushFailure ? { pushFailure } : {}) };
     }));
   }
@@ -380,8 +408,6 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
     } catch (error) {
       pushFailure = safeRemoteText(error instanceof Error ? error.message : 'The integration branch push failed.').slice(0, 1_500);
     }
-    this.options.groups.recordIntegrationPublication?.({ ...context }, { branch: input.targetBranch, commitSha: input.head, ...(pushFailure ? { error: pushFailure } : {}) });
-    if (pushed) this.options.groups.notifyIntegrationBranch?.({ ...context }, pushed);
     return { ...(pushed ? { pushed } : {}), ...(pushFailure ? { pushFailure } : {}) };
   }
 
@@ -398,27 +424,111 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
         throw new HttpError(403, 'Team permission changed; only full-access orchestrators may accept tasks.');
       }
       const accepted = await this.options.groups.acceptTask(context, { taskId: input.taskId, verificationSummary });
-      const result = accepted && typeof accepted === 'object' ? accepted as Record<string, unknown> : {};
-      const worktreePath = typeof result.integrationWorktree === 'string' ? result.integrationWorktree : null;
-      const sourceBranch = typeof result.integrationBranch === 'string' ? result.integrationBranch : null;
-      if (!worktreePath || !sourceBranch) return result;
-      const target = this.settings(latestHost).integrationTarget;
-      let head = typeof result.integrationHead === 'string' ? result.integrationHead : null;
-      let pushed: { branch: string; commitSha: string } | undefined;
-      let pushFailure: string | undefined;
-      try {
-        const ownerSnapshot = await this.options.collaboration.snapshot(host.local_project_id);
-        const owner = ownerSnapshot.members.find((member) => member.accountId === host.owner_account_id);
-        await mergeTeamIntegrationTarget({ worktreePath, targetBranch: target, identity: { name: owner?.displayName, email: owner?.email } });
-        head = (await git(worktreePath, ['rev-parse', '--verify', 'HEAD'])).stdout.trim();
-      } catch (error) {
-        pushFailure = safeRemoteText(error instanceof Error ? error.message : 'Could not reconcile the integration target.').slice(0, 1_500);
-        this.options.groups.recordIntegrationPublication?.({ ...context }, { branch: target, commitSha: head ?? '', error: pushFailure });
+      const record = accepted && typeof accepted === 'object' ? accepted as Record<string, unknown> : {};
+      const integrationPush = record.integrationPush as { branch?: unknown; commitSha?: unknown } | undefined;
+      if (typeof integrationPush?.branch === 'string' && typeof integrationPush.commitSha === 'string') {
+        this.options.groups.recordIntegrationPublication?.({ ...context }, { branch: integrationPush.branch, commitSha: integrationPush.commitSha });
+        this.options.groups.notifyIntegrationBranch?.({ ...context }, { branch: integrationPush.branch, commitSha: integrationPush.commitSha });
       }
-      if (!pushFailure && head) ({ pushed, pushFailure } = await this.publishIntegration(context, { worktreePath, targetBranch: target, sourceBranch, head }));
-      return { ...result, ...(head ? { integrationHead: head } : {}), integrationBranch: target,
-        ...(pushed ? { integrationPush: pushed } : {}), ...(pushFailure ? { pushFailure } : {}) };
+      return accepted;
     });
+  }
+
+  /** Runs after local merge but before GroupService marks the task Done. On failure the branch
+   * remains locally merged and a later team_accept retries the idempotent publish operation. */
+  private async finalizeLocalTeamIntegration(context: import('@mingle/contracts').GroupRunContext, integration: {
+    integrationWorktree: string; integrationBranch: string | null; integrationHead: string | null; merged: boolean;
+  }): Promise<Record<string, unknown>> {
+    const group = this.options.groups.get(context.groupId);
+    const request = group.requests.find((row) => row.id === context.requestId);
+    if (request?.plannerMemberId !== context.memberId) throw new HttpError(403, 'Coordinator authority changed before integration publication.');
+    const host = this.hostRows.prepare(`SELECT * FROM mingle_team_host_projects WHERE group_id=? AND group_id!=''`).get(context.groupId) as HostRow | undefined;
+    if (!host || this.settings(host).permissionLevel !== 'full-access') throw new HttpError(403, 'Full-access team authority changed before integration publication.');
+    const target = this.settings(host).integrationTarget;
+    const ownerSnapshot = await this.options.collaboration.snapshot(host.local_project_id);
+    const currentGroup = this.options.groups.get(context.groupId);
+    const currentCaller = currentGroup.members.find((member) => member.id === context.memberId && !member.removedAt);
+    this.assertCurrentAcceptanceAuthority(context, currentCaller?.sessionId ?? '', undefined);
+    const owner = ownerSnapshot.members.find((member) => member.accountId === host.owner_account_id);
+    await mergeTeamIntegrationTarget({ worktreePath: integration.integrationWorktree, targetBranch: target,
+      identity: { name: owner?.displayName, email: owner?.email } });
+    const head = (await git(integration.integrationWorktree, ['rev-parse', '--verify', 'HEAD'])).stdout.trim();
+    this.assertCurrentAcceptanceAuthority(context, currentCaller?.sessionId ?? '', undefined);
+    const result = await this.publishIntegration(context, { worktreePath: integration.integrationWorktree, targetBranch: target,
+      sourceBranch: integration.integrationBranch ?? target, head });
+    if (result.pushFailure) {
+      this.options.groups.recordIntegrationPublication?.({ ...context }, { branch: target, commitSha: head, error: result.pushFailure });
+      throw new HttpError(409, `Integration publication failed; the task stays in Review and team_accept can be retried: ${result.pushFailure}`);
+    }
+    return { integrationBranch: target, integrationHead: head, ...(result.pushed ? { integrationPush: result.pushed } : {}) };
+  }
+
+  private assertCurrentAcceptanceAuthority(context: import('@mingle/contracts').GroupRunContext, sessionId: string, taskId?: string): void {
+    const group = this.options.groups.get(context.groupId);
+    const caller = group.members.find((member) => member.id === context.memberId && !member.removedAt);
+    const request = group.requests.find((row) => row.id === context.requestId);
+    const assignment = taskId ? group.assignments.find((row) => row.taskId === taskId) : undefined;
+    if (!caller || caller.sessionId !== sessionId || request?.plannerMemberId !== caller.id
+      || (taskId !== undefined && (!assignment || assignment.requestId !== context.requestId || this.options.store.getTask(taskId)?.status !== 'review'))) {
+      throw new HttpError(403, 'Current request coordinator authority changed before team acceptance could be published.');
+    }
+  }
+
+  /** Saves a bounded change summary from the exact verified worker revision on its proxy run. */
+  private async recordVerifiedBranchChanges(delivery: DeliveryRow, worktreePath: string, base: string | null, revision: string): Promise<void> {
+    if (!base || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(base) || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(revision)) {
+      this.options.store.setRunChanges(delivery.run_id, unavailableRunChanges('The verified worker revision has no valid recorded base commit.'));
+      return;
+    }
+    try {
+      const [names, stats, diff] = await Promise.all([
+        git(worktreePath, ['diff', '--name-status', '-z', '--no-renames', base, revision], { maxBuffer: 8 * 1024 * 1024 }),
+        git(worktreePath, ['diff', '--numstat', '-z', '--no-renames', base, revision], { maxBuffer: 8 * 1024 * 1024 }),
+        git(worktreePath, ['diff', '--no-ext-diff', '--no-textconv', '--no-renames', '--no-color', '--unified=3', base, revision], { maxBuffer: 8 * 1024 * 1024 }),
+      ]);
+      const statuses = new Map<string, string>();
+      const nameRecords = names.stdout.split('\0');
+      for (let i = 0; i + 1 < nameRecords.length; i += 2) {
+        if (nameRecords[i] && nameRecords[i + 1]) statuses.set(nameRecords[i + 1]!, nameRecords[i]!);
+      }
+      const counts = new Map<string, { additions: number | null; deletions: number | null; binary: boolean }>();
+      for (const record of stats.stdout.split('\0').filter(Boolean)) {
+        const first = record.indexOf('\t');
+        const second = record.indexOf('\t', first + 1);
+        if (first < 0 || second < 0) continue;
+        const plus = record.slice(0, first);
+        const minus = record.slice(first + 1, second);
+        const file = record.slice(second + 1);
+        const binary = plus === '-' || minus === '-';
+        counts.set(file, { additions: binary ? null : Number(plus), deletions: binary ? null : Number(minus), binary });
+      }
+      const allFiles = [...statuses.entries()].map(([file, status]) => {
+        const count = counts.get(file) ?? { additions: null, deletions: null, binary: false };
+        const mapped = status === 'A' || status === 'D' || status === 'T' ? status : 'M';
+        return { path: file, status: mapped as 'A' | 'M' | 'D' | 'T', ...count };
+      });
+      const additions = allFiles.reduce((sum, file) => sum + (file.additions ?? 0), 0);
+      const deletions = allFiles.reduce((sum, file) => sum + (file.deletions ?? 0), 0);
+      const truncated = allFiles.length > 200 || Buffer.byteLength(diff.stdout) > 500_000;
+      const changes: RunChanges = {
+        summary: { status: 'available', capturedAt: new Date(this.now()).toISOString(), fileCount: allFiles.length,
+          files: allFiles.slice(0, 200), additions, deletions, truncated,
+          notices: truncated ? ['The verified worker change summary was truncated to bounded output.'] : [] },
+        diff: Buffer.byteLength(diff.stdout) > 500_000 ? diff.stdout.slice(0, 500_000) : diff.stdout,
+        diffTruncated: Buffer.byteLength(diff.stdout) > 500_000,
+      };
+      this.options.store.setRunChanges(delivery.run_id, changes);
+    } catch {
+      this.options.store.setRunChanges(delivery.run_id, unavailableRunChanges('The verified worker revision change summary could not be captured.'));
+    }
+  }
+
+  private appendAcceptedIntegrationNote(delivery: DeliveryRow, worktreePath: string, branch: string, revision: string): void {
+    const message = this.options.store.listMessages(delivery.session_id, { limit: 100 })
+      .find((entry) => entry.role === 'assistant' && entry.runId === delivery.run_id);
+    if (!message || message.content.includes(`published origin/${branch} @ ${revision}`)) return;
+    const note = `\n\nIntegrated into the host group workspace; published origin/${safeArtifactText(branch, 200)} @ ${revision}. Integration worktree: ${safeArtifactText(worktreePath, 4_096)}.`;
+    this.options.store.updateMessage(message.id, { content: `${message.content}${note}`.slice(0, 50_000) });
   }
 
   /** Fetches the reported worker turn into its pinned review ref and verifies its history against the saved assignment authority. */
@@ -2575,6 +2685,8 @@ export class TeamOrchestrationHost implements TeamProxyRuntimeService {
             this.assertCompletionStillLive(deliveryId);
             if (!workspace) throw new Error('The host team integration worktree is unavailable.');
             const fetched = await this.fetchReviewRef(delivery, workspace.worktreePath, pushedBranch);
+            this.assertCompletionStillLive(deliveryId);
+            await this.recordVerifiedBranchChanges(delivery, workspace.worktreePath, pushedBranch.baseCommitSha ?? null, fetched.commitSha);
             this.assertCompletionStillLive(deliveryId);
             intent = { ...intent, reviewRef: fetched.ref };
             this.hostRows.prepare(`INSERT INTO mingle_team_host_review_branches(delivery_id,branch,commit_sha,base_commit_sha,review_ref,fetch_failure,push_failure)

@@ -8,7 +8,7 @@ afterEach(async () => { while (apps.length) await apps.pop()!.cleanup(); });
 
 const available = (id: Provider, model: string): ProviderInfo => ({
   id, name: id, available: true, version: 'fake', executable: `/fake/${id}`, reason: null,
-  models: [{ id: model, name: model, policies: ['supervised', 'full-access'], reasoningEfforts: [{ id: 'high', label: 'High' }] }],
+  models: [{ id: model, name: model, policies: ['supervised', 'full-access'], reasoningEfforts: [{ id: 'high', label: 'High' }], defaultReasoningEffort: 'high' }],
   policies: ['supervised', 'full-access'],
 });
 

@@ -124,7 +124,8 @@ let roots: string[] = [];
 let advertiseFullAccess = true;
 const fakeProviders = () => [{ id: 'claude' as const, name: 'Claude', available: true, version: 'fake', executable: '/fake/claude', reason: null,
   policies: advertiseFullAccess ? ['supervised' as const, 'full-access' as const] : ['supervised' as const],
-  models: [{ id: 'claude-sonnet-5-5', name: 'Sonnet', policies: advertiseFullAccess ? ['supervised' as const, 'full-access' as const] : ['supervised' as const] }] }];
+  models: [{ id: 'claude-sonnet-5-5', name: 'Sonnet', policies: advertiseFullAccess ? ['supervised' as const, 'full-access' as const] : ['supervised' as const],
+    reasoningEfforts: [{ id: 'high', label: 'High' }], defaultReasoningEffort: 'high' }] }];
 
 let sharedRoot = '';
 let sharedRepo = '';

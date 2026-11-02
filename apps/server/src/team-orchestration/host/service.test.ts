@@ -175,6 +175,7 @@ function fixture(options: { deviceId?: string; accountId?: string; role?: 'leade
   const remoteCompletionNotices: Array<{ groupId: string; deliveryId: string; content: string }> = [];
   const integrationPublications: Array<{ branch: string; commitSha: string; error?: string }> = [];
   const integrationNotifications: Array<{ branch: string; commitSha: string }> = [];
+  let teamAcceptanceFinalizer: ((context: any, integration: any) => Promise<Record<string, unknown>>) | null = null;
   const groupService = {
     createTeamGroup(input: { id: string; projectId: string; title: string; orchestratorSessionId: string; mode?: 'cowork' | 'orchestrated' | 'current-leads'; members: Array<{ sessionId: string; handle: string; role: 'orchestrator' | 'worker' | 'idle'; held: boolean }> }) {
       // Mirrors GroupService.createTeamGroup: cowork groups have only peers and no orchestrator.
@@ -241,6 +242,7 @@ function fixture(options: { deviceId?: string; accountId?: string; role?: 'leade
       if (assignment) Object.assign(assignment, { acceptedBy: 'orchestrator', verificationSummary: input.verificationSummary });
       return { taskId: task.id, status: 'done', acceptedBy: 'orchestrator', verificationSummary: input.verificationSummary };
     },
+    setTeamAcceptanceFinalizer(finalizer: (context: any, integration: any) => Promise<Record<string, unknown>>) { teamAcceptanceFinalizer = finalizer; },
     setTeamDispatchGuard() {}, setTeamRunFinishedHook() {}, holdTeamMember() {},
     contextForRun() { return undefined; },
   };
@@ -273,6 +275,7 @@ function fixture(options: { deviceId?: string; accountId?: string; role?: 'leade
   let host = makeHost();
   const fx = {
     store, project, local, get host() { return host; }, outgoing, finished, enqueued, remoteCompletionNotices, integrationPublications, integrationNotifications, artifactImports, artifactDiscards, artifactIntegrations, remoteToolCalls, agents, group: () => group,
+    finalizeTeamAcceptance: (context: any, integration: any) => teamAcceptanceFinalizer?.(context, integration),
     authenticatedCalls: () => authenticatedCalls, collaborationRefreshCalls: () => collaborationRefreshes,
     authorizeCalls: () => authorizeCalls, maxConcurrentCloudQueries: () => maxConcurrentCloudQueries,
     cloudQueryTables: () => [...cloudQueryTables],
@@ -1375,6 +1378,7 @@ it('merges concurrent origin advances with accepted worker results before publis
     status: 'running', runId: 'host-branch-run', hop: 0, error: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), kind: 'assignment' });
   group.assignments.push({ id: 'team-branch-review-assignment', groupId: group.group.id, requestId, fromMemberId: orchestrator.id,
     toMemberId: worker.id, taskId, deliveryId, scope: ['src/features/landing.ts'], createdAt: new Date().toISOString() });
+  group.requests.push({ id: requestId, plannerMemberId: orchestrator.id });
   const userMessage = fx.store.insertMessage({ sessionId: worker.sessionId, role: 'user', content: 'Add the scoped output', runId: 'host-branch-run', kind: 'group-delivery' });
   fx.store.insertRun({ id: 'host-branch-run', sessionId: worker.sessionId, userMessageId: userMessage.id, provider: 'codex', model: 'gpt-6-codex', startedAt: new Date().toISOString() });
   fx.host.start({ session: proxySession, runId: 'host-branch-run', content: 'Add the scoped output', options: { groupDeliveryId: deliveryId },
@@ -1430,7 +1434,18 @@ it('merges concurrent origin advances with accepted worker results before publis
   runGit(fx.project.path, 'config', 'user.name', 'Host integration');
   runGit(fx.project.path, 'config', 'user.email', 'host-integration@example.test');
 
-  const accepted = await fx.host.acceptTask(context, fx.local.id, { taskId, verificationSummary: 'Tests pass and I inspected the diff.' });
+  const replacement = { id: 'replacement-coordinator', groupId: group.group.id, sessionId: 'replacement-coordinator-session',
+    handle: 'replacement', role: 'orchestrator' as const, held: false, joinedAt: new Date().toISOString(), removedAt: null };
+  group.members.push(replacement);
+  group.members.find((member) => member.id === orchestrator.id)!.role = 'worker';
+  group.group.orchestratorMemberId = replacement.id;
+  group.requests.find((request) => request.id === requestId)!.plannerMemberId = replacement.id;
+  await expect(fx.host.acceptTask(context, fx.local.id, { taskId, verificationSummary: 'Tests pass and I inspected the diff.' }))
+    .rejects.toMatchObject({ status: 403 });
+  const replacementContext = { ...context, memberId: replacement.id };
+
+  const accepted = await fx.host.acceptTask(replacementContext, replacement.sessionId,
+    { taskId, verificationSummary: 'Tests pass and I inspected the diff.' });
   expect(accepted).toMatchObject({ acceptedBy: 'orchestrator', taskId, status: 'done', branch, commitSha, localRef: review.review_ref, merged: true });
   expect(fx.store.getTask(taskId)?.status).toBe('done');
   expect(group.assignments[0]).toMatchObject({ acceptedBy: 'orchestrator', verificationSummary: 'Tests pass and I inspected the diff.' });
@@ -1442,6 +1457,9 @@ it('merges concurrent origin advances with accepted worker results before publis
   expect(runGit(fx.project.path, 'show', `${mergedHead}:remote-update.txt`).trim()).toBe('pushed by another contributor');
   expect(accepted).toMatchObject({ integrationBranch: 'main', integrationHead: mergedHead, integrationPush: { branch: 'main', commitSha: mergedHead } });
   expect(runGit(origin, 'rev-parse', 'refs/heads/main').trim()).toBe(mergedHead);
+  expect(fx.store.getRun('host-branch-run')?.changes).toMatchObject({ status: 'available', files: [{ path: 'src/features/landing.ts', status: 'A' }] });
+  expect(fx.store.listMessages(worker.sessionId, { limit: 20 }).find((message) => message.role === 'assistant')?.content)
+    .toContain(`Integrated into the host group workspace; published origin/main @ ${mergedHead}`);
   expect(fx.integrationPublications).toContainEqual({ branch: 'main', commitSha: mergedHead });
   expect(fx.integrationNotifications).toContainEqual({ branch: 'main', commitSha: mergedHead });
 
@@ -1496,16 +1514,23 @@ it('merges concurrent origin advances with accepted worker results before publis
   mkdirSync(rejectedPush);
   execFileSync('git', ['init', '-q', '--bare', '--initial-branch=main', rejectedPush]);
   runGit(fx.project.path, 'remote', 'set-url', '--push', 'origin', rejectedPush);
-  const secondAccepted = await fx.host.acceptTask(secondContext, fx.local.id,
-    { taskId: secondTaskId, verificationSummary: 'The second diff is correct and checks passed.' });
-  expect(secondAccepted).toMatchObject({ acceptedBy: 'orchestrator', taskId: secondTaskId, merged: true,
-    pushFailure: expect.stringContaining('destinations differ') });
+  await expect(fx.host.acceptTask(secondContext, fx.local.id,
+    { taskId: secondTaskId, verificationSummary: 'The second diff is correct and checks passed.' }))
+    .rejects.toMatchObject({ status: 409, message: expect.stringContaining('task stays in Review') });
+  expect(fx.store.getTask(secondTaskId)?.status).toBe('review');
   expect(fx.integrationPublications.at(-1)).toMatchObject({ branch: 'main', error: expect.stringContaining('destinations differ') });
   const finalHead = runGit(fx.project.path, 'rev-parse', 'HEAD').trim();
   expect(() => runGit(fx.project.path, 'merge-base', '--is-ancestor', commitSha, finalHead)).not.toThrow();
   expect(() => runGit(fx.project.path, 'merge-base', '--is-ancestor', secondCommitSha, finalHead)).not.toThrow();
   expect(runGit(fx.project.path, 'rev-list', '--parents', '-n', '1', finalHead).trim().split(' ')).toHaveLength(3);
   expect(runGit(origin, 'rev-parse', 'refs/heads/main').trim()).toBe(mergedHead);
+  runGit(fx.project.path, 'remote', 'set-url', '--push', 'origin', origin);
+  const retried = await fx.host.acceptTask(secondContext, fx.local.id,
+    { taskId: secondTaskId, verificationSummary: 'The second diff is correct and checks passed.' });
+  expect(retried).toMatchObject({ acceptedBy: 'orchestrator', taskId: secondTaskId, status: 'done', merged: true,
+    integrationPush: { branch: 'main' } });
+  expect(fx.store.getTask(secondTaskId)?.status).toBe('done');
+  expect(runGit(origin, 'rev-parse', 'refs/heads/main').trim()).toBe(finalHead);
 });
 
 it('interrupts an old owner turn before re-dispatching a supervised restart continuation', async () => {
@@ -2250,6 +2275,7 @@ async function reviewFixture(options: { publishBranch: boolean; reportBranch?: b
     status: 'running', runId, hop: 0, error: null, createdAt: now, updatedAt: now, kind: 'assignment' });
   group.assignments.push({ id: `a-${deliveryId}`, groupId: group.group.id, requestId, fromMemberId: orchestrator.id, toMemberId: worker.id,
     taskId, deliveryId, scope: ['src/features/landing.ts'], createdAt: now });
+  group.requests.push({ id: requestId, plannerMemberId: orchestrator.id });
   const userMessage = fx.store.insertMessage({ sessionId: worker.sessionId, role: 'user', content: 'Add the scoped output', runId, kind: 'group-delivery' });
   fx.store.insertRun({ id: runId, sessionId: worker.sessionId, userMessageId: userMessage.id, provider: 'codex', model: 'gpt-6-codex', startedAt: now });
   fx.host.start({ session: proxySession, runId, content: 'Add the scoped output', options: { groupDeliveryId: deliveryId },
@@ -2310,6 +2336,18 @@ it('refuses acceptance when the worker reported a push failure and transferred n
   expect(fx.integrationPublications).toEqual([]);
 });
 
+it('publishes the configured target before accepting verified artifact-only fallback work', async () => {
+  const { fx, origin, baseRevision, taskId, deliveryId, context } = await reviewFixture({ publishBranch: false });
+  fx.store.db.prepare('UPDATE mingle_team_host_deliveries SET artifacts_json=? WHERE delivery_id=?')
+    .run(JSON.stringify([{ revision: baseRevision }]), deliveryId);
+  const accepted = await fx.host.acceptTask(context, fx.local.id,
+    { taskId, verificationSummary: 'The imported revision is present and the checks passed.' });
+  expect(accepted).toMatchObject({ status: 'done', merged: true, integrationBranch: 'main',
+    integrationPush: { branch: 'main', commitSha: baseRevision } });
+  expect(fx.store.getTask(taskId)?.status).toBe('done');
+  expect(runGit(origin, 'rev-parse', 'refs/heads/main').trim()).toBe(baseRevision);
+});
+
 it('accepts, reconciles and publishes a host-device worker in a team group instead of rejecting for a missing remote delivery', async () => {
   const { fx, origin, taskId, context } = await reviewFixture({ publishBranch: true });
   // Re-point the same Review task at a worker that lives on the host device.
@@ -2325,9 +2363,12 @@ it('accepts, reconciles and publishes a host-device worker in a team group inste
   runGit(fx.project.path, 'commit', '-m', 'Local worker output');
   const head = runGit(fx.project.path, 'rev-parse', 'HEAD').trim();
   const branch = runGit(fx.project.path, 'rev-parse', '--abbrev-ref', 'HEAD').trim();
-  options.groups.acceptTask = (_context: unknown, input: { taskId: string }) => {
+  options.groups.acceptTask = async (acceptContext: unknown, input: { taskId: string; verificationSummary: string }) => {
+    const finalized = await fx.finalizeTeamAcceptance(acceptContext, { integrationWorktree: fx.project.path,
+      integrationBranch: branch, integrationHead: head, merged: true });
     fx.store.updateTask(input.taskId, { status: 'done' });
-    return { taskId: input.taskId, status: 'done', acceptedBy: 'orchestrator', integrationWorktree: fx.project.path, integrationBranch: branch, integrationHead: head, merged: true };
+    return { taskId: input.taskId, status: 'done', acceptedBy: 'orchestrator', integrationWorktree: fx.project.path,
+      integrationBranch: branch, integrationHead: head, merged: true, ...finalized };
   };
   const accepted = await fx.host.acceptTask({ ...context, deliveryId: 'local-worker-delivery' }, fx.local.id,
     { taskId, verificationSummary: 'Ran the local checks and inspected the diff.' });

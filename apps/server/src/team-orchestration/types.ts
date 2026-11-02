@@ -68,6 +68,9 @@ export interface TeamOrchestrationGroups {
   touchDeliveryActivity?(sessionId: string, runId: string): void;
   recordRemoteDeliveryActivity?(sessionId: string, runId: string, entries: import('@mingle/contracts').TeamAgentActivityEntry[]): void;
   acceptTask(context: GroupRunContext, input: TeamAcceptTask): unknown;
+  setTeamAcceptanceFinalizer?(finalizer: (context: GroupRunContext, integration: {
+    integrationWorktree: string; integrationBranch: string | null; integrationHead: string | null; merged: boolean;
+  }) => Promise<Record<string, unknown>>): void;
   recordIntegrationPublication?(context: GroupRunContext, input: { branch: string; commitSha: string; error?: string }): void;
   notifyIntegrationBranch?(context: GroupRunContext, input: { branch: string; commitSha: string }): string[];
   setTeamDispatchGuard(guard: (sessionId: string, groupId: string) => Promise<boolean>): void;

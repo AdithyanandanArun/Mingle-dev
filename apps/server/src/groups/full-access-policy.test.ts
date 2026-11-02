@@ -13,7 +13,8 @@ afterEach(async () => { while (apps.length) await apps.pop()!.cleanup(); });
 it('uses full-access native policy for local group runs only when the provider advertises it', async () => {
   const fake = new FakeProviders();
   const provider: ProviderInfo = { id: 'claude', name: 'Claude', available: true, version: 'fake', executable: '/fake/claude', reason: null,
-    policies: ['supervised', 'full-access'], models: [{ id: 'claude-sonnet-5-5', name: 'Sonnet', policies: ['supervised', 'full-access'] }] };
+    policies: ['supervised', 'full-access'], models: [{ id: 'claude-sonnet-5-5', name: 'Sonnet', policies: ['supervised', 'full-access'],
+      reasoningEfforts: [{ id: 'high', label: 'High' }], defaultReasoningEffort: 'high' }] };
   fake.detectProviders = async () => [provider];
   const t = await startTestApp({ fake });
   apps.push(t);
@@ -39,7 +40,8 @@ it('uses full-access native policy for local group runs only when the provider a
   expect(observedPolicies).toEqual(['full-access']);
   expect(t.app.store.getSession(worker.sessionId)?.policy).toBe('supervised');
 
-  const limitedProvider: ProviderInfo = { ...provider, policies: ['supervised'], models: [{ id: 'claude-sonnet-5-5', name: 'Sonnet', policies: ['supervised'] }] };
+  const limitedProvider: ProviderInfo = { ...provider, policies: ['supervised'], models: [{ id: 'claude-sonnet-5-5', name: 'Sonnet', policies: ['supervised'],
+    reasoningEfforts: [{ id: 'high', label: 'High' }], defaultReasoningEffort: 'high' }] };
   fake.detectProviders = async () => [limitedProvider];
   await t.api('POST', '/api/providers/refresh', {});
   const secondAnchor = await t.api<any>('POST', '/api/sessions', { projectId: t.app.store.getSession(EXAMPLE_CLIENT_SESSION_ID)!.projectId,
@@ -79,7 +81,8 @@ async function callTeamTool(connection: TeamMcpConnection, name: string, args: R
 it('durably wakes a Full-access coordinator to accept a completed worker and integrate it without an approval callback', async () => {
   const fake = new FakeProviders();
   fake.detectProviders = async () => [{ id: 'claude', name: 'Claude', available: true, version: 'fake', executable: '/fake/claude', reason: null,
-    policies: ['supervised', 'full-access'], models: [{ id: 'claude-sonnet-5-5', name: 'Sonnet', policies: ['supervised', 'full-access'] }] }];
+    policies: ['supervised', 'full-access'], models: [{ id: 'claude-sonnet-5-5', name: 'Sonnet', policies: ['supervised', 'full-access'],
+      reasoningEfforts: [{ id: 'high', label: 'High' }], defaultReasoningEffort: 'high' }] }];
   const t = await startTestApp({ fake });
   apps.push(t);
   await t.api('POST', '/api/providers/refresh', {});

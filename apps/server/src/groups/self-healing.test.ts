@@ -14,7 +14,7 @@ afterEach(async () => {
 });
 
 const available = (id: Provider, model: string): ProviderInfo => ({ id, name: id, available: true, version: 'fake', executable: `/fake/${id}`, reason: null,
-  models: [{ id: model, name: model, policies: ['supervised', 'full-access'], reasoningEfforts: [{ id: 'high', label: 'High' }] }], policies: ['supervised', 'full-access'] });
+  models: [{ id: model, name: model, policies: ['supervised', 'full-access'], reasoningEfforts: [{ id: 'high', label: 'High' }], defaultReasoningEffort: 'high' }], policies: ['supervised', 'full-access'] });
 
 async function createLocalGroup(t: TestApp, mode: 'current-leads' | 'orchestrated' = 'current-leads', count = 1, extraProviders: Provider[] = ['claude', 'opencode']) {
   t.fake.detectProviders = async () => [available('claude', 'claude-sonnet-5-5'), available('codex', 'gpt-5-codex'), available('opencode', 'opencode-model')];

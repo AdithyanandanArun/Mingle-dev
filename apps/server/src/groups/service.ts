@@ -66,6 +66,9 @@ export interface GroupServiceOptions {
   stallTimeoutMs?: number;
   stallSweepIntervalMs?: number;
 }
+export type TeamAcceptanceFinalizer = (context: GroupRunContext, integration: {
+  integrationWorktree: string; integrationBranch: string | null; integrationHead: string | null; merged: boolean;
+}) => Promise<Record<string, unknown>>;
 
 type Outcome = 'completed' | 'failed' | 'interrupted';
 type Assign = z.infer<typeof TeamAssignSchema>;
@@ -130,6 +133,7 @@ export class GroupService {
   private readonly now: () => number;
   private readonly stallTimeoutMs: number;
   private readonly stallSweepIntervalMs: number;
+  private teamAcceptanceFinalizer?: TeamAcceptanceFinalizer;
   private readonly providerCooldowns = new Map<Session['provider'], { until: number; reason: string; kind: ProviderFailure['kind'] }>();
   private readonly deliveryActivity = new Map<string, { fingerprint: string; at: number }>();
   private readonly stalledDeliveries = new Map<string, { at: number; reason: string }>();
@@ -493,6 +497,8 @@ export class GroupService {
     }, this.stallSweepIntervalMs);
     this.stallTimer.unref?.();
   }
+
+  setTeamAcceptanceFinalizer(finalizer: TeamAcceptanceFinalizer): void { this.teamAcceptanceFinalizer = finalizer; }
 
   /** Used only by the shared-project host to create its regular scheduler group without provisioning provider sessions. */
   createTeamGroup(input: {
@@ -3711,9 +3717,13 @@ ${task ? `Task ${task.id}: ${task.title}\nAcceptance: ${task.acceptanceCriteria}
     });
     if (!pending.length) return false;
     let queued = false;
-    for (const delegatorId of new Set(pending.map((assignment) => assignment.fromMemberId))) {
+    const planner = this.repo.getMember(request.plannerMemberId);
+    const acceptanceMemberId = planner && !planner.removedAt ? planner.id : pending[0]!.fromMemberId;
+    for (const delegatorId of [acceptanceMemberId]) {
       const delegator = this.repo.getMember(delegatorId);
-      const batch = pending.filter((assignment) => assignment.fromMemberId === delegatorId);
+      // A replacement coordinator must see the outstanding assignments even though their
+      // historical issuer remains the former coordinator.
+      const batch = pending;
       const lines = batch.map((assignment) => `- @${this.repo.getMember(assignment.toMemberId)?.handle ?? 'worker'} · ${clean(this.store.getTask(assignment.taskId)?.title ?? assignment.taskId, 120)} (task ${assignment.taskId})`);
       const round = (this.store.db.prepare('SELECT COUNT(*) AS n FROM group_acceptance_followups WHERE request_id=? AND member_id=?')
         .get(request.id, delegatorId) as { n: number }).n + 1;
@@ -4047,8 +4057,8 @@ ${task ? `Task ${task.id}: ${task.title}\nAcceptance: ${task.acceptanceCriteria}
     const request = this.repo.getRequest(delivery.requestId);
     if (!request || !this.mayAssign(group, member, request.plannerMemberId)) throw forbidden('Only this request’s current orchestrator may accept a worker task.');
     const assignment = this.repo.assignmentByTask(group.id, input.taskId);
-    if (!assignment || assignment.fromMemberId !== member.id || assignment.requestId !== delivery.requestId) {
-      throw forbidden('You may accept only a worker assignment from this request that you issued.');
+    if (!assignment || assignment.requestId !== delivery.requestId) {
+      throw forbidden('You may accept only a worker assignment from this request.');
     }
     const task = this.store.getTask(input.taskId);
     const workerDelivery = this.repo.getDelivery(assignment.deliveryId);
@@ -4065,6 +4075,8 @@ ${task ? `Task ${task.id}: ${task.title}\nAcceptance: ${task.acceptanceCriteria}
     if (!worker || !workerSession) throw conflict('The assigned worker session is no longer available.');
     const isRemoteProxy = Boolean(this.store.db.prepare('SELECT 1 AS found FROM mingle_team_proxy_sessions WHERE session_id=?').get(workerSession.id));
     const integration = isRemoteProxy ? null : await this.integrateLocalAssignment(group, assignment, workerSession);
+    const finalized = integration && this.isTeamGroup(group) && this.teamAcceptanceFinalizer
+      ? await this.teamAcceptanceFinalizer(ctx, integration) : {};
 
     const accepted = this.store.tx(() => {
       this.live(ctx);
@@ -4097,7 +4109,8 @@ ${task ? `Task ${task.id}: ${task.title}\nAcceptance: ${task.acceptanceCriteria}
     }
     this.schedule(group.id);
     return { taskId: accepted.id, status: accepted.status, acceptedBy: 'orchestrator', verificationSummary,
-      ...(integration ? { ...integration } : {}), ...(integrationPush ? { integrationPush } : {}), ...(pushFailure ? { pushFailure } : {}) };
+      ...(integration ? { ...integration } : {}), ...finalized,
+      ...(integrationPush ? { integrationPush } : {}), ...(pushFailure ? { pushFailure } : {}) };
   }
 
   private async integrateLocalAssignment(
