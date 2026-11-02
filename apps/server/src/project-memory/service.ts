@@ -3,7 +3,7 @@ import type {
   MemoryRememberToolInput, MemoryRetireToolInput, MemorySearchToolInput, MemoryUpdateToolInput, PatchProjectMemoryInput, CreateProjectMemoryInput,
   ProjectMemoryAuthor, ProjectMemoryContextPreview, ProjectMemoryCounts, ProjectMemoryEntry, ProjectMemoryEntryDetail, ProjectMemoryFileRef,
   ProjectMemoryHistoryResponse, ProjectMemoryInjection, ProjectMemoryInjectionsResponse, ProjectMemoryKind, ProjectMemoryListResponse,
-  ProjectMemoryOp, ProjectMemoryQuery, ProjectMemoryRevision, ProjectMemoryRevisionSnapshot, ProjectMemorySharing, ProjectMemorySourceRef,
+  ProjectMemoryCausalProof, ProjectMemoryOp, ProjectMemoryQuery, ProjectMemoryRevision, ProjectMemoryRevisionSnapshot, ProjectMemorySharing, ProjectMemorySourceRef,
   ProjectMemorySyncRecord, ProjectMemoryWriteResult, Session,
 } from '@mingle/contracts';
 import { PROJECT_MEMORY_LIMITS, ProjectMemorySyncRecordSchema } from '@mingle/contracts';
@@ -41,7 +41,7 @@ export interface AgentContext { session: Session; runId: string }
 type Actor = { kind: 'human' } | { kind: 'agent'; session: Session; runId: string };
 type Draft = Omit<ProjectMemoryRevisionSnapshot, never>;
 type Claim = 'tentative' | 'evidenced';
-export type RemoteResult = 'applied' | 'duplicate' | 'ignored';
+export type RemoteResult = 'applied' | 'duplicate' | 'ignored' | 'pending';
 
 function snapshotOf(entry: EntryRow): ProjectMemoryRevisionSnapshot {
   return {
@@ -358,10 +358,9 @@ export class ProjectMemoryService {
     const revision = prior ? prior.revision + 1 : 1;
     const recordId = randomUUID();
     const priorLineage = prior ? this.repo.lineageFor(prior.headRecordId) : undefined;
-    const inheritedControl = prior?.updatedBy.kind === 'human' ? prior.headRecordId : priorLineage?.controlId ?? null;
     const lineage = {
       parentId: prior?.headRecordId ?? null,
-      controlId: inheritedControl,
+      controlId: author.kind === 'human' ? recordId : priorLineage?.controlId ?? null,
       epoch: Math.min(1_000_000, (priorLineage?.epoch ?? 0) + (author.kind === 'human' ? 1 : 0)),
     };
     const retiredNow = draft.retired && !prior?.retired;
@@ -378,7 +377,7 @@ export class ProjectMemoryService {
       this.repo.insertRecord({
         recordId, entryId: row.id, projectId: row.projectId, revision, parentRevision: prior?.revision ?? null, op: input.op, at, createdAt: at, author,
         note: input.note ? input.note.slice(0, 300) : null, snapshot: draft, changed: changedFields(prior ? snapshotOf(prior) : null, draft),
-        received: false, authorDeviceId: null, signature: null, teamId: null, sharedProjectId: null, publishedAt: null, lineage,
+        received: false, authorDeviceId: null, signature: null, teamId: null, sharedProjectId: null, publishedAt: null, lineage, causalValid: true,
       });
       this.repo.upsertEntry(row);
       this.repo.pruneRecords(row.id);
@@ -505,7 +504,7 @@ export class ProjectMemoryService {
   async humanPatch(projectId: string, entryId: string, input: PatchProjectMemoryInput): Promise<ProjectMemoryWriteResult> {
     const project = this.project(projectId);
     const prior = this.requireEntry(projectId, entryId);
-    if (prior.revision !== input.expectedRevision) throw conflict(`Memory entry changed; current revision is ${prior.revision}.`);
+    if (prior.revision !== input.expectedRevision || prior.headRecordId !== input.expectedHeadId) throw conflict(`Memory entry changed; current revision is ${prior.revision}.`);
     const actor: Actor = { kind: 'human' };
     const title = input.title === undefined ? undefined : cleanText(input.title);
     const body = input.body === undefined ? undefined : cleanText(input.body);
@@ -583,6 +582,7 @@ export class ProjectMemoryService {
     if (prior.retired) throw conflict('This memory entry is retired; only a person can restore it.');
     if (prior.pinned) throw conflict('This memory entry is pinned by a person and is locked against agent edits.');
     if (input.expectedRevision !== undefined && input.expectedRevision !== prior.revision) throw conflict(`Memory entry changed; current revision is ${prior.revision}. Search again.`);
+    if (input.expectedHeadId !== undefined && input.expectedHeadId !== prior.headRecordId) throw conflict(`Memory entry changed; current revision is ${prior.revision}. Search again.`);
     const title = input.title === undefined ? undefined : cleanText(input.title);
     const body = input.body === undefined ? undefined : cleanText(input.body);
     if ((title !== undefined && title.length < 3) || (body !== undefined && !body)) throw badRequest('A memory needs a title and a body.');
@@ -617,9 +617,115 @@ export class ProjectMemoryService {
   toSyncRecord(row: RevisionRow, teamId: string, sharedProjectId: string, authorDeviceId: string, signature: string): ProjectMemorySyncRecord {
     return ProjectMemorySyncRecordSchema.parse({
       id: row.recordId, entryId: row.entryId, revision: row.revision, parentRevision: row.parentRevision, op: row.op, at: row.at, teamId, sharedProjectId,
-      author: row.author, note: row.note, content: row.snapshot, createdAt: row.createdAt, authorDeviceId, signature, lineage: row.lineage,
+      author: row.author, note: row.note, content: row.snapshot, createdAt: row.createdAt, authorDeviceId, signature,
+      ...(row.lineage ? { lineage: row.lineage } : {}), ...(row.causalProof ? { causalProof: row.causalProof } : {}),
     });
   }
+
+  private causalProofState(proof: ProjectMemoryCausalProof): 'valid' | 'pending' | 'invalid' {
+    const parentRow = proof.parentId ? this.repo.entryRecordById(proof.parentId) : undefined;
+    const parentProof = proof.parentId ? this.repo.causalProofFor(proof.parentId) : undefined;
+    if (parentProof?.invalid) return 'invalid';
+    if (proof.parentId && !parentProof?.valid && !parentRow) return 'pending';
+    if (parentProof && !parentProof.valid) return 'pending';
+    if (!proof.parentId) {
+      const human = proof.authorKind === 'human';
+      return proof.parentRevision === null && proof.revision === 1 && proof.epoch === (human ? 1 : 0)
+        && proof.controlId === (human ? proof.recordId : null)
+        && (human || (!proof.pinned && !proof.retired && !proof.humanVerified)) ? 'valid' : 'invalid';
+    }
+    const parentEntryId = parentProof?.proof.entryId ?? parentRow?.entryId;
+    if (parentEntryId !== proof.entryId) return 'invalid';
+    const parentRevision = parentProof?.proof.revision ?? parentRow!.revision;
+    if (proof.parentRevision !== parentRevision || proof.revision !== parentRevision + 1) return 'invalid';
+    // A legacy peer's signed lineage has no validated ancestry chain. Use it only for locally authored pre-proof rows;
+    // remote legacy rows start a neutral causal baseline instead of importing a sender-asserted epoch/control id.
+    const trustLocalLineage = parentRow && !parentRow.received;
+    const parentEpoch = parentProof?.proof.epoch ?? (trustLocalLineage ? parentRow.lineage?.epoch ?? 0 : 0);
+    const parentControl = parentProof?.proof.controlId ?? (trustLocalLineage ? parentRow.lineage?.controlId ?? null : null);
+    const human = proof.authorKind === 'human';
+    const expectedEpoch = parentEpoch + (human ? 1 : 0);
+    const expectedControl = human ? proof.recordId : parentControl;
+    if (proof.epoch !== expectedEpoch || proof.controlId !== expectedControl) return 'invalid';
+    if (!human) {
+      const parentPinned = parentProof?.proof.pinned ?? parentRow!.snapshot.pinned;
+      const parentRetired = parentProof?.proof.retired ?? parentRow!.snapshot.retired;
+      if (parentPinned || parentRetired || proof.pinned !== parentPinned || (proof.retired && proof.op !== 'retire') || proof.humanVerified) return 'invalid';
+    }
+    return 'valid';
+  }
+
+  private causalCompare(a: RevisionRow, b: RevisionRow): number {
+    const ap = a.causalProof;
+    const bp = b.causalProof;
+    const al = ap ? { epoch: ap.epoch, controlId: ap.controlId } : a.lineage;
+    const bl = bp ? { epoch: bp.epoch, controlId: bp.controlId } : b.lineage;
+    if (al && bl) {
+      if (al.epoch !== bl.epoch) return al.epoch - bl.epoch;
+      const control = (al.controlId ?? '').localeCompare(bl.controlId ?? '');
+      if (control) return control;
+    }
+    if (a.revision !== b.revision) return a.revision - b.revision;
+    if ((a.author.kind === 'human') !== (b.author.kind === 'human')) return a.author.kind === 'human' ? 1 : -1;
+    if (a.at !== b.at) return a.at.localeCompare(b.at);
+    return a.recordId.localeCompare(b.recordId);
+  }
+
+  private makeHead(current: EntryRow | undefined, row: RevisionRow): EntryRow {
+    const content = row.snapshot;
+    const retiredNow = content.retired && !current?.retired;
+    return {
+      id: row.entryId, projectId: row.projectId, kind: content.kind, title: content.title, body: content.body, status: content.status,
+      pinned: content.pinned, humanVerified: content.humanVerified, revision: row.revision, retired: content.retired,
+      retiredAt: content.retired ? (retiredNow ? row.at : current?.retiredAt ?? row.at) : null,
+      retiredByHuman: content.retired ? (retiredNow ? row.author.kind === 'human' : current?.retiredByHuman ?? false) : false,
+      createdAt: current?.createdAt ?? row.at, updatedAt: row.at, author: current?.author ?? row.author, updatedBy: row.author,
+      files: content.files, sources: content.sources, titleKey: titleKey(content.kind, content.title, content.body), bodyKey: bodyKey(content.body),
+      headRecordId: row.recordId, headAt: row.at, originDeviceId: row.received ? row.authorDeviceId : null, stale: current?.stale ?? null,
+    };
+  }
+
+  private promoteCausal(projectId: string, entryId: string): EntryRow | null {
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const proof of this.repo.pendingCausalProofs(entryId)) {
+        const state = this.causalProofState(proof);
+        if (state === 'valid') { this.repo.markCausalValid(proof.recordId); changed = true; }
+        else if (state === 'invalid') { this.repo.markCausalInvalid(proof.recordId); changed = true; }
+      }
+      for (const row of this.repo.pendingCausalRecords(entryId)) {
+        const proof = row.causalProof;
+        if (!proof) continue;
+        const state = this.causalProofState(proof);
+        if (state === 'valid') { this.repo.markCausalValid(row.recordId); changed = true; }
+        else if (state === 'invalid') { this.repo.markCausalInvalid(row.recordId); changed = true; }
+      }
+    }
+    const current = this.repo.getEntry(entryId);
+    const candidates = this.repo.validRecords(entryId).filter((row) => row.causalProof || (!row.received && row.lineage));
+    let winner = current ? this.repo.getRecord(current.headRecordId) : undefined;
+    if (winner && winner.received && !winner.causalProof) winner = undefined;
+    for (const candidate of candidates) if (!winner || this.causalCompare(candidate, winner) > 0) winner = candidate;
+    if (!winner || winner.recordId === current?.headRecordId) return null;
+    const next = this.makeHead(current, winner);
+    this.repo.tx(() => {
+      this.repo.upsertEntry(next);
+      if (next.retired && !current?.retired) this.compactTombstones(projectId);
+    });
+    return next;
+  }
+
+  acceptCausalProof(projectId: string, proof: ProjectMemoryCausalProof): 'valid' | 'pending' {
+    const state = this.causalProofState(proof);
+    if (state === 'invalid') throw badRequest('The memory ancestry proof does not follow its parent control state.');
+    this.repo.saveCausalProof(proof, state === 'valid');
+    const head = this.promoteCausal(projectId, proof.entryId);
+    if (head) { this.emit(head, 'update', 'peer'); void this.rescan(projectId, true); }
+    return this.repo.causalProofFor(proof.recordId)?.valid ? 'valid' : 'pending';
+  }
+
+  resolvePendingCausal(projectId: string, entryId: string): EntryRow | null { return this.promoteCausal(projectId, entryId); }
 
   /**
    * Applies a verified team record to local state. The caller (sync layer) has already proven the sender, binding and signature;
@@ -644,41 +750,46 @@ export class ProjectMemoryService {
     const current = this.repo.getEntry(record.entryId);
     if (current && current.projectId !== projectId) throw badRequest('Memory record belongs to a different project.');
     if (!current && this.repo.hasRetiredId(projectId, record.entryId)) return 'ignored';
-    if (current) {
-      const newer = outranks(record, current, this.repo.lineageFor(current.headRecordId));
-      if (newer && record.author.kind === 'agent') {
-        if (current.pinned) return 'ignored';
-        if (current.retired && !content.retired) return 'ignored';
+    if (!current && !content.retired && this.repo.liveCount(projectId) >= (this.options.liveLimit ?? PROJECT_MEMORY_LIMITS.maxLiveEntries)) return 'ignored';
+    let causalState: 'valid' | 'pending' | 'invalid' | 'legacy' = 'legacy';
+    if (record.causalProof) {
+      const proof = record.causalProof;
+      if (proof.recordId !== record.id || proof.entryId !== record.entryId || proof.revision !== record.revision
+        || proof.parentRevision !== record.parentRevision || proof.op !== record.op || proof.authorDeviceId !== record.authorDeviceId || proof.authorKind !== record.author.kind
+        || ((proof.parentId === null) !== (record.op === 'create'))
+        || proof.pinned !== content.pinned || proof.retired !== content.retired || proof.humanVerified !== content.humanVerified
+        || !record.lineage || proof.parentId !== record.lineage.parentId || proof.controlId !== record.lineage.controlId || proof.epoch !== record.lineage.epoch) {
+        throw badRequest('The causal proof does not describe this signed memory record.');
       }
-    } else if (!content.retired && this.repo.liveCount(projectId) >= (this.options.liveLimit ?? PROJECT_MEMORY_LIMITS.maxLiveEntries)) return 'ignored';
+      causalState = this.causalProofState(proof);
+      if (causalState === 'invalid') throw badRequest('The memory ancestry proof does not follow its parent control state.');
+    }
     const row: RevisionRow = {
       recordId: record.id, entryId: record.entryId, projectId, revision: record.revision, parentRevision: record.parentRevision, op: record.op, at: record.at,
       createdAt: record.createdAt, author: record.author, note: record.note, snapshot: content,
       changed: changedFields(current ? snapshotOf(current) : null, content), received: true, authorDeviceId: record.authorDeviceId, signature: record.signature,
       teamId: record.teamId, sharedProjectId: record.sharedProjectId, publishedAt: this.iso(),
-      lineage: record.lineage ?? { parentId: null, controlId: null, epoch: 0 },
+      lineage: record.lineage, causalProof: record.causalProof, causalValid: causalState === 'valid',
     };
-    const isNewer = !current || outranks(record, current, this.repo.lineageFor(current.headRecordId));
-    let applied: EntryRow | null = null;
     this.repo.tx(() => {
       this.repo.insertRecord(row);
-      if (isNewer) {
-        const retiredNow = content.retired && !current?.retired;
-        applied = {
-          id: record.entryId, projectId, kind: content.kind, title: content.title, body: content.body, status: content.status, pinned: content.pinned,
-          humanVerified: content.humanVerified, revision: record.revision, retired: content.retired,
-          retiredAt: content.retired ? (retiredNow ? record.at : current?.retiredAt ?? record.at) : null,
-          retiredByHuman: content.retired ? (retiredNow ? record.author.kind === 'human' : current?.retiredByHuman ?? false) : false,
-          createdAt: current?.createdAt ?? record.at, updatedAt: record.at, author: current?.author ?? record.author, updatedBy: record.author,
-          files: content.files, sources: content.sources, titleKey: titleKey(content.kind, content.title, content.body), bodyKey: bodyKey(content.body),
-          headRecordId: record.id, headAt: record.at, originDeviceId: record.authorDeviceId, stale: current?.stale ?? null,
-        };
-        this.repo.upsertEntry(applied);
-        if (retiredNow) this.compactTombstones(projectId);
-      }
       this.repo.pruneRecords(record.entryId);
       this.repo.patchSyncState(projectId, { lastReceivedAt: this.iso() });
     });
+    let applied: EntryRow | null = null;
+    if (causalState === 'pending') return 'pending';
+    if (record.causalProof) applied = this.promoteCausal(projectId, record.entryId);
+    else {
+      const newer = !current || outranks(record, current, this.repo.lineageFor(current.headRecordId));
+      const blockedAgent = current && record.author.kind === 'agent' && (current.pinned || (current.retired && !content.retired));
+      if (newer && !blockedAgent) {
+        applied = this.makeHead(current, row);
+        this.repo.tx(() => {
+          this.repo.upsertEntry(applied!);
+          if (applied!.retired && !current?.retired) this.compactTombstones(projectId);
+        });
+      }
+    }
     const head: EntryRow | null = applied;
     if (head) {
       this.emit(head, record.op, 'peer');

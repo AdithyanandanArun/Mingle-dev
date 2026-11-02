@@ -116,7 +116,7 @@ describe('project memory HTTP API, MCP tools and run wiring', () => {
     // Cross-project isolation over HTTP.
     expect(ProjectMemoryListResponseSchema.parse((await t.api('GET', `/api/projects/${other.id}/memory`)).json).total).toBe(0);
     expect((await t.api('GET', `/api/projects/${other.id}/memory/${entry.id}`)).status).toBe(404);
-    expect((await t.api('PATCH', `/api/projects/${other.id}/memory/${entry.id}`, { expectedRevision: 2, pinned: true })).status).toBe(404);
+    expect((await t.api('PATCH', `/api/projects/${other.id}/memory/${entry.id}`, { expectedRevision: 2, expectedHeadId: entry.headRecordId, pinned: true })).status).toBe(404);
 
     const detail = ProjectMemoryEntryDetailSchema.parse((await t.api('GET', `/api/projects/${project.id}/memory/${entry.id}`)).json);
     expect(detail.history.map((r) => [r.revision, r.op])).toEqual([[2, 'update'], [1, 'create']]);
@@ -127,10 +127,10 @@ describe('project memory HTTP API, MCP tools and run wiring', () => {
     expect(ProjectMemoryHistoryResponseSchema.parse((await t.api('GET', `/api/projects/${project.id}/memory/${entry.id}/history?limit=1&cursor=1`)).json).revisions[0]!.revision).toBe(1);
 
     // ---- explicit human edits ----
-    expect((await t.api('PATCH', `/api/projects/${project.id}/memory/${entry.id}`, { expectedRevision: 1, pinned: true })).status).toBe(409);
-    expect((await t.api('PATCH', `/api/projects/${project.id}/memory/${entry.id}`, { expectedRevision: 2 })).status).toBe(400);
-    expect((await t.api('PATCH', `/api/projects/${project.id}/memory/${entry.id}`, { expectedRevision: 2, author: 'x', pinned: true })).status).toBe(400);
-    const pinned = ProjectMemoryWriteResultSchema.parse((await t.api('PATCH', `/api/projects/${project.id}/memory/${entry.id}`, { expectedRevision: 2, pinned: true, note: 'critical' })).json);
+    expect((await t.api('PATCH', `/api/projects/${project.id}/memory/${entry.id}`, { expectedRevision: 1, expectedHeadId: entry.headRecordId, pinned: true })).status).toBe(409);
+    expect((await t.api('PATCH', `/api/projects/${project.id}/memory/${entry.id}`, { expectedRevision: 2, expectedHeadId: entry.headRecordId })).status).toBe(400);
+    expect((await t.api('PATCH', `/api/projects/${project.id}/memory/${entry.id}`, { expectedRevision: 2, expectedHeadId: entry.headRecordId, author: 'x', pinned: true })).status).toBe(400);
+    const pinned = ProjectMemoryWriteResultSchema.parse((await t.api('PATCH', `/api/projects/${project.id}/memory/${entry.id}`, { expectedRevision: 2, expectedHeadId: entry.headRecordId, pinned: true, note: 'critical' })).json);
     expect(pinned.entry).toMatchObject({ pinned: true, revision: 3 });
     const created = await t.api('POST', `/api/projects/${project.id}/memory`, { kind: 'convention', title: 'Release notes in CHANGELOG', body: 'Every PR updates CHANGELOG.md.', files: ['src/a.ts', '../etc/passwd'] });
     expect(created.status).toBe(201);

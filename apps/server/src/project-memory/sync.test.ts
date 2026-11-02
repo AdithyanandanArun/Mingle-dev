@@ -3,12 +3,13 @@ import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { AuthenticatedTransportMessage, DistributedDevice, ProjectMemorySyncRecord, Session } from '@mingle/contracts';
+import { PROJECT_MEMORY_LIMITS } from '@mingle/contracts';
 import { canonicalJson, generateDeviceKeyMaterial, signDevicePayload, type DeviceKeyMaterial } from '../distributed/crypto.ts';
 import { openDatabase } from '../db.ts';
 import { Store } from '../store.ts';
 import { tmpDir } from '../test-utils.ts';
 import { ProjectMemoryService, type AgentContext } from './service.ts';
-import { ProjectMemoryTeamSync, signingPayload, type MemoryTransport } from './sync.ts';
+import { ProjectMemoryTeamSync, causalProofPayload, signingPayload, type MemoryTransport } from './sync.ts';
 
 const TEAM = randomUUID();
 const SHARED = randomUUID();
@@ -151,7 +152,7 @@ describe('team project memory sync (two-device fixture)', () => {
     expect(a.service.sharing(a.projectId)).toMatchObject({ shared: true, teamId: TEAM, sharedProjectId: SHARED, peerCount: 1, unpublished: 0, localDeviceId: a.deviceId });
 
     // B's person pins it; A sees the pin and its agent is now locked out.
-    const pinned = await b.service.humanPatch(b.projectId, created.entry.id, { expectedRevision: 1, pinned: true });
+    const pinned = await b.service.humanPatch(b.projectId, created.entry.id, { expectedRevision: 1, expectedHeadId: created.entry.headRecordId, pinned: true });
     await b.settle();
     await mesh.deliver();
     expect(a.service.repo.getEntry(created.entry.id)).toMatchObject({ pinned: true, revision: 2, originDeviceId: b.deviceId });
@@ -159,8 +160,8 @@ describe('team project memory sync (two-device fixture)', () => {
     expect(pinned.entry.updatedBy).toMatchObject({ kind: 'human', accountId: b.accountId, deviceId: b.deviceId });
 
     // Human unpins and retires on A; the tombstone reaches B.
-    const unpinned = await a.service.humanPatch(a.projectId, created.entry.id, { expectedRevision: 2, pinned: false });
-    await a.service.humanPatch(a.projectId, created.entry.id, { expectedRevision: unpinned.entry.revision, lifecycle: 'retired', note: 'obsolete' });
+    const unpinned = await a.service.humanPatch(a.projectId, created.entry.id, { expectedRevision: 2, expectedHeadId: a.service.repo.getEntry(created.entry.id)!.headRecordId, pinned: false });
+    await a.service.humanPatch(a.projectId, created.entry.id, { expectedRevision: unpinned.entry.revision, expectedHeadId: unpinned.entry.headRecordId, lifecycle: 'retired', note: 'obsolete' });
     await a.settle();
     await mesh.deliver();
     expect(b.service.repo.getEntry(created.entry.id)).toMatchObject({ retired: true, revision: 4 });
@@ -181,8 +182,7 @@ describe('team project memory sync (two-device fixture)', () => {
     expect(records).toHaveLength(3);
     mesh.queue = [];
 
-    await mesh.redeliver(records[2]!); // two missing ancestors, both backfilled by exact ID
-    expect(b.service.repo.getEntry(created.entry.id)).toMatchObject({ revision: 3, body: 'Third revision of the fact, rewritten again.' });
+    await mesh.redeliver(records[2]!); // missing ancestors are requested by exact ID; the head may advance as backfill resolves them
     await mesh.redeliver(records[0]!);
     await mesh.redeliver(records[1]!);
     expect(b.service.repo.getEntry(created.entry.id)).toMatchObject({ revision: 3, body: 'Third revision of the fact, rewritten again.' });
@@ -201,7 +201,7 @@ describe('team project memory sync (two-device fixture)', () => {
     const created = await a.service.agentRemember(ctx, { kind: 'fact', title: 'Human control', body: 'Initial shared value.' });
     await a.settle(); await mesh.deliver();
 
-    await b.service.humanPatch(b.projectId, created.entry.id, { expectedRevision: 1, pinned: true });
+    await b.service.humanPatch(b.projectId, created.entry.id, { expectedRevision: 1, expectedHeadId: created.entry.headRecordId, pinned: true });
     await b.settle();
     const pin = mesh.log.findLast((m) => m.kind === 'projectmemory.record' && m.fromDeviceId === b.deviceId)!;
     await a.service.agentUpdate(ctx, { id: created.entry.id, body: 'Offline agent edit one.' });
@@ -218,7 +218,7 @@ describe('team project memory sync (two-device fixture)', () => {
     expect(a.service.repo.countRecords(created.entry.id)).toBe(4);
     expect(b.service.repo.countRecords(created.entry.id)).toBe(4);
 
-    await b.service.humanPatch(b.projectId, created.entry.id, { expectedRevision: 2, pinned: false });
+    await b.service.humanPatch(b.projectId, created.entry.id, { expectedRevision: 2, expectedHeadId: b.service.repo.getEntry(created.entry.id)!.headRecordId, pinned: false });
     await b.settle(); await mesh.deliver();
     const agentAfterUnpin = await a.service.agentUpdate(ctx, { id: created.entry.id, body: 'Agent edit after human unpin.' });
     await a.settle(); await mesh.deliver();
@@ -227,6 +227,84 @@ describe('team project memory sync (two-device fixture)', () => {
     expect(a.service.repo.getEntry(created.entry.id)).toMatchObject({ pinned: false, body: 'Agent edit after human unpin.' });
     expect(b.service.repo.getEntry(created.entry.id)).toMatchObject({ pinned: false, body: 'Agent edit after human unpin.' });
     expect(mesh.rejected).toEqual([]);
+  });
+
+  it('keeps an agent descendant pending until its unseen human unpin proof arrives, then converges in either order', async () => {
+    for (const agentFirst of [true, false]) {
+      const { mesh, a, b } = await pair();
+      const ctx = a.agent();
+      const created = await a.service.agentRemember(ctx, { kind: 'fact', title: 'Ancestor delivery order', body: 'Before controls.' });
+      await a.settle(); await mesh.deliver();
+      await b.service.humanPatch(b.projectId, created.entry.id, { expectedRevision: 1, expectedHeadId: created.entry.headRecordId, pinned: true });
+      await b.settle(); await mesh.deliver();
+
+      const pinned = b.service.repo.getEntry(created.entry.id)!;
+      const unpin = await a.service.humanPatch(a.projectId, created.entry.id, { expectedRevision: pinned.revision, expectedHeadId: pinned.headRecordId, pinned: false });
+      await a.service.agentUpdate(ctx, { id: created.entry.id, expectedHeadId: unpin.entry.headRecordId, body: 'Descendant authored after the unpin.' });
+      await a.settle();
+      const fromA = mesh.log.filter((m) => m.kind === 'projectmemory.record' && m.fromDeviceId === a.deviceId && (m.payload as ProjectMemorySyncRecord).entryId === created.entry.id).slice(-2);
+      const unpinRecord = fromA[0]!;
+      const agentRecord = fromA[1]!;
+      mesh.queue = [];
+
+      if (agentFirst) {
+        const receiveA = a.handler;
+        a.handler = null; // leave the exact parent proof request pending so we can inspect quarantine before backfill
+        await mesh.redeliver(agentRecord);
+        expect(b.service.repo.pendingCausalRecords(created.entry.id)).toHaveLength(1);
+        expect(b.service.repo.getEntry(created.entry.id)).toMatchObject({ pinned: true, body: 'Before controls.' });
+        a.handler = receiveA;
+        await mesh.redeliver(unpinRecord);
+      } else {
+        await mesh.redeliver(unpinRecord);
+        await mesh.redeliver(agentRecord);
+      }
+      expect(a.service.repo.getEntry(created.entry.id)).toMatchObject({ pinned: false, body: 'Descendant authored after the unpin.' });
+      expect(b.service.repo.getEntry(created.entry.id)).toMatchObject({ pinned: false, body: 'Descendant authored after the unpin.' });
+      expect(b.service.repo.pendingCausalRecords(created.entry.id)).toHaveLength(0);
+      expect(mesh.rejected).toEqual([]);
+    }
+  });
+
+  it('chooses one signed human control branch before comparing descendant revisions', async () => {
+    for (const descendantFirst of [true, false]) {
+      const { mesh, a, b } = await pair();
+      const ctx = a.agent();
+      const created = await a.service.agentRemember(ctx, { kind: 'fact', title: 'Concurrent controls', body: 'Shared base.' });
+      await a.settle(); await mesh.deliver();
+      const pin = await b.service.humanPatch(b.projectId, created.entry.id, { expectedRevision: 1, expectedHeadId: created.entry.headRecordId, pinned: true });
+      await b.settle();
+      const pinRecord = mesh.log.filter((m) => m.kind === 'projectmemory.record' && m.fromDeviceId === b.deviceId).at(-1)!;
+      const edit = await a.service.humanPatch(a.projectId, created.entry.id, { expectedRevision: 1, expectedHeadId: created.entry.headRecordId, body: 'Concurrent human edit branch.' });
+      await a.service.agentUpdate(ctx, { id: created.entry.id, body: 'Agent descendant of human edit branch.' });
+      await a.settle();
+      const fromA = mesh.log.filter((m) => m.kind === 'projectmemory.record' && m.fromDeviceId === a.deviceId && (m.payload as ProjectMemorySyncRecord).entryId === created.entry.id).slice(-2);
+      const humanEditRecord = fromA[0]!;
+      const agentRecord = fromA[1]!;
+      mesh.queue = [];
+
+      if (descendantFirst) {
+        const receiveA = a.handler;
+        a.handler = null;
+        await mesh.redeliver(agentRecord);
+        a.handler = receiveA;
+        await mesh.redeliver(humanEditRecord);
+      } else {
+        await mesh.redeliver(humanEditRecord);
+        await mesh.redeliver(agentRecord);
+      }
+      await mesh.redeliver(pinRecord);
+      const pinProof = (pinRecord.payload as ProjectMemorySyncRecord).causalProof!;
+      const editProof = (humanEditRecord.payload as ProjectMemorySyncRecord).causalProof!;
+      const winningControl = pinProof.controlId!.localeCompare(editProof.controlId!) > 0 ? pinProof.controlId : editProof.controlId;
+      const aHead = a.service.repo.getEntry(created.entry.id)!;
+      const bHead = b.service.repo.getEntry(created.entry.id)!;
+      expect(aHead.headRecordId).toBe(bHead.headRecordId);
+      expect(a.service.repo.lineageFor(aHead.headRecordId)?.controlId).toBe(winningControl);
+      expect(b.service.repo.lineageFor(bHead.headRecordId)?.controlId).toBe(winningControl);
+      expect(mesh.rejected).toEqual([]);
+      expect(pin.entry.headRecordId).not.toBe(edit.entry.headRecordId);
+    }
   });
 
   it('uses exact purged IDs for resurrection protection without blocking unrelated old offline creates', async () => {
@@ -247,6 +325,83 @@ describe('team project memory sync (two-device fixture)', () => {
     expect(b.service.repo.getEntry(offlineId)?.title).toBe('Old offline create');
     expect(b.service.repo.getEntry(retiredId)).toBeUndefined();
   });
+
+  it('relays legacy signatures with lineage still absent from the original signed payload', async () => {
+    const { a, b } = await pair();
+    const at = new Date().toISOString();
+    const unsigned = {
+      id: randomUUID(), entryId: randomUUID(), revision: 1, parentRevision: null, op: 'create' as const, at,
+      teamId: TEAM, sharedProjectId: SHARED,
+      author: { kind: 'human' as const, displayName: 'Legacy author', accountId: a.accountId, deviceId: a.deviceId }, note: null,
+      content: { kind: 'fact' as const, title: 'Legacy signed payload', body: 'A record from before causal proofs.', status: 'tentative' as const,
+        pinned: false, retired: false, humanVerified: true, files: [], sources: [] },
+      createdAt: at, authorDeviceId: a.deviceId,
+    };
+    const legacy: ProjectMemorySyncRecord = { ...unsigned, signature: signDevicePayload(signingPayload(unsigned), a.keys) };
+    expect(Object.hasOwn(legacy, 'lineage')).toBe(false);
+    expect(b.service.applyRemote(b.projectId, legacy)).toBe('applied');
+    const relayed = b.service.toSyncRecord(b.service.repo.getRecord(legacy.id)!, TEAM, SHARED, a.deviceId, legacy.signature);
+    expect(Object.hasOwn(relayed, 'lineage')).toBe(false);
+    expect(Object.hasOwn(relayed, 'causalProof')).toBe(false);
+    expect(signingPayload(relayed)).toBe(signingPayload(legacy));
+    expect(relayed.signature).toBe(legacy.signature);
+
+    const assertedEntryId = randomUUID();
+    const assertedLineage = { parentId: null, controlId: randomUUID(), epoch: 900_000 };
+    const assertedUnsigned = { ...unsigned, id: randomUUID(), entryId: assertedEntryId, lineage: assertedLineage,
+      content: { ...unsigned.content, title: 'Legacy asserted causal metadata', body: 'A different record with an untrusted old epoch.' } };
+    const assertedLegacy: ProjectMemorySyncRecord = { ...assertedUnsigned, signature: signDevicePayload(signingPayload(assertedUnsigned), a.keys) };
+    expect(b.service.applyRemote(b.projectId, assertedLegacy)).toBe('applied');
+    expect(b.service.repo.lineageFor(assertedLegacy.id)).toBeUndefined();
+    const controlled = await b.service.humanPatch(b.projectId, assertedEntryId, { expectedRevision: 1, expectedHeadId: assertedLegacy.id, body: 'A new validated control baseline.' });
+    expect(b.service.repo.getRecord(controlled.entry.headRecordId)?.lineage).toMatchObject({ epoch: 1, controlId: controlled.entry.headRecordId });
+  });
+
+  it('rejects a correctly signed agent proof that invents a control epoch or human-only flags', async () => {
+    const { mesh, a, b } = await pair();
+    const ctx = a.agent();
+    const created = await a.service.agentRemember(ctx, { kind: 'fact', title: 'Proof validation', body: 'Original value.' });
+    await a.settle(); await mesh.deliver();
+    await a.service.agentUpdate(ctx, { id: created.entry.id, body: 'Legitimate agent value.' });
+    await a.settle();
+    const message = mesh.log.filter((item) => item.kind === 'projectmemory.record' && item.fromDeviceId === a.deviceId).at(-1)!;
+    const forged = structuredClone(message.payload) as ProjectMemorySyncRecord;
+    const proof = forged.causalProof!;
+    const lineage = { ...forged.lineage!, epoch: proof.epoch + 9, controlId: randomUUID() };
+    const { signature: _oldProofSignature, ...proofFields } = { ...proof, ...lineage, pinned: true, humanVerified: true };
+    forged.lineage = lineage;
+    forged.content.pinned = true;
+    forged.content.humanVerified = true;
+    forged.causalProof = { ...proof, ...lineage, pinned: true, humanVerified: true,
+      signature: signDevicePayload(causalProofPayload(proofFields), a.keys) };
+    forged.signature = signDevicePayload(signingPayload({ ...forged, signature: undefined } as never), a.keys);
+    mesh.queue = [];
+    await mesh.redeliver({ ...message, id: randomUUID(), payload: forged });
+    expect(b.service.repo.hasRecord(forged.id)).toBe(false);
+    expect(b.service.repo.getEntry(created.entry.id)).toMatchObject({ pinned: false, humanVerified: false, body: 'Original value.' });
+    expect(mesh.rejected.join(' ')).toMatch(/ancestry proof/i);
+  });
+
+  it('serves signed compact ancestry proofs after history pruning so a third device can validate a head', async () => {
+    const { mesh, a, b } = await pair();
+    const ctx = a.agent();
+    let entry = (await a.service.agentRemember(ctx, { kind: 'fact', title: 'Pruned ancestry', body: 'Revision zero.' })).entry;
+    await a.settle(); await mesh.deliver();
+    for (let i = 1; i <= PROJECT_MEMORY_LIMITS.maxRevisionsPerEntry + 4; i++) {
+      entry = (await a.service.humanPatch(a.projectId, entry.id, { expectedRevision: entry.revision, expectedHeadId: entry.headRecordId, body: `Revision ${i}.` })).entry;
+      await a.settle(); await mesh.deliver();
+    }
+    expect(a.service.repo.countRecords(entry.id)).toBe(PROJECT_MEMORY_LIMITS.maxRevisionsPerEntry);
+    expect(b.service.repo.countRecords(entry.id)).toBe(PROJECT_MEMORY_LIMITS.maxRevisionsPerEntry);
+
+    const c = new Node(mesh, randomUUID(), 'joined');
+    mesh.link(b, c);
+    expect(await c.sync.requestBackfill(c.projectId, true)).toBe(1);
+    await mesh.deliver();
+    expect(c.service.repo.getEntry(entry.id)).toMatchObject({ revision: entry.revision, body: entry.body, headRecordId: entry.headRecordId });
+    expect(c.service.repo.lineageFor(entry.headRecordId)).toMatchObject({ epoch: entry.revision - 1, controlId: entry.headRecordId });
+    expect(mesh.rejected).toEqual([]);
+  }, 30_000);
 
   it('rejects unauthorized senders, forged signatures and bad bindings', async () => {
     const { mesh, a, b } = await pair();
@@ -347,7 +502,7 @@ describe('team project memory sync (two-device fixture)', () => {
     const ctx = a.agent();
     const created = await a.service.agentRemember(ctx, { kind: 'decision', title: 'Locked decision text', body: 'Humans own this one.' });
     await a.settle(); await mesh.deliver();
-    await b.service.humanPatch(b.projectId, created.entry.id, { expectedRevision: 1, pinned: true });
+    await b.service.humanPatch(b.projectId, created.entry.id, { expectedRevision: 1, expectedHeadId: created.entry.headRecordId, pinned: true });
     await b.settle(); await mesh.deliver();
     expect(a.service.repo.getEntry(created.entry.id)!.pinned).toBe(true);
 
@@ -364,10 +519,10 @@ describe('team project memory sync (two-device fixture)', () => {
     expect(b.service.repo.getEntry(created.entry.id)).toMatchObject({ title: 'Locked decision text', pinned: true, revision: 2 });
 
     // Human retires on B; later agent revisions cannot bring it back, but a person can.
-    await b.service.humanPatch(b.projectId, created.entry.id, { expectedRevision: 2, lifecycle: 'retired' });
+    await b.service.humanPatch(b.projectId, created.entry.id, { expectedRevision: 2, expectedHeadId: b.service.repo.getEntry(created.entry.id)!.headRecordId, lifecycle: 'retired' });
     await mesh.redeliver({ id: randomUUID(), teamId: TEAM, fromDeviceId: a.deviceId, toDeviceId: b.deviceId, kind: 'projectmemory.record', payload: forgedAgent(9, false, new Date()) });
     expect(b.service.repo.getEntry(created.entry.id)).toMatchObject({ retired: true, revision: 3 });
-    const restored = await b.service.humanPatch(b.projectId, created.entry.id, { expectedRevision: 3, lifecycle: 'active' });
+    const restored = await b.service.humanPatch(b.projectId, created.entry.id, { expectedRevision: 3, expectedHeadId: b.service.repo.getEntry(created.entry.id)!.headRecordId, lifecycle: 'active' });
     expect(restored.entry.lifecycle).toBe('active');
   });
 

@@ -3,7 +3,7 @@ import type {
   ProjectMemoryAuthor, ProjectMemoryEntry, ProjectMemoryFileRef, ProjectMemoryInjection, ProjectMemoryOp,
   ProjectMemoryRevision, ProjectMemoryRevisionSnapshot, ProjectMemorySourceRef,
 } from '@mingle/contracts';
-import type { ProjectMemoryLineage } from '@mingle/contracts';
+import type { ProjectMemoryCausalProof, ProjectMemoryLineage } from '@mingle/contracts';
 import { PROJECT_MEMORY_LIMITS } from '@mingle/contracts';
 
 type Row = Record<string, unknown>;
@@ -23,7 +23,7 @@ export interface RevisionRow {
   at: string; createdAt: string; author: ProjectMemoryAuthor; note: string | null; snapshot: ProjectMemoryRevisionSnapshot;
   changed: ProjectMemoryRevision['changed']; received: boolean; authorDeviceId: string | null; signature: string | null;
   teamId: string | null; sharedProjectId: string | null; publishedAt: string | null;
-  lineage: ProjectMemoryLineage;
+  lineage?: ProjectMemoryLineage; causalProof?: ProjectMemoryCausalProof; causalValid: boolean;
 }
 
 export interface SyncStateRow { projectId: string; lastBackfillAt: string | null; lastReceivedAt: string | null; error: string | null; tombstoneFloorAt: string | null }
@@ -51,7 +51,9 @@ function revisionRow(row: Row): RevisionRow {
     authorDeviceId: (row.author_device_id as string | null) ?? null, signature: (row.signature as string | null) ?? null,
     teamId: (row.team_id as string | null) ?? null, sharedProjectId: (row.shared_project_id as string | null) ?? null,
     publishedAt: (row.published_at as string | null) ?? null,
-    lineage: row.lineage_json ? json(row.lineage_json) : { parentId: null, controlId: null, epoch: 0 },
+    lineage: row.lineage_json ? json(row.lineage_json) : undefined,
+    causalProof: row.causal_proof_json ? json(row.causal_proof_json) : undefined,
+    causalValid: row.causal_state === 'valid',
   };
 }
 
@@ -72,7 +74,7 @@ export class MemoryRepo {
         record_id TEXT PRIMARY KEY, entry_id TEXT NOT NULL, project_id TEXT NOT NULL, revision INTEGER NOT NULL,
         parent_revision INTEGER, op TEXT NOT NULL, at TEXT NOT NULL, created_at TEXT NOT NULL, author_json TEXT NOT NULL,
         note TEXT, snapshot_json TEXT NOT NULL, changed_json TEXT NOT NULL, received INTEGER NOT NULL DEFAULT 0,
-        author_device_id TEXT, signature TEXT, team_id TEXT, shared_project_id TEXT, published_at TEXT, lineage_json TEXT
+        author_device_id TEXT, signature TEXT, team_id TEXT, shared_project_id TEXT, published_at TEXT, lineage_json TEXT, causal_proof_json TEXT, causal_state TEXT
       );
       CREATE INDEX IF NOT EXISTS mingle_project_memory_revisions_entry ON mingle_project_memory_revisions(entry_id, revision DESC, at DESC);
       CREATE INDEX IF NOT EXISTS mingle_project_memory_revisions_project ON mingle_project_memory_revisions(project_id, at, record_id);
@@ -85,10 +87,15 @@ export class MemoryRepo {
         project_id TEXT PRIMARY KEY, last_backfill_at TEXT, last_received_at TEXT, error TEXT, tombstone_floor_at TEXT
       );
       CREATE TABLE IF NOT EXISTS mingle_project_memory_retired_ids (project_id TEXT NOT NULL, entry_id TEXT NOT NULL, retired_at TEXT NOT NULL, PRIMARY KEY(project_id,entry_id));
-      CREATE TABLE IF NOT EXISTS mingle_project_memory_causality (record_id TEXT PRIMARY KEY, entry_id TEXT NOT NULL, parent_id TEXT, control_id TEXT, epoch INTEGER NOT NULL, human INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS mingle_project_memory_causality (record_id TEXT PRIMARY KEY, entry_id TEXT NOT NULL, parent_id TEXT, control_id TEXT, epoch INTEGER NOT NULL, human INTEGER NOT NULL, proof_json TEXT, valid INTEGER NOT NULL DEFAULT 0);
     `);
     const cols = this.db.prepare('PRAGMA table_info(mingle_project_memory_revisions)').all() as Array<{ name: string }>;
     if (!cols.some((c) => c.name === 'lineage_json')) this.db.exec('ALTER TABLE mingle_project_memory_revisions ADD COLUMN lineage_json TEXT');
+    if (!cols.some((c) => c.name === 'causal_proof_json')) this.db.exec('ALTER TABLE mingle_project_memory_revisions ADD COLUMN causal_proof_json TEXT');
+    if (!cols.some((c) => c.name === 'causal_state')) this.db.exec("ALTER TABLE mingle_project_memory_revisions ADD COLUMN causal_state TEXT NOT NULL DEFAULT 'legacy'");
+    const causalCols = this.db.prepare('PRAGMA table_info(mingle_project_memory_causality)').all() as Array<{ name: string }>;
+    if (!causalCols.some((c) => c.name === 'proof_json')) this.db.exec('ALTER TABLE mingle_project_memory_causality ADD COLUMN proof_json TEXT');
+    if (!causalCols.some((c) => c.name === 'valid')) this.db.exec('ALTER TABLE mingle_project_memory_causality ADD COLUMN valid INTEGER NOT NULL DEFAULT 0');
   }
 
   tx<T>(fn: () => T): T {
@@ -147,19 +154,60 @@ export class MemoryRepo {
 
   insertRecord(record: RevisionRow): void {
     this.db.prepare(`INSERT INTO mingle_project_memory_revisions
-      (record_id,entry_id,project_id,revision,parent_revision,op,at,created_at,author_json,note,snapshot_json,changed_json,received,author_device_id,signature,team_id,shared_project_id,published_at,lineage_json)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+      (record_id,entry_id,project_id,revision,parent_revision,op,at,created_at,author_json,note,snapshot_json,changed_json,received,author_device_id,signature,team_id,shared_project_id,published_at,lineage_json,causal_proof_json,causal_state)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
       .run(record.recordId, record.entryId, record.projectId, record.revision, record.parentRevision, record.op, record.at, record.createdAt,
         JSON.stringify(record.author), record.note, JSON.stringify(record.snapshot), JSON.stringify(record.changed), record.received ? 1 : 0,
-        record.authorDeviceId, record.signature, record.teamId, record.sharedProjectId, record.publishedAt, JSON.stringify(record.lineage));
-    this.db.prepare('INSERT OR REPLACE INTO mingle_project_memory_causality VALUES (?,?,?,?,?,?)')
+        record.authorDeviceId, record.signature, record.teamId, record.sharedProjectId, record.publishedAt, record.lineage ? JSON.stringify(record.lineage) : null,
+        record.causalProof ? JSON.stringify(record.causalProof) : null, record.causalProof ? (record.causalValid ? 'valid' : 'pending') : 'legacy');
+    if (record.causalProof) this.saveCausalProof(record.causalProof, record.causalValid);
+    // Local pre-proof rows are trusted durable state. A legacy peer's signed lineage is still an assertion, not a validated ancestry chain.
+    else if (record.lineage && !record.received) this.db.prepare('INSERT OR REPLACE INTO mingle_project_memory_causality (record_id,entry_id,parent_id,control_id,epoch,human,proof_json,valid) VALUES (?,?,?,?,?,?,NULL,1)')
       .run(record.recordId, record.entryId, record.lineage.parentId, record.lineage.controlId, record.lineage.epoch, record.author.kind === 'human' ? 1 : 0);
   }
 
   lineageFor(id: string): ProjectMemoryLineage | undefined {
-    const row = this.one('SELECT parent_id,control_id,epoch FROM mingle_project_memory_causality WHERE record_id=?', id);
+    const proof = this.causalProofFor(id);
+    if (proof?.valid) return { parentId: proof.proof.parentId, controlId: proof.proof.controlId, epoch: proof.proof.epoch };
+    const row = this.one('SELECT parent_id,control_id,epoch FROM mingle_project_memory_causality WHERE record_id=? AND valid=1', id);
     return row ? { parentId: (row.parent_id as string | null) ?? null, controlId: (row.control_id as string | null) ?? null, epoch: Number(row.epoch) } : undefined;
   }
+  causalProofFor(id: string): { proof: ProjectMemoryCausalProof; valid: boolean; invalid: boolean } | undefined {
+    const row = this.one('SELECT proof_json,valid FROM mingle_project_memory_causality WHERE record_id=?', id);
+    return row?.proof_json ? { proof: json(row.proof_json), valid: row.valid === 1, invalid: row.valid === 2 } : undefined;
+  }
+  saveCausalProof(proof: ProjectMemoryCausalProof, valid: boolean): void {
+    this.db.prepare('INSERT INTO mingle_project_memory_causality (record_id,entry_id,parent_id,control_id,epoch,human,proof_json,valid) VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(record_id) DO UPDATE SET proof_json=excluded.proof_json,valid=MAX(valid,excluded.valid)')
+      .run(proof.recordId, proof.entryId, proof.parentId, proof.controlId, proof.epoch, proof.authorKind === 'human' ? 1 : 0, JSON.stringify(proof), valid ? 1 : 0);
+    this.db.prepare('UPDATE mingle_project_memory_revisions SET causal_proof_json=?,causal_state=? WHERE record_id=?')
+      .run(JSON.stringify(proof), valid ? 'valid' : 'pending', proof.recordId);
+  }
+  markCausalValid(recordId: string): void {
+    this.db.prepare("UPDATE mingle_project_memory_revisions SET causal_state='valid' WHERE record_id=?").run(recordId);
+    this.db.prepare('UPDATE mingle_project_memory_causality SET valid=1 WHERE record_id=?').run(recordId);
+  }
+  markCausalInvalid(recordId: string): void {
+    this.db.prepare("UPDATE mingle_project_memory_revisions SET causal_state='invalid' WHERE record_id=?").run(recordId);
+    // 0 = pending, 1 = valid, 2 = permanently invalid; invalid proofs must not be retried by pending resolution.
+    this.db.prepare('UPDATE mingle_project_memory_causality SET valid=2 WHERE record_id=?').run(recordId);
+  }
+  pendingCausalProofs(entryId: string): ProjectMemoryCausalProof[] {
+    return this.all('SELECT proof_json FROM mingle_project_memory_causality WHERE entry_id=? AND valid=0 AND proof_json IS NOT NULL', entryId)
+      .flatMap((row) => row.proof_json ? [json<ProjectMemoryCausalProof>(row.proof_json)] : []);
+  }
+  pendingCausalRecords(entryId: string): RevisionRow[] {
+    return this.all("SELECT * FROM mingle_project_memory_revisions WHERE entry_id=? AND causal_state='pending' ORDER BY revision,at,record_id", entryId).map(revisionRow);
+  }
+  causalProofs(ids: string[]): ProjectMemoryCausalProof[] {
+    if (!ids.length) return [];
+    const placeholders = ids.map(() => '?').join(',');
+    return this.all(`SELECT proof_json FROM mingle_project_memory_causality WHERE valid=1 AND record_id IN (${placeholders})`, ...ids)
+      .flatMap((row) => row.proof_json ? [json<ProjectMemoryCausalProof>(row.proof_json)] : []);
+  }
+  validRecords(entryId: string): RevisionRow[] {
+    return this.all("SELECT * FROM mingle_project_memory_revisions WHERE entry_id=? AND causal_state IN ('valid','legacy') ORDER BY revision,at,record_id", entryId).map(revisionRow);
+  }
+  entryRecordById(recordId: string): RevisionRow | undefined { return this.getRecord(recordId); }
   hasRetiredId(projectId: string, entryId: string): boolean { return Boolean(this.one('SELECT 1 AS x FROM mingle_project_memory_retired_ids WHERE project_id=? AND entry_id=?', projectId, entryId)); }
   markRetiredId(projectId: string, entryId: string, at: string): void { this.db.prepare('INSERT OR IGNORE INTO mingle_project_memory_retired_ids VALUES (?,?,?)').run(projectId, entryId, at); }
 
@@ -173,14 +221,16 @@ export class MemoryRepo {
   pruneRecords(entryId: string, keep = PROJECT_MEMORY_LIMITS.maxRevisionsPerEntry): number {
     const result = this.db.prepare(`DELETE FROM mingle_project_memory_revisions WHERE entry_id=? AND record_id NOT IN (
       SELECT record_id FROM mingle_project_memory_revisions WHERE entry_id=? ORDER BY revision DESC, at DESC, record_id DESC LIMIT ?)
+      AND record_id NOT IN (SELECT record_id FROM mingle_project_memory_revisions WHERE entry_id=? AND causal_state='pending')
       AND record_id != (SELECT record_id FROM mingle_project_memory_revisions WHERE entry_id=? ORDER BY revision ASC, at ASC, record_id ASC LIMIT 1)`)
-      .run(entryId, entryId, keep - 1, entryId);
+      .run(entryId, entryId, keep - 1, entryId, entryId);
     return Number(result.changes);
   }
 
-  markSigned(recordId: string, teamId: string, sharedProjectId: string, authorDeviceId: string, signature: string, author: ProjectMemoryAuthor): void {
-    this.db.prepare('UPDATE mingle_project_memory_revisions SET team_id=?, shared_project_id=?, author_device_id=?, signature=?, author_json=? WHERE record_id=?')
-      .run(teamId, sharedProjectId, authorDeviceId, signature, JSON.stringify(author), recordId);
+  markSigned(recordId: string, teamId: string, sharedProjectId: string, authorDeviceId: string, signature: string, author: ProjectMemoryAuthor, proof?: ProjectMemoryCausalProof): void {
+    this.db.prepare('UPDATE mingle_project_memory_revisions SET team_id=?, shared_project_id=?, author_device_id=?, signature=?, author_json=?,causal_proof_json=? WHERE record_id=?')
+      .run(teamId, sharedProjectId, authorDeviceId, signature, JSON.stringify(author), proof ? JSON.stringify(proof) : null, recordId);
+    if (proof) this.saveCausalProof(proof, true);
   }
   markPublished(recordId: string, at: string): void {
     this.db.prepare('UPDATE mingle_project_memory_revisions SET published_at=? WHERE record_id=?').run(at, recordId);

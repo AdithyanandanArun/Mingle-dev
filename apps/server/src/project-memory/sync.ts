@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { ZodError } from 'zod';
-import type { DistributedDevice, DistributedDeviceLink, ProjectMemorySharing, ProjectMemorySyncRecord, AuthenticatedTransportMessage } from '@mingle/contracts';
-import { PROJECT_MEMORY_MESSAGE_KINDS, ProjectMemorySyncRecordSchema, ProjectMemorySyncRequestSchema, ProjectMemorySyncResponseSchema } from '@mingle/contracts';
+import type { DistributedDevice, DistributedDeviceLink, ProjectMemoryCausalProof, ProjectMemorySharing, ProjectMemorySyncRecord, AuthenticatedTransportMessage } from '@mingle/contracts';
+import { PROJECT_MEMORY_MESSAGE_KINDS, ProjectMemoryCausalProofSchema, ProjectMemorySyncRecordSchema, ProjectMemorySyncRequestSchema, ProjectMemorySyncResponseSchema } from '@mingle/contracts';
 import { canonicalJson, verifyDevicePayload } from '../distributed/crypto.ts';
 import type { Store } from '../store.ts';
 import { HttpError } from '../util.ts';
@@ -35,7 +35,7 @@ export interface MemorySyncOptions {
 }
 
 interface Binding { teamId: string; sharedProjectId: string }
-interface PendingRequest { projectId: string; peerDeviceId: string; expiresAt: number; batchCount: number | null; batches: Set<number>; records: number }
+interface PendingRequest { projectId: string; peerDeviceId: string; expiresAt: number; batchCount: number | null; batches: Set<number>; records: number; wantedIds: Set<string> }
 
 const REQUEST_EXPIRY_MS = 2 * 60_000;
 const BACKFILL_COOLDOWN_MS = 30_000;
@@ -52,7 +52,12 @@ export function signingPayload(record: Omit<ProjectMemorySyncRecord, 'signature'
     op: record.op, at: record.at, teamId: record.teamId, sharedProjectId: record.sharedProjectId, author: record.author, note: record.note,
     content: record.content, createdAt: record.createdAt, authorDeviceId: record.authorDeviceId,
     ...(record.lineage ? { lineage: record.lineage } : {}),
+    ...(record.causalProof ? { causalProof: record.causalProof } : {}),
   });
+}
+
+export function causalProofPayload(proof: Omit<ProjectMemoryCausalProof, 'signature'>): string {
+  return canonicalJson({ domain: 'mingle-project-memory-causal-proof-v1', ...proof });
 }
 
 function permanent(error: unknown): boolean {
@@ -194,13 +199,24 @@ export class ProjectMemoryTeamSync implements MemoryTeamHooks {
         } else {
           // Fill in the attribution that was unknown when an unregistered or signed-out device wrote the revision.
           const author = { ...row.author, deviceId: row.author.deviceId ?? deviceId, accountId: row.author.accountId ?? this.options.authority.localAccountId() } as RevisionRow['author'];
+          const lineage = row.lineage;
+          let causalProof: ProjectMemoryCausalProof | undefined;
+          if (lineage) {
+            const proofBody: Omit<ProjectMemoryCausalProof, 'signature'> = {
+              recordId: row.recordId, entryId: row.entryId, parentId: lineage.parentId, parentRevision: row.parentRevision, revision: row.revision,
+              op: row.op, authorKind: author.kind, authorDeviceId: deviceId, controlId: lineage.controlId, epoch: lineage.epoch,
+              pinned: row.snapshot.pinned, retired: row.snapshot.retired, humanVerified: row.snapshot.humanVerified,
+            };
+            const proofSignature = await this.options.transport.signPayload(teamId, deviceId, causalProofPayload(proofBody));
+            causalProof = ProjectMemoryCausalProofSchema.parse({ ...proofBody, signature: proofSignature });
+          }
           const unsigned: Omit<ProjectMemorySyncRecord, 'signature'> = {
             id: row.recordId, entryId: row.entryId, revision: row.revision, parentRevision: row.parentRevision, op: row.op, at: row.at,
             teamId, sharedProjectId, author, note: row.note, content: row.snapshot, createdAt: row.createdAt, authorDeviceId: deviceId,
-            lineage: row.lineage,
+            ...(lineage ? { lineage, causalProof } : {}),
           };
           const signature = await this.options.transport.signPayload(teamId, deviceId, signingPayload(unsigned));
-          repo.markSigned(row.recordId, teamId, sharedProjectId, deviceId, signature, author);
+          repo.markSigned(row.recordId, teamId, sharedProjectId, deviceId, signature, author, causalProof);
           record = ProjectMemorySyncRecordSchema.parse({ ...unsigned, signature });
         }
         for (const peer of peers) {
@@ -254,7 +270,7 @@ export class ProjectMemoryTeamSync implements MemoryTeamHooks {
       if (this.pending.size >= MAX_PENDING) break;
       const request = ProjectMemorySyncRequestSchema.parse({ sharedProjectId, requestId: randomUUID(), since });
       const key = this.pendingKey(teamId, sharedProjectId, peer, request.requestId);
-      this.pending.set(key, { projectId, peerDeviceId: peer, expiresAt: this.now() + REQUEST_EXPIRY_MS, batchCount: null, batches: new Set(), records: 0 });
+      this.pending.set(key, { projectId, peerDeviceId: peer, expiresAt: this.now() + REQUEST_EXPIRY_MS, batchCount: null, batches: new Set(), records: 0, wantedIds: new Set() });
       try {
         await this.options.transport.send({ teamId, toDeviceId: peer, kind: 'projectmemory.sync.request', payload: request, idempotencyKey: `pmem-req:${request.requestId}:${peer}` });
         asked++;
@@ -273,7 +289,7 @@ export class ProjectMemoryTeamSync implements MemoryTeamHooks {
     if (!wanted.length || this.pending.size >= MAX_PENDING) return;
     const request = ProjectMemorySyncRequestSchema.parse({ sharedProjectId, requestId: randomUUID(), since: null, want: wanted });
     const key = this.pendingKey(teamId, sharedProjectId, peer, request.requestId);
-    this.pending.set(key, { projectId, peerDeviceId: peer, expiresAt: this.now() + REQUEST_EXPIRY_MS, batchCount: null, batches: new Set(), records: 0 });
+    this.pending.set(key, { projectId, peerDeviceId: peer, expiresAt: this.now() + REQUEST_EXPIRY_MS, batchCount: null, batches: new Set(), records: 0, wantedIds: new Set(wanted) });
     try {
       await this.options.transport.send({ teamId, toDeviceId: peer, kind: 'projectmemory.sync.request', payload: request, idempotencyKey: `pmem-want:${request.requestId}:${peer}` });
     } catch (error) {
@@ -357,6 +373,24 @@ export class ProjectMemoryTeamSync implements MemoryTeamHooks {
     if (record.author.deviceId !== null && record.author.deviceId !== device.id) throw new HttpError(403, 'The record claims a different authoring device.');
     const { signature, ...unsigned } = record;
     if (!this.verify(signingPayload(unsigned), signature, device.signingPublicKey)) throw new HttpError(403, 'The memory record signature is invalid.');
+    if (record.causalProof) {
+      this.verifyCausalProof(record.causalProof, teamId, members);
+      const proof = record.causalProof;
+      if (proof.recordId !== record.id || proof.entryId !== record.entryId || proof.revision !== record.revision
+        || proof.parentRevision !== record.parentRevision || proof.op !== record.op || proof.authorDeviceId !== record.authorDeviceId || proof.authorKind !== record.author.kind
+        || proof.pinned !== record.content.pinned || proof.retired !== record.content.retired || proof.humanVerified !== record.content.humanVerified
+        || !record.lineage || proof.parentId !== record.lineage.parentId || proof.controlId !== record.lineage.controlId || proof.epoch !== record.lineage.epoch) {
+        throw new HttpError(400, 'The causal proof does not describe the signed memory record.');
+      }
+    }
+  }
+
+  private verifyCausalProof(proof: ProjectMemoryCausalProof, teamId: string, members: Set<string>): void {
+    const { byId } = this.roster(teamId);
+    const device = byId.get(proof.authorDeviceId);
+    if (!device || device.revokedAt || !members.has(device.ownerId)) throw new HttpError(403, 'The causal proof author is unknown or revoked.');
+    const { signature, ...unsigned } = proof;
+    if (!this.verify(causalProofPayload(unsigned), signature, device.signingPublicKey)) throw new HttpError(403, 'The memory ancestry proof signature is invalid.');
   }
 
   private async receive(envelope: AuthenticatedTransportMessage): Promise<void> {
@@ -366,7 +400,7 @@ export class ProjectMemoryTeamSync implements MemoryTeamHooks {
       const { projectId, members } = await this.authorizeSender(envelope, record.sharedProjectId);
       this.verifyRecord(record, envelope.teamId, members, envelope.fromDeviceId);
       this.options.service.applyRemote(projectId, record);
-      const missingParent = record.lineage?.parentId;
+      const missingParent = record.causalProof?.parentId ?? record.lineage?.parentId;
       if (missingParent && !this.options.service.repo.lineageFor(missingParent)) {
         await this.requestWanted(projectId, envelope.teamId, record.sharedProjectId, envelope.fromDeviceId, [missingParent]);
       }
@@ -390,7 +424,8 @@ export class ProjectMemoryTeamSync implements MemoryTeamHooks {
         : repo.signedRecordsSince(projectId, request.sharedProjectId, request.since, RESPONSE_RECORD_CEILING + 1);
       const more = rows.length > RESPONSE_RECORD_CEILING;
       const records = rows.slice(0, RESPONSE_RECORD_CEILING).map((row) => this.options.service.toSyncRecord(row, row.teamId!, row.sharedProjectId!, row.authorDeviceId!, row.signature!));
-      const batches = this.batches(request.sharedProjectId, request.requestId, records, more);
+      const proofs = request.want?.length ? repo.causalProofs(request.want) : [];
+      const batches = this.batches(request.sharedProjectId, request.requestId, records, more, proofs);
       for (const batch of batches) {
         const digest = createHash('sha256').update(JSON.stringify(batch)).digest('hex').slice(0, 32);
         await this.options.transport.send({ teamId: envelope.teamId, toDeviceId: envelope.fromDeviceId, kind: 'projectmemory.sync.response', payload: batch,
@@ -410,12 +445,26 @@ export class ProjectMemoryTeamSync implements MemoryTeamHooks {
       const { projectId, members } = await this.authorizeSender(envelope, response.sharedProjectId);
       if (projectId !== pending.projectId) throw new HttpError(403, 'The sync response is outside the requesting project.');
       let skipped = 0;
+      for (const proof of response.proofs ?? []) {
+        try {
+          if (!pending.wantedIds.has(proof.recordId)) throw new HttpError(400, 'The response included an ancestry proof that was not requested.');
+          this.verifyCausalProof(proof, envelope.teamId, members);
+          this.options.service.acceptCausalProof(projectId, proof);
+          if (proof.parentId && !this.options.service.repo.lineageFor(proof.parentId)) {
+            await this.requestWanted(projectId, envelope.teamId, response.sharedProjectId, envelope.fromDeviceId, [proof.parentId]);
+          }
+        } catch (error) {
+          if (!permanent(error)) throw error;
+          skipped++;
+          this.log('warn', `Skipped a backfilled memory ancestry proof: ${error instanceof Error ? error.message : 'invalid'}`);
+        }
+      }
       for (const record of response.records) {
         try {
           if (record.sharedProjectId !== response.sharedProjectId) throw new HttpError(400, 'A record belongs to another shared project.');
           this.verifyRecord(record, envelope.teamId, members, null);
           this.options.service.applyRemote(projectId, record);
-          const missingParent = record.lineage?.parentId;
+          const missingParent = record.causalProof?.parentId ?? record.lineage?.parentId;
           if (missingParent && !this.options.service.repo.lineageFor(missingParent)) {
             await this.requestWanted(projectId, envelope.teamId, response.sharedProjectId, envelope.fromDeviceId, [missingParent]);
           }
@@ -438,7 +487,7 @@ export class ProjectMemoryTeamSync implements MemoryTeamHooks {
     throw new HttpError(400, 'Unsupported project memory message.');
   }
 
-  private batches(sharedProjectId: string, requestId: string, records: ProjectMemorySyncRecord[], more: boolean) {
+  private batches(sharedProjectId: string, requestId: string, records: ProjectMemorySyncRecord[], more: boolean, proofs: ProjectMemoryCausalProof[] = []) {
     const chunks: ProjectMemorySyncRecord[][] = [];
     let current: ProjectMemorySyncRecord[] = [];
     for (const record of records) {
@@ -450,6 +499,7 @@ export class ProjectMemoryTeamSync implements MemoryTeamHooks {
     if (chunks.length > 200) throw new HttpError(413, 'The memory sync response needs too many batches.');
     return chunks.map((chunk, batchIndex) => ProjectMemorySyncResponseSchema.parse({
       sharedProjectId, requestId, batchIndex, batchCount: chunks.length, more: more && batchIndex === chunks.length - 1, records: chunk,
+      ...(batchIndex === 0 && proofs.length ? { proofs } : {}),
     }));
   }
 

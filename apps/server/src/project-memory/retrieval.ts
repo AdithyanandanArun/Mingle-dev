@@ -125,7 +125,7 @@ export function toEntry(row: EntryRow, match: Scored | null): ProjectMemoryEntry
   return {
     id: row.id, projectId: row.projectId, kind: row.kind, title: row.title, body: row.body, status: row.status,
     lifecycle: row.retired ? 'retired' : row.stale ? 'stale' : 'active', pinned: row.pinned, humanVerified: row.humanVerified,
-    revision: row.revision, createdAt: row.createdAt, updatedAt: row.updatedAt, retiredAt: row.retiredAt,
+    revision: row.revision, headRecordId: row.headRecordId, createdAt: row.createdAt, updatedAt: row.updatedAt, retiredAt: row.retiredAt,
     author: row.author, updatedBy: row.updatedBy, files: row.files, sources: row.sources, stale: row.stale,
     origin: { local: row.originDeviceId === null, deviceId: row.originDeviceId },
     match: match ? { score: match.score, fields: match.fields } : null,

@@ -87,6 +87,8 @@ export const ProjectMemoryEntrySchema = z.object({
   /** True once a person created, edited or re-verified the entry; any later agent edit clears it. */
   humanVerified: z.boolean(),
   revision: z.number().int().min(1),
+  /** Stable identity of this entry's current signed revision; unlike revision, it never repeats after conflict resolution. */
+  headRecordId: z.string().uuid(),
   createdAt: z.string().datetime({ offset: true }), updatedAt: z.string().datetime({ offset: true }),
   retiredAt: z.string().datetime({ offset: true }).nullable(),
   author: ProjectMemoryAuthorSchema, updatedBy: ProjectMemoryAuthorSchema,
@@ -199,6 +201,7 @@ export type CreateProjectMemoryInput = z.infer<typeof CreateProjectMemorySchema>
 /** Optimistic concurrency: `expectedRevision` must equal the entry's current revision or the request fails with 409. */
 export const PatchProjectMemorySchema = z.object({
   expectedRevision: z.number().int().min(1),
+  expectedHeadId: z.string().uuid(),
   kind: KindInput.optional(), title: TitleInput.optional(), body: BodyInput.optional(),
   /** Replaces the file references; the server re-hashes them. Omit to keep, pass [] to clear. */
   files: FilesInput.optional(),
@@ -206,7 +209,7 @@ export const PatchProjectMemorySchema = z.object({
   /** `retired` writes a tombstone; `active` restores a retired entry or re-verifies a stale one against current files. */
   lifecycle: z.enum(['active', 'retired']).optional(),
   note: z.string().trim().max(300).optional(),
-}).strict().refine((value) => Object.keys(value).some((key) => key !== 'expectedRevision' && key !== 'note' && value[key as keyof typeof value] !== undefined),
+}).strict().refine((value) => Object.keys(value).some((key) => key !== 'expectedRevision' && key !== 'expectedHeadId' && key !== 'note' && value[key as keyof typeof value] !== undefined),
   'Supply a field to change');
 export type PatchProjectMemoryInput = z.infer<typeof PatchProjectMemorySchema>;
 
@@ -243,7 +246,7 @@ export const MemorySearchToolSchema = z.object({
   limit: z.number().int().min(1).max(PROJECT_MEMORY_LIMITS.searchMaxResults).default(5),
 }).strict();
 export const MemoryUpdateToolSchema = z.object({
-  id: z.string().uuid(), expectedRevision: z.number().int().min(1).optional(),
+  id: z.string().uuid(), expectedRevision: z.number().int().min(1).optional(), expectedHeadId: z.string().uuid().optional(),
   kind: KindInput.optional(), title: TitleInput.optional(), body: BodyInput.optional(),
   files: FilesInput.optional(), commits: z.array(SHA).max(PROJECT_MEMORY_LIMITS.maxCommitsPerEntry).optional(),
   commands: z.array(z.string().trim().min(1).max(300)).max(PROJECT_MEMORY_LIMITS.maxCommandsPerEntry).optional(),
@@ -271,6 +274,17 @@ export const ProjectMemoryLineageSchema = z.object({
 }).strict();
 export type ProjectMemoryLineage = z.infer<typeof ProjectMemoryLineageSchema>;
 
+/** Compact, independently signed ancestry proof retained even when its revision body is pruned. */
+export const ProjectMemoryCausalProofSchema = z.object({
+  recordId: z.string().uuid(), entryId: z.string().uuid(), parentId: z.string().uuid().nullable(),
+  parentRevision: z.number().int().min(1).max(PROJECT_MEMORY_LIMITS.maxRevisionNumber).nullable(),
+  revision: z.number().int().min(1).max(PROJECT_MEMORY_LIMITS.maxRevisionNumber),
+  op: ProjectMemoryOpSchema, authorKind: z.enum(['human', 'agent']), authorDeviceId: z.string().uuid(),
+  controlId: z.string().uuid().nullable(), epoch: z.number().int().min(0).max(PROJECT_MEMORY_LIMITS.maxRevisionNumber),
+  pinned: z.boolean(), retired: z.boolean(), humanVerified: z.boolean(), signature: z.string().min(80).max(100),
+}).strict();
+export type ProjectMemoryCausalProof = z.infer<typeof ProjectMemoryCausalProofSchema>;
+
 export const ProjectMemorySyncRecordSchema = z.object({
   id: z.string().uuid(), entryId: z.string().uuid(), revision: z.number().int().min(1).max(PROJECT_MEMORY_LIMITS.maxRevisionNumber),
   parentRevision: z.number().int().min(1).max(PROJECT_MEMORY_LIMITS.maxRevisionNumber).nullable(),
@@ -282,6 +296,7 @@ export const ProjectMemorySyncRecordSchema = z.object({
   authorDeviceId: z.string().uuid(), signature: z.string().min(80).max(100),
   /** Absent only on records signed by an older build. When present it is covered by the signature. */
   lineage: ProjectMemoryLineageSchema.optional(),
+  causalProof: ProjectMemoryCausalProofSchema.optional(),
 }).strict();
 export type ProjectMemorySyncRecord = z.infer<typeof ProjectMemorySyncRecordSchema>;
 
@@ -295,6 +310,7 @@ export const ProjectMemorySyncResponseSchema = z.object({
   batchIndex: z.number().int().min(0).max(199), batchCount: z.number().int().min(1).max(200),
   /** True on the final batch when the responder has more records beyond the per-request ceiling. */
   more: z.boolean(), records: z.array(ProjectMemorySyncRecordSchema).max(100),
+  proofs: z.array(ProjectMemoryCausalProofSchema).max(100).optional(),
 }).strict().superRefine((value, ctx) => {
   if (value.batchIndex >= value.batchCount) ctx.addIssue({ code: 'custom', path: ['batchIndex'], message: 'Batch index must be below batch count.' });
 });

@@ -86,6 +86,7 @@ Body `PatchProjectMemorySchema`:
 ```jsonc
 {
   "expectedRevision": 3,            // required; mismatch → 409, refetch and retry
+  "expectedHeadId": "…",            // required stable record id from the same entry snapshot
   "title": "…", "body": "…", "kind": "gotcha",
   "files": ["src/a.ts"],            // replaces file refs; the server re-hashes. [] clears.
   "pinned": true,                   // pin / unpin
@@ -94,7 +95,7 @@ Body `PatchProjectMemorySchema`:
 }
 ```
 
-At least one change besides `expectedRevision`/`note` is required. Returns `ProjectMemoryWriteResult` with the new revision. Humans are never locked out by `pinned`. Sending `lifecycle:"active"` on a **stale** entry re-hashes its files against the current project files and marks the entry `humanVerified` (this is the "still true" action); if a referenced file no longer exists the entry stays stale and a notice says so. `humanVerified` becomes true on any human content edit.
+At least one change besides `expectedRevision`/`expectedHeadId`/`note` is required. `expectedHeadId` is `entry.headRecordId` captured with `expectedRevision`; both must still match the current head. This identity check also catches a stale edit when conflict resolution rolls the numeric revision back to a number the client previously saw. Returns `ProjectMemoryWriteResult` with the new revision and head id. Humans are never locked out by `pinned`. Sending `lifecycle:"active"` on a **stale** entry re-hashes its files against the current project files and marks the entry `humanVerified` (this is the "still true" action); if a referenced file no longer exists the entry stays stale and a notice says so. `humanVerified` becomes true on any human content edit.
 
 ### `GET /api/projects/:projectId/memory/context-preview?query=`
 
@@ -120,7 +121,7 @@ Same pattern as `mingle_progress`: a per-run bearer token on `/api/memory/mcp`, 
 |---|---|---|
 | `mingle_memory_remember` | `kind, title, body, files?, commits?, commands?, evidence?` | Dedups/merges; returns `{id, revision, status, outcome, notices}`. |
 | `mingle_memory_search` | `query?, kind?, includeStale?, limit?` | Returns compact entries with id + revision for later updates. |
-| `mingle_memory_update` | `id, expectedRevision?, kind?, title?, body?, files?, commits?, commands?, evidence?, note?` | Refuses pinned or retired entries. Passing `files` re-verifies and clears staleness. |
+| `mingle_memory_update` | `id, expectedRevision?, expectedHeadId?, kind?, title?, body?, files?, commits?, commands?, evidence?, note?` | Optional head identity binds the update to the exact result returned by search; stale identities conflict. Refuses pinned or retired entries. Passing `files` re-verifies and clears staleness. |
 | `mingle_memory_retire` | `id, reason, expectedRevision?` | Tombstones the entry; refuses pinned entries. |
 
 ## Run context
@@ -139,7 +140,9 @@ When the local project is bound to a team shared project (the same binding the t
 
 A received record is accepted only if: the transport authenticated its sender device and the envelope is addressed to this device, the sender is an active, mutually linked, non-revoked roster device, fresh team authorization passes, the team and shared project match this device's exact local binding, the sender's account is an active member, the record's `authorDeviceId` and Ed25519 signature verify against that device's registered key (direct records must be signed by the sending device; backfilled records may be relayed from any non-revoked team device), any claimed author account/device matches the device owner, the timestamp is not in the future, the content passes the secret/path/control-character filters, and it is not a replay (record ids are unique) or an entry ID in the exact retired-ID ledger. Permanently invalid records are dropped and logged, not retried; transient failures use the transport's bounded retry.
 
-Conflict handling carries signed lineage (`parentId`, the latest human control epoch, and the human control record id) in every new record. Head selection compares the control epoch before the revision number, then uses the existing human/revision/time/id tie-breaks. Thus agent work made offline before a human pin or retirement stays in history but cannot replace that human decision, regardless of its higher local revision; agent edits based on a later human unpin/restore can become head. Delayed older human controls cannot override that later control epoch. Causal metadata is retained separately from bounded revision bodies so restart and history pruning do not erase ancestry. Missing parents can arrive later without losing their records; a device requests missing record IDs during backfill. Legacy records without lineage remain readable and use the legacy tie-breaks. Local writes are durable first and published afterwards (`sharing.unpublished` is the queue).
+New records carry an independently signed causal proof binding the record id, entry id, parent record id and revision, operation, author device and kind, human control id and epoch, and protected flags (`pinned`, `retired`, `humanVerified`). A receiver checks each proof against the stored proof for its parent; it never trusts an asserted epoch or control id by itself. Agent records cannot create a control branch or change human-only flags, and cannot descend from a pinned or retired parent. If a descendant arrives before its parent proof, the signed record stays in history in a pending state and is re-evaluated after the requested ancestry arrives. It cannot become a head while pending. Human control branches at the same epoch use the control record id as a deterministic branch choice before revision comparison, so distinct concurrent controls and their descendants converge regardless of delivery order.
+
+Signed causal proofs are kept in a compact persistent ledger separate from bounded revision bodies. Sync can serve those proofs after pruning, including to a newly joined third device; this preserves the chain needed to validate retained heads without retaining old content bodies. Legacy signed records are relayed with their original signed fields: absent lineage/proof fields remain absent on the wire and in the signing payload. Legacy records remain readable with the legacy conflict ordering; any old peer-supplied lineage without a proof is ignored as a causal baseline for new records. Local writes are durable first and published afterwards (`sharing.unpublished` is the queue).
 
 Retired entry bodies and revision history are bounded, while a small persistent exact-ID ledger retains purged entry IDs to prevent resurrection. New unknown entry IDs are accepted regardless of timestamp; a global time floor is not used, since it could discard an unrelated valid offline create. The exact-ID ledger grows with retired IDs and contains no entry bodies.
 
@@ -148,7 +151,7 @@ Retired entry bodies and revision history are bounded, while a small persistent 
 - Memory is shared with the whole team as soon as the project is team-bound; there is no per-entry "local only" switch (the secret filter and review UI are the safeguards). Retiring an entry replicates a tombstone but cannot unsend text a peer already received.
 - Staleness is content-hash based, per device: a teammate with uncommitted edits can see an entry as stale that is fresh elsewhere.
 - Search is deterministic token scoring over a bounded candidate set, not semantic/embedding search.
-- Replication is eventually consistent. Concurrent agent edits at the same human control epoch use revision, author, time and record ID tie-breaks; all valid records remain in history, while human control epochs protect pins, retirements and restores from stale offline work.
+- Replication is eventually consistent. Concurrent agent edits descended from the same verified control branch use revision, author, time and record ID tie-breaks. Valid and ancestry-pending signed records remain available in history; invalid causal claims are rejected.
 - Only devices that have signed a record can serve it in backfill; records written before a device was registered are signed and published once it registers.
 - Backfill of more than 400 records per request needs several round trips (the requester chains them automatically).
 ## Known limitations
