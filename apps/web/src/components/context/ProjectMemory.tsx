@@ -19,7 +19,8 @@ export function ProjectMemory({ active }: { active: boolean }) {
   const [notice, setNotice] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
-  const [selected, setSelected] = useState<string | null>(null);
+  // Keep the exact version the person started editing, even if live sync refreshes the list.
+  const [selected, setSelected] = useState<MemoryRecord | null>(null);
   const [draft, setDraft] = useState('');
   const [history, setHistory] = useState<{ id: string; entries: ProjectMemoryRevision[] } | null>(null);
   const generation = useRef(0);
@@ -102,14 +103,14 @@ export function ProjectMemory({ active }: { active: boolean }) {
       {entries.map((entry) => <article className="project-memory__entry" key={entry.id}>
         <div className="project-memory__meta"><span>{entry.kind}</span><span>{entry.lifecycle === 'stale' ? 'Needs verification' : entry.lifecycle === 'retired' ? 'Retired' : entry.status === 'evidenced' ? 'References checked' : 'Tentative'}</span>{entry.pinned ? <Pin size={12} aria-label="Pinned" /> : null}</div>
         <h3>{entry.title}</h3>
-        {selected === entry.id ? <form onSubmit={(event) => { event.preventDefault(); void mutate(entry, { body: draft }); }}><textarea aria-label={`Edit ${entry.title}`} value={draft} onChange={(event) => setDraft(event.target.value)} maxLength={1500} rows={5} /><div className="project-memory__actions"><Button type="submit" size="sm" busy={busy === entry.id} disabled={!draft.trim()}>Save correction</Button><Button size="sm" variant="ghost" onClick={() => setSelected(null)}>Cancel</Button></div></form> : <p className="project-memory__content">{entry.body}</p>}
+        {selected?.id === entry.id ? <form onSubmit={(event) => { event.preventDefault(); void mutate(selected, { body: draft }); }}><textarea aria-label={`Edit ${entry.title}`} value={draft} onChange={(event) => setDraft(event.target.value)} maxLength={1500} rows={5} /><div className="project-memory__actions"><Button type="submit" size="sm" busy={busy === entry.id} disabled={!draft.trim()}>Save correction</Button><Button size="sm" variant="ghost" onClick={() => setSelected(null)}>Cancel</Button></div></form> : <p className="project-memory__content">{entry.body}</p>}
         {entry.files.length ? <ul className="project-memory__paths" aria-label="Related files">{entry.files.map(({ path }) => <li key={path}><code>{path}</code></li>)}</ul> : null}
         {entry.stale ? <p className="project-memory__source">{entry.stale.reason}</p> : null}
         <p className="project-memory__source">{entry.updatedBy.kind === 'agent' ? `Agent: ${entry.updatedBy.name}` : entry.updatedBy.displayName} · Revision {entry.revision}{!entry.origin.local ? ' · From teammate device' : ''}</p>
         {entry.sources.length ? <details className="project-memory__sources"><summary>Source references</summary><ul>{entry.sources.map((source, index) => <li key={`${source.type}:${source.ref}:${index}`}><span>{source.type}</span> <code>{source.ref}</code>{source.type === 'command' ? <small> · recorded exit 0</small> : null}</li>)}</ul></details> : null}
         <div className="project-memory__actions">
           <Button size="sm" variant="ghost" disabled={!!busy} title="Agents preserve pinned entries until you unpin them" onClick={() => void mutate(entry, { pinned: !entry.pinned })}>{entry.pinned ? 'Unpin' : 'Pin'}</Button>
-          <Button size="sm" variant="ghost" disabled={!!busy} onClick={() => { setSelected(entry.id); setDraft(entry.body); }}>Correct</Button>
+          <Button size="sm" variant="ghost" disabled={!!busy} onClick={() => { setSelected(entry); setDraft(entry.body); }}>Correct</Button>
           <Button size="sm" variant="ghost" disabled={!!busy} onClick={() => void showHistory(entry)}><History size={12} /> History</Button>
           {entry.lifecycle === 'stale' ? <Button size="sm" variant="ghost" disabled={!!busy} onClick={() => void mutate(entry, { lifecycle: 'active' })}>Still true</Button> : null}
           {entry.lifecycle !== 'retired' ? <Button size="sm" variant="ghost" disabled={!!busy} onClick={() => void mutate(entry, { lifecycle: 'retired' })}>Retire</Button> : <Button size="sm" variant="ghost" disabled={!!busy} onClick={() => void mutate(entry, { lifecycle: 'active' })}>Restore</Button>}

@@ -24,6 +24,11 @@ try {
   const errors = [];
   page.on('pageerror', (error) => errors.push(error.message));
   await page.routeWebSocket('**/ws', () => {});
+  // Fixture pages must never reach an installed runtime, including selection persistence.
+  await page.route('**/api/**', (route) => {
+    if (new URL(route.request().url()).pathname === '/api/workspace/selection') return route.fulfill({ json: { projectId: route.request().postDataJSON()?.projectId ?? null } });
+    return route.fulfill({ status: 404, json: { error: 'Not exposed by the Example memory fixture.' } });
+  });
   await page.route('**/api/bootstrap', (route) => route.fulfill({ json: { projects: ['example-a', 'example-b'].map((id) => ({ id, name: id, path: `/example/${id}`, isExample: false, createdAt: '2026-11-02' })), sessions: [], messages: [], tasks: [], events: [], approvals: [], plans: [], questions: [], providers: [], settings: {}, version: 'Example fixture', runs: [], toolCalls: [] } }));
   let saved = { ...entry }, searchCount = 0, rejectEdit = false;
   await page.route('**/api/projects/*/memory**', async (route) => {
@@ -32,8 +37,7 @@ try {
     if (url.pathname.endsWith('/history')) return route.fulfill({ json: { revisions: [{ id: 'revision-one', revision: 1, snapshot: { body: entry.body } }] } });
     if (request.method() === 'PATCH') {
       const { expectedRevision, ...patch } = request.postDataJSON();
-      assert.equal(expectedRevision, saved.revision);
-      if (rejectEdit) return route.fulfill({ status: 409, json: { error: 'Memory changed on another device. Refresh before correcting it.' } });
+      if (rejectEdit || expectedRevision !== saved.revision) return route.fulfill({ status: 409, json: { error: 'Memory changed on another device. Refresh before correcting it.' } });
       saved = { ...saved, ...patch, revision: saved.revision + 1 };
       return route.fulfill({ json: { entry: saved, notices: [] } });
     }
@@ -63,6 +67,17 @@ try {
   await page.getByText('Memory changed on another device. Refresh before correcting it.', { exact: true }).waitFor();
   rejectEdit = false;
   await page.getByRole('button', { name: 'Refresh project memory' }).click();
+  await page.getByRole('button', { name: 'Correct', exact: true }).click();
+  await edit.fill('My correction started before the teammate update.');
+  saved = { ...saved, body: 'Newer teammate knowledge.', revision: saved.revision + 1 };
+  await page.getByRole('button', { name: 'Refresh project memory' }).click();
+  await page.getByText(`Agent: Example agent · Revision ${saved.revision}`, { exact: true }).waitFor();
+  assert.equal(await edit.inputValue(), 'My correction started before the teammate update.');
+  await page.getByRole('button', { name: 'Save correction' }).click();
+  await page.getByText('Memory changed on another device. Refresh before correcting it.', { exact: true }).waitFor();
+  assert.equal(saved.body, 'Newer teammate knowledge.', 'live refresh cannot silently rebase an old correction');
+  await page.getByRole('button', { name: 'Cancel', exact: true }).click();
+  await page.getByRole('button', { name: 'Refresh project memory' }).click();
   await page.screenshot({ path: join(output, 'memory-desktop.png') });
   await page.setViewportSize({ width: 360, height: 740 });
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
@@ -75,5 +90,5 @@ try {
   await page.waitForTimeout(400);
   assert.equal(searchCount, before, 'hidden panel does not poll');
   assert.deepEqual(errors, []);
-  console.log(JSON.stringify({ passed: 8, output, fixtureOnly: true }));
+  console.log(JSON.stringify({ passed: 9, output, fixtureOnly: true }));
 } finally { await browser?.close(); await server?.close(); }
