@@ -28,6 +28,10 @@ export const PROJECT_MEMORY_LIMITS = {
   listMaxLimit: 100,
   /** Agent writes allowed per run (guards against runaway loops). */
   maxAgentWritesPerRun: 25,
+  /** Sanity ceiling for revision numbers and human-control epochs on received records (a signed record cannot claim an unbounded lead). */
+  maxRevisionNumber: 1_000_000,
+  /** Exact record ids one `want` request may ask for. */
+  syncWantPerRequest: 20,
 } as const;
 
 export const ProjectMemoryKindSchema = z.enum(['decision', 'convention', 'gotcha', 'fact', 'verification']);
@@ -253,19 +257,38 @@ export const MemoryRetireToolSchema = z.object({
 /** ---- Team replication (carried inside the existing authenticated, encrypted device transport) ---- */
 export const PROJECT_MEMORY_MESSAGE_KINDS = ['projectmemory.record', 'projectmemory.sync.request', 'projectmemory.sync.response'] as const;
 
+/**
+ * Signed causal metadata. `parentId` is the head this revision was written on top of. A *human control version* starts at every record
+ * written by a person (pin, unpin, retire, restore or edit); `epoch` counts those steps and `controlId` is the human record the author had
+ * seen last (for a person's own record: the control it replaces). Agents inherit the control they saw and cannot create a new one.
+ * A device therefore ranks a record by `(epoch, control version)` before its revision counter, so an agent's extra offline revisions can
+ * never outrank a person's decision made on the same base, while an agent edit written *after* a person's unpin or restore still wins.
+ * Records signed before this field existed carry none and retain the legacy conflict tie-break behavior.
+ */
+export const ProjectMemoryLineageSchema = z.object({
+  parentId: z.string().uuid().nullable(), controlId: z.string().uuid().nullable(),
+  epoch: z.number().int().min(0).max(PROJECT_MEMORY_LIMITS.maxRevisionNumber),
+}).strict();
+export type ProjectMemoryLineage = z.infer<typeof ProjectMemoryLineageSchema>;
+
 export const ProjectMemorySyncRecordSchema = z.object({
-  id: z.string().uuid(), entryId: z.string().uuid(), revision: z.number().int().min(1), parentRevision: z.number().int().min(1).nullable(),
+  id: z.string().uuid(), entryId: z.string().uuid(), revision: z.number().int().min(1).max(PROJECT_MEMORY_LIMITS.maxRevisionNumber),
+  parentRevision: z.number().int().min(1).max(PROJECT_MEMORY_LIMITS.maxRevisionNumber).nullable(),
   op: ProjectMemoryOpSchema, at: z.string().datetime({ offset: true }),
   teamId: z.string().uuid(), sharedProjectId: z.string().uuid(),
   author: ProjectMemoryAuthorSchema, note: z.string().max(300).nullable(),
   content: ProjectMemoryRevisionSnapshotSchema,
   createdAt: z.string().datetime({ offset: true }),
   authorDeviceId: z.string().uuid(), signature: z.string().min(80).max(100),
+  /** Absent only on records signed by an older build. When present it is covered by the signature. */
+  lineage: ProjectMemoryLineageSchema.optional(),
 }).strict();
 export type ProjectMemorySyncRecord = z.infer<typeof ProjectMemorySyncRecordSchema>;
 
 export const ProjectMemorySyncRequestSchema = z.object({
   sharedProjectId: z.string().uuid(), requestId: z.string().uuid(), since: z.string().datetime({ offset: true }).nullable(),
+  /** Fetch exactly these records (missing ancestors of records already held) and nothing else; `since` and `cursors` are then ignored. */
+  want: z.array(z.string().uuid()).min(1).max(PROJECT_MEMORY_LIMITS.syncWantPerRequest).optional(),
 }).strict();
 export const ProjectMemorySyncResponseSchema = z.object({
   sharedProjectId: z.string().uuid(), requestId: z.string().uuid(),

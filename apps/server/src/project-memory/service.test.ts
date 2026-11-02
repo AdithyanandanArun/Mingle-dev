@@ -253,7 +253,8 @@ describe('project memory service', () => {
       await w.service.humanPatch(w.project.id, id, { expectedRevision: current.revision, lifecycle: 'retired' });
     }
     expect(w.service.repo.tombstoneCount(w.project.id)).toBe(2);
-    expect(w.service.repo.syncState(w.project.id).tombstoneFloorAt).not.toBeNull();
+    const ledgerIds = ids.filter((id) => w.service.repo.hasRetiredId(w.project.id, id));
+    expect(ledgerIds).toHaveLength(1);
   });
 
   it('marks entries stale when a referenced file changes, and re-verification clears it', async () => {

@@ -60,10 +60,13 @@ function changedFields(before: ProjectMemoryRevisionSnapshot | null, after: Proj
 }
 
 /**
- * Deterministic head selection for concurrent writes: higher revision, then a person over an agent, then the later write, then the id.
+ * Deterministic head selection: human control epoch first, then revision, author, time and record id.
  * Every device applying the same set of records therefore chooses the same head.
  */
-function outranks(record: ProjectMemorySyncRecord, head: EntryRow): boolean {
+function outranks(record: ProjectMemorySyncRecord, head: EntryRow, headLineage?: { epoch: number }): boolean {
+  const oldLineage = record.lineage;
+  // A received record carrying an older human control epoch is stale even if its local revision counter is larger.
+  if (oldLineage && headLineage && oldLineage.epoch !== headLineage.epoch) return oldLineage.epoch > headLineage.epoch;
   if (record.revision !== head.revision) return record.revision > head.revision;
   const recordHuman = record.author.kind === 'human';
   if (recordHuman !== (head.updatedBy.kind === 'human')) return recordHuman;
@@ -354,6 +357,13 @@ export class ProjectMemoryService {
     const at = this.iso();
     const revision = prior ? prior.revision + 1 : 1;
     const recordId = randomUUID();
+    const priorLineage = prior ? this.repo.lineageFor(prior.headRecordId) : undefined;
+    const inheritedControl = prior?.updatedBy.kind === 'human' ? prior.headRecordId : priorLineage?.controlId ?? null;
+    const lineage = {
+      parentId: prior?.headRecordId ?? null,
+      controlId: inheritedControl,
+      epoch: Math.min(1_000_000, (priorLineage?.epoch ?? 0) + (author.kind === 'human' ? 1 : 0)),
+    };
     const retiredNow = draft.retired && !prior?.retired;
     const row: EntryRow = {
       id: prior?.id ?? input.entryId ?? randomUUID(), projectId: input.projectId, kind: draft.kind, title: draft.title, body: draft.body, status: draft.status,
@@ -368,7 +378,7 @@ export class ProjectMemoryService {
       this.repo.insertRecord({
         recordId, entryId: row.id, projectId: row.projectId, revision, parentRevision: prior?.revision ?? null, op: input.op, at, createdAt: at, author,
         note: input.note ? input.note.slice(0, 300) : null, snapshot: draft, changed: changedFields(prior ? snapshotOf(prior) : null, draft),
-        received: false, authorDeviceId: null, signature: null, teamId: null, sharedProjectId: null, publishedAt: null,
+        received: false, authorDeviceId: null, signature: null, teamId: null, sharedProjectId: null, publishedAt: null, lineage,
       });
       this.repo.upsertEntry(row);
       this.repo.pruneRecords(row.id);
@@ -383,10 +393,8 @@ export class ProjectMemoryService {
     const excess = this.repo.excessTombstones(projectId, this.options.tombstoneLimit ?? PROJECT_MEMORY_LIMITS.maxTombstones);
     if (!excess.length) return;
     for (const entry of excess) this.repo.deleteEntry(entry.id);
-    // Records at or before this instant for an unknown entry are ignored, so removed tombstones cannot be resurrected by replay.
-    const floor = excess.map((entry) => entry.headAt).sort().at(-1)!;
-    const current = this.repo.syncState(projectId).tombstoneFloorAt;
-    this.repo.patchSyncState(projectId, { tombstoneFloorAt: current && current > floor ? current : floor });
+    // Keep exact retired IDs after deleting their bounded bodies/history; timestamps cannot identify an unrelated offline create.
+    for (const entry of excess) this.repo.markRetiredId(projectId, entry.id, entry.headAt);
   }
 
   private assertCapacity(projectId: string): void {
@@ -609,7 +617,7 @@ export class ProjectMemoryService {
   toSyncRecord(row: RevisionRow, teamId: string, sharedProjectId: string, authorDeviceId: string, signature: string): ProjectMemorySyncRecord {
     return ProjectMemorySyncRecordSchema.parse({
       id: row.recordId, entryId: row.entryId, revision: row.revision, parentRevision: row.parentRevision, op: row.op, at: row.at, teamId, sharedProjectId,
-      author: row.author, note: row.note, content: row.snapshot, createdAt: row.createdAt, authorDeviceId, signature,
+      author: row.author, note: row.note, content: row.snapshot, createdAt: row.createdAt, authorDeviceId, signature, lineage: row.lineage,
     });
   }
 
@@ -635,10 +643,9 @@ export class ProjectMemoryService {
     }
     const current = this.repo.getEntry(record.entryId);
     if (current && current.projectId !== projectId) throw badRequest('Memory record belongs to a different project.');
-    const state = this.repo.syncState(projectId);
-    if (!current && state.tombstoneFloorAt && record.at <= state.tombstoneFloorAt) return 'ignored';
+    if (!current && this.repo.hasRetiredId(projectId, record.entryId)) return 'ignored';
     if (current) {
-      const newer = outranks(record, current);
+      const newer = outranks(record, current, this.repo.lineageFor(current.headRecordId));
       if (newer && record.author.kind === 'agent') {
         if (current.pinned) return 'ignored';
         if (current.retired && !content.retired) return 'ignored';
@@ -649,8 +656,9 @@ export class ProjectMemoryService {
       createdAt: record.createdAt, author: record.author, note: record.note, snapshot: content,
       changed: changedFields(current ? snapshotOf(current) : null, content), received: true, authorDeviceId: record.authorDeviceId, signature: record.signature,
       teamId: record.teamId, sharedProjectId: record.sharedProjectId, publishedAt: this.iso(),
+      lineage: record.lineage ?? { parentId: null, controlId: null, epoch: 0 },
     };
-    const isNewer = !current || outranks(record, current);
+    const isNewer = !current || outranks(record, current, this.repo.lineageFor(current.headRecordId));
     let applied: EntryRow | null = null;
     this.repo.tx(() => {
       this.repo.insertRecord(row);

@@ -175,22 +175,77 @@ describe('team project memory sync (two-device fixture)', () => {
     const ctx = a.agent();
     const created = await a.service.agentRemember(ctx, { kind: 'fact', title: 'Order independence', body: 'First revision of the fact.' });
     await a.service.agentUpdate(ctx, { id: created.entry.id, body: 'Second revision of the fact, rewritten.' });
+    await a.service.agentUpdate(ctx, { id: created.entry.id, body: 'Third revision of the fact, rewritten again.' });
     await a.settle();
     const records = mesh.log.filter((m) => m.kind === 'projectmemory.record');
-    expect(records).toHaveLength(2);
+    expect(records).toHaveLength(3);
     mesh.queue = [];
 
-    await mesh.redeliver(records[1]!); // update before create
-    expect(b.service.repo.getEntry(created.entry.id)).toMatchObject({ revision: 2, body: 'Second revision of the fact, rewritten.' });
+    await mesh.redeliver(records[2]!); // two missing ancestors, both backfilled by exact ID
+    expect(b.service.repo.getEntry(created.entry.id)).toMatchObject({ revision: 3, body: 'Third revision of the fact, rewritten again.' });
     await mesh.redeliver(records[0]!);
-    expect(b.service.repo.getEntry(created.entry.id)).toMatchObject({ revision: 2, body: 'Second revision of the fact, rewritten.' });
+    await mesh.redeliver(records[1]!);
+    expect(b.service.repo.getEntry(created.entry.id)).toMatchObject({ revision: 3, body: 'Third revision of the fact, rewritten again.' });
     const before = b.service.repo.countRecords(created.entry.id);
-    expect(before).toBe(2);
+    expect(before).toBe(3);
 
-    for (let i = 0; i < 3; i++) { await mesh.redeliver(records[0]!); await mesh.redeliver(records[1]!); }
+    for (let i = 0; i < 3; i++) { for (const record of records) await mesh.redeliver(record!); }
     expect(b.service.repo.countRecords(created.entry.id)).toBe(before);
     expect(b.service.repo.liveCount(b.projectId)).toBe(1);
     expect(mesh.rejected).toEqual([]);
+  });
+
+  it('converges offline agent edits around human control epochs and ignores delayed pins after unpin', async () => {
+    const { mesh, a, b } = await pair();
+    const ctx = a.agent();
+    const created = await a.service.agentRemember(ctx, { kind: 'fact', title: 'Human control', body: 'Initial shared value.' });
+    await a.settle(); await mesh.deliver();
+
+    await b.service.humanPatch(b.projectId, created.entry.id, { expectedRevision: 1, pinned: true });
+    await b.settle();
+    const pin = mesh.log.findLast((m) => m.kind === 'projectmemory.record' && m.fromDeviceId === b.deviceId)!;
+    await a.service.agentUpdate(ctx, { id: created.entry.id, body: 'Offline agent edit one.' });
+    await a.service.agentUpdate(ctx, { id: created.entry.id, body: 'Offline agent edit two.' });
+    await a.settle();
+    const offlineAgentRecords = mesh.log.filter((m) => m.kind === 'projectmemory.record' && m.fromDeviceId === a.deviceId).slice(-2);
+
+    // Different arrival order on each device retains both branches but the human pin wins on both.
+    await mesh.redeliver(offlineAgentRecords[1]!);
+    await mesh.redeliver(pin);
+    await mesh.redeliver(offlineAgentRecords[0]!);
+    expect(a.service.repo.getEntry(created.entry.id)).toMatchObject({ pinned: true, body: 'Initial shared value.' });
+    expect(b.service.repo.getEntry(created.entry.id)).toMatchObject({ pinned: true, body: 'Initial shared value.' });
+    expect(a.service.repo.countRecords(created.entry.id)).toBe(4);
+    expect(b.service.repo.countRecords(created.entry.id)).toBe(4);
+
+    await b.service.humanPatch(b.projectId, created.entry.id, { expectedRevision: 2, pinned: false });
+    await b.settle(); await mesh.deliver();
+    const agentAfterUnpin = await a.service.agentUpdate(ctx, { id: created.entry.id, body: 'Agent edit after human unpin.' });
+    await a.settle(); await mesh.deliver();
+    await mesh.redeliver(pin); // stale delayed control record must not undo the unpin
+    expect(agentAfterUnpin.entry.body).toBe('Agent edit after human unpin.');
+    expect(a.service.repo.getEntry(created.entry.id)).toMatchObject({ pinned: false, body: 'Agent edit after human unpin.' });
+    expect(b.service.repo.getEntry(created.entry.id)).toMatchObject({ pinned: false, body: 'Agent edit after human unpin.' });
+    expect(mesh.rejected).toEqual([]);
+  });
+
+  it('uses exact purged IDs for resurrection protection without blocking unrelated old offline creates', async () => {
+    const { b } = await pair();
+    const retiredId = randomUUID();
+    b.service.repo.markRetiredId(b.projectId, retiredId, '2025-01-01T00:00:00.000Z');
+    const offlineId = randomUUID();
+    const at = '2020-01-01T00:00:00.000Z';
+    const record: ProjectMemorySyncRecord = {
+      id: randomUUID(), entryId: offlineId, revision: 1, parentRevision: null, op: 'create', at,
+      teamId: TEAM, sharedProjectId: SHARED,
+      author: { kind: 'human', displayName: 'Offline', accountId: b.accountId, deviceId: b.deviceId },
+      note: null, content: { kind: 'fact', title: 'Old offline create', body: 'A valid entry created before unrelated compaction.', status: 'tentative', pinned: false, retired: false, humanVerified: true, files: [], sources: [] },
+      createdAt: at, authorDeviceId: b.deviceId, signature: 'x'.repeat(80), lineage: { parentId: null, controlId: null, epoch: 1 },
+    };
+    expect(b.service.applyRemote(b.projectId, record)).toBe('applied');
+    expect(b.service.applyRemote(b.projectId, { ...record, id: randomUUID(), entryId: retiredId })).toBe('ignored');
+    expect(b.service.repo.getEntry(offlineId)?.title).toBe('Old offline create');
+    expect(b.service.repo.getEntry(retiredId)).toBeUndefined();
   });
 
   it('rejects unauthorized senders, forged signatures and bad bindings', async () => {

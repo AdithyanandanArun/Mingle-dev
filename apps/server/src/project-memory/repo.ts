@@ -3,6 +3,7 @@ import type {
   ProjectMemoryAuthor, ProjectMemoryEntry, ProjectMemoryFileRef, ProjectMemoryInjection, ProjectMemoryOp,
   ProjectMemoryRevision, ProjectMemoryRevisionSnapshot, ProjectMemorySourceRef,
 } from '@mingle/contracts';
+import type { ProjectMemoryLineage } from '@mingle/contracts';
 import { PROJECT_MEMORY_LIMITS } from '@mingle/contracts';
 
 type Row = Record<string, unknown>;
@@ -22,6 +23,7 @@ export interface RevisionRow {
   at: string; createdAt: string; author: ProjectMemoryAuthor; note: string | null; snapshot: ProjectMemoryRevisionSnapshot;
   changed: ProjectMemoryRevision['changed']; received: boolean; authorDeviceId: string | null; signature: string | null;
   teamId: string | null; sharedProjectId: string | null; publishedAt: string | null;
+  lineage: ProjectMemoryLineage;
 }
 
 export interface SyncStateRow { projectId: string; lastBackfillAt: string | null; lastReceivedAt: string | null; error: string | null; tombstoneFloorAt: string | null }
@@ -49,6 +51,7 @@ function revisionRow(row: Row): RevisionRow {
     authorDeviceId: (row.author_device_id as string | null) ?? null, signature: (row.signature as string | null) ?? null,
     teamId: (row.team_id as string | null) ?? null, sharedProjectId: (row.shared_project_id as string | null) ?? null,
     publishedAt: (row.published_at as string | null) ?? null,
+    lineage: row.lineage_json ? json(row.lineage_json) : { parentId: null, controlId: null, epoch: 0 },
   };
 }
 
@@ -69,7 +72,7 @@ export class MemoryRepo {
         record_id TEXT PRIMARY KEY, entry_id TEXT NOT NULL, project_id TEXT NOT NULL, revision INTEGER NOT NULL,
         parent_revision INTEGER, op TEXT NOT NULL, at TEXT NOT NULL, created_at TEXT NOT NULL, author_json TEXT NOT NULL,
         note TEXT, snapshot_json TEXT NOT NULL, changed_json TEXT NOT NULL, received INTEGER NOT NULL DEFAULT 0,
-        author_device_id TEXT, signature TEXT, team_id TEXT, shared_project_id TEXT, published_at TEXT
+        author_device_id TEXT, signature TEXT, team_id TEXT, shared_project_id TEXT, published_at TEXT, lineage_json TEXT
       );
       CREATE INDEX IF NOT EXISTS mingle_project_memory_revisions_entry ON mingle_project_memory_revisions(entry_id, revision DESC, at DESC);
       CREATE INDEX IF NOT EXISTS mingle_project_memory_revisions_project ON mingle_project_memory_revisions(project_id, at, record_id);
@@ -81,7 +84,11 @@ export class MemoryRepo {
       CREATE TABLE IF NOT EXISTS mingle_project_memory_sync (
         project_id TEXT PRIMARY KEY, last_backfill_at TEXT, last_received_at TEXT, error TEXT, tombstone_floor_at TEXT
       );
+      CREATE TABLE IF NOT EXISTS mingle_project_memory_retired_ids (project_id TEXT NOT NULL, entry_id TEXT NOT NULL, retired_at TEXT NOT NULL, PRIMARY KEY(project_id,entry_id));
+      CREATE TABLE IF NOT EXISTS mingle_project_memory_causality (record_id TEXT PRIMARY KEY, entry_id TEXT NOT NULL, parent_id TEXT, control_id TEXT, epoch INTEGER NOT NULL, human INTEGER NOT NULL);
     `);
+    const cols = this.db.prepare('PRAGMA table_info(mingle_project_memory_revisions)').all() as Array<{ name: string }>;
+    if (!cols.some((c) => c.name === 'lineage_json')) this.db.exec('ALTER TABLE mingle_project_memory_revisions ADD COLUMN lineage_json TEXT');
   }
 
   tx<T>(fn: () => T): T {
@@ -140,12 +147,21 @@ export class MemoryRepo {
 
   insertRecord(record: RevisionRow): void {
     this.db.prepare(`INSERT INTO mingle_project_memory_revisions
-      (record_id,entry_id,project_id,revision,parent_revision,op,at,created_at,author_json,note,snapshot_json,changed_json,received,author_device_id,signature,team_id,shared_project_id,published_at)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+      (record_id,entry_id,project_id,revision,parent_revision,op,at,created_at,author_json,note,snapshot_json,changed_json,received,author_device_id,signature,team_id,shared_project_id,published_at,lineage_json)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
       .run(record.recordId, record.entryId, record.projectId, record.revision, record.parentRevision, record.op, record.at, record.createdAt,
         JSON.stringify(record.author), record.note, JSON.stringify(record.snapshot), JSON.stringify(record.changed), record.received ? 1 : 0,
-        record.authorDeviceId, record.signature, record.teamId, record.sharedProjectId, record.publishedAt);
+        record.authorDeviceId, record.signature, record.teamId, record.sharedProjectId, record.publishedAt, JSON.stringify(record.lineage));
+    this.db.prepare('INSERT OR REPLACE INTO mingle_project_memory_causality VALUES (?,?,?,?,?,?)')
+      .run(record.recordId, record.entryId, record.lineage.parentId, record.lineage.controlId, record.lineage.epoch, record.author.kind === 'human' ? 1 : 0);
   }
+
+  lineageFor(id: string): ProjectMemoryLineage | undefined {
+    const row = this.one('SELECT parent_id,control_id,epoch FROM mingle_project_memory_causality WHERE record_id=?', id);
+    return row ? { parentId: (row.parent_id as string | null) ?? null, controlId: (row.control_id as string | null) ?? null, epoch: Number(row.epoch) } : undefined;
+  }
+  hasRetiredId(projectId: string, entryId: string): boolean { return Boolean(this.one('SELECT 1 AS x FROM mingle_project_memory_retired_ids WHERE project_id=? AND entry_id=?', projectId, entryId)); }
+  markRetiredId(projectId: string, entryId: string, at: string): void { this.db.prepare('INSERT OR IGNORE INTO mingle_project_memory_retired_ids VALUES (?,?,?)').run(projectId, entryId, at); }
 
   /** Newest first. */
   listRecords(entryId: string, limit: number, offset: number): RevisionRow[] {
@@ -191,6 +207,12 @@ export class MemoryRepo {
     return this.all(`SELECT r.* FROM mingle_project_memory_revisions r JOIN mingle_project_memory_entries e ON e.head_record_id=r.record_id
       WHERE e.project_id=? AND r.shared_project_id=? AND r.signature IS NOT NULL AND r.author_device_id IS NOT NULL ORDER BY r.at, r.record_id LIMIT ?`,
     projectId, sharedProjectId, limit).map(revisionRow);
+  }
+  signedRecordsByIds(projectId: string, sharedProjectId: string, ids: string[]): RevisionRow[] {
+    if (!ids.length) return [];
+    const placeholders = ids.map(() => '?').join(',');
+    return this.all(`SELECT * FROM mingle_project_memory_revisions WHERE project_id=? AND shared_project_id=? AND signature IS NOT NULL AND record_id IN (${placeholders})`,
+      projectId, sharedProjectId, ...ids).map(revisionRow);
   }
   latestRecordAt(projectId: string): string | null {
     return (this.one('SELECT MAX(at) AS at FROM mingle_project_memory_revisions WHERE project_id=?', projectId)?.at as string | null) ?? null;

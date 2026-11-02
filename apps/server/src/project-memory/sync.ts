@@ -51,6 +51,7 @@ export function signingPayload(record: Omit<ProjectMemorySyncRecord, 'signature'
     domain: 'mingle-project-memory-record-v1', id: record.id, entryId: record.entryId, revision: record.revision, parentRevision: record.parentRevision,
     op: record.op, at: record.at, teamId: record.teamId, sharedProjectId: record.sharedProjectId, author: record.author, note: record.note,
     content: record.content, createdAt: record.createdAt, authorDeviceId: record.authorDeviceId,
+    ...(record.lineage ? { lineage: record.lineage } : {}),
   });
 }
 
@@ -196,6 +197,7 @@ export class ProjectMemoryTeamSync implements MemoryTeamHooks {
           const unsigned: Omit<ProjectMemorySyncRecord, 'signature'> = {
             id: row.recordId, entryId: row.entryId, revision: row.revision, parentRevision: row.parentRevision, op: row.op, at: row.at,
             teamId, sharedProjectId, author, note: row.note, content: row.snapshot, createdAt: row.createdAt, authorDeviceId: deviceId,
+            lineage: row.lineage,
           };
           const signature = await this.options.transport.signPayload(teamId, deviceId, signingPayload(unsigned));
           repo.markSigned(row.recordId, teamId, sharedProjectId, deviceId, signature, author);
@@ -266,6 +268,19 @@ export class ProjectMemoryTeamSync implements MemoryTeamHooks {
   }
 
   private pendingKey(teamId: string, sharedProjectId: string, peer: string, requestId: string): string { return `${teamId}:${sharedProjectId}:${peer}:${requestId}`; }
+  private async requestWanted(projectId: string, teamId: string, sharedProjectId: string, peer: string, ids: string[]): Promise<void> {
+    const wanted = [...new Set(ids)].slice(0, 20).filter((id) => !this.options.service.repo.lineageFor(id));
+    if (!wanted.length || this.pending.size >= MAX_PENDING) return;
+    const request = ProjectMemorySyncRequestSchema.parse({ sharedProjectId, requestId: randomUUID(), since: null, want: wanted });
+    const key = this.pendingKey(teamId, sharedProjectId, peer, request.requestId);
+    this.pending.set(key, { projectId, peerDeviceId: peer, expiresAt: this.now() + REQUEST_EXPIRY_MS, batchCount: null, batches: new Set(), records: 0 });
+    try {
+      await this.options.transport.send({ teamId, toDeviceId: peer, kind: 'projectmemory.sync.request', payload: request, idempotencyKey: `pmem-want:${request.requestId}:${peer}` });
+    } catch (error) {
+      this.pending.delete(key);
+      this.log('warn', `Project memory ancestry request failed for ${projectId}`, error);
+    }
+  }
   private expire(): void { for (const [key, entry] of this.pending) if (entry.expiresAt <= this.now()) this.pending.delete(key); }
 
   /** Opening a project's memory is an explicit local event: flush anything pending and ask for missed records (rate-limited). */
@@ -351,18 +366,26 @@ export class ProjectMemoryTeamSync implements MemoryTeamHooks {
       const { projectId, members } = await this.authorizeSender(envelope, record.sharedProjectId);
       this.verifyRecord(record, envelope.teamId, members, envelope.fromDeviceId);
       this.options.service.applyRemote(projectId, record);
+      const missingParent = record.lineage?.parentId;
+      if (missingParent && !this.options.service.repo.lineageFor(missingParent)) {
+        await this.requestWanted(projectId, envelope.teamId, record.sharedProjectId, envelope.fromDeviceId, [missingParent]);
+      }
       return;
     }
     if (envelope.kind === 'projectmemory.sync.request') {
       const request = ProjectMemorySyncRequestSchema.parse(envelope.payload);
       const { projectId } = await this.authorizeSender(envelope, request.sharedProjectId);
       const rateKey = `${envelope.teamId}:${request.sharedProjectId}:${envelope.fromDeviceId}`;
-      if (this.now() - (this.peerRequestAt.get(rateKey) ?? 0) < (this.options.requestRateMs ?? REQUEST_RATE_MS)) return; // a redundant valid request is consumed
-      this.peerRequestAt.set(rateKey, this.now());
-      if (this.peerRequestAt.size > 1_000) this.peerRequestAt.delete(this.peerRequestAt.keys().next().value!);
+      if (!request.want?.length) {
+        if (this.now() - (this.peerRequestAt.get(rateKey) ?? 0) < (this.options.requestRateMs ?? REQUEST_RATE_MS)) return; // a redundant valid request is consumed
+        this.peerRequestAt.set(rateKey, this.now());
+        if (this.peerRequestAt.size > 1_000) this.peerRequestAt.delete(this.peerRequestAt.keys().next().value!);
+      }
       await this.publish(projectId); // make sure our own revisions are signed before serving history
       const { repo } = this.options.service;
-      const rows = request.since === null
+      const rows = request.want?.length
+        ? repo.signedRecordsByIds(projectId, request.sharedProjectId, request.want)
+        : request.since === null
         ? repo.signedHeads(projectId, request.sharedProjectId, RESPONSE_RECORD_CEILING + 1)
         : repo.signedRecordsSince(projectId, request.sharedProjectId, request.since, RESPONSE_RECORD_CEILING + 1);
       const more = rows.length > RESPONSE_RECORD_CEILING;
@@ -392,6 +415,10 @@ export class ProjectMemoryTeamSync implements MemoryTeamHooks {
           if (record.sharedProjectId !== response.sharedProjectId) throw new HttpError(400, 'A record belongs to another shared project.');
           this.verifyRecord(record, envelope.teamId, members, null);
           this.options.service.applyRemote(projectId, record);
+          const missingParent = record.lineage?.parentId;
+          if (missingParent && !this.options.service.repo.lineageFor(missingParent)) {
+            await this.requestWanted(projectId, envelope.teamId, response.sharedProjectId, envelope.fromDeviceId, [missingParent]);
+          }
         } catch (error) {
           if (!permanent(error)) throw error;
           skipped++;
