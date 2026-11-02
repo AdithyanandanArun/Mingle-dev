@@ -14,6 +14,7 @@ import { AttachmentDrafts, AttachmentTray, useAttachmentDraft } from './Attachme
 import { usePresence } from '../lib/motion';
 import { useTeamStructure } from '../lib/team-structure-context';
 import { providerSwitchFailureCopy } from '../lib/providerFailureUi';
+import { reasoningEffortChoices } from '../lib/providers';
 import { QueuedMessages } from './composer/QueuedMessages';
 import {
   appendContextReference, ContextReferenceChips, EMPTY_CONTEXT_REFS, FileContextPicker,
@@ -340,7 +341,7 @@ export function Composer({ session, statusBar }: { session: Session; statusBar?:
   const modelData = (currentProvider?.models ?? []) as ProviderModel[];
   const currentModel = modelData.find((m) => m.id === session.model || m.aliases?.includes(session.model));
   const selectedModelId = currentModel?.id ?? session.model;
-  const effortChoices = currentModel?.reasoningEfforts ?? [];
+  const effortChoices = reasoningEffortChoices(currentModel);
   const tierChoices = [
     { id: 'standard', name: 'Standard', description: 'Standard service tier.' },
     ...(currentModel?.serviceTiers ?? []).filter((item) => item.id !== 'standard'),

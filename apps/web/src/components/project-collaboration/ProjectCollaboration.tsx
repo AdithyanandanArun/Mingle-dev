@@ -6,7 +6,7 @@ import { useMingle } from '../../store/store';
 import { copyText } from '../../lib/clipboard';
 import { teamAgentDisplayName } from '../../lib/team-agent-display';
 import { subscribeToTeamUpdates } from '../../lib/team-live-updates';
-import { PROVIDER_NAMES } from '../../lib/providers';
+import { PROVIDER_NAMES, reasoningEffortChoices } from '../../lib/providers';
 import { POLICY_DESCRIPTION, POLICY_LABEL } from '../../lib/groups';
 import { createIdempotencyKey, distributedApi } from '../distributed/api';
 import { Badge, Button, InlineError, Modal, ProviderMark, StatusDot } from '../ui';
@@ -35,14 +35,9 @@ function eligibleModels(info: ProviderInfo | undefined): ProviderModel[] {
   return info.models.filter((model) => joinAgentPolicyChoices(info, model).length > 0 && reasoningChoices(info, model).length > 0);
 }
 
-/** Use native catalog choices when reported; otherwise mirror the runtime's documented defaults. */
-function reasoningChoices(info: ProviderInfo, model: ProviderModel): NonNullable<ProviderModel['reasoningEfforts']> {
-  if (model.reasoningEfforts?.length) return model.reasoningEfforts;
-  if (model.reasoningEfforts) return [{ id: 'none', label: 'Native/default' }];
-  if (info.id === 'codex' || info.id === 'claude') return [
-    { id: 'low', label: 'Low' }, { id: 'medium', label: 'Medium' }, { id: 'high', label: 'High' },
-  ];
-  return [{ id: 'none', label: 'Native/default' }];
+/** Joining uses the same native choices as the composer and agent settings. */
+function reasoningChoices(_info: ProviderInfo, model: ProviderModel): NonNullable<ProviderModel['reasoningEfforts']> {
+  return reasoningEffortChoices(model);
 }
 
 function localSessionLabel(session: Session): string {

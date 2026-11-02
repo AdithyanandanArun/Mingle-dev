@@ -9,6 +9,14 @@ export const PROVIDER_NAMES: Record<Provider, string> = {
 
 export type ProviderModelSetting = 'defaultCodexModel' | 'defaultClaudeModel' | 'defaultAntigravityModel' | 'defaultOpencodeModel';
 
+/** `none` omits an effort override; it does not claim an unreported reasoning capability. */
+export function reasoningEffortChoices(model: ProviderModel | undefined): NonNullable<ProviderModel['reasoningEfforts']> {
+  return model?.reasoningEfforts?.length ? model.reasoningEfforts : [{
+    id: 'none', label: 'Native/default',
+    description: model?.reasoningEfforts ? 'This model reports no effort control.' : 'Effort capabilities are unreported. Let the provider choose its default.',
+  }];
+}
+
 export const providerModelSetting = (provider: Provider): ProviderModelSetting => ({
   codex: 'defaultCodexModel',
   claude: 'defaultClaudeModel',

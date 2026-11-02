@@ -11,7 +11,7 @@ import { SettingRow } from './SettingRow';
 import { BrowserSettings } from './browser/BrowserSettings';
 import { AccountSettings } from './AccountSettings';
 import { AgentsSettings } from './AgentsSettings';
-import { defaultProviderModel, usesNativeModelDefault, providerModelChoices, providerModelSetting, PROVIDER_NAMES } from '../lib/providers';
+import { defaultProviderModel, usesNativeModelDefault, providerModelChoices, providerModelSetting, PROVIDER_NAMES, reasoningEffortChoices } from '../lib/providers';
 import { AntigravityRuntimeSetup } from './AntigravityRuntimeSetup';
 import { ProviderExecutableSetting, executableSetting } from './ProviderExecutableSetting';
 import { RemoveProjectButton } from './RemoveProjectDialog';
@@ -74,14 +74,14 @@ export function SettingsPage({ onReplayOnboarding }: { onReplayOnboarding: () =>
   const providerInfo = boot.providers.find((p) => p.id === settings.defaultProvider);
   const models = providerModelChoices(providerInfo, defaultModel);
   const selectedModel = models.find((m) => m.id === defaultModel || m.aliases?.includes(defaultModel));
-  const efforts = selectedModel?.reasoningEfforts ?? [];
+  const efforts = reasoningEffortChoices(selectedModel);
   const tiers = serviceTiersFor(selectedModel);
   const policies = selectedModel?.policies ?? boot.providers.find((p) => p.id === settings.defaultProvider)?.policies ?? [];
   const updateDefaultModel = (value: string) => {
     const nextModel = models.find((model) => model.id === value);
     if (!nextModel && !(settings.defaultProvider === 'claude' && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,149}$/.test(value))) return;
     const patch: Partial<AppSettings> = { [modelKey]: value };
-    const nextEfforts = nextModel?.reasoningEfforts ?? [];
+    const nextEfforts = reasoningEffortChoices(nextModel);
     if (nextEfforts.length && !nextEfforts.some((item) => item.id === settings.defaultEffort)) patch.defaultEffort = nextModel?.defaultReasoningEffort ?? nextEfforts[0]!.id;
     const nextTiers = serviceTiersFor(nextModel);
     if (nextTiers.length && !nextTiers.some((item) => item.id === (settings.defaultServiceTier ?? 'standard'))) patch.defaultServiceTier = nextModel?.defaultServiceTier ?? nextTiers[0]!.id;
@@ -96,7 +96,7 @@ export function SettingsPage({ onReplayOnboarding }: { onReplayOnboarding: () =>
     if (model) patch[providerModelSetting(provider)] = model.id;
     else if (usesNativeModelDefault(provider) && preferredModel === 'default') patch[providerModelSetting(provider)] = 'default';
 
-    const efforts = model?.reasoningEfforts ?? [];
+    const efforts = reasoningEffortChoices(model);
     if (efforts.length && !efforts.some((item) => item.id === settings.defaultEffort)) {
       patch.defaultEffort = model?.defaultReasoningEffort && efforts.some((item) => item.id === model.defaultReasoningEffort)
         ? model.defaultReasoningEffort : efforts[0]!.id;

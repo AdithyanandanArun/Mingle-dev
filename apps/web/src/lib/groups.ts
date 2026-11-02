@@ -1,7 +1,7 @@
 import type {
   AgentConfiguration, AppSettings, GroupDelivery, GroupMember, GroupMode, GroupSnapshot, Policy, Provider, ProviderInfo, ProviderModel, Session, SessionStatus,
 } from '@mingle/contracts';
-import { defaultProviderModel, PROVIDER_NAMES, usesNativeModelDefault } from './providers';
+import { defaultProviderModel, PROVIDER_NAMES, reasoningEffortChoices, usesNativeModelDefault } from './providers';
 
 export const MODE_LABEL: Record<GroupMode, string> = { cowork: 'Cowork', orchestrated: 'Orchestrated', 'current-leads': 'Current agent leads' };
 export const MODE_TAGLINE: Record<GroupMode, string> = {
@@ -114,7 +114,7 @@ export function validateHandle(raw: string, taken: Iterable<string>): string | n
 export interface Choice { id: string; label: string; description?: string }
 export const modelOf = (info: ProviderInfo | undefined, id: string): ProviderModel | undefined => info?.models.find((model) => model.id === id || model.aliases?.includes(id));
 export const effortChoices = (model: ProviderModel | undefined): Choice[] =>
-  model?.reasoningEfforts ?? [];
+  reasoningEffortChoices(model);
 export const tierChoices = (model: ProviderModel | undefined): Choice[] =>
   (model?.serviceTiers ?? []).map((tier) => ({ id: tier.id, label: tierLabel(tier.id, tier.name), description: tier.description }));
 export const policyChoices = (info: ProviderInfo | undefined, model: ProviderModel | undefined): Policy[] => model?.policies ?? info?.policies ?? [];
