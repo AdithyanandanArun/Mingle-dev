@@ -1,4 +1,4 @@
-.session-workflow { margin: 0 0 8px; border: 1px solid var(--line-soft); border-radius: 12px; background: var(--bg-1); min-width: 0; }
+.session-workflow { margin: 0 0 8px; border: 1px solid var(--line-soft); border-radius: 12px; background: var(--bg-panel); min-width: 0; }
 .session-workflow__header { display: flex; gap: 10px; align-items: center; padding: 9px 12px; min-width: 0; flex-wrap: wrap; }
 .session-workflow__heading { display: flex; align-items: center; gap: 7px; min-width: 0; border: 0; padding: 0; background: transparent; color: var(--fg-1); cursor: pointer; text-align: left; font-size: 12px; }
 .session-workflow__heading span { overflow-wrap: anywhere; }
@@ -6,19 +6,19 @@
 .session-workflow__heading .is-open { transform: rotate(180deg); }
 .session-workflow__turns { font-size: 11px; color: var(--fg-3); white-space: nowrap; }
 .session-workflow__actions { margin-left: auto; display: flex; align-items: center; gap: 5px; flex-wrap: wrap; }
-.session-workflow__actions button { display: inline-flex; align-items: center; justify-content: center; gap: 5px; min-height: 28px; border: 1px solid var(--line-soft); border-radius: 7px; background: var(--bg-2); color: var(--fg-1); padding: 4px 8px; font-size: 11px; cursor: pointer; }
+.session-workflow__actions button { display: inline-flex; align-items: center; justify-content: center; gap: 5px; min-height: 28px; border: 1px solid var(--line-soft); border-radius: 7px; background: var(--bg-surface); color: var(--fg-1); padding: 4px 8px; font-size: 11px; cursor: pointer; }
 .session-workflow__actions button:disabled { cursor: default; opacity: .45; }
 .session-workflow button:focus-visible, .workflow-setup summary:focus-visible, .workflow-setup input:focus-visible { outline: 2px solid var(--fg-2); outline-offset: 3px; }
 .session-workflow__body { padding: 0 12px 11px; display: grid; gap: 7px; }
 .session-workflow__goal { font-size: 12px; color: var(--fg-1); line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 110px; overflow-y: auto; }
 .session-workflow__summary, .session-workflow__hint { font-size: 11px; color: var(--fg-3); line-height: 1.5; overflow-wrap: anywhere; white-space: pre-wrap; }
-.session-workflow__error { font-size: 11px; color: var(--danger); line-height: 1.5; padding: 0 12px 10px; overflow-wrap: anywhere; }
+.session-workflow__error { font-size: 11px; color: var(--err); line-height: 1.5; padding: 0 12px 10px; overflow-wrap: anywhere; }
 .workflow-setup { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; padding: 0 14px 8px; font-size: 11px; color: var(--fg-3); }
 .workflow-setup details { flex: none; max-width: 100%; }
 .workflow-setup summary { display: flex; align-items: center; gap: 4px; cursor: pointer; color: var(--fg-2); }
 .workflow-setup__fields { padding: 9px 0 0; display: grid; gap: 7px; }
 .workflow-setup__fields label { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-.workflow-setup__fields input { width: 60px; min-height: 28px; color: var(--fg-1); border: 1px solid var(--line-soft); border-radius: 5px; background: var(--bg-1); padding: 4px; }
+.workflow-setup__fields input { width: 60px; min-height: 28px; color: var(--fg-1); border: 1px solid var(--line-soft); border-radius: 5px; background: var(--bg-panel); padding: 4px; }
 @keyframes workflow-live { 50% { opacity: .4; } }
 .session-workflow__live { animation: workflow-live 2s ease-in-out infinite; }
 @media (prefers-reduced-motion: reduce) { .session-workflow__live { animation: none; } }
