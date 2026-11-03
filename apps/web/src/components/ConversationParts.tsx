@@ -14,6 +14,7 @@ import { Button, PROVIDER_NAME } from './ui';
 import { AgentIdentity } from './group/AgentIdentity';
 import { AttachmentHistory } from './AttachmentHistory';
 import { ContextReferenceChips, quoteFromSelection } from './MessageContextControls';
+import { deepEqualData } from '../lib/transcript';
 
 function legacyToolTitle(m: DisplayMessage): string {
   const candidates = [m.kind, ...m.content.split('\n')];
@@ -29,7 +30,7 @@ function normalizedCommand(value: string): string {
   return value.trim().replace(/^(?:\$|❯)\s*/, '');
 }
 
-export const LegacyToolGroup = memo(function LegacyToolGroup({ messages }: { messages: DisplayMessage[] }) {
+export const LegacyToolGroup = memo(function LegacyToolGroup({ messages }: { messages: readonly DisplayMessage[] }) {
   const previews = messages.map(legacyToolTitle);
   return (
     <details className="conversation-detail conversation-detail--tool legacy-tool-group">
@@ -57,7 +58,7 @@ export const LegacyToolGroup = memo(function LegacyToolGroup({ messages }: { mes
 });
 
 /** Group/team delivery prompts contain runtime routing instructions, not a separate human chat message. */
-export function InternalDeliveryDisclosure({ message }: { message: DisplayMessage }) {
+export const InternalDeliveryDisclosure = memo(function InternalDeliveryDisclosure({ message }: { message: DisplayMessage }) {
   if (message.role !== 'user' || (message.kind !== 'group-delivery' && message.kind !== 'team-delivery')) return null;
   return <details className="conversation-detail conversation-detail--system internal-delivery-detail" data-message-id={message.id}>
     <summary className="conversation-detail__summary">
@@ -68,7 +69,7 @@ export function InternalDeliveryDisclosure({ message }: { message: DisplayMessag
     </summary>
     <div className="conversation-detail__body"><p>This is delivery context generated for the agent, not a separate message from a person.</p><Markdown text={message.content} /></div>
   </details>;
-}
+});
 
 /** Names who is speaking in a shared conversation; standalone assistant responses remain provider-icon-free. */
 export function SpeakerLabel({ speaker, provider, identityKey, trailing }: { speaker: Pick<Speaker, 'handle' | 'role' | 'removed' | 'memberId'>; provider?: Provider | null; identityKey?: string; trailing?: ReactNode }) {
@@ -80,7 +81,14 @@ export function SpeakerLabel({ speaker, provider, identityKey, trailing }: { spe
   );
 }
 
-export const MessageRow = memo(function MessageRow({ m, provider, speaker, onAskAboutThis }: { m: DisplayMessage; provider?: keyof typeof PROVIDER_NAME; speaker?: Speaker | null; onAskAboutThis?: (quote: QuoteCitation) => void }) {
+type MessageRowProps = { m: DisplayMessage; provider?: keyof typeof PROVIDER_NAME; speaker?: Speaker | null; onAskAboutThis?: (quote: QuoteCitation) => void };
+
+/** Rows are pure in their props: a rebuilt-but-identical message or speaker (a bootstrap refetch, a sibling's token) must not re-render the Markdown tree. */
+function sameMessageRowProps(a: MessageRowProps, b: MessageRowProps): boolean {
+  return a.provider === b.provider && a.onAskAboutThis === b.onAskAboutThis && deepEqualData(a.m, b.m) && deepEqualData(a.speaker, b.speaker);
+}
+
+export const MessageRow = memo(function MessageRow({ m, provider, speaker, onAskAboutThis }: MessageRowProps) {
   if (m.role === 'tool') return null;
   if (m.role === 'system') {
     const preview = m.content.split('\n').find((line) => line.trim()) ?? '';
@@ -118,7 +126,7 @@ export const MessageRow = memo(function MessageRow({ m, provider, speaker, onAsk
       </div>
     </article>
   );
-});
+}, sameMessageRowProps);
 
 export function ApprovalCard({ approval, speaker, provider }: { approval: Approval; speaker?: Pick<Speaker, 'handle' | 'memberId'> | null; provider?: Provider | null }) {
   const [busy, setBusy] = useState<'approved' | 'denied' | null>(null);

@@ -1,57 +1,35 @@
-import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { ArrowDown, FolderPlus } from 'lucide-react';
-import type { Approval, Session, SessionPlan, SessionRun, Task, ToolCall, UserQuestion, WorkspaceEvent } from '@mingle/contracts';
-import { useMingle, useProject, useActiveSession, useActiveGroup } from '../store/store';
+import type { Approval, SessionPlan, SessionRun, Task, ToolCall, UserQuestion, WorkspaceEvent } from '@mingle/contracts';
 import type { DisplayMessage } from '../lib/conversation';
+import type { SubagentRun } from '../lib/subagents';
+import { useMingle, useProject, useActiveSession, useActiveGroup } from '../store/store';
 import { Button, EmptyState, MingleGlyph, PROVIDER_NAME } from './ui';
-import { ApprovalCard, InternalDeliveryDisclosure, LegacyToolGroup, MessageRow, SessionPlanCard, UserQuestionCard } from './ConversationParts';
+import { ApprovalCard, SessionPlanCard, UserQuestionCard } from './ConversationParts';
+import { TranscriptList } from './TranscriptList';
 import { GroupConversation } from './group/GroupConversation';
 import { Composer } from './Composer';
-import { RunActivity } from './RunActivity';
-import { RunChanges } from './RunChanges';
 import { GitBar } from './git/GitBar';
-import { appendContextReference } from './MessageContextControls';
 import { TeamSessionView } from './team-chat/TeamSessionView';
 import { useTeamStructure } from '../lib/team-structure-context';
 import { TeamConsentBanner } from './team-orchestration/settings/TeamConsentBanner';
-import { deriveSubagents } from '../lib/subagents';
+import { createTranscriptDeriver } from '../lib/transcript';
+import { useSessionStreamIds, useStableById } from '../lib/transcriptHooks';
 import { SubagentChatView } from './subagents/SubagentChatView';
 import { SubagentRail } from './subagents/SubagentRail';
-import { SubagentTranscriptLinks } from './subagents/SubagentTranscriptLinks';
 import { StatusBar } from './status-bar/StatusBar';
 import { deriveStatusBarState } from './status-bar/deriveStatusBarState';
 import { api, errorMessage } from '../lib/api';
 
-const EMPTY_RUNS: SessionRun[] = [];
-const EMPTY_TOOL_CALLS: ToolCall[] = [];
+const EMPTY_MESSAGES: readonly DisplayMessage[] = [];
+const EMPTY_SESSION_RUNS: readonly SessionRun[] = [];
+const EMPTY_SESSION_CALLS: readonly ToolCall[] = [];
+const EMPTY_SESSION_SUBAGENTS: readonly SubagentRun[] = [];
 const EMPTY_PLANS: SessionPlan[] = [];
 const EMPTY_QUESTIONS: UserQuestion[] = [];
 const EMPTY_TASKS: Task[] = [];
 const EMPTY_EVENTS: WorkspaceEvent[] = [];
 const EMPTY_APPROVALS: Approval[] = [];
-
-function useSessionMessages(session: Session | undefined): DisplayMessage[] {
-  const all = useMingle((s) => s.boot?.messages);
-  const streams = useMingle((s) => s.streams);
-  return useMemo(() => {
-    if (!session || !all) return [];
-    const out: DisplayMessage[] = [];
-    const seen = new Set<string>();
-    for (const m of all) {
-      if (m.sessionId !== session.id) continue;
-      seen.add(m.id);
-      const st = streams[m.id];
-      const streamed = st ? st.base + st.text : '';
-      const content = streamed.length > m.content.length ? streamed : m.content;
-      out.push({ id: m.id, sessionId: m.sessionId, role: m.role, content, createdAt: m.createdAt, kind: m.kind, runId: m.runId, live: (Boolean(st) || m.kind === 'streaming') && session.status === 'running', attachments: m.attachments, contextRefs: m.contextRefs });
-    }
-    for (const [id, st] of Object.entries(streams)) {
-      if (st.sessionId !== session.id || seen.has(id)) continue;
-      out.push({ id, sessionId: session.id, role: 'assistant', content: st.base + st.text, createdAt: '', live: session.status === 'running' });
-    }
-    return out;
-  }, [all, streams, session]);
-}
 
 /** A converted session opens as its group's shared conversation; everything else stays a single session. */
 export function SessionPane() {
@@ -79,59 +57,32 @@ function SingleSessionPane() {
   const project = useProject();
   const session = useActiveSession();
   const hasSessions = useMingle((s) => s.boot?.sessions.some((x) => x.projectId === s.activeProjectId) ?? false);
-  const messages = useSessionMessages(session);
-  const allRuns = useMingle((s) => s.boot?.runs ?? EMPTY_RUNS);
-  const runs = useMemo(() => allRuns.filter(run => run.sessionId === session?.id), [allRuns, session?.id]);
-  const allToolCalls = useMingle((s) => s.boot?.toolCalls ?? EMPTY_TOOL_CALLS);
-  const sessionToolCalls = useMemo(() => allToolCalls.filter((call) => call.sessionId === session?.id), [allToolCalls, session?.id]);
-  const subagents = useMemo(() => session ? deriveSubagents(sessionToolCalls, session.provider, session.model) : [], [sessionToolCalls, session?.provider, session?.model]);
+  const sessionId = session?.id;
+  // Token deltas are followed by the one streaming row, not here: this pane only sees which buffers exist.
+  const streamIds = useSessionStreamIds(sessionId);
+  const allMessages = useMingle((s) => s.boot?.messages);
+  const allRuns = useMingle((s) => s.boot?.runs);
+  const allToolCalls = useMingle((s) => s.boot?.toolCalls);
+  const deriveTranscript = useRef<ReturnType<typeof createTranscriptDeriver>>(undefined);
+  deriveTranscript.current ??= createTranscriptDeriver();
+  const transcript = useMemo(() => session ? deriveTranscript.current!({
+    sessionId: session.id, provider: session.provider, model: session.model, running: session.status === 'running',
+    messages: allMessages, runs: allRuns, toolCalls: allToolCalls, streamIds,
+  }) : null, [session?.id, session?.provider, session?.model, session?.status, allMessages, allRuns, allToolCalls, streamIds]);
+  const messages = transcript?.messages ?? EMPTY_MESSAGES;
+  const runs = transcript?.runs ?? EMPTY_SESSION_RUNS;
+  const sessionToolCalls = transcript?.toolCalls ?? EMPTY_SESSION_CALLS;
+  const subagents = transcript?.subagents ?? EMPTY_SESSION_SUBAGENTS;
   // Select the stable store array, then filter: a selector that returns a new array each time re-renders forever.
   const allDelegatedSubagents = useMingle((s) => s.boot?.delegatedSubagents);
-  const delegatedSubagents = useMemo(() => (allDelegatedSubagents ?? []).filter((item) => item.parentSessionId === session?.id), [allDelegatedSubagents, session?.id]);
+  const delegatedSubagents = useStableById(useMemo(() => (allDelegatedSubagents ?? []).filter((item) => item.parentSessionId === sessionId), [allDelegatedSubagents, sessionId]));
   const continuingSubagent = delegatedSubagents.find((item) => item.status === 'completed' && item.resultDelivered)?.name;
   const allPlans = useMingle((s) => s.boot?.plans ?? EMPTY_PLANS);
   const allQuestions = useMingle((s) => s.boot?.questions ?? EMPTY_QUESTIONS);
   const allTasks = useMingle((s) => s.boot?.tasks ?? EMPTY_TASKS);
   const allEvents = useMingle((s) => s.boot?.events ?? EMPTY_EVENTS);
   const allApprovals = useMingle((s) => s.boot?.approvals ?? EMPTY_APPROVALS);
-  const toolCallsByRun = useMemo(() => {
-    const grouped = new Map<string, ToolCall[]>();
-    for (const call of allToolCalls) {
-      if (call.sessionId !== session?.id) continue;
-      const rows = grouped.get(call.runId) ?? [];
-      rows.push(call);
-      grouped.set(call.runId, rows);
-    }
-    return grouped;
-  }, [allToolCalls, session?.id]);
-  const runsByUserMessage = useMemo(() => {
-    const grouped = new Map<string, SessionRun[]>();
-    for (const run of runs) {
-      const rows = grouped.get(run.userMessageId) ?? [];
-      rows.push(run);
-      grouped.set(run.userMessageId, rows);
-    }
-    return grouped;
-  }, [runs]);
-  const messageIds = useMemo(() => new Set(messages.map(message => message.id)), [messages]);
-  const unplacedRuns = useMemo(() => runs.filter(run => !messageIds.has(run.userMessageId)).sort((a, b) => a.startedAt.localeCompare(b.startedAt)), [runs, messageIds]);
-  const changesAfterMessage = useMemo(() => {
-    const placements = new Map<number, SessionRun[]>();
-    for (const run of runs) {
-      if (!messageIds.has(run.userMessageId)) continue;
-      const assistants = messages.map((message, index) => ({ message, index })).filter(row => row.message.role === 'assistant' && row.message.runId === run.id);
-      let index = assistants.at(-1)?.index;
-      if (index === undefined) {
-        const fallback = messages.map((message, candidate) => ({ message, candidate })).filter(row => row.message.role !== 'tool' && row.message.runId === run.id).at(-1);
-        index = fallback?.candidate ?? messages.findIndex(message => message.id === run.userMessageId);
-      }
-      if (index === undefined || index < 0) continue;
-      const list = placements.get(index) ?? []; list.push(run); placements.set(index, list);
-    }
-    return placements;
-  }, [runs, messages, messageIds]);
-  const approvals = useMingle((s) => s.boot?.approvals);
-  const pending = useMemo(() => (approvals ?? []).filter((a) => a.sessionId === session?.id && a.status === 'pending'), [approvals, session?.id]);
+  const pending = useStableById(useMemo(() => allApprovals.filter((a) => a.sessionId === sessionId && a.status === 'pending'), [allApprovals, sessionId]));
   const statusBarState = useMemo(() => session ? deriveStatusBarState({
     session, runs, toolCalls: sessionToolCalls, tasks: allTasks, events: allEvents, approvals: allApprovals, questions: allQuestions,
     delegatedSubagents, continuingSubagent,
@@ -141,16 +92,19 @@ function SingleSessionPane() {
     try { await api.interrupt(session.id); await useMingle.getState().refreshNow(); }
     catch (cause) { useMingle.getState().toast('error', errorMessage(cause)); }
   }, [session]);
-  const plans = useMemo(() => {
-    const rows = allPlans.filter((plan) => plan.sessionId === session?.id);
+  const plans = useStableById(useMemo(() => {
+    const rows = allPlans.filter((plan) => plan.sessionId === sessionId);
     const completed = rows.filter((plan) => plan.status === 'completed').at(-1);
     return [...rows.filter((plan) => plan.status !== 'completed'), ...(completed ? [completed] : [])];
-  }, [allPlans, session?.id]);
-  const questions = useMemo(() => {
-    const rows = allQuestions.filter((question) => question.sessionId === session?.id);
+  }, [allPlans, sessionId]));
+  const questions = useStableById(useMemo(() => {
+    const rows = allQuestions.filter((question) => question.sessionId === sessionId);
     const pendingRows = rows.filter((question) => question.status === 'pending');
     return [...rows.filter((question) => question.status !== 'pending').slice(-2), ...pendingRows];
-  }, [allQuestions, session?.id]);
+  }, [allQuestions, sessionId]));
+  const completedRunIds = useMemo(() => new Set(runs.filter((run) => run.status === 'completed').map((run) => run.id)), [runs]);
+  const hasRunningRun = useMemo(() => runs.some((run) => run.status === 'running'), [runs]);
+  const hasConversation = useMemo(() => messages.some((message) => message.role === 'user' || message.role === 'assistant'), [messages]);
   const { openDialog } = useMingle.getState();
   const creatingSession = useMingle((s) => s.creatingSession);
   const [selectedSubagentId, setSelectedSubagentId] = useState<string | null>(null);
@@ -161,16 +115,18 @@ function SingleSessionPane() {
   const stick = useRef(true);
   const [away, setAway] = useState(false);
   const last = messages[messages.length - 1];
-  const activitySig = runs.map(run => `${run.id}:${run.status}:${run.toolCount}:${run.changes?.status ?? 'unknown'}:${run.changes?.fileCount ?? ''}:${run.changes?.additions ?? ''}:${run.changes?.deletions ?? ''}`).join('|');
-  const planningSig = `${plans.map((plan) => `${plan.id}:${plan.revision}:${plan.status}`).join(',')}|${questions.map((question) => `${question.id}:${question.status}`).join(',')}`;
-  const sig = `${session?.id}|${messages.length}|${last?.content.length ?? 0}|${pending.length}|${activitySig}|${allToolCalls.length}|${planningSig}`;
+  const activitySig = useMemo(() => runs.map(run => `${run.id}:${run.status}:${run.toolCount}:${run.changes?.status ?? 'unknown'}:${run.changes?.fileCount ?? ''}:${run.changes?.additions ?? ''}:${run.changes?.deletions ?? ''}`).join('|'), [runs]);
+  const planningSig = useMemo(() => `${plans.map((plan) => `${plan.id}:${plan.revision}:${plan.status}`).join(',')}|${questions.map((question) => `${question.id}:${question.status}`).join(',')}`, [plans, questions]);
+  const sig = `${session?.id}|${messages.length}|${last?.content.length ?? 0}|${pending.length}|${activitySig}|${allToolCalls?.length ?? 0}|${planningSig}`;
+  /** Streamed text grows inside its own row, which asks to stay pinned to the latest output when the reader has not scrolled away. */
+  const pinToBottom = useCallback(() => {
+    const el = scroller.current;
+    if (el && stick.current) el.scrollTop = el.scrollHeight;
+  }, []);
 
   useEffect(() => { stick.current = true; setAway(false); }, [session?.id]);
   useEffect(() => { setSelectedSubagentId(null); }, [session?.id]);
-  useLayoutEffect(() => {
-    const el = scroller.current;
-    if (el && stick.current) el.scrollTop = el.scrollHeight;
-  }, [sig]);
+  useLayoutEffect(pinToBottom, [sig, pinToBottom]);
 
   if (!project) {
     return (
@@ -211,7 +167,7 @@ function SingleSessionPane() {
         }}
       >
         <div className="chat__inner">
-          {!messages.some(message => message.role === 'user' || message.role === 'assistant') ? (
+          {!hasConversation ? (
             <div className="chat__empty">
               <span className="chat__welcome-mark" aria-hidden="true"><MingleGlyph size={28} /></span>
               <span className="chat__eyebrow">YOUR WORKSPACE, READY</span>
@@ -220,39 +176,13 @@ function SingleSessionPane() {
               <div className="chat__welcome-hints"><span><kbd>@</kbd> Add files and context</span><span><kbd>/</kbd> Explore commands</span></div>
             </div>
           ) : null}
-          {messages.map((m, index) => {
-            if (m.role === 'tool') {
-              const group = [m];
-              let next = index + 1;
-              while (next < messages.length && messages[next]?.role === 'tool') group.push(messages[next++]!);
-              if (index > 0 && messages[index - 1]?.role === 'tool') return null;
-              return <LegacyToolGroup key={m.id} messages={group} />;
-            }
-            if (m.role === 'user' && (m.kind === 'group-delivery' || m.kind === 'team-delivery')) return <Fragment key={m.id}>
-              <InternalDeliveryDisclosure message={m} />
-              {(runsByUserMessage.get(m.id) ?? []).map(run => <Fragment key={run.id}>
-                <RunActivity run={run} initialCalls={toolCallsByRun.get(run.id) ?? EMPTY_TOOL_CALLS} />
-                <SubagentTranscriptLinks subagents={subagents.filter((subagent) => subagent.runId === run.id)} onOpen={setSelectedSubagentId} />
-              </Fragment>)}
-            </Fragment>;
-            return (
-              <Fragment key={m.id}>
-                <MessageRow m={m} provider={session.provider} onAskAboutThis={(quote) => appendContextReference(session.id, quote)} />
-                {m.role === 'user' ? (runsByUserMessage.get(m.id) ?? []).map(run => <Fragment key={run.id}>
-                  <RunActivity run={run} initialCalls={toolCallsByRun.get(run.id) ?? EMPTY_TOOL_CALLS} />
-                  <SubagentTranscriptLinks subagents={subagents.filter((subagent) => subagent.runId === run.id)} onOpen={setSelectedSubagentId} />
-                </Fragment>) : null}
-                {(changesAfterMessage.get(index) ?? []).filter(run => run.status !== 'running').map(run => <RunChanges key={run.id} runId={run.id} summary={run.changes} />)}
-              </Fragment>
-            );
-          })}
-           {unplacedRuns.map(run => <Fragment key={run.id}><RunActivity run={run} initialCalls={toolCallsByRun.get(run.id) ?? EMPTY_TOOL_CALLS} /><SubagentTranscriptLinks subagents={subagents.filter((subagent) => subagent.runId === run.id)} onOpen={setSelectedSubagentId} />{run.status !== 'running' ? <RunChanges runId={run.id} summary={run.changes} /> : null}</Fragment>)}
-          {session.status === 'running' && !runs.some(run => run.status === 'running') ? (
+          <TranscriptList layout={transcript!.layout} sessionId={session.id} provider={session.provider} onOpenSubagent={setSelectedSubagentId} onGrow={pinToBottom} />
+          {session.status === 'running' && !hasRunningRun ? (
             <div className="working" role="status"><span className="activity-shimmer">{PROVIDER_NAME[session.provider]} is working…</span></div>
           ) : null}
           {session.error && session.status === 'error' ? <div className="chat__error" role="alert"><strong>Session error</strong><span>{session.error}</span></div> : null}
           {pending.map((a) => <ApprovalCard key={a.id} approval={a} />)}
-          {plans.map((plan) => <SessionPlanCard key={plan.id} plan={plan} reviewReady={runs.some((run) => run.id === plan.runId && run.status === 'completed')} />)}
+          {plans.map((plan) => <SessionPlanCard key={plan.id} plan={plan} reviewReady={completedRunIds.has(plan.runId)} />)}
           {questions.map((question) => <UserQuestionCard key={question.id} question={question} />)}
         </div>
       </div>
