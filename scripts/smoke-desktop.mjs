@@ -26,13 +26,13 @@ try {
   let page;
   for (let attempt = 0; attempt < 120; attempt++) {
     if (child.exitCode !== null) throw new Error(`Desktop exited: ${logs}`);
-    try { page = (await (await fetch(`http://127.0.0.1:${port}/json/list`)).json()).find(item => item.type === 'page' && item.url.startsWith('http://127.0.0.1:')); } catch { /* starting */ }
+    try { page = (await (await fetch(`http://127.0.0.1:${port}/json/list`, { signal: AbortSignal.timeout(2000) })).json()).find(item => item.type === 'page' && item.url.startsWith('http://127.0.0.1:')); } catch { /* starting */ }
     if (page) break;
     await new Promise(resolvePromise => setTimeout(resolvePromise, 500));
   }
   assert.ok(page, `Desktop did not open its local UI: ${logs}`);
   socket = new WebSocket(page.webSocketDebuggerUrl);
-  await once(socket, 'open');
+  await once(socket, 'open', { signal: AbortSignal.timeout(10000) });
   const pending = new Map();
   socket.addEventListener('message', event => {
     const response = JSON.parse(event.data);
@@ -61,16 +61,24 @@ try {
   assert.equal(await evaluate('typeof window.require'), 'undefined', 'Renderer Node integration stays disabled');
   console.log('Installed Electron opened Mingle and rendered the built application with the sandbox enabled.');
 } finally {
+  let forced = false;
   if (child.exitCode === null) {
     const exited = once(child, 'exit');
-    // Closing the actual window runs Electron's before-quit backend cleanup.
+    // Close the browser through CDP, so Electron runs before-quit cleanup.
+    // window.close() only closes the workspace's WebContentsView.
     // On Windows SIGTERM would terminate Electron immediately and orphan Node.
-    if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ id: 99999, method: 'Runtime.evaluate', params: { expression: 'window.close()' } }));
+    if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ id: 99999, method: 'Browser.close', params: {} }));
     else child.kill('SIGTERM');
-    const timer = setTimeout(() => child.kill('SIGKILL'), 40000);
+    const timer = setTimeout(() => { forced = true; child.kill('SIGKILL'); }, 40000);
     await exited;
     clearTimeout(timer);
   }
   socket?.close();
+  // An orphaned descendant can retain inherited pipes after Electron exits.
+  // Report forced shutdown as a failed check instead of hanging this process.
+  child.stdout.destroy();
+  child.stderr.destroy();
   await rm(scratch, { recursive: true, force: true });
+  assert.ok(!forced, `Desktop did not shut down gracefully: ${logs}`);
+  assert.equal(child.exitCode, 0, `Desktop exited unsuccessfully: ${logs}`);
 }

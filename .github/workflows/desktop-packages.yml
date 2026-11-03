@@ -32,6 +32,7 @@ jobs:
           dpkg-deb --extract release/*.deb release/debian-extracted
           node scripts/smoke-packaged-linux.mjs release/debian-extracted/opt/mingle
       - name: Verify installation, launcher and removal in disposable runner
+        timeout-minutes: 10
         run: |
           sudo apt-get update
           sudo apt-get install -y ./release/*.deb
