@@ -6,9 +6,16 @@ import '../apps/web/src/styles/tokens.css';
 import '../apps/web/src/styles/base.css';
 import '../apps/web/src/styles/ui.css';
 import '../apps/web/src/styles/app.css';
+import '../apps/web/src/styles/select-menu.css';
+import '../apps/web/src/styles/conversation.css';
+import '../apps/web/src/styles/message-context.css';
+import '../apps/web/src/styles/attachments.css';
+import '../apps/web/src/styles/git.css';
+import '../apps/web/src/styles/usage.css';
+import '../apps/web/src/styles/polish.css';
 
-// Example fixture page: the acceptance script answers every /api request and blocks WebSockets.
-// The real store is bootstrapped through its normal refresh path, without init() and without a live socket.
+// Example fixture page: the acceptance script answers every /api request and mocks the store WebSocket locally.
+// The real store is bootstrapped through its normal refresh path, with no connection to an installed runtime.
 useMingle.setState({ connection: 'online' });
 // Lets the acceptance script deliver a changed Example snapshot through the store's normal bootstrap path.
 (window as unknown as { refreshExampleBootstrap: () => Promise<void> }).refreshExampleBootstrap = () => useMingle.getState().refreshNow();

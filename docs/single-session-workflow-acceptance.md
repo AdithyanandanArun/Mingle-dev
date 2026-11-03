@@ -1,14 +1,14 @@
 # Single-session Autonomous workflow: browser acceptance fixture
 
-`node scripts/session-workflow-browser-acceptance.mjs` checks the new Autonomous workflow UI (see [single-session-workflow.md](single-session-workflow.md)) in Chromium. It runs the real `Composer` and `SessionWorkflowPanel` with the real Zustand store, bootstrapped through `refreshNow()` without `init()`.
+`node scripts/session-workflow-browser-acceptance.mjs` checks the new Autonomous workflow UI (see [single-session-workflow.md](single-session-workflow.md)) in Chromium. It runs the real `Composer` and `SessionWorkflowPanel` with the real Zustand store, bootstrapped through `refreshNow()` and a locally mocked store connection. The Vite development module calls `init()` on import; its socket is handled entirely inside Playwright.
 
 ## Boundary and safety
 
 - The page is labelled **Example workspace · fixture data only**. Projects, sessions, workflows, attachments and helpers are synthetic.
-- A disposable Vite server binds an ephemeral loopback port. Every `/api/**` request is answered by the script; `/ws` and `/ws/**` are intercepted and counted. Unlisted API paths return 404 and fail the test, except the Git bar's `/repository` and `/github` reads, which are expected to be unavailable. Requests to a non-loopback host fail the test.
+- A disposable Vite server binds an ephemeral loopback port. Every `/api/**` request is answered by the script; `/ws` and `/ws/**` are intercepted and counted, with a mocked open connection so online-only controls remain usable. No socket is forwarded to an installed runtime. Unlisted API paths return 404 and fail the test, except the Git bar's `/repository` and `/github` reads, which are expected to be unavailable. Requests to a non-loopback host fail the test.
 - No provider, model, cloud service, credential or installed runtime is touched. Nothing here is a paid task.
 - The mocked workflow routes parse bodies with the real `StartSessionWorkflowSchema`, `WorkflowControlSchema` and `ResumeSessionWorkflowSchema` (loaded through Vite), so a malformed or non-strict request is rejected as the server would. The mock also applies the documented `expectedVersion` check (409), checks that attachments and context references belong to the session, and requires explicit extra turns/time to resume an exhausted budget. These server rules come from the mock, not the production service. The production service has its own tests.
-- Each test uses a fresh browser context (clean storage), `reducedMotion: 'reduce'` unless stated, and fails on page errors, console errors, external requests or WebSocket attempts.
+- Each test uses a fresh browser context (clean storage), `reducedMotion: 'reduce'` unless stated, and fails on page errors, console errors, external requests or unexpected socket paths.
 
 ## Running
 
@@ -39,6 +39,10 @@ Screenshots go to `$TMPDIR/mingle-session-workflow-acceptance-<pid>/`, or to `SE
 | Restore | Running, paused-after-restart and a later bootstrap snapshot render after load; page load performs no mutation. |
 | Session switching | Workflow, drafts, attachments, project label and actions stay with their own session; an in-flight pause (made stale) neither leaks its result or error into another session nor replays. |
 | Responsive, keyboard, motion | At 390 and 900 px there is no horizontal overflow, controls stay in the viewport and actions are at least 28 px tall; a keyboard-only run covers toggle, budget, start, heading collapse and Pause with visible focus; the live pulse is off under reduced motion and on otherwise. |
+
+## Recorded result (2026-11-03)
+
+All **28 browser checks passed**, with no page errors, unexpected API routes or external requests. Screenshots were captured in `/tmp/mingle-session-workflow-acceptance-543510/`; these show labelled Example fixtures. The real service is separately covered by 28 focused server tests, including HTTP/MCP and restart recovery.
 
 ## Screenshots
 

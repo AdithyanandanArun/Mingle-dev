@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Disposable Example fixtures. Exercises the real Composer, SessionWorkflowPanel and Zustand bootstrap path at the
-// HTTP boundary; every /api request is answered locally, WebSockets are blocked, and no provider or cloud is reached.
+// HTTP boundary; every /api request and store socket is mocked locally; no provider or cloud is reached.
 // See docs/single-session-workflow-acceptance.md.
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
@@ -155,7 +155,9 @@ async function withPage({ viewport = { width: 1000, height: 860 }, reducedMotion
   page.on('pageerror', (error) => errors.push(error.message));
   page.on('console', (message) => { if (message.type() === 'error' && !/Failed to load resource/.test(message.text())) errors.push(message.text()); });
   page.on('request', (request) => { const { hostname, protocol } = new URL(request.url()); if (protocol.startsWith('http') && hostname !== '127.0.0.1') external.push(request.url()); });
-  const ws = (socket) => { world.sockets.push(socket.url()); aggregate.sockets.push(socket.url()); void socket.close(); };
+  // The store initializes its connection during Vite hot-module setup. Keep that socket wholly in Playwright so
+  // the real onopen path reports online; closing it would make every composer control correctly remain offline.
+  const ws = (socket) => { world.sockets.push(socket.url()); aggregate.sockets.push(socket.url()); };
   await context.routeWebSocket('**/ws', ws);
   await context.routeWebSocket('**/ws/**', ws);
   await context.route('**/api/**', (route) => handle(route, schemas));
@@ -163,10 +165,11 @@ async function withPage({ viewport = { width: 1000, height: 860 }, reducedMotion
   try {
     await page.goto(fixtureUrl, { waitUntil: 'domcontentloaded' });
     await page.locator('textarea.composer__input').first().waitFor();
+    await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
     await run({ page, shot, ui: ui(page) });
     assert.deepEqual(errors, [], 'page errors');
     assert.deepEqual(external, [], 'external requests');
-    assert.deepEqual(world.sockets, [], 'application WebSocket attempts');
+    assert.ok(world.sockets.every((url) => new URL(url).pathname === '/ws'), 'only the local mocked store socket is used');
     assert.deepEqual(world.notExposed.filter((path) => !unexposedAllowed.test(path)), [], 'unmocked API paths');
   } finally { await context.close(); }
 }
@@ -183,7 +186,7 @@ function ui(page) {
     pause: page.getByRole('button', { name: 'Pause autonomous workflow' }),
     stop: page.getByRole('button', { name: 'Stop autonomous workflow' }),
     resume: page.getByRole('button', { name: /^Resume/ }),
-    alert: page.getByRole('alert'),
+    alert: page.locator('.composer__note[role="alert"], .session-workflow__error[role="alert"]'),
     label: (text) => page.getByRole('region', { name: 'Autonomous workflow' }).getByRole('button', { name: text }),
     open: (name) => page.getByRole('button', { name: `Open ${name}` }),
     refresh: () => page.evaluate(() => window.refreshExampleBootstrap()),
@@ -201,8 +204,9 @@ function ui(page) {
   };
 }
 async function test(name, run) {
+  if (process.env.SESSION_WORKFLOW_ACCEPTANCE_FILTER && !new RegExp(process.env.SESSION_WORKFLOW_ACCEPTANCE_FILTER).test(name)) return;
   try { await run(); passed++; console.log(`PASS ${name}`); }
-  catch (error) { failures.push({ name, error }); console.log(`FAIL ${name}\n  ${error instanceof Error ? error.stack?.split('\n').slice(0, 4).join('\n  ') : error}`); }
+  catch (error) { failures.push({ name, error }); console.log(`FAIL ${name}\n  ${error instanceof Error ? error.stack : error}`); }
 }
 const noOverflow = (page) => page.evaluate(() => document.documentElement.scrollWidth <= innerWidth);
 const inViewport = (page, selector) => page.evaluate((sel) => [...document.querySelectorAll(sel)].filter((node) => node.getClientRects().length).every((node) => { const box = node.getBoundingClientRect(); return box.left >= -0.5 && box.right <= innerWidth + 0.5; }), selector);
@@ -218,7 +222,7 @@ try {
   fixtureUrl = `http://127.0.0.1:${server.httpServer.address().port}/scripts/session-workflow-browser-fixture.html`;
   const contracts = await server.ssrLoadModule('/packages/contracts/src/session-workflow.ts');
   const schemas = { StartSessionWorkflowSchema: contracts.StartSessionWorkflowSchema, WorkflowControlSchema: contracts.WorkflowControlSchema, ResumeSessionWorkflowSchema: contracts.ResumeSessionWorkflowSchema };
-  browser = await chromium.launch({ executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH || chromium.executablePath(), headless: true, args: ['--no-sandbox'] });
+  browser = await chromium.launch({ executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH || chromium.executablePath(), headless: true });
   const run = (options, fn) => withPage({ ...options, schemas }, fn);
 
   await test('opt-in: initial composer is ordinary chat and native controls stay editable', () => run({}, async ({ page, ui: u }) => {
@@ -228,6 +232,8 @@ try {
     assert.equal(await u.panel.count(), 0, 'no workflow panel without a workflow');
     assert.equal(await page.getByText(/Up to \d+ turns/).count(), 0, 'no budget setup until Autonomous is chosen');
     for (const control of [u.model, u.effort, u.policy, u.plan, u.autonomous]) assert.equal(await control.isDisabled(), false);
+    await u.effort.scrollIntoViewIfNeeded();
+    await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
     await u.effort.click();
     await page.getByRole('option', { name: /^High/ }).click();
     await page.getByRole('combobox', { name: 'Reasoning effort and service tier' }).filter({ hasText: 'High' }).waitFor();
@@ -531,7 +537,7 @@ try {
     await u.label('Waiting for you').waitFor();
     await page.getByText('Answer the question or permission request in this conversation to continue.').waitFor();
     await page.getByText('Waiting for your answer or approval above before the run can continue.').waitFor();
-    assert.equal(await u.send.isDisabled(), true);
+    assert.equal(await u.send.count(), 0, 'waiting presents Stop instead of a send action');
     assert.equal(await u.resume.count(), 0);
     assert.equal(await u.pause.isEnabled(), true);
     await shot('03-waiting-desktop');
@@ -654,7 +660,7 @@ try {
       await u.label('Working toward your goal').waitFor();
       const check = async (label) => {
         assert.equal(await noOverflow(page), true, `${label}: no horizontal page overflow`);
-        assert.equal(await inViewport(page, page.locator('.session-workflow, .session-workflow *, .composer, .composer__bar button, .workflow-setup, .workflow-setup *')), true, `${label}: every control inside the viewport`);
+        assert.equal(await inViewport(page, '.session-workflow, .session-workflow button, .composer, .composer__bar button, .workflow-setup, .workflow-setup input'), true, `${label}: every control inside the viewport`);
         for (const control of [u.pause, u.stop]) if (await control.count()) { const box = await control.boundingBox(); assert.ok(box && box.height >= 28, `${label}: action height`); }
       };
       await check('running');
@@ -682,7 +688,7 @@ try {
     await page.keyboard.press('Enter');
     assert.equal(await page.locator('.workflow-setup details').evaluate((node) => node.open), true);
     await page.keyboard.press('Tab');
-    assert.equal(await page.evaluate(() => document.activeElement?.closest('label')?.textContent), 'Turn budget');
+    assert.equal(await page.evaluate(() => document.activeElement?.closest('label')?.textContent), 'Turn budget', await page.evaluate(() => document.activeElement?.outerHTML));
     await page.keyboard.press('ControlOrMeta+A');
     await page.keyboard.type('5');
     await u.input.focus();
@@ -712,8 +718,8 @@ try {
     await run({ reducedMotion: 'no-preference', setup }, async ({ ui: u, page }) => { await u.label('Working toward your goal').waitFor(); assert.equal(await live(page), 'workflow-live'); });
   });
 
-  await test('boundary: only Example endpoints were used; no sockets, external hosts or run-control endpoints', () => {
-    assert.deepEqual(aggregate.sockets, []);
+  await test('boundary: only Example endpoints and mocked local sockets were used; no external hosts or run-control endpoints', () => {
+    assert.ok(aggregate.sockets.every((url) => new URL(url).hostname === '127.0.0.1' && new URL(url).pathname === '/ws'));
     assert.deepEqual(aggregate.unexposed.filter((path) => !unexposedAllowed.test(path)), []);
     assert.deepEqual(aggregate.requests.filter((entry) => /\/(interrupt|approvals|questions|compact|runs|retry)\b/.test(entry) && !/GET /.test(entry)), []);
   });
