@@ -38,6 +38,7 @@ code, pre, kbd, samp { font-family: var(--font-mono); }
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; }
+  details::details-content { transition: none !important; }
 }
 
 @supports (interpolate-size: allow-keywords) and selector(details::details-content) {
