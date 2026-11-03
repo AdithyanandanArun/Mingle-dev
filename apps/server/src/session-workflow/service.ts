@@ -319,8 +319,13 @@ export class SessionWorkflowService {
     }
     const wf = this.repo.open(sessionId);
     if (!wf || wf.state !== 'running' || wf.currentRunId) return options;
-    if (options.intent === 'plan' || options.executionPlanId || options.taskId || options.invocation) return options;
-    if (wf.counters.turns >= wf.limits.maxTurns || Date.now() >= Date.parse(wf.deadlineAt)) return options;
+    if (options.intent === 'plan' || options.executionPlanId || options.taskId || options.invocation) {
+      throw conflict('Pause autonomous work before starting a different task, native command or read-only plan in this session.');
+    }
+    if (wf.counters.turns >= wf.limits.maxTurns || Date.now() >= Date.parse(wf.deadlineAt)) {
+      this.pauseWith(wf, 'limit', 'The goal reached its turn or time budget before this turn could start.');
+      throw conflict('The autonomous goal reached its budget and is paused. Resume it with an explicit extension or send your message again as ordinary chat.');
+    }
     const kind: WorkflowRunKind = options.origin === 'queue' ? (this.wakeupRow(sessionId, content) ? 'wakeup' : 'queue') : 'human';
     return {
       ...options, taskId: wf.taskId, workflow: { workflowId: wf.id, kind } satisfies WorkflowRunBinding,

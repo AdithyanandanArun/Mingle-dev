@@ -158,4 +158,31 @@ describe('single-session workflow HTTP and native MCP integration', () => {
     expect(fake.runs[0]!.prompt).toMatch(/inspect the current state/i);
     expect(restarted.app.store.getSession(session.id)?.policy).toBe('full-access');
   }, 15_000);
+
+  it('rejects task and native-plan starts while a goal waits for a helper instead of bypassing its turn budget', async () => {
+    const { t, session, project, endpoint } = await setup();
+    const child = t.app.store.insertSession({ projectId: project.id, name: 'Example helper', provider: session.provider,
+      model: session.model, effort: session.effort, policy: session.policy, isolated: false,
+      worktreePath: session.worktreePath, branch: session.branch, parentSessionId: session.id,
+    });
+    t.fake.script = async (options) => {
+      t.app.store.insertDelegatedSubagent({ id: 'example-held-helper', parentSessionId: session.id, childSessionId: child.id,
+        name: 'example-helper', provider: session.provider, model: session.model, task: 'Wait in the fixture', status: 'running',
+        requestedBy: 'agent', startedAt: new Date().toISOString(), endedAt: null, resultPreview: null, error: null, resultDelivered: false,
+      });
+      const client = await connect(options.progressMcp!);
+      await client.callTool({ name: 'mingle_plan_update', arguments: { steps: [{ title: 'Wait for the helper', status: 'in_progress' }] } });
+    };
+    expect((await t.api('POST', endpoint, { goal: 'Wait for the helper result.' })).status).toBe(202);
+    await waitFor(() => t.fake.runs.length === 1 && !t.app.runtime.isActive(session.id));
+    const task = await t.api('POST', '/api/tasks', { projectId: project.id, sessionId: session.id,
+      title: 'A different task', description: 'Another explicit task', acceptanceCriteria: '', dependsOn: [],
+    });
+    expect(task.status).toBe(201);
+    expect((await t.api('POST', `/api/tasks/${task.json.id}/run`, {})).status).toBe(409);
+    expect(() => t.app.runtime.start(session.id, 'Generate a native plan.', { intent: 'plan' })).toThrow(/Pause autonomous work/);
+    expect(t.fake.runs).toHaveLength(1);
+    expect((await t.api('GET', endpoint)).json.workflow).toMatchObject({ state: 'running', counters: { turns: 1 }, currentRunId: null });
+    expect(t.app.store.getTask(task.json.id)?.status).toBe('ready');
+  });
 });
