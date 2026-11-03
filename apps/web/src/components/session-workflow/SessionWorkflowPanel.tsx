@@ -15,6 +15,7 @@ const reasons: Record<WorkflowStopReason, string> = {
 };
 
 export function SessionWorkflowPanel({ workflow, session }: { workflow: SessionWorkflow; session: Session }) {
+  const helpers = useMingle((state) => state.boot?.delegatedSubagents?.reduce((count, item) => count + Number(item.parentSessionId === session.id && item.status === 'running'), 0) ?? 0);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const mounted = useRef(true);
@@ -29,7 +30,7 @@ export function SessionWorkflowPanel({ workflow, session }: { workflow: SessionW
   const extraTimeLabel = extraMinutes % 60 === 0 ? `${extraMinutes / 60} hours` : `${extraMinutes} minutes`;
   const budgetExhausted = workflow.counters.turns >= 50 || (expired && extraMinutes === 0);
   const resumeLabel = extraTurns ? `Resume · +${extraTurns} turns` : extraMinutes ? `Resume · +${extraTimeLabel}` : 'Resume';
-  const label = waiting ? 'Waiting for you' : running ? session.status === 'running' ? 'Working toward your goal' : 'Continuing your goal'
+  const label = waiting ? 'Waiting for you' : running ? session.status === 'running' ? 'Working toward your goal' : helpers ? `Waiting for ${helpers} subagent${helpers === 1 ? '' : 's'}` : 'Continuing your goal'
     : workflow.stopReason ? reasons[workflow.stopReason] : workflow.state === 'completed' ? 'Agent reported completion' : 'Autonomous work paused';
   const act = async (action: 'pause' | 'resume' | 'stop') => {
     setBusy(action); setError(null);
@@ -64,6 +65,7 @@ export function SessionWorkflowPanel({ workflow, session }: { workflow: SessionW
       {workflow.summary ? <p className="session-workflow__summary">{workflow.summary}</p> : null}
       {workflow.state === 'completed' ? <button type="button" className="link-btn" onClick={() => useMingle.getState().setContextTab('changes')}>Review changes</button> : null}
       {waiting ? <p className="session-workflow__hint">Answer the question or permission request in this conversation to continue.</p> : null}
+      {running && session.status === 'idle' && helpers > 0 ? <p className="session-workflow__hint">Helper results continue this goal within its remaining budget.</p> : null}
       {workflow.state === 'paused' && workflow.stopReason === 'app-closed' ? <p className="session-workflow__hint">Resume checks the current workspace before continuing partial work.</p> : null}
       {extraTurns && extraMinutes ? <p className="session-workflow__hint">Resuming grants {extraTurns} additional turns and {extraTimeLabel} more.</p> : null}
       {workflow.state === 'paused' && budgetExhausted ? <p className="session-workflow__hint">This goal reached its maximum budget. Stop it before starting a new goal.</p> : null}
