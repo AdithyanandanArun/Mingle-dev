@@ -1,11 +1,11 @@
 import { create } from 'zustand';
-import { mergeTextDelta } from '@mingle/contracts/stream';
-import type { Approval, Bootstrap, GroupSnapshot, Message, MessageContextRef, Project, ServerEvent, ClientEvent, Session, Task, TeamSessionRef, WorkspaceEvent } from '@mingle/contracts';
+import type { Bootstrap, GroupSnapshot, Message, MessageContextRef, Project, ServerEvent, ClientEvent, Session, TeamSessionRef } from '@mingle/contracts';
 import { api, errorMessage } from '../lib/api';
 import { terminalBus } from './terminalBus';
 import { resolveTab, useBrowserStore } from './browser';
 import { activeMembers, findGroupForSession, groupChildSessionIds } from '../lib/groups';
 import { dispatchTeamUpdate } from '../lib/team-live-updates';
+import { applyStreamDelta, findById, pendingOptimisticMessages, pruneStreams, reconcileBootstrap } from './bootstrapState';
 
 export type View = 'workspace' | 'tasks' | 'activity' | 'map' | 'team-structure' | 'settings';
 export type SettingsSection = 'account' | 'general' | 'project' | 'agents' | 'team' | 'providers' | 'browser' | 'appearance';
@@ -44,6 +44,8 @@ export interface TerminalState {
   note: string | null;
 }
 
+/** Minimum spacing between published stream updates; React renders at most this often while text streams in. */
+const STREAM_PUBLISH_MS = 32;
 const LS = 'relay.ui.v2';
 interface Persisted {
   activeProjectId?: string; sessionByProject?: Record<string, string>; selectedTeamSessionByProject?: Record<string, string>;
@@ -66,11 +68,17 @@ const loadPersisted = (): Persisted => {
 };
 const persisted = loadPersisted();
 
+/**
+ * Debounces refresh requests while enforcing a floor between bootstraps. A continuous event stream cannot postpone
+ * the refresh forever: the wait is bounded from the first request that is still pending.
+ */
 export function createRefreshScheduler(refresh: () => void, getLastRefreshAt: () => number = () => Number.NEGATIVE_INFINITY) {
   let timer: ReturnType<typeof setTimeout> | undefined;
   let lastScheduledRefreshAt = Number.NEGATIVE_INFINITY;
+  let pendingSince: number | undefined;
   const intervalMs = 1_000;
   const debounceMs = 160;
+  const maxWaitMs = 2_000;
   const run = () => {
     timer = undefined;
     const now = Date.now();
@@ -80,6 +88,7 @@ export function createRefreshScheduler(refresh: () => void, getLastRefreshAt: ()
       timer = setTimeout(run, remaining);
       return;
     }
+    pendingSince = undefined;
     lastScheduledRefreshAt = now;
     refresh();
   };
@@ -87,13 +96,17 @@ export function createRefreshScheduler(refresh: () => void, getLastRefreshAt: ()
     schedule() {
       if (timer) clearTimeout(timer);
       const now = Date.now();
+      pendingSince ??= now;
       const lastRefreshAt = Math.max(lastScheduledRefreshAt, getLastRefreshAt());
-      const untilNextAllowed = intervalMs - (now - lastRefreshAt);
-      timer = setTimeout(run, Math.max(debounceMs, untilNextAllowed));
+      const untilNextAllowed = Math.max(0, intervalMs - (now - lastRefreshAt));
+      const settled = Math.max(debounceMs, untilNextAllowed);
+      const ceiling = Math.max(pendingSince + maxWaitMs - now, untilNextAllowed);
+      timer = setTimeout(run, Math.min(settled, ceiling));
     },
     cancel() {
       if (timer) clearTimeout(timer);
       timer = undefined;
+      pendingSince = undefined;
     },
   };
 }
@@ -182,68 +195,6 @@ interface MingleState {
   resizeTerminal(cols: number, rows: number): void;
 }
 
-const sameValue = (a: unknown, b: unknown): boolean => a === b || (typeof a === 'object' && typeof b === 'object' && JSON.stringify(a) === JSON.stringify(b));
-const sameItem = <T extends object>(a: T, b: T): boolean => {
-  const ka = Object.keys(a) as (keyof T)[];
-  if (ka.length !== Object.keys(b).length) return false;
-  return ka.every((k) => sameValue(a[k], b[k]));
-};
-
-/** Group snapshots have no top-level id; keep the previous reference for any that did not change. */
-function reconcileGroups(prev: GroupSnapshot[] | undefined, next: GroupSnapshot[]): GroupSnapshot[] {
-  if (!prev) return next;
-  const old = new Map(prev.map((p) => [p.group.id, p]));
-  let changed = prev.length !== next.length;
-  const out = next.map((n, i) => {
-    const o = old.get(n.group.id);
-    if (o && sameValue(o, n)) {
-      if (prev[i] !== o) changed = true;
-      return o;
-    }
-    changed = true;
-    return n;
-  });
-  return changed ? out : prev;
-}
-
-/** Reuses previous object references for unchanged items so unrelated components do not re-render. */
-function reconcile<T extends { id: string | number }>(prev: T[] | undefined, next: T[]): T[] {
-  if (!prev) return next;
-  const old = new Map(prev.map((p) => [p.id, p]));
-  let changed = prev.length !== next.length;
-  const out = next.map((n, i) => {
-    const o = old.get(n.id);
-    if (o && sameItem(o, n)) {
-      if (prev[i] !== o) changed = true;
-      return o;
-    }
-    changed = true;
-    return n;
-  });
-  return changed ? out : prev;
-}
-
-function reconcileBootstrap(prev: Bootstrap | null, next: Bootstrap): Bootstrap {
-  if (!prev) return next;
-  return {
-    ...next,
-    runs: reconcile(prev.runs, next.runs ?? []),
-    toolCalls: reconcile(prev.toolCalls, next.toolCalls ?? []),
-    delegatedSubagents: reconcile(prev.delegatedSubagents ?? [], next.delegatedSubagents ?? []),
-    projects: reconcile<Project>(prev.projects, next.projects),
-    sessions: reconcile<Session>(prev.sessions, next.sessions),
-    messages: reconcile<Message>(prev.messages, next.messages),
-    tasks: reconcile<Task>(prev.tasks, next.tasks),
-    events: reconcile<WorkspaceEvent>(prev.events, next.events),
-    approvals: reconcile<Approval>(prev.approvals, next.approvals),
-    plans: reconcile(prev.plans, next.plans),
-    questions: reconcile(prev.questions, next.questions),
-    providers: reconcile(prev.providers, next.providers),
-    settings: sameItem(prev.settings, next.settings) ? prev.settings : next.settings,
-    ...(next.groups ? { groups: reconcileGroups(prev.groups, next.groups) } : {}),
-  };
-}
-
 /** Choose valid selections without disturbing choices that are still valid. */
 function resolveSelection(s: Pick<MingleState, 'boot' | 'activeProjectId' | 'sessionByProject' | 'teamSessionsByProject' | 'selectedTeamSessionByProject'>, boot: Bootstrap): Pick<MingleState, 'activeProjectId' | 'sessionByProject'> {
   let projectId = s.activeProjectId;
@@ -279,24 +230,6 @@ function resolveSelection(s: Pick<MingleState, 'boot' | 'activeProjectId' | 'ses
   return { activeProjectId: projectId, sessionByProject: changed ? map : s.sessionByProject };
 }
 
-/** Drop stream buffers the server snapshot has already caught up with. */
-function pruneStreams(streams: Record<string, StreamEntry>, boot: Bootstrap): Record<string, StreamEntry> {
-  let changed = false;
-  const out: Record<string, StreamEntry> = {};
-  for (const [id, entry] of Object.entries(streams)) {
-    const msg = boot.messages.find((m) => m.id === id);
-    const session = boot.sessions.find((x) => x.id === entry.sessionId);
-    const caughtUp = msg && msg.content.length >= (entry.base + entry.text).length;
-    const orphan = !msg && session && session.status !== 'running';
-    if (caughtUp || orphan || !session) {
-      changed = true;
-      continue;
-    }
-    out[id] = entry;
-  }
-  return changed ? out : streams;
-}
-
 let socket: WebSocket | null = null;
 let retryTimer: number | undefined;
 let inflight: Promise<void> | null = null;
@@ -317,7 +250,13 @@ const send = (event: ClientEvent): boolean => {
 };
 
 export const useMingle = create<MingleState>((set, get) => {
-  let lastBootstrapText: string | null = null;
+  /** Last server payload after reconciliation, without local optimistic rows; the next fetch is compared against it. */
+  let lastServerBoot: Bootstrap | null = null;
+  let lastPersistedText: string | null = null;
+  /** Stream buffers computed from deltas but not yet published, so a burst costs one store update. */
+  let pendingStreams: Record<string, StreamEntry> | null = null;
+  let streamFlushTimer: ReturnType<typeof setTimeout> | undefined;
+  let lastStreamPublishAt = Number.NEGATIVE_INFINITY;
   let lastBootstrapStartedAt = Number.NEGATIVE_INFINITY;
   let savedProjectId: string | null = null;
   let projectSave = Promise.resolve();
@@ -332,7 +271,11 @@ export const useMingle = create<MingleState>((set, get) => {
       contextOpen: s.contextOpen, terminalOpen: s.terminalOpen, terminalHeight: s.terminalHeight, scope: s.scope,
     };
     try {
-      localStorage.setItem(LS, JSON.stringify(data));
+      const text = JSON.stringify(data);
+      if (text !== lastPersistedText) {
+        localStorage.setItem(LS, text);
+        lastPersistedText = text;
+      }
     } catch {
       /* storage may be unavailable */
     }
@@ -356,6 +299,27 @@ export const useMingle = create<MingleState>((set, get) => {
   };
 
   const scheduleRefresh = (): void => refreshScheduler.schedule();
+
+  const flushStreams = (): void => {
+    clearTimeout(streamFlushTimer);
+    streamFlushTimer = undefined;
+    if (!pendingStreams) return;
+    const updates = pendingStreams;
+    pendingStreams = null;
+    lastStreamPublishAt = Date.now();
+    set({ streams: { ...get().streams, ...updates } });
+  };
+  const discardPendingStreams = (): void => {
+    clearTimeout(streamFlushTimer);
+    streamFlushTimer = undefined;
+    pendingStreams = null;
+  };
+  /** The first delta after a quiet period publishes at once; the rest of a burst shares one trailing publish. */
+  const publishStreams = (): void => {
+    const wait = STREAM_PUBLISH_MS - (Date.now() - lastStreamPublishAt);
+    if (wait <= 0) flushStreams();
+    else streamFlushTimer ??= setTimeout(flushStreams, wait);
+  };
 
   const markTerminalLost = (): void => {
     const t = get().terminal;
@@ -404,19 +368,12 @@ export const useMingle = create<MingleState>((set, get) => {
         break;
       }
       case 'session.delta': {
-        const { streams, boot } = get();
-        const existing = streams[ev.messageId];
-        const snapshot = boot?.messages.find((m) => m.id === ev.messageId)?.content ?? '';
-        if (ev.offset !== undefined) {
-          const buffered = existing ? existing.base + existing.text : '';
-          const current = snapshot.length > buffered.length ? snapshot : buffered;
-          const text = mergeTextDelta(current, ev.offset, ev.delta);
-          if (text === null) { scheduleRefresh(); break; }
-          set({ streams: { ...streams, [ev.messageId]: { sessionId: ev.sessionId, base: '', text } } });
-        } else {
-          const base = existing ? existing.base : snapshot;
-          set({ streams: { ...streams, [ev.messageId]: { sessionId: ev.sessionId, base, text: (existing?.text ?? '') + ev.delta } } });
-        }
+        const existing = pendingStreams?.[ev.messageId] ?? get().streams[ev.messageId];
+        const snapshot = findById(get().boot?.messages, ev.messageId)?.content ?? '';
+        const entry = applyStreamDelta(existing, snapshot, ev);
+        if (!entry) { scheduleRefresh(); break; }
+        (pendingStreams ??= {})[ev.messageId] = entry;
+        publishStreams();
         break;
       }
       case 'terminal.error': {
@@ -479,6 +436,7 @@ export const useMingle = create<MingleState>((set, get) => {
     ws.onopen = () => {
       if (socket !== ws) return;
       // Deltas missed while disconnected would leave gaps, so rebuild from the server snapshot.
+      discardPendingStreams();
       set({ connection: 'online', attempt: 0, nextRetryAt: null, streams: {} });
       void get().refreshNow();
     };
@@ -601,21 +559,26 @@ export const useMingle = create<MingleState>((set, get) => {
           dirty = false;
           try {
             const next = await api.bootstrap();
+            flushStreams();
             const s = get();
-            const serialized = JSON.stringify(next);
-            if (serialized === lastBootstrapText) {
+            // One structural pass against the previous server payload replaces serializing and comparing the whole body.
+            const serverBoot = reconcileBootstrap(lastServerBoot, next);
+            if (lastServerBoot && serverBoot === lastServerBoot) {
               if (s.bootLoading || s.bootError || s.staleError) set({ bootError: null, staleError: null, bootLoading: false });
               continue;
             }
-            lastBootstrapText = serialized;
-            const pendingOptimistic = s.boot?.messages.filter((message) => message.id.startsWith('optimistic:') &&
-              !next.messages.some((saved) => saved.role === 'user' && saved.sessionId === message.sessionId && saved.content === message.content &&
-                Math.abs(Date.parse(saved.createdAt) - Date.parse(message.createdAt)) < 10_000)) ?? [];
+            lastServerBoot = serverBoot;
+            const pendingOptimistic = pendingOptimisticMessages(s.boot?.messages, serverBoot.messages);
+            // Everything in `serverBoot` is already canonical, so this pass is mostly reference checks.
             const boot = reconcileBootstrap(s.boot, pendingOptimistic.length
-              ? { ...next, messages: [...next.messages, ...pendingOptimistic] }
-              : next);
+              ? { ...serverBoot, messages: [...serverBoot.messages, ...pendingOptimistic] }
+              : serverBoot);
             const sel = resolveSelection(s, boot);
-            set({ boot, bootError: null, staleError: null, bootLoading: false, streams: pruneStreams(s.streams, boot), ...sel });
+            const streams = pruneStreams(s.streams, boot);
+            const update: Partial<MingleState> = { boot, bootError: null, staleError: null, bootLoading: false, streams, ...sel };
+            // Publish only what differs so an equal payload (for example one the live events already applied) notifies nobody.
+            const changes = Object.fromEntries(Object.entries(update).filter(([key, value]) => s[key as keyof MingleState] !== value));
+            if (Object.keys(changes).length) set(changes);
             savePersisted();
           } catch (e) {
             const msg = errorMessage(e);
@@ -770,6 +733,7 @@ export const useMingle = create<MingleState>((set, get) => {
       });
     },
     applyArchivedSessions(sessionIds, groupId) {
+      flushStreams();
       const ids = new Set(sessionIds);
       const terminalSessionId = get().terminal.sessionId;
       if (terminalSessionId && ids.has(terminalSessionId)) get().stopTerminal();
