@@ -8,6 +8,7 @@ import type { Provider, Policy, Effort } from './provider-config';
 import type { ContextCompactionResult } from './resilience';
 export * from './provider-config';
 export * from './provider-updates';
+export * from './session-workflow';
 export type SessionStatus = 'idle' | 'running' | 'waiting' | 'interrupted' | 'error';
 export type TaskStatus = 'backlog' | 'ready' | 'running' | 'blocked' | 'review' | 'done';
 export interface Project { id: string; name: string; path: string; createdAt: string; isExample: boolean }
@@ -153,6 +154,8 @@ export interface AppSettings {
   browserDefaultMode?: 'embedded' | 'managed' | 'existing'; browserExistingSourceId?: string; browserCdpEndpoint?: string;
 }
 export interface Bootstrap {
+  /** Explicit, bounded autonomous goals for standalone root sessions. */
+  workflows?: import('./session-workflow').SessionWorkflow[];
   /** Last project selected on this device, independent of the desktop's changing loopback origin. */
   lastProjectId?: string | null;
   projects: Project[]; sessions: Session[]; messages: Message[]; queuedMessages?: QueuedMessage[]; delegatedSubagents?: import('./delegated-subagents').DelegatedSubagent[]; tasks: Task[]; events: WorkspaceEvent[]; approvals: Approval[]; plans: import('./planning').SessionPlan[]; questions: import('./planning').UserQuestion[]; providers: ProviderInfo[]; settings: AppSettings; version: string; runs: SessionRun[]; toolCalls: ToolCall[]; groups?: import('./groups').GroupSnapshot[] }
