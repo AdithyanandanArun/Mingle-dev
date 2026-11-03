@@ -34,6 +34,8 @@ export class SessionResumeService {
     private readonly providers: ProviderService,
     private readonly groups: GroupService,
     private readonly log: Logger,
+    /** Autonomous goals own their runs: they pause on restart and need an explicit Resume. */
+    private readonly workflows?: { ownsRun(runId: string): boolean },
   ) {}
 
   /** Provider discovery and all resume work happen after listen(), outside the startup path. */
@@ -74,6 +76,8 @@ export class SessionResumeService {
     // Delegated children have their own durable recovery path: it fails the stale delegation and notifies the parent.
     // Resuming the child here would duplicate its work after that failure has already been delivered.
     if (session.parentSessionId) return this.skip(entry, 'delegated-subagent-managed');
+    // An autonomous goal pauses on restart; it must never be resumed by a second, automatic owner.
+    if (this.workflows?.ownsRun(entry.runId)) return this.skip(entry, 'workflow-managed');
     const run = this.store.getRun(entry.runId);
     if (!run) return this.skip(entry, 'interrupted-run-missing');
     const startedAt = Date.parse(run.startedAt);

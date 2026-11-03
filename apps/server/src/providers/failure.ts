@@ -153,8 +153,8 @@ function classify(error: unknown, records: Record<string, unknown>[], status?: n
   if (allCodes.some((tag) => !/(?:^|_)rate_limit(?:_|$)/.test(tag)
     && /(?:context|prompt).*(?:length|window|too_large|exceed|limit)|(?:context_length_exceeded|context_window_exceeded|prompt_too_long|request_too_large|input_too_large)/.test(tag))
     || /(?:maximum context length|context window.{0,40}(?:exceed|full|too large)|prompt is too long|input is too large)/i.test(text)) return 'context_exhausted';
-  if (allCodes.some((tag) => /(?:max_output_tokens|output_token_limit|output_truncated|max_tokens|output_length_exceeded|output_tokens_exceeded|output_limit_exceeded)/.test(tag))
-    || /(?:maximum|max|maximal) output tokens?|output token limit|stopped at (?:its )?token limit/i.test(text)) return 'output_truncated';
+  if (allCodes.some((tag) => /(?:max_output_tokens|output_token_limit|output_truncated|max_tokens|turn_limit|max_turn_requests|output_length_exceeded|output_tokens_exceeded|output_limit_exceeded)/.test(tag))
+    || /(?:maximum|max|maximal) output tokens?|output token limit|stopped at (?:its )?(?:token|turn) limit/i.test(text)) return 'output_truncated';
   if (allCodes.some((tag) => /(?:insufficient_quota|quota_exhausted|quota_exceeded|usage_limit_reached|usage_limit_exceeded|billing_hard_limit|account_quota)/.test(tag))
     || /(?:insufficient quota|quota (?:is )?(?:exhausted|exceeded)|usage limit reached|billing hard limit)/i.test(text)) return 'quota_exhausted';
   if (allCodes.some((tag) => /(?:rate_limit|too_many_requests|overloaded_error|temporarily_unavailable_capacity)/.test(tag))

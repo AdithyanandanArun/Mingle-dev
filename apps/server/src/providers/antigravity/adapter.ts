@@ -132,6 +132,7 @@ class AntigravityRun {
       const reason = object(response).stopReason;
       if (reason === 'cancelled') throw new ProviderError('Antigravity canceled the turn without a Mingle interruption.', { code: 'turn_interrupted' });
       if (reason === 'max_tokens' || reason === 'max_turn_requests') throw new ProviderError(`Antigravity stopped at its ${reason === 'max_tokens' ? 'token' : 'turn'} limit. Partial output was retained.`, { code: 'turn_limit', outcomeKnown: true });
+      if (reason === 'refusal') throw new ProviderError('Antigravity refused to continue this turn. Review its reply, then rephrase or choose another model.', { code: 'refusal', outcomeKnown: true });
       if (reason !== 'end_turn' && reason !== 'refusal') throw new ProviderError('Antigravity returned an unrecognized completion state.', { code: 'protocol_error' });
     } catch (error) {
       if (this.violation) throw this.violation;
@@ -209,7 +210,7 @@ class AntigravityRun {
     const mcp = object(object(call._meta).mcp);
     const trustedTeam = this.options.teamMcp && mcp.server === 'mingle_team' && typeof mcp.tool === 'string' && TEAM.has(mcp.tool);
     const trustedBrowser = this.options.browserMcp && mcp.server === 'mingle_browser' && typeof mcp.tool === 'string' && /^browser_[a-z_]+$/.test(mcp.tool);
-    const trustedProgress = this.options.progressMcp && mcp.server === 'mingle_progress' && ['mingle_status_set', 'mingle_plan_update'].includes(String(mcp.tool));
+    const trustedProgress = this.options.progressMcp && mcp.server === 'mingle_progress' && ['mingle_status_set', 'mingle_plan_update', 'mingle_workflow_finish'].includes(String(mcp.tool));
     const trustedSubagent=this.options.subagentMcp&&mcp.server==='mingle_subagents'&&['mingle_subagent_start','mingle_subagent_list','mingle_subagent_result','mingle_subagent_cancel'].includes(String(mcp.tool));
     const trustedMemory = this.options.memoryMcp && mcp.server === 'mingle_memory' && ['mingle_memory_remember', 'mingle_memory_search', 'mingle_memory_update', 'mingle_memory_retire'].includes(String(mcp.tool));
     let approved = Boolean(trustedTeam || trustedBrowser || trustedProgress || trustedSubagent || trustedMemory);

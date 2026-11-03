@@ -24,6 +24,8 @@ import type { DispatchAwareOptions, DispatchState } from './providers/common.ts'
 import { buildMessageContext } from './message-context.ts';
 import { buildProviderHandoff } from './provider-handoff.ts';
 import { git } from './repository/git-run.ts';
+import type { RunBoundaryCounters, RunChecklistState, RunEndInfo, SessionWorkflowHooks, WorkflowRunBinding } from './session-workflow/hooks.ts';
+import type { WorkflowFinish } from '@mingle/contracts';
 
 export interface RuntimeOptions {
   /** Milliseconds to wait after an abort before declaring an unresponsive adapter interrupted. */
@@ -123,6 +125,11 @@ interface ActiveRun {
   onActivity?: (event: AdapterEvent) => void;
   onApproval?: (approval: Approval) => void;
   onApprovalDecision?: (approval: Approval, decision: 'approved' | 'denied') => void;
+  workflow?: WorkflowRunBinding;
+  boundary: RunBoundaryCounters;
+  checklist: RunChecklistState | null;
+  endInfo?: RunEndInfo;
+  idleNotified: boolean;
   promise: Promise<void>;
 }
 
@@ -151,6 +158,10 @@ export interface StartOptions {
   onActivity?: (event: AdapterEvent) => void;
   onApproval?: (approval: Approval) => void;
   onApprovalDecision?: (approval: Approval, decision: 'approved' | 'denied') => void;
+  /** Server-only binding to a bounded single-session workflow; HTTP bodies can never reach this field. */
+  workflow?: WorkflowRunBinding;
+  /** Set when a queued message is being started by the queue, so a workflow can tell human input from its own turns. */
+  origin?: 'queue';
 }
 
 const MAX_TOOL_CHARS = 20_000;
@@ -197,7 +208,7 @@ export class SessionRuntime {
     if(this.store.getSession(sessionId)?.status==='waiting') { this.store.enqueueMessage({...item,createdAt:item.createdAt}); return; }
     try {
       const session=this.store.getSession(sessionId);
-      this.start(sessionId,item.content,{intent:item.intent,attachmentIds:item.attachmentIds,contextRefs:item.contextRefs,deferContextResolution:true,resolveSkills:session ? this.resolveQueuedSkills?.(session,item.skills) : undefined,queuedAttachmentOwnerId:item.id});
+      this.start(sessionId,item.content,{intent:item.intent,attachmentIds:item.attachmentIds,contextRefs:item.contextRefs,deferContextResolution:true,resolveSkills:session ? this.resolveQueuedSkills?.(session,item.skills) : undefined,queuedAttachmentOwnerId:item.id,origin:'queue'});
     } catch(error) { this.requeueFront(sessionId,item,`Could not start queued message: ${errorMessage(error)}`); }
   }
   private requeueFront(sessionId:string,item:import('@mingle/contracts').QueuedMessage,reason:string): void {
@@ -220,6 +231,7 @@ export class SessionRuntime {
   private memoryMcp?: ProjectMemoryMcpBridge;
   private runFinishedListeners = new Set<(sessionId:string,outcome:'completed'|'failed'|'interrupted',failure:string|null)=>void>();
   private teamProxy?: TeamProxyRuntimeService;
+  private workflowHooks?: SessionWorkflowHooks;
   private attachmentService?: AttachmentService;
   private readonly abortGraceMs: number;
   private readonly flushIntervalMs: number;
@@ -246,6 +258,10 @@ export class SessionRuntime {
   setProjectMemory(service: ProjectMemoryService, bridge: ProjectMemoryMcpBridge): void { this.projectMemory = service; this.memoryMcp = bridge; }
   onRunFinished(listener:(sessionId:string,outcome:'completed'|'failed'|'interrupted',failure:string|null)=>void):()=>void { this.runFinishedListeners.add(listener);return()=>this.runFinishedListeners.delete(listener); }
   setTeamProxyService(service: TeamProxyRuntimeService): void { this.teamProxy = service; }
+  /** Installs the single-session workflow seam. Sessions without a workflow see no behavioural change. */
+  setWorkflowHooks(hooks: SessionWorkflowHooks | undefined): void { this.workflowHooks = hooks; }
+  /** True when workflow turns can be given their run-scoped finish tool (needs the progress MCP bridge). */
+  supportsWorkflowFinish(): boolean { return Boolean(this.progressMcp && this.workflowHooks); }
 
   async authorizeApprovalDecision(approvalId: string): Promise<void> {
     await this.teamProxy?.authorizeApprovalDecision(approvalId);
@@ -320,6 +336,8 @@ export class SessionRuntime {
       throw badRequest('Remote team deliveries do not currently carry native commands, skills or host-local attachment IDs.');
     }
     if (!proxy) this.validateSession?.(runSession);
+    if (options.workflow && (!this.workflowHooks || proxy)) throw conflict('Autonomous goal turns are unavailable for this session.');
+    if (!proxy && this.workflowHooks && !options.groupDeliveryId && !options.teamRun) options = this.workflowHooks.prepareStart(sessionId, content, options);
 
     const pendingProviderHandoff = session.handoffFromProvider && session.handoffFromModel && session.handoffPendingAt
       ? {
@@ -367,6 +385,8 @@ export class SessionRuntime {
       attachmentOwnerKind: options.attachmentOwnerKind ?? 'message', attachmentOwnerId: options.attachmentOwnerId, changeBaseline: null, dispatchState: 'unknown',
       teamRun: options.teamRun === true, teamMcpConnection: options.teamMcp, onActivity: options.onActivity,
       onApproval: options.onApproval, onApprovalDecision: options.onApprovalDecision,
+      workflow: options.workflow, checklist: null, idleNotified: false,
+      boundary: { approvalsDenied: 0, approvalsExpired: 0, approvalsCancelled: 0, questionsAnswered: 0, questionsCancelled: 0 },
       promise: Promise.resolve(),
     };
     this.store.tx(() => {
@@ -394,6 +414,8 @@ export class SessionRuntime {
         const task = this.store.getTask(options.taskId);
         if (task) this.tasks.markRunning(task);
       }
+      // Budget freezing and the run binding share this transaction: a refusal rolls back the run row too.
+      if (run.workflow) this.workflowHooks!.runBound({ sessionId, runId: run.id, workflow: run.workflow });
       this.intelligence?.trackRequest(session, run.id, options.userMessage?.content ?? content, options.taskId);
       this.store.recordEvent({ projectId: session.projectId, sessionId, type: 'session.run.started', summary: `Run started: ${session.name}`, payload: { runId: run.id, provider: session.provider, model: session.model, taskId: options.taskId ?? null, handoffsIncluded: handoffs.length } });
     });
@@ -504,6 +526,7 @@ export class SessionRuntime {
       this.store.recordEvent({ projectId: session?.projectId ?? null, sessionId: question.sessionId, type: 'session.question.answered', summary: 'Provider question answered', payload: { questionId: question.id, runId: question.runId } });
       return updated;
     });
+    run.boundary.questionsAnswered++;
     this.finishQuestionWait(run, question.id, parsed.data);
     return answered;
   }
@@ -616,6 +639,7 @@ export class SessionRuntime {
         isLive: () => this.isRunLive(run.sessionId, run.id),
         setStatus: (status) => this.setProgressStatus(run, status),
         updatePlan: (plan) => this.updateProgressPlan(run, plan),
+        ...(run.workflow ? { finishWorkflow: (report: WorkflowFinish) => this.recordWorkflowReport(run, report) } : {}),
       }) : undefined;
       if (progressMcp) capabilityTokens.push(progressMcp.token);
       const subagentMcp = run.intent !== 'plan' && !session.parentSessionId && !this.groups?.forSession(session.id)
@@ -632,7 +656,9 @@ export class SessionRuntime {
       const explicit = run.invocation;
       const providerHandoffBlock = await this.providerHandoffBlock(run, session);
       const progressInstructions = progressMcp
-        ? 'Mingle provides mingle_status_set for the live composer status and mingle_plan_update for a replaceable checklist. Keep them current during multi-step work, updating status as you make progress.'
+        ? ['Mingle provides mingle_status_set for the live composer status and mingle_plan_update for a replaceable checklist. Keep them current during multi-step work, updating status as you make progress.',
+          run.workflow ? 'This turn belongs to a bounded Mingle goal. When the goal is finished, blocked, or needs a person, call mingle_workflow_finish once with outcome complete, blocked or needs_human and a short honest summary; ending a turn alone does not mean the goal is done.' : '',
+        ].filter(Boolean).join(' ')
         : undefined;
       const subagentInstructions=subagentMcp?'Mingle provides subagent tools for parallel self-contained tasks. Start them, continue your work, and finish your turn when ready; Mingle will resume you with each result automatically.':'';
       const effectivePrompt = explicit ? prompt : [providerHandoffBlock, run.intent !== 'plan' ? groupContext?.instructions : undefined, run.context, prompt].filter(Boolean).join('\n\n');
@@ -785,7 +811,14 @@ export class SessionRuntime {
       steps: steps.map((step) => ({ ...step, status: step.status === 'done' ? 'completed' : step.status })),
     };
     this.intelligence?.applyPlan(session, run.id, providerPlan);
+    const done = steps.filter((step) => step.status === 'done').length;
+    run.checklist = { total: steps.length, done, open: steps.length - done, fingerprint: JSON.stringify(steps.map((step) => [step.title, step.status])) };
     this.store.recordEvent({ projectId: session.projectId, sessionId: session.id, type: 'session.progress.plan', summary: 'Run progress checklist replaced', payload: { runId: run.id, planId, steps } });
+  }
+
+  private recordWorkflowReport(run: ActiveRun, report: WorkflowFinish): void {
+    if (!run.workflow || !this.workflowHooks || !this.isRunLive(run.sessionId, run.id)) throw conflict('This goal connection has expired');
+    this.workflowHooks.recordReport({ sessionId: run.sessionId, runId: run.id, report });
   }
 
   private async releaseAfterCleanup(run: ActiveRun): Promise<void> {
@@ -800,7 +833,7 @@ export class SessionRuntime {
       run.capabilityTokens.length = 0;
       try { this.groups?.onRuntimeIdle(run.sessionId); }
       catch (error) { this.log('error', `Failed to resume group queue after provider cleanup for ${run.sessionId}`, error); }
-      if (!run.teamRun) queueMicrotask(() => this.drainQueued(run.sessionId));
+      if (!run.teamRun) queueMicrotask(() => this.afterRunIdle(run));
     }
   }
 
@@ -949,7 +982,10 @@ export class SessionRuntime {
         this.store.recordEvent({ projectId: session?.projectId ?? null, sessionId: question.sessionId, type: 'session.question.cancelled', summary: 'Provider question cancelled', payload: { questionId: question.id, runId: question.runId } });
       });
     }
-    if (run) this.finishQuestionWait(run, question.id, null);
+    if (run) {
+      if (question.status === 'pending') run.boundary.questionsCancelled++;
+      this.finishQuestionWait(run, question.id, null);
+    }
     return updated;
   }
 
@@ -1135,6 +1171,7 @@ export class SessionRuntime {
       });
       throw conflict('Approval is stale: its run is no longer active');
     }
+    if (decision === 'denied') run.boundary.approvalsDenied++;
     const resolved = this.store.tx(() => {
       const result = this.store.resolveApproval(approvalId, decision, 'host');
       run.approvals.delete(approvalId);
@@ -1153,6 +1190,8 @@ export class SessionRuntime {
     const session = this.store.getSession(run.sessionId, true);
     const entries = [...run.approvals.entries()];
     run.approvals.clear();
+    if (reason === 'interrupted') run.boundary.approvalsCancelled += entries.length;
+    else if (reason === 'run finished') run.boundary.approvalsExpired += entries.length;
     this.store.tx(() => {
       for (const [id] of entries) {
         this.store.resolveApproval(id, 'denied', reason);
@@ -1446,10 +1485,13 @@ export class SessionRuntime {
     } catch (error) {
       this.log('error', `Failed to finalise run for ${run.sessionId}: ${redactSecrets(errorMessage(error)).slice(0, 500)}`);
     }
+    let failureInfo: RunEndInfo['failureInfo'] = null;
     if (outcome === 'failed' && failure) {
       try {
         const scrubCapabilities = (value: string) => run.capabilityTokens.reduce((text, token) => text.split(token).join('[redacted]'), value);
-        this.recovery?.recordFailure(run.sessionId, run.id, this.makeProviderFailure(run, failure, scrubCapabilities));
+        const providerFailureRecord = this.makeProviderFailure(run, failure, scrubCapabilities);
+        failureInfo = { kind: providerFailureRecord.kind, providerCode: providerFailureRecord.providerCode, outcomeUnknown: providerFailureRecord.outcomeUnknown, dispatchState: providerFailureRecord.dispatchState, message: providerFailureRecord.message };
+        this.recovery?.recordFailure(run.sessionId, run.id, providerFailureRecord);
       } catch (error) {
         this.log('error', `Failed to persist provider failure for run ${run.id}: ${redactSecrets(errorMessage(error)).slice(0, 500)}`);
       }
@@ -1465,7 +1507,25 @@ export class SessionRuntime {
     try { if (!run.teamRun) this.groups?.onRunFinished(run.sessionId, run.id, outcome); }
     catch (error) { this.log('error', `Failed to record group delivery outcome for ${run.sessionId}`, error); }
     for (const listener of this.runFinishedListeners) { try { listener(run.sessionId,outcome,failure); } catch(error) { this.log('error','Run-finished listener failed',error); } }
-    if (!run.cleanupPending && !run.teamRun) queueMicrotask(() => this.drainQueued(run.sessionId));
+    if (run.workflow || this.workflowHooks) {
+      run.endInfo = {
+        sessionId: run.sessionId, runId: run.id, outcome, failure, failureInfo, shutdown: run.shutdownInterruption === true || shutdownIsActive() || this.shutdownStartedAt !== null,
+        boundary: { ...run.boundary }, changedFiles: changes.summary.status === 'available' ? changes.summary.fileCount : null, toolCalls: run.tools.size,
+        checklist: run.checklist, startedAt: run.startedAt,
+      };
+      if (!run.teamRun) { try { this.workflowHooks?.runEnded(run.endInfo); } catch (error) { this.log('error', 'Workflow run-end handling failed', error); } }
+    }
+    if (!run.cleanupPending && !run.teamRun) queueMicrotask(() => this.afterRunIdle(run));
+  }
+
+  /** The runtime idle edge: provider cleanup is done and the queue-drain attempt for this run has been made. */
+  private afterRunIdle(run: ActiveRun): void {
+    try { this.drainQueued(run.sessionId); }
+    catch (error) { this.log('warn', `Could not drain the queue for ${run.sessionId} after the run ended: ${redactSecrets(errorMessage(error)).slice(0, 300)}`); return; }
+    if (!run.endInfo || run.idleNotified || !this.workflowHooks) return;
+    run.idleNotified = true;
+    try { this.workflowHooks.idle({ ...run.endInfo, sessionActive: this.isActive(run.sessionId) }); }
+    catch (error) { this.log('error', 'Workflow idle handling failed', error); }
   }
 
   /**
@@ -1476,10 +1536,13 @@ export class SessionRuntime {
     if (this.isActive(sessionId) || this.groups?.forSession(sessionId)) return false;
     const session = this.store.getSession(sessionId);
     if (!session || session.status === 'waiting' || session.status === 'running') return false;
-    const queued = this.store.dequeueMessage(sessionId);
+    const next = this.workflowHooks
+      ? this.store.listQueuedMessages(sessionId).find((item) => this.workflowHooks!.allowQueuedStart(sessionId, item))
+      : this.store.listQueuedMessages(sessionId)[0];
+    const queued = next ? this.store.dequeueMessage(sessionId, next.id) : undefined;
     if (!queued) return false;
     try {
-      this.start(sessionId, queued.content, { intent: queued.intent, attachmentIds: queued.attachmentIds, contextRefs: queued.contextRefs, deferContextResolution: true, resolveSkills: this.resolveQueuedSkills?.(session, queued.skills), queuedAttachmentOwnerId: queued.id });
+      this.start(sessionId, queued.content, { intent: queued.intent, attachmentIds: queued.attachmentIds, contextRefs: queued.contextRefs, deferContextResolution: true, resolveSkills: this.resolveQueuedSkills?.(session, queued.skills), queuedAttachmentOwnerId: queued.id, origin: 'queue' });
       return true;
     } catch (error) {
       this.log('error', `Could not drain queued message for ${sessionId}`, error);

@@ -2,8 +2,8 @@ import { createHash, randomBytes } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import { MinglePlanUpdateSchema, MingleStatusSetSchema } from '@mingle/contracts';
-import type { MinglePlanUpdate, MingleStatusSet, ProgressMcpConnection, Session } from '@mingle/contracts';
+import { MinglePlanUpdateSchema, MingleStatusSetSchema, WorkflowFinishSchema } from '@mingle/contracts';
+import type { MinglePlanUpdate, MingleStatusSet, ProgressMcpConnection, Session, WorkflowFinish } from '@mingle/contracts';
 import type { Store } from './store.ts';
 import { errorMessage, redactSecrets, truncate } from './util.ts';
 
@@ -14,11 +14,14 @@ interface Binding {
   isLive: () => boolean;
   setStatus: (status: MingleStatusSet) => void;
   updatePlan: (plan: MinglePlanUpdate) => void;
+  /** Present only for a run bound to an active workflow; its absence hides the finish tool entirely. */
+  finishWorkflow?: (report: WorkflowFinish) => void;
   revoked: boolean;
 }
 
 const hash = (value: string) => createHash('sha256').update(value).digest('hex');
 const STATUS_INSTRUCTIONS = 'mingle_status_set updates the short live progress label and optional detail. Use it to keep Mingle’s composer status current during multi-step work.';
+const FINISH_INSTRUCTIONS = 'mingle_workflow_finish records your own report for this bounded goal (complete, blocked or needs_human). It is your claim, not a verification; Mingle applies it only after this turn ends normally.';
 const PLAN_INSTRUCTIONS = 'mingle_plan_update replaces the checklist displayed above the composer. Keep steps concise and update their statuses as work changes.';
 
 /** Run-scoped local MCP tools for durable, user-visible progress. */
@@ -30,6 +33,7 @@ export class ProgressMcpBridge {
   create(input: {
     runId: string; session: Session; signal: AbortSignal; isLive: () => boolean;
     setStatus: (status: MingleStatusSet) => void; updatePlan: (plan: MinglePlanUpdate) => void;
+    finishWorkflow?: (report: WorkflowFinish) => void;
   }): ProgressMcpConnection {
     if (this.bindings.size >= 256) throw new Error('Too many active progress tool connections');
     const token = randomBytes(32).toString('base64url');
@@ -59,7 +63,7 @@ export class ProgressMcpBridge {
 
   private tools(binding: Binding, requestSignal: AbortSignal): McpServer {
     const server = new McpServer({ name: 'mingle-progress', version: '0.0.1' }, {
-      instructions: `${STATUS_INSTRUCTIONS} ${PLAN_INSTRUCTIONS}`,
+      instructions: `${STATUS_INSTRUCTIONS} ${PLAN_INSTRUCTIONS}${binding.finishWorkflow ? ` ${FINISH_INSTRUCTIONS}` : ''}`,
     });
     const result = (text: string) => ({ content: [{ type: 'text' as const, text }] });
     server.registerTool('mingle_status_set', {
@@ -90,6 +94,22 @@ export class ProgressMcpBridge {
         return { ...result(truncate(redactSecrets(errorMessage(error)), 500)), isError: true };
       }
     });
+    if (binding.finishWorkflow) {
+      server.registerTool('mingle_workflow_finish', {
+        description: 'Report that the current Mingle goal is complete, blocked, or needs a person. Call at most once, when you stop working on it.',
+        inputSchema: WorkflowFinishSchema,
+        annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+      }, async (args) => {
+        try {
+          this.ensure(binding, requestSignal);
+          binding.finishWorkflow!(WorkflowFinishSchema.parse(args));
+          this.ensure(binding, requestSignal);
+          return result('Mingle recorded your report. It takes effect when this turn ends normally.');
+        } catch (error) {
+          return { ...result(truncate(redactSecrets(errorMessage(error)), 500)), isError: true };
+        }
+      });
+    }
     return server;
   }
 

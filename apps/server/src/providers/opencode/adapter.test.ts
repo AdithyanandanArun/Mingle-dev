@@ -18,7 +18,7 @@ async function fakeExecutable(directory: string): Promise<string> {
   return path;
 }
 
-function connectionFor(http: boolean, taskEvents = false): NonNullable<FakeChildOptions['onMessage']> {
+function connectionFor(http: boolean, taskEvents = false, stopReason = 'end_turn'): NonNullable<FakeChildOptions['onMessage']> {
   return (message: Json, child: FakeChild) => {
     switch (message.method) {
       case 'initialize':
@@ -49,7 +49,7 @@ function connectionFor(http: boolean, taskEvents = false): NonNullable<FakeChild
             sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'The root answer.' },
           } } });
         }
-        child.send({ jsonrpc: '2.0', id: message.id, result: { stopReason: 'end_turn' } });
+        child.send({ jsonrpc: '2.0', id: message.id, result: { stopReason } });
         break;
       case 'session/close':
         child.send({ jsonrpc: '2.0', id: message.id, result: {} });
@@ -60,14 +60,14 @@ function connectionFor(http: boolean, taskEvents = false): NonNullable<FakeChild
   };
 }
 
-async function runOpenCode(input: { http: boolean; taskEvents?: boolean }) {
+async function runOpenCode(input: { http: boolean; taskEvents?: boolean; stopReason?: string }) {
   const directory = await mkdtemp(join(tmpdir(), 'mingle-opencode-adapter-test-'));
   boxes.push(directory);
   const executable = await fakeExecutable(directory);
   const run = makeRun({ session: { provider: 'opencode', model: 'default', effort: 'none', policy: 'supervised' } });
   run.options.settings.opencodeExecutable = executable;
   run.options.progressMcp = { url: 'http://127.0.0.1:4310/api/progress/mcp', token: TOKEN };
-  const child = new FakeChild({ onMessage: connectionFor(input.http, input.taskEvents) });
+  const child = new FakeChild({ onMessage: connectionFor(input.http, input.taskEvents, input.stopReason) });
   const spawned: { file: string; args: string[]; options: SpawnOptions }[] = [];
   const adapter = createOpencodeAdapter({
     env: { PATH: '/usr/bin', HOME: directory, MINGLE_DATA_DIR: directory },
@@ -84,6 +84,14 @@ afterEach(async () => {
 });
 
 describe('OpenCode ACP adapter', () => {
+  it('reports a refusal as a distinct failure instead of a completed turn', async () => {
+    await expect(runOpenCode({ http: true, stopReason: 'refusal' })).rejects.toMatchObject({ code: 'refusal' });
+  });
+
+  it('keeps turn-limit stops distinguishable from refusals', async () => {
+    await expect(runOpenCode({ http: true, stopReason: 'max_turn_requests' })).rejects.toMatchObject({ code: 'turn_limit' });
+  });
+
   it('uses HTTP MCP when advertised', async () => {
     const { child } = await runOpenCode({ http: true });
     expect(child.requestsFor('session/new')[0]?.params.mcpServers).toEqual([{

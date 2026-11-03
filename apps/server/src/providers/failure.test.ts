@@ -61,4 +61,11 @@ describe('providerFailure', () => {
     expect(failure.providerCode).toContain('[redacted]');
     expect(failure.providerCode!.length).toBeLessThanOrEqual(100);
   });
+
+  it('keeps provider refusals and turn limits distinct from unknown failures', () => {
+    const refusal = providerFailure(new ProviderError('OpenCode ACP: refused to continue this turn.', { code: 'refusal', outcomeKnown: true }), context('dispatched'));
+    expect(refusal).toMatchObject({ kind: 'unknown', providerCode: 'refusal', outcomeUnknown: false, retryable: false });
+    const turnLimit = providerFailure(new ProviderError('OpenCode stopped at its turn limit. Partial output was retained.', { code: 'turn_limit', outcomeKnown: true }), context('dispatched'));
+    expect(turnLimit).toMatchObject({ kind: 'output_truncated', providerCode: 'turn_limit', retryable: false });
+  });
 });

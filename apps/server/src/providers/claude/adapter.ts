@@ -120,7 +120,7 @@ export function createClaudeAdapter(deps: ClaudeAdapterDeps = {}): AgentAdapter 
         if (run.browserMcp && toolName.startsWith('mcp__mingle_browser__')) return { behavior: 'allow', updatedInput: input };
         // Only the six host-backed team tools; the bridge re-checks the run, membership and delivery on every call.
         if (run.teamMcp && TEAM_TOOL_NAMES.has(toolName)) return { behavior: 'allow', updatedInput: input };
-        if (run.progressMcp && ['mcp__mingle_progress__mingle_status_set', 'mcp__mingle_progress__mingle_plan_update'].includes(toolName)) return { behavior: 'allow', updatedInput: input };
+        if (run.progressMcp && ['mcp__mingle_progress__mingle_status_set', 'mcp__mingle_progress__mingle_plan_update', 'mcp__mingle_progress__mingle_workflow_finish'].includes(toolName)) return { behavior: 'allow', updatedInput: input };
         if (run.subagentMcp && toolName.startsWith('mcp__mingle_subagents__')) return { behavior:'allow',updatedInput:input };
         if (run.memoryMcp && ['mingle_memory_remember', 'mingle_memory_search', 'mingle_memory_update', 'mingle_memory_retire'].some((tool) => toolName === `mcp__mingle_memory__${tool}`)) return { behavior: 'allow', updatedInput: input };
         if (toolName === 'AskUserQuestion') {

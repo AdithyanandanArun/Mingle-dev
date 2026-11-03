@@ -218,6 +218,7 @@ class OpencodeRun {
       const reason = object(response).stopReason;
        if (reason === 'cancelled') throw new ProviderError('OpenCode canceled the turn without a Mingle interruption.', { code: 'turn_interrupted' });
        if (reason === 'max_tokens' || reason === 'max_turn_requests') throw new ProviderError(`OpenCode stopped at its ${reason === 'max_tokens' ? 'token' : 'turn'} limit. Partial output was retained.`, { code: 'turn_limit', outcomeKnown: true });
+      if (reason === 'refusal') throw new ProviderError('OpenCode refused to continue this turn. Review its reply, then rephrase or choose another model.', { code: 'refusal', outcomeKnown: true });
       if (reason !== 'end_turn' && reason !== 'refusal') throw new ProviderError('OpenCode returned an unrecognized completion state.', { code: 'protocol_error' });
     } catch (error) {
       if (this.violation) throw this.violation;
@@ -333,7 +334,7 @@ class OpencodeRun {
     const reject = options.find((option) => option.kind === 'reject_once' && typeof option.optionId === 'string');
     if (!reject) return cancelled;
     const name = text(call.name) ?? '';
-    const trustedProgress = this.options.progressMcp && ['mingle_progress_mingle_status_set', 'mingle_progress_mingle_plan_update'].includes(name);
+    const trustedProgress = this.options.progressMcp && ['mingle_progress_mingle_status_set', 'mingle_progress_mingle_plan_update', 'mingle_progress_mingle_workflow_finish'].includes(name);
     const trustedSubagent=this.options.subagentMcp&&name.startsWith('mingle_subagents_mingle_subagent_');
     const trustedMemory = this.options.memoryMcp && ['mingle_memory_remember', 'mingle_memory_search', 'mingle_memory_update', 'mingle_memory_retire'].some((tool) => name === `${MEMORY_PREFIX}${tool}`);
     const trusted = Boolean(trustedMemory || (this.options.browserMcp && name.startsWith(BROWSER_PREFIX)) || (this.options.teamMcp && name.startsWith(TEAM_PREFIX)) || trustedProgress || trustedSubagent);
