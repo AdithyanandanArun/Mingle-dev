@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { ArrowUp, FilePlus2, Square } from 'lucide-react';
-import type { AttachmentRef, ProviderModel, Session } from '@mingle/contracts';
+import type { AttachmentRef, ProviderModel, Session, WorkflowLimits } from '@mingle/contracts';
 import { useMingle } from '../store/store';
 import { api, errorMessage, type ApiProviderFailure, type ProviderCatalog, type SessionPatch } from '../lib/api';
 import { MOD, PROVIDER_NAME, Badge } from './ui';
@@ -15,6 +15,7 @@ import { usePresence } from '../lib/motion';
 import { useTeamStructure } from '../lib/team-structure-context';
 import { providerSwitchFailureCopy } from '../lib/providerFailureUi';
 import { reasoningEffortChoices } from '../lib/providers';
+import { SessionWorkflowPanel, WorkflowLimitsControl } from './session-workflow/SessionWorkflowPanel';
 import { QueuedMessages } from './composer/QueuedMessages';
 import {
   appendContextReference, ContextReferenceChips, EMPTY_CONTEXT_REFS, FileContextPicker,
@@ -41,6 +42,11 @@ export function Composer({ session, statusBar }: { session: Session; statusBar?:
   const compactController = useRef<{ controller: AbortController; targetSessionId: string; operationId: string } | null>(null);
   const [sending, setSending] = useState(false);
   const [planningMode, setPlanningMode] = useState(false);
+  const [autonomousMode, setAutonomousMode] = useState(false);
+  const [workflowLimits, setWorkflowLimits] = useState<WorkflowLimits>({ maxTurns: 8, maxElapsedMinutes: 240, maxStalls: 2 });
+  const workflow = useMingle((state) => state.boot?.workflows?.find((item) => item.sessionId === session.id));
+  const workflowRunning = workflow?.state === 'running';
+  const canStartWorkflow = !session.parentSessionId && !session.id.startsWith('proxy_');
   const [compactStatus, setCompactStatus] = useState<{ status: 'running' | 'completed' | 'unsupported' | 'failed'; message?: string } | null>(null);
   const [updating, setUpdating] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -117,7 +123,7 @@ export function Composer({ session, statusBar }: { session: Session; statusBar?:
     el.style.height = '0px';
     el.style.height = `${Math.min(el.scrollHeight, 260)}px`;
   }, [draft, session.id]);
-  useEffect(() => { setError(null); setCompactStatus(null); setPlanningMode(false); }, [session.id]);
+  useEffect(() => { setError(null); setCompactStatus(null); setPlanningMode(false); setAutonomousMode(false); }, [session.id]);
   useEffect(() => {
     if (session.status !== 'error' || !session.error) {
       setProviderFailure(null);
@@ -265,6 +271,9 @@ export function Composer({ session, statusBar }: { session: Session; statusBar?:
           if (sendNow && response.queued) await api.sendQueuedNow(session.id, response.queued.id);
           useMingle.getState().toast('success', sendNow ? 'Message sent next' : 'Message queued');
         }
+      } else if (autonomousMode && canStartWorkflow && !workflowRunning) {
+        if (messageSkills.length || /^\s*\//.test(draft)) throw new Error('Start an autonomous goal with a regular request. Use Chat for native commands and skills.');
+        await api.startSessionWorkflow(session.id, { goal: draft.trim(), limits: workflowLimits, attachmentIds: submittedAttachmentIds, contextRefs: submittedContextRefs });
       } else await api.sendMessage(session.id, draft.trim(), messageSkills, submittedAttachmentIds, submittedContextRefs, planningMode ? 'plan' : 'normal');
       if (useMingle.getState().drafts[session.id] === submittedDraft) useMingle.getState().setDraft(session.id, '');
       if (useMingle.getState().contextDrafts[session.id] === submittedContextRefs) useMingle.getState().setContextDraft(session.id, []);
@@ -282,7 +291,8 @@ export function Composer({ session, statusBar }: { session: Session; statusBar?:
 
   const stop = async () => {
     try {
-      await api.interrupt(session.id);
+      if (workflowRunning && workflow) await api.stopSessionWorkflow(session.id, workflow.version);
+      else await api.interrupt(session.id);
       void useMingle.getState().refreshNow();
     } catch (e) {
       setError(errorMessage(e));
@@ -304,7 +314,7 @@ export function Composer({ session, statusBar }: { session: Session; statusBar?:
   };
 
   const configure = async (patch: SessionPatch) => {
-    if (running || sending || updating || connection !== 'online') return;
+    if (running || workflowRunning || sending || updating || connection !== 'online') return;
     setUpdating(true);
     setError(null);
     try {
@@ -473,6 +483,7 @@ export function Composer({ session, statusBar }: { session: Session; statusBar?:
         <button type="button" className="link-btn" onClick={() => setModelOpenRequest((value) => value + 1)} disabled={disabled} title={running ? 'Wait for the active run to finish before switching providers.' : 'Choose another available provider.'}>Switch provider</button>
         {canRetryFailedMessage ? <>{' '}<button type="button" className="link-btn" onClick={() => void retryFailedMessage()} disabled={disabled}>Retry with {PROVIDER_NAME[session.provider]}</button></> : null}
       </div> : null}
+      {workflow ? <SessionWorkflowPanel key={workflow.id} workflow={workflow} session={session} /> : null}
       {statusBar}
       <div className={cx('composer', blocker && 'is-blocked')}>
         <label htmlFor={`composer-${session.id}`} className="sr-only">Message {session.name}</label>
@@ -540,21 +551,23 @@ export function Composer({ session, statusBar }: { session: Session; statusBar?:
           </div>)}
         </div> : null}
         {focused && trigger.startsWith('$') && !suggestions.length && !catalogError ? <div className="composer-picker-empty" role="status">{!catalog ? 'Loading skills…' : catalog.skills.some((item) => item.enabled) ? 'No matching skills.' : 'No skills are available for this provider and session.'}</div> : null}
+        {autonomousMode && !workflowRunning && !running ? <WorkflowLimitsControl limits={workflowLimits} onChange={setWorkflowLimits} disabled={sending || updating} /> : null}
         <div className="composer__bar">
           <div className="composer__controls" aria-busy={updating}>
-            <button type="button" className={cx('composer__plan-toggle', planningMode && 'is-active')} aria-pressed={planningMode} disabled={disabled} title="Ask the provider for a native read-only plan" onClick={() => { setPlanningMode((value) => !value); setSelectedSkills([]); setError(null); }}>
+            <button type="button" className={cx('composer__plan-toggle', planningMode && 'is-active')} aria-pressed={planningMode} disabled={disabled || workflowRunning} title="Ask the provider for a native read-only plan" onClick={() => { setPlanningMode((value) => !value); setAutonomousMode(false); setSelectedSkills([]); setError(null); }}>
               {planningMode ? 'Planning on' : 'Plan'}
             </button>
+            {canStartWorkflow ? <button type="button" className={cx('composer__plan-toggle', (autonomousMode || workflowRunning) && 'is-active')} aria-pressed={autonomousMode || workflowRunning} disabled={disabled || workflowRunning} title="Work toward a goal across turns using this session’s current permissions" onClick={() => { setAutonomousMode((value) => !value); setPlanningMode(false); setError(null); }}>Autonomous</button> : null}
             {session.handoffFromProvider ? <Badge tone="info" title="No extra model call; context is included with your next message.">Handoff pending from {PROVIDER_NAME[session.handoffFromProvider]}</Badge> : null}
             <ModelPicker triggerRef={modelControl} openRequest={modelOpenRequest} className="composer__model-picker" label="Model"
               value={{ provider: session.provider, model: selectedModelId }} providers={providers ?? []}
               title={running ? 'Provider and model selection is disabled while this session is running.' : undefined}
-              disabled={disabled} placement="top"
+              disabled={disabled || workflowRunning} placement="top"
               onChange={({ provider, model }) => { void configure({ provider, model }); }} />
-            <SelectMenu triggerRef={reasoningControl} className="composer__select" label="Reasoning effort and service tier" value={combinedValue} selectedValues={combinedSelectedValues} displayValue={combinedDisplay} openRequest={reasoningOpenRequest} disabled={disabled}
+            <SelectMenu triggerRef={reasoningControl} className="composer__select" label="Reasoning effort and service tier" value={combinedValue} selectedValues={combinedSelectedValues} displayValue={combinedDisplay} openRequest={reasoningOpenRequest} disabled={disabled || workflowRunning}
               options={combinedOptions}
               onChange={(value) => { const [kind, option] = value.split(':'); if (kind === 'effort') void configure({ effort: option }); else if (kind === 'tier') void configure({ serviceTier: option }); }} placement="top" />
-            <SelectMenu triggerRef={policyControl} openRequest={policyOpenRequest} className="composer__select composer__select--policy" label={isTeamSessionAnchor ? 'Team permission level' : 'Approval policy'} value={session.policy} disabled={disabled || policyChoices.length === 0}
+            <SelectMenu triggerRef={policyControl} openRequest={policyOpenRequest} className="composer__select composer__select--policy" label={isTeamSessionAnchor ? 'Team permission level' : 'Approval policy'} value={session.policy} disabled={disabled || workflowRunning || policyChoices.length === 0}
               displayValue={policyChoices.length ? policyChoices.includes(session.policy) ? undefined : 'Not available' : 'Native/default'}
               options={policyChoices.map((value) => ({ value, label: policyLabels[value]?.[0] ?? value, description: policyLabels[value]?.[1] }))}
               onChange={(value) => void configure({ policy: value as Session['policy'] })} placement="top" />
@@ -567,7 +580,7 @@ export function Composer({ session, statusBar }: { session: Session; statusBar?:
             ) : running && !['usage', 'import'].includes(localDraftCommand?.[1]?.toLowerCase() ?? '') ? (
               <button type="button" className="sendbtn sendbtn--stop" onClick={stop} aria-label="Interrupt run" title="Interrupt run"><Square size={12} fill="currentColor" /></button>
             ) : (
-          <button type="button" className="sendbtn" onClick={() => void submit()} disabled={Boolean(waitingBlocker) || empty || sending || updating || (attachmentDraft.busy && !compactIntent)} aria-label={compactIntent ? 'Compact conversation' : ['usage', 'import'].includes(localDraftCommand?.[1]?.toLowerCase() ?? '') ? (localDraftCommand?.[1]?.toLowerCase() === 'import' ? 'Import conversation' : 'Open usage') : 'Send message'} title={compactIntent ? blocker ?? 'Compact conversation' : ['usage', 'import'].includes(localDraftCommand?.[1]?.toLowerCase() ?? '') ? (localDraftCommand?.[1]?.toLowerCase() === 'import' ? 'Import conversation' : 'Open usage') : blocker ?? (empty ? 'Write a message first' : `Send (${MOD}+Enter or Enter)`)}>
+          <button type="button" className="sendbtn" onClick={() => void submit()} disabled={Boolean(waitingBlocker) || empty || sending || updating || (attachmentDraft.busy && !compactIntent)} aria-label={compactIntent ? 'Compact conversation' : ['usage', 'import'].includes(localDraftCommand?.[1]?.toLowerCase() ?? '') ? (localDraftCommand?.[1]?.toLowerCase() === 'import' ? 'Import conversation' : 'Open usage') : autonomousMode && !workflowRunning ? 'Start autonomous workflow' : 'Send message'} title={compactIntent ? blocker ?? 'Compact conversation' : ['usage', 'import'].includes(localDraftCommand?.[1]?.toLowerCase() ?? '') ? (localDraftCommand?.[1]?.toLowerCase() === 'import' ? 'Import conversation' : 'Open usage') : blocker ?? (empty ? 'Write a message first' : `Send (${MOD}+Enter or Enter)`)}>
                 <ArrowUp size={15} />
               </button>
             )}

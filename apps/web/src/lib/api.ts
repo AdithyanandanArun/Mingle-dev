@@ -6,7 +6,7 @@ import type { DelegatedSubagent, StartSubagent } from '@mingle/contracts';
 import type { AccountState, AccountConnection, AccountPreferences, SavedAccountPreferences, AttachmentRef, NativeActionCatalog } from '@mingle/contracts';
 import type { ProjectCollaborationSnapshot, SendTeamChatMessage, TeamChatSnapshot, TeamChatMessage } from '@mingle/contracts';
 import type { ProgressBoardResponse } from '@mingle/contracts';
-import type { ProviderUpdateInfo, ProviderUpdatesSnapshot } from '@mingle/contracts';
+import type { SessionWorkflow, StartSessionWorkflowInput, ResumeSessionWorkflowInput, ProviderUpdateInfo, ProviderUpdatesSnapshot } from '@mingle/contracts';
 import type {
   ContextCompactionResult as ContractContextCompactionResult,
   ProviderFailure as ContractProviderFailure,
@@ -262,6 +262,11 @@ export const api = {
     json<ExternalConversationDetails>(`/api/imports/${encodeURIComponent(provider)}/${encodeURIComponent(conversationId)}`, 'GET', undefined, signal),
   importConversation: (provider: Session['provider'], conversationId: string) =>
     json<ImportConversationResult>('/api/imports', 'POST', { provider, conversationId }),
+  sessionWorkflow: (id: string, signal?: AbortSignal) => json<{ workflow: SessionWorkflow | null }>(`/api/sessions/${encodeURIComponent(id)}/workflow`, 'GET', undefined, signal),
+  startSessionWorkflow: (id: string, input: StartSessionWorkflowInput) => json<SessionWorkflow>(`/api/sessions/${encodeURIComponent(id)}/workflow`, 'POST', input),
+  pauseSessionWorkflow: (id: string, expectedVersion: number) => json<SessionWorkflow>(`/api/sessions/${encodeURIComponent(id)}/workflow/pause`, 'POST', { expectedVersion }),
+  stopSessionWorkflow: (id: string, expectedVersion: number) => json<SessionWorkflow>(`/api/sessions/${encodeURIComponent(id)}/workflow/stop`, 'POST', { expectedVersion }),
+  resumeSessionWorkflow: (id: string, input: ResumeSessionWorkflowInput) => json<SessionWorkflow>(`/api/sessions/${encodeURIComponent(id)}/workflow/resume`, 'POST', input),
   interrupt: (id: string) => json<{ ok: boolean }>(`/api/sessions/${encodeURIComponent(id)}/interrupt`, 'POST'),
   createTask: (input: NewTaskInput) => json<Task>('/api/tasks', 'POST', input),
   updateTask: (id: string, patch: TaskPatch) => json<Task>(`/api/tasks/${encodeURIComponent(id)}`, 'PATCH', patch),
