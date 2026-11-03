@@ -52,4 +52,12 @@ w.__perf = {
     const boot = JSON.parse(JSON.stringify(useMingle.getState().boot)) as Bootstrap;
     useMingle.setState({ boot });
   },
+  workflowInstructions() {
+    useMingle.setState((state) => ({ boot: state.boot ? { ...state.boot, messages: [...state.boot.messages,
+      ...['workflow-continuation', 'workflow-verification', 'workflow-resume'].map((kind, index): Message => ({
+        id: `example-${kind}`, sessionId: 'a', role: 'user', kind,
+        content: `Example internal follow-through prompt ${index}.`, createdAt: stamp(2000 + index),
+      })),
+    ] } : null }));
+  },
 };

@@ -89,6 +89,19 @@ try {
   for (const name of ['SingleSessionPane', 'TranscriptList', 'MessageRow', 'ReactMarkdown', 'RunChanges']) bound(unrelated, name, 0, 'unrelated session');
   for (const name of ['MessageRow', 'ReactMarkdown', 'RunChanges', 'LegacyToolGroup']) bound(refetch, name, 0, 'identical refetch');
   bound(refetch, 'RunActivity', 2, 'identical refetch');
+  // Automatic prompts remain inspectable without appearing as additional messages from the person.
+  await page.evaluate(() => window.__perf.workflowInstructions());
+  for (const kind of ['workflow-continuation', 'workflow-verification', 'workflow-resume']) {
+    const detail = page.locator(`details[data-message-id="example-${kind}"]`);
+    await detail.waitFor();
+    assert.equal(await detail.getAttribute('open'), null);
+    assert.equal(await page.locator(`article[data-message-id="example-${kind}"]`).count(), 0);
+    await detail.locator('summary').focus();
+    await detail.locator('summary').press('Enter');
+    await detail.locator('.conversation-detail__body').waitFor({ state: 'visible' });
+    assert.match(await detail.innerText(), /Example internal follow-through prompt/);
+  }
+  assert.deepEqual(errors, []);
   process.stdout.write('chat render performance acceptance passed\n');
 } catch (error) {
   failed = true; process.stderr.write(`${error instanceof Error ? error.stack : error}\n`);

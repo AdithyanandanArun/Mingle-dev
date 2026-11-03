@@ -90,6 +90,20 @@ function sameMessageRowProps(a: MessageRowProps, b: MessageRowProps): boolean {
 
 export const MessageRow = memo(function MessageRow({ m, provider, speaker, onAskAboutThis }: MessageRowProps) {
   if (m.role === 'tool') return null;
+  const workflowLabel = m.role === 'user' ? ({
+    'workflow-continuation': 'Autonomous continuation',
+    'workflow-verification': 'Checking the goal outcome',
+    'workflow-resume': 'Resuming autonomous work',
+  } as Record<string, string>)[m.kind ?? ''] : undefined;
+  if (workflowLabel) return <details className="conversation-detail conversation-detail--system" data-message-id={m.id}>
+    <summary className="conversation-detail__summary">
+      <ChevronRight size={12} className="conversation-detail__chevron" aria-hidden="true" />
+      <Info size={13} aria-hidden="true" />
+      <span className="conversation-detail__label">{workflowLabel}</span>
+      <span className="conversation-detail__preview">Mingle follow-through instructions</span>
+    </summary>
+    <div className="conversation-detail__body"><Markdown text={m.content} /></div>
+  </details>;
   if (m.role === 'system') {
     const preview = m.content.split('\n').find((line) => line.trim()) ?? '';
     return (
