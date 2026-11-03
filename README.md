@@ -34,6 +34,7 @@ Mingle brings that work into a desktop workspace. Start with one agent, add othe
 | You want to… | Mingle helps you… |
 | --- | --- |
 | Use more than one provider | Run **Codex, Claude Code, OpenCode, and Antigravity** sessions in the same workspace, with their supported models and controls. |
+| Follow a goal through to review | Choose **Autonomous** in a standalone session, follow its progress and budget, and pause, stop or resume without changing conversations. |
 | Let agents work together | Use a group conversation, address an agent with **@mentions**, and follow assignments, questions, and committed artifact handoffs. |
 | See what your agent delegates | Follow automatically reported **subagents** and inspect their available activity and results. |
 | Bring in a teammate | Invite them by email to a Git project. They choose their checkout and providers, then join the shared conversation from their device. |
@@ -79,6 +80,8 @@ Packages include Electron, Node, the local server, and the built UI. **Provider 
 | **Antigravity** | Use **Settings → Providers** to install its runtime and sign in with Google. |
 
 An installed executable does not guarantee authentication, quota, or access to every model. Mingle shows the provider’s reported capabilities and errors. An explicit `ANTHROPIC_API_KEY` overrides Claude’s saved login and uses API billing. See [provider coverage](docs/provider-feature-parity.md), [OpenCode](docs/provider-opencode.md), and [Antigravity](docs/provider-antigravity.md) for setup and differences.
+
+Settings → Providers also reports available provider updates. Updates require an explicit action; Mingle keeps provider installation and account setup separate from application updates.
 
 ## Work as a team
 
