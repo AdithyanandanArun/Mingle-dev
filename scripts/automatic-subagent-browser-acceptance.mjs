@@ -112,6 +112,10 @@ async function main() {
     const response = await route.fetch();
     const boot = await response.json();
     boot.settings.onboardingCompletedVersion = 1;
+    const project = boot.projects.find((item) => item.isExample) ?? boot.projects[0];
+    assert.ok(project, 'Example fixture project exists');
+    project.isExample = false;
+    boot.lastProjectId = project.id;
     seed = boot;
     if (fixture) fixture(boot);
     await route.fulfill({ response, body: JSON.stringify(boot) });
@@ -144,7 +148,7 @@ async function main() {
       startedAt: at, finishedAt: status === 'completed' ? at : null, durationMs: null,
       subagentMessages: status === 'completed' ? [{ id: 'example-child-reply', content: 'Example source is ready.', createdAt: at }] : [] });
   };
-  await test('workspace header keeps labels, icons and the Example badge inside their own bounds', async () => {
+  await test('workspace header keeps labels and icons inside their own bounds', async () => {
     fixture = (boot) => {
       boot.projects = boot.projects.map((project) => ({ ...project, name: 'Example project with a long name that must truncate' }));
       boot.sessions = boot.sessions.map((session) => ({ ...session, name: 'Example session with a long name that must truncate' }));
@@ -155,6 +159,7 @@ async function main() {
         await page.setViewportSize({ width, height: 900 });
         const layout = await page.locator('.header').evaluate((header) => {
           const bounds = (node) => {
+            if (!node) return null;
             const r = node.getBoundingClientRect();
             return { left: r.left, right: r.right, top: r.top, bottom: r.bottom, width: r.width };
           };
@@ -170,7 +175,7 @@ async function main() {
           };
         });
         assert.ok(layout.actions.right <= width + 1, `header actions stay on screen at ${width}px`);
-        assert.ok(layout.badge.right <= layout.actions.left, `Example badge never overlaps actions at ${width}px`);
+        assert.equal(layout.badge, null, `a selected normal project has no starter Example badge at ${width}px`);
         for (const button of layout.buttons) {
           assert.ok(button.icon.width >= 13, `${button.name} retains its icon at ${width}px`);
           assert.ok(button.icon.left >= button.rect.left && button.icon.right <= button.rect.right, `${button.name} icon stays inside its button at ${width}px`);

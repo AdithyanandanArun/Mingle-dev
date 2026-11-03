@@ -114,6 +114,10 @@ async function main() {
     const project = boot.projects.find((item) => item.isExample);
     const sessions = boot.sessions.filter((item) => item.projectId === project?.id);
     assert.ok(project && sessions.length, 'Example workspace and sessions are present in the local fixture runtime');
+    // Production intentionally never opens a starter Example project. Select this explicitly labelled fixture as a
+    // normal project at the browser boundary so the acceptance still exercises the full SessionPane.
+    project.isExample = false;
+    boot.lastProjectId = project.id;
     let id = Math.max(0, ...boot.events.map((event) => event.id)) + 1;
     for (const session of sessions) boot.events.push({ id: id++, projectId: project.id, sessionId: session.id, type: 'session.progress.plan',
       summary: 'Example-only status strip acceptance fixture', payload: { exampleFixture: true, planId: 'example-status-bar-plan', steps: [
@@ -143,7 +147,8 @@ async function main() {
       const session = state.boot?.sessions.find((item) => item.id === state.sessionByProject[state.activeProjectId ?? '']);
       return { example: project?.isExample, sessionProjectId: session?.projectId, projectId: project?.id };
     });
-    assert.equal(selected.example, true, `selected project is explicitly the Example workspace: ${JSON.stringify(selected)}`);
+    assert.equal(selected.projectId, 'prj_example', `selected project is the disposable Example fixture: ${JSON.stringify(selected)}`);
+    assert.equal(selected.example, false, 'browser fixture is selectable after starter projects stopped opening automatically');
     assert.equal(selected.sessionProjectId, selected.projectId, `selected session belongs to the Example workspace: ${JSON.stringify(selected)}`);
     assert.equal(await toggle.getAttribute('aria-expanded'), 'false');
     assert.match(await toggle.innerText(), /Render the expandable task strip/);
