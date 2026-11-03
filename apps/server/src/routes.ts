@@ -3,6 +3,7 @@ import { z } from 'zod';
 import {
   CreateGroupSchema, AddGroupAgentSchema, UpdateGroupSchema, SendGroupMessageSchema, RepositoryCommitSchema, RepositoryPushSchema, RepositoryBranchSchema, RepositoryPullRequestSchema, BrowserConnectSchema, BrowserSignInSchema, BrowserActionSchema, ApprovalDecisionSchema, ConversationIdSchema, ImportConversationSchema, ProviderSchema, CloneProjectSchema, NewProjectSchema, CreateProjectSchema, CreateSessionSchema, CreateTaskSchema, HandoffSchema, SendMessageSchema, UpdateProjectSchema, UpdateSessionSchema, UpdateSettingsSchema, UpdateTaskSchema, EditSessionPlanSchema, UserInputAnswersSchema, StartSubagentSchema,
   RecoveryActionRequestSchema, InitializeGitSchema,
+  StartSessionWorkflowSchema, WorkflowControlSchema, ResumeSessionWorkflowSchema,
 } from '@mingle/contracts';
 import { BrowserImportSchema } from '@mingle/contracts';
 import type { Bootstrap, Session, SessionUsage } from '@mingle/contracts';
@@ -48,6 +49,7 @@ import { ProgressBoardResponseSchema } from '@mingle/contracts';
 import type { ProjectMemoryService } from './project-memory/service.ts';
 import type { ProjectMemoryTeamSync } from './project-memory/sync.ts';
 import { registerProjectMemoryRoutes } from './project-memory/routes.ts';
+import type { SessionWorkflowService } from './session-workflow/service.ts';
 
 export interface Services {
   distributed: DistributedWorkspaceService;
@@ -61,6 +63,7 @@ export interface Services {
   config: ServerConfig; store: Store; hub: Hub; workspace: WorkspaceService; runtime: SessionRuntime; tasks: TaskService; handoffs: HandoffService;
   groups: GroupService; attachments: AttachmentService; recovery: RecoveryService; intelligence: ProjectIntelligenceService; repository: RepositoryService; browser: BrowserService; providers: ProviderService; providerUpdates: ProviderUpdateService; imports: ImportService; directories: DirectoryService; projectSources: ProjectSources; terminals: TerminalManager; startedAt: number; getPort: () => number;
   subagents: DelegatedSubagentService;
+  workflows: SessionWorkflowService;
 }
 
 export class Reply {
@@ -237,6 +240,7 @@ export function buildRouter(s: Services) {
     const body: Bootstrap = {
       groups: s.groups.snapshots(), runs, toolCalls: s.store.bootstrapToolCalls(runs.map((run) => run.id)),
       delegatedSubagents: s.subagents.list(),
+      workflows: s.workflows.list(),
       lastProjectId: s.store.getProject(s.store.getMeta('workspace.lastProjectId') ?? '')?.id ?? null,
       projects: s.store.listProjects(), sessions: s.store.listSessions().map((session) => ({ ...session, steerable: s.runtime.isSteerable(session.id) })), messages: s.store.bootstrapMessages(300), queuedMessages: s.store.listSessions().flatMap((session) => s.store.listQueuedMessages(session.id)), tasks: s.store.listTasks(),
       events: s.store.recentEvents(500), approvals: s.store.bootstrapApprovals(50), plans: s.store.bootstrapPlans(), questions: s.store.bootstrapQuestions(), providers, settings: s.store.getSettings(), version: s.config.version,
@@ -452,6 +456,9 @@ export function buildRouter(s: Services) {
     let patch = await ctx.body(UpdateSessionSchema);
     const session = s.store.getSession(id);
     if (!session) throw notFound('Session not found');
+    if (s.workflows.get(id)?.state === 'running' && ['provider', 'model', 'effort', 'policy', 'serviceTier'].some((key) => key in patch)) {
+      throw conflict('Pause autonomous work before changing this session’s provider, model or permissions.');
+    }
     if (s.groups.forSession(id) && patch.provider && patch.provider !== session?.provider) throw conflict('Group members retain their provider identity. Add another agent to use a different provider.');
     const providerChanged = patch.provider !== undefined && patch.provider !== session.provider;
     let updated: Session;
@@ -616,6 +623,33 @@ export function buildRouter(s: Services) {
     s.runtime.start(id, content, { intent, attachmentIds, contextRefs, deferContextResolution: true, resolveSkills });
     return new Reply(202, { accepted: true });
   });
+  add('GET', '/api/sessions/:id/workflow', (ctx) => {
+    const id = param(ctx, 'id');
+    if (!s.store.getSession(id)) throw notFound('Session not found');
+    return { workflow: s.workflows.get(id) };
+  });
+  add('POST', '/api/sessions/:id/workflow', async (ctx) => {
+    const id = param(ctx, 'id');
+    const input = await ctx.body(StartSessionWorkflowSchema);
+    const session = s.store.getSession(id);
+    if (!session) throw notFound('Session not found');
+    const attachments = s.attachments.validate({ kind: 'session', id }, input.attachmentIds ?? []);
+    validateSessionAttachmentSupport(s, session, attachments, input.goal);
+    for (const ref of input.contextRefs ?? []) {
+      if (ref.kind === 'quote' && (ref.sourceGroupId || ref.sourceSessionId !== id)) throw badRequest('A quoted source must come from this session. Choose text from a message in this conversation.');
+      if (ref.kind === 'file' && ref.sourceSessionId !== id) throw badRequest('A file reference must come from this session worktree. Choose the file again.');
+    }
+    return new Reply(202, await s.workflows.start(id, input));
+  });
+  for (const action of ['pause', 'stop'] as const) add('POST', `/api/sessions/:id/workflow/${action}`, async (ctx) => {
+    const id = param(ctx, 'id');
+    const { expectedVersion } = await ctx.body(WorkflowControlSchema);
+    return s.workflows[action](id, expectedVersion);
+  });
+  add('POST', '/api/sessions/:id/workflow/resume', async (ctx) => {
+    const id = param(ctx, 'id');
+    return s.workflows.resume(id, await ctx.body(ResumeSessionWorkflowSchema));
+  });
   add('GET', '/api/sessions/:id/queue', (ctx) => { const id=param(ctx,'id'); if(!s.store.getSession(id)) throw notFound('Session not found'); return s.store.listQueuedMessages(id); });
   add('PATCH', '/api/sessions/:id/queue/:messageId', async (ctx) => { const id=param(ctx,'id'); const {content}=await ctx.body(z.object({content:z.string().trim().min(1).max(100_000)}).strict()); const message=s.store.updateQueuedMessage(id,param(ctx,'messageId'),content); if(!message) throw notFound('Queued message not found'); return message; });
   add('DELETE', '/api/sessions/:id/queue/:messageId', async (ctx) => { const id=param(ctx,'id'); const messageId=param(ctx,'messageId'); s.store.removeQueuedMessage(id,messageId); await s.attachments.discardQueued(messageId); return {ok:true}; });
@@ -626,7 +660,10 @@ export function buildRouter(s: Services) {
     const group = s.groups.forSession(id);
     const member = group?.members.find((row) => row.sessionId === id && !row.removedAt);
     if (group && member) s.groups.stopMember(group.group.id, member.id);
-    else s.runtime.interrupt(id);
+    else {
+      s.workflows.stopActive(id);
+      s.runtime.interrupt(id);
+    }
     return { ok: true };
   });
 

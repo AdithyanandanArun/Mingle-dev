@@ -44,6 +44,8 @@ import { TeamChatService } from './team-chat/service.ts';
 import { createTeamOrchestration, type TeamOrchestrationDeviceSideFactory } from './team-orchestration/index.ts';
 import { createDeviceSide } from './team-orchestration/device/index.ts';
 import { SessionResumeService } from './session-resume.ts';
+import { SessionWorkflowService } from './session-workflow/service.ts';
+import { WORKFLOW_RESTART_MESSAGE, workflowOwnsRun } from './session-workflow/ownership.ts';
 import { DelegatedSubagentService } from './delegated-subagents.ts';
 import { SubagentMcpBridge } from './subagent-mcp.ts';
 import { ProjectMemoryService } from './project-memory/service.ts';
@@ -79,6 +81,7 @@ export interface MingleApplication {
   readonly hub: Hub;
   readonly providers: ProviderService;
   readonly providerUpdates: ProviderUpdateService;
+  readonly workflows: SessionWorkflowService;
   readonly browser: BrowserService;
   readonly intelligence: ProjectIntelligenceService;
   readonly repository: RepositoryService;
@@ -104,6 +107,7 @@ const defaultLogger: Logger = (level, message, detail) => {
 };
 
 function interruptedRunMessage(store: Store, sessionId: string, runId?: string): string {
+  if (runId && workflowOwnsRun(store.db, runId)) return WORKFLOW_RESTART_MESSAGE;
   if (store.isTeamProxySession(sessionId)) return 'Mingle was closed while this remote team delivery was active. It must be resumed by its owner device.';
   if (runId && store.isTeamDeviceDeliveryRun(runId)) return 'Mingle was closed while this owner-device team delivery was active. It was interrupted because the host delivery could not be confirmed.';
   if (store.isGroupSession(sessionId)) return 'Mingle was closed while this group delivery was active. The delivery is retained for group recovery.';
@@ -227,7 +231,8 @@ export function createApplication(options: ApplicationOptions): MingleApplicatio
     store, workspace, tasks, handoffs, runtime, log, attachments, providers: () => providers.cached() ?? [],
     catalog: (session, refresh) => providers.catalog(session, refresh), recovery, now: options.groupNow,
   });
-  const sessionResume = new SessionResumeService(store, runtime, providers, groups, log);
+  const workflows = new SessionWorkflowService({ store, runtime, tasks, recovery, groups, log });
+  const sessionResume = new SessionResumeService(store, runtime, providers, groups, log, workflows);
   const teamMcp = new TeamMcpBridge(groups, store, () => boundPort, () => config.host);
   runtime.setGroupServices(groups, teamMcp);
 
@@ -296,7 +301,7 @@ export function createApplication(options: ApplicationOptions): MingleApplicatio
     },
   });
   const services: Services = {
-    config, store, hub, runtime, tasks, terminals, providers, providerUpdates, browser, intelligence, repository, groups, handoffs, workspace, attachments, account, recovery, distributed, projectCollaboration, teamChat, projectMemory, memorySync: () => memorySync, teamOrchestration, subagents, setupSignal: setupLifecycle.signal,
+    config, store, hub, runtime, tasks, terminals, providers, providerUpdates, workflows, browser, intelligence, repository, groups, handoffs, workspace, attachments, account, recovery, distributed, projectCollaboration, teamChat, projectMemory, memorySync: () => memorySync, teamOrchestration, subagents, setupSignal: setupLifecycle.signal,
     imports: new ImportService(store, options.providers, providers, runtime), directories: new DirectoryService(), projectSources: new ProjectSources(workspace), startedAt: Date.now(), getPort: () => boundPort,
   };
   hub.bind({ onMessage: (socket, raw) => terminals.handleMessage(socket, raw), onClose: (socket) => terminals.releaseSocket(socket) });
@@ -370,7 +375,7 @@ export function createApplication(options: ApplicationOptions): MingleApplicatio
   const address = () => ({ host: config.host, port: boundPort, url: `http://${config.host.includes(':') ? `[${config.host}]` : config.host}:${boundPort}` });
 
   const app: MingleApplication = {
-    config, store, server, runtime, groups, terminals, hub, providers, providerUpdates, browser, intelligence, repository, attachments, recovery, distributed, projectCollaboration, teamChat, teamOrchestration,
+    config, store, server, runtime, groups, terminals, hub, providers, providerUpdates, workflows, browser, intelligence, repository, attachments, recovery, distributed, projectCollaboration, teamChat, teamOrchestration,
     initialize() {
       initialized ??= (async () => {
         if (options.exampleWorkspace === true) await seedExampleWorkspace(store, config.dataDir, log);
@@ -411,6 +416,7 @@ export function createApplication(options: ApplicationOptions): MingleApplicatio
       runtime.beginShutdown();
       closing ??= (async () => {
         setupLifecycle.abort();
+        workflows.close();
         await providerUpdates.close();
         await teamOrchestration.close();
         await memorySync?.close();
