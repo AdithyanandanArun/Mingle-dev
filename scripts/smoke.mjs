@@ -79,7 +79,9 @@ try {
   assert.equal(git.isRepo, true, 'Fixture is a real Git repository');
 
   const isolated = await api('/sessions', 'POST', {
-    projectId: project.id, name: 'Smoke isolation', provider: 'codex', model: 'gpt-6.1-sol', effort: 'high', policy: 'supervised', isolated: true,
+    // This checks Git/workspace isolation, not provider capabilities. Resolve native defaults instead of requiring a
+    // particular model's reasoning control on a CI runner that may have no provider or model catalog installed.
+    projectId: project.id, name: 'Smoke isolation', provider: 'codex', isolated: true,
   });
   assert.notEqual(isolated.worktreePath, project.path, 'New session uses an isolated worktree');
   assert.ok(isolated.branch, 'Isolated session has a Git branch');
