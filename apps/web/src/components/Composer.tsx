@@ -46,6 +46,10 @@ export function Composer({ session, statusBar }: { session: Session; statusBar?:
   const [workflowLimits, setWorkflowLimits] = useState<WorkflowLimits>({ maxTurns: 8, maxElapsedMinutes: 240, maxStalls: 2 });
   const workflow = useMingle((state) => state.boot?.workflows?.find((item) => item.sessionId === session.id));
   const workflowRunning = workflow?.state === 'running';
+  const workflowOpen = workflowRunning || workflow?.state === 'paused';
+  useEffect(() => {
+    if (workflow?.state === 'paused' || workflow?.state === 'stopped') setAutonomousMode(false);
+  }, [workflow?.id, workflow?.state]);
   const canStartWorkflow = !session.parentSessionId && !session.id.startsWith('proxy_');
   const [compactStatus, setCompactStatus] = useState<{ status: 'running' | 'completed' | 'unsupported' | 'failed'; message?: string } | null>(null);
   const [updating, setUpdating] = useState(false);
@@ -271,7 +275,7 @@ export function Composer({ session, statusBar }: { session: Session; statusBar?:
           if (sendNow && response.queued) await api.sendQueuedNow(session.id, response.queued.id);
           useMingle.getState().toast('success', sendNow ? 'Message sent next' : 'Message queued');
         }
-      } else if (autonomousMode && canStartWorkflow && !workflowRunning) {
+      } else if (autonomousMode && canStartWorkflow && !workflowOpen) {
         if (messageSkills.length || /^\s*\//.test(draft)) throw new Error('Start an autonomous goal with a regular request. Use Chat for native commands and skills.');
         await api.startSessionWorkflow(session.id, { goal: draft.trim(), limits: workflowLimits, attachmentIds: submittedAttachmentIds, contextRefs: submittedContextRefs });
       } else await api.sendMessage(session.id, draft.trim(), messageSkills, submittedAttachmentIds, submittedContextRefs, planningMode ? 'plan' : 'normal');
@@ -551,13 +555,13 @@ export function Composer({ session, statusBar }: { session: Session; statusBar?:
           </div>)}
         </div> : null}
         {focused && trigger.startsWith('$') && !suggestions.length && !catalogError ? <div className="composer-picker-empty" role="status">{!catalog ? 'Loading skills…' : catalog.skills.some((item) => item.enabled) ? 'No matching skills.' : 'No skills are available for this provider and session.'}</div> : null}
-        {autonomousMode && !workflowRunning && !running ? <WorkflowLimitsControl limits={workflowLimits} onChange={setWorkflowLimits} disabled={sending || updating} /> : null}
+        {autonomousMode && !workflowOpen && !running ? <WorkflowLimitsControl limits={workflowLimits} onChange={setWorkflowLimits} disabled={sending || updating} /> : null}
         <div className="composer__bar">
           <div className="composer__controls" aria-busy={updating}>
             <button type="button" className={cx('composer__plan-toggle', planningMode && 'is-active')} aria-pressed={planningMode} disabled={disabled || workflowRunning} title="Ask the provider for a native read-only plan" onClick={() => { setPlanningMode((value) => !value); setAutonomousMode(false); setSelectedSkills([]); setError(null); }}>
               {planningMode ? 'Planning on' : 'Plan'}
             </button>
-            {canStartWorkflow ? <button type="button" className={cx('composer__plan-toggle', (autonomousMode || workflowRunning) && 'is-active')} aria-pressed={autonomousMode || workflowRunning} disabled={disabled || workflowRunning} title="Work toward a goal across turns using this session’s current permissions" onClick={() => { setAutonomousMode((value) => !value); setPlanningMode(false); setError(null); }}>Autonomous</button> : null}
+            {canStartWorkflow ? <button type="button" className={cx('composer__plan-toggle', (autonomousMode || workflowRunning) && 'is-active')} aria-pressed={autonomousMode || workflowRunning} disabled={disabled || workflowOpen} title={workflow?.state === 'paused' ? 'Resume or stop the paused goal above before starting another.' : 'Work toward a goal across turns using this session’s current permissions'} onClick={() => { setAutonomousMode((value) => !value); setPlanningMode(false); setError(null); }}>Autonomous</button> : null}
             {session.handoffFromProvider ? <Badge tone="info" title="No extra model call; context is included with your next message.">Handoff pending from {PROVIDER_NAME[session.handoffFromProvider]}</Badge> : null}
             <ModelPicker triggerRef={modelControl} openRequest={modelOpenRequest} className="composer__model-picker" label="Model"
               value={{ provider: session.provider, model: selectedModelId }} providers={providers ?? []}
@@ -580,7 +584,7 @@ export function Composer({ session, statusBar }: { session: Session; statusBar?:
             ) : running && !['usage', 'import'].includes(localDraftCommand?.[1]?.toLowerCase() ?? '') ? (
               <button type="button" className="sendbtn sendbtn--stop" onClick={stop} aria-label="Interrupt run" title="Interrupt run"><Square size={12} fill="currentColor" /></button>
             ) : (
-          <button type="button" className="sendbtn" onClick={() => void submit()} disabled={Boolean(waitingBlocker) || empty || sending || updating || (attachmentDraft.busy && !compactIntent)} aria-label={compactIntent ? 'Compact conversation' : ['usage', 'import'].includes(localDraftCommand?.[1]?.toLowerCase() ?? '') ? (localDraftCommand?.[1]?.toLowerCase() === 'import' ? 'Import conversation' : 'Open usage') : autonomousMode && !workflowRunning ? 'Start autonomous workflow' : 'Send message'} title={compactIntent ? blocker ?? 'Compact conversation' : ['usage', 'import'].includes(localDraftCommand?.[1]?.toLowerCase() ?? '') ? (localDraftCommand?.[1]?.toLowerCase() === 'import' ? 'Import conversation' : 'Open usage') : blocker ?? (empty ? 'Write a message first' : `Send (${MOD}+Enter or Enter)`)}>
+          <button type="button" className="sendbtn" onClick={() => void submit()} disabled={Boolean(waitingBlocker) || empty || sending || updating || (attachmentDraft.busy && !compactIntent)} aria-label={compactIntent ? 'Compact conversation' : ['usage', 'import'].includes(localDraftCommand?.[1]?.toLowerCase() ?? '') ? (localDraftCommand?.[1]?.toLowerCase() === 'import' ? 'Import conversation' : 'Open usage') : autonomousMode && !workflowOpen ? 'Start autonomous workflow' : 'Send message'} title={compactIntent ? blocker ?? 'Compact conversation' : ['usage', 'import'].includes(localDraftCommand?.[1]?.toLowerCase() ?? '') ? (localDraftCommand?.[1]?.toLowerCase() === 'import' ? 'Import conversation' : 'Open usage') : blocker ?? (empty ? 'Write a message first' : `Send (${MOD}+Enter or Enter)`)}>
                 <ArrowUp size={15} />
               </button>
             )}
