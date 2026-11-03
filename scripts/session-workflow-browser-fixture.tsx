@@ -1,0 +1,40 @@
+import { useState } from 'react';
+import { createRoot } from 'react-dom/client';
+import { Composer } from '../apps/web/src/components/Composer';
+import { useMingle } from '../apps/web/src/store/store';
+import '../apps/web/src/styles/tokens.css';
+import '../apps/web/src/styles/base.css';
+import '../apps/web/src/styles/ui.css';
+import '../apps/web/src/styles/app.css';
+
+// Example fixture page: the acceptance script answers every /api request and blocks WebSockets.
+// The real store is bootstrapped through its normal refresh path, without init() and without a live socket.
+useMingle.setState({ connection: 'online' });
+// Lets the acceptance script deliver a changed Example snapshot through the store's normal bootstrap path.
+(window as unknown as { refreshExampleBootstrap: () => Promise<void> }).refreshExampleBootstrap = () => useMingle.getState().refreshNow();
+
+function Fixture() {
+  const sessions = useMingle((state) => state.boot?.sessions ?? []);
+  const projects = useMingle((state) => state.boot?.projects ?? []);
+  const contextTab = useMingle((state) => state.contextTab);
+  const [selected, setSelected] = useState(sessions[0]?.id ?? '');
+  const session = sessions.find((item) => item.id === selected) ?? sessions[0];
+  const project = projects.find((item) => item.id === session?.projectId);
+  return <main className="workflow-fixture" style={{ maxWidth: 760, minHeight: '100dvh', margin: '0 auto', display: 'flex', flexDirection: 'column', padding: 10, gap: 10 }}>
+    <header>
+      <p style={{ fontSize: 11 }}>Example workspace · fixture data only · no provider or cloud access</p>
+      <h1 style={{ fontSize: 14 }}>Autonomous workflow acceptance</h1>
+      <nav aria-label="Example sessions" style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+        {sessions.map((item) => <button key={item.id} type="button" aria-pressed={item.id === session?.id} onClick={() => setSelected(item.id)}>Open {item.name}</button>)}
+      </nav>
+      <p id="fixture-project" role="status">Project: {project?.name ?? 'none'}</p>
+      <p id="fixture-context-tab" role="status">Context tab: {contextTab ?? 'none'}</p>
+    </header>
+    <div style={{ flex: 1 }} />
+    {session ? <Composer key={session.id} session={session} /> : <p role="alert">Example bootstrap failed.</p>}
+  </main>;
+}
+
+void useMingle.getState().refreshNow().then(() => {
+  createRoot(document.getElementById('root')!).render(<Fixture />);
+});
