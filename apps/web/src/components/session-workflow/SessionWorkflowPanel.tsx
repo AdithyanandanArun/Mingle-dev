@@ -24,8 +24,11 @@ export function SessionWorkflowPanel({ workflow, session }: { workflow: SessionW
   const terminal = workflow.state === 'completed' || workflow.state === 'stopped';
   const [expanded, setExpanded] = useState(!terminal);
   const extraTurns = workflow.counters.turns >= workflow.limits.maxTurns ? Math.min(8, 50 - workflow.limits.maxTurns) : 0;
-  const extraMinutes = Date.parse(workflow.deadlineAt) <= Date.now() ? 240 : 0;
-  const resumeLabel = extraTurns ? `Resume · +${extraTurns} turns` : extraMinutes ? 'Resume · +4 hours' : 'Resume';
+  const expired = Date.parse(workflow.deadlineAt) <= Date.now();
+  const extraMinutes = expired ? Math.max(0, Math.min(240, 1440 - workflow.limits.maxElapsedMinutes)) : 0;
+  const extraTimeLabel = extraMinutes % 60 === 0 ? `${extraMinutes / 60} hours` : `${extraMinutes} minutes`;
+  const budgetExhausted = workflow.counters.turns >= 50 || (expired && extraMinutes === 0);
+  const resumeLabel = extraTurns ? `Resume · +${extraTurns} turns` : extraMinutes ? `Resume · +${extraTimeLabel}` : 'Resume';
   const label = waiting ? 'Waiting for you' : running ? session.status === 'running' ? 'Working toward your goal' : 'Continuing your goal'
     : workflow.stopReason ? reasons[workflow.stopReason] : workflow.state === 'completed' ? 'Agent reported completion' : 'Autonomous work paused';
   const act = async (action: 'pause' | 'resume' | 'stop') => {
@@ -52,7 +55,7 @@ export function SessionWorkflowPanel({ workflow, session }: { workflow: SessionW
       <span className="session-workflow__turns" title="Provider turns used; this is a turn budget, not a percentage of work completed.">{workflow.counters.turns}/{workflow.limits.maxTurns} turns</span>
       <div className="session-workflow__actions">
         {running ? <button type="button" disabled={busy !== null} onClick={() => void act('pause')} aria-label="Pause autonomous workflow"><Pause size={13} /><span>Pause</span></button> : null}
-        {workflow.state === 'paused' ? <button type="button" disabled={busy !== null || session.status === 'running' || session.status === 'waiting' || (workflow.counters.turns >= 50)} onClick={() => void act('resume')} aria-label={resumeLabel}><Play size={13} /><span>{resumeLabel}</span></button> : null}
+        {workflow.state === 'paused' ? <button type="button" disabled={busy !== null || session.status === 'running' || session.status === 'waiting' || budgetExhausted} onClick={() => void act('resume')} aria-label={resumeLabel}><Play size={13} /><span>{resumeLabel}</span></button> : null}
         {!terminal ? <button type="button" disabled={busy !== null} onClick={() => void act('stop')} aria-label="Stop autonomous workflow"><Square size={12} /><span>Stop</span></button> : null}
       </div>
     </div>
@@ -62,7 +65,8 @@ export function SessionWorkflowPanel({ workflow, session }: { workflow: SessionW
       {workflow.state === 'completed' ? <button type="button" className="link-btn" onClick={() => useMingle.getState().setContextTab('changes')}>Review changes</button> : null}
       {waiting ? <p className="session-workflow__hint">Answer the question or permission request in this conversation to continue.</p> : null}
       {workflow.state === 'paused' && workflow.stopReason === 'app-closed' ? <p className="session-workflow__hint">Resume checks the current workspace before continuing partial work.</p> : null}
-      {extraTurns && extraMinutes ? <p className="session-workflow__hint">Resuming grants {extraTurns} additional turns and 4 more hours.</p> : null}
+      {extraTurns && extraMinutes ? <p className="session-workflow__hint">Resuming grants {extraTurns} additional turns and {extraTimeLabel} more.</p> : null}
+      {workflow.state === 'paused' && budgetExhausted ? <p className="session-workflow__hint">This goal reached its maximum budget. Stop it before starting a new goal.</p> : null}
     </div> : null}
     {error ? <p className="session-workflow__error" role="alert">{error}</p> : null}
   </section>;
