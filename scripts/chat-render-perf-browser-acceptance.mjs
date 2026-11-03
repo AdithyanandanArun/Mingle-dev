@@ -23,6 +23,7 @@ try {
   await server.listen();
   browser = await chromium.launch({ executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH || chromium.executablePath(), headless: true });
   const page = await browser.newPage({ viewport: { width: 1100, height: 800 }, reducedMotion: 'reduce' });
+  await page.routeWebSocket('**/ws', () => {});
   page.setDefaultTimeout(15_000);
   const errors = []; page.on('pageerror', (error) => errors.push(error.message));
   await page.route('**/api/**', (route) => route.fulfill({ status: 404, json: { error: 'Example fixture route only.' } }));
