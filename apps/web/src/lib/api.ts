@@ -5,7 +5,7 @@ import type {
 import type { DelegatedSubagent, StartSubagent } from '@mingle/contracts';
 import type { AccountState, AccountConnection, AccountPreferences, SavedAccountPreferences, AttachmentRef, NativeActionCatalog } from '@mingle/contracts';
 import type { ProjectCollaborationSnapshot, SendTeamChatMessage, TeamChatSnapshot, TeamChatMessage } from '@mingle/contracts';
-import type { ProgressBoardResponse } from '@mingle/contracts';
+import type { ProgressBoardResponse, RunReviewEvidence } from '@mingle/contracts';
 import type { SessionWorkflow, StartSessionWorkflowInput, ResumeSessionWorkflowInput, ProviderUpdateInfo, ProviderUpdatesSnapshot } from '@mingle/contracts';
 import type {
   ContextCompactionResult as ContractContextCompactionResult,
@@ -214,6 +214,7 @@ export const api = {
   resumeGroup: (id: string) => json<GroupSnapshot>(`${groupBase(id)}/resume`, 'POST', {}),
   interruptGroupMember: (id: string, memberId: string) => json<GroupSnapshot>(`${groupBase(id)}/members/${encodeURIComponent(memberId)}/interrupt`, 'POST', {}),
   runTools: (id: string) => json<ToolCall[]>(`/api/runs/${encodeURIComponent(id)}/tools`),
+  runReview: (id: string, signal?: AbortSignal) => json<RunReviewEvidence>(`/api/runs/${encodeURIComponent(id)}/review`, 'GET', undefined, signal),
   runChanges: (id: string, signal?: AbortSignal) => json<RunChanges>(`/api/runs/${encodeURIComponent(id)}/changes`, 'GET', undefined, signal),
   toolCall: (id: string) => json<ToolCall>(`/api/tool-calls/${encodeURIComponent(id)}`),
   renameSession: (id: string, name: string) => json<Session>(`/api/sessions/${encodeURIComponent(id)}`, 'PATCH', { name }),

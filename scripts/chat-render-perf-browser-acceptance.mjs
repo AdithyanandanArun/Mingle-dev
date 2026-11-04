@@ -51,15 +51,16 @@ try {
   const refetch = await measure('bootstrap refetch with identical data', () => page.evaluate(() => window.__perf.refreshBoot()));
   assert.match(await page.locator('article.msg--assistant').last().innerText(), /tok0 tok1/);
   assert.deepEqual(errors, []);
-  // Placement: run activity directly follows its user message and a finished run's changes follow its final assistant message.
+  // Placement: run activity directly follows its user message and a finished run's review (with exactly one embedded saved-change list) follows its final assistant message.
   const placement = await page.evaluate((turns) => {
     const bad = [];
     for (let i = 0; i < turns; i++) {
       const user = document.querySelector(`article[data-message-id="a-u-${i}"]`);
       const assistant = document.querySelector(`article[data-message-id="a-a-${i}"]`);
       if (!user?.nextElementSibling?.matches('details.run-activity')) bad.push(`activity after u-${i}`);
-      if (i < turns - 1 && !assistant?.nextElementSibling?.matches('section.run-changes')) bad.push(`changes after a-${i}`);
-      if (i === turns - 1 && assistant?.nextElementSibling) bad.push('running run must not show changes');
+      if (i < turns - 1 && !assistant?.nextElementSibling?.matches('section.run-review')) bad.push(`review after a-${i}`);
+      if (i < turns - 1 && assistant?.nextElementSibling?.querySelectorAll('.run-changes').length !== 1) bad.push(`one embedded change list after a-${i}`);
+      if (i === turns - 1 && assistant?.nextElementSibling) bad.push('running run must not show a review');
     }
     return { bad, cards: document.querySelectorAll('section.run-changes').length };
   }, TURNS);

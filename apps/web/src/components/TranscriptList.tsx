@@ -6,11 +6,11 @@ import { overlayStream, type RunBlock, type TranscriptLayout, type TranscriptRow
 import { InternalDeliveryDisclosure, LegacyToolGroup, MessageRow } from './ConversationParts';
 import { appendContextReference } from './MessageContextControls';
 import { RunActivity } from './RunActivity';
-import { RunChanges } from './RunChanges';
+import { RunReview } from './RunReview';
 import { SubagentTranscriptLinks } from './subagents/SubagentTranscriptLinks';
 
 const MemoRunActivity = memo(RunActivity);
-const MemoRunChanges = memo(RunChanges);
+const MemoRunReview = memo(RunReview);
 const MemoSubagentLinks = memo(SubagentTranscriptLinks);
 
 /**
@@ -47,11 +47,11 @@ const TranscriptEntry = memo(function TranscriptEntry({ row, provider, onAskAbou
   return <>
     <StreamAwareMessageRow m={row.message} tracked={row.streamed} provider={provider} onAskAboutThis={onAskAboutThis} onGrow={onGrow} />
     {row.runs.map((block) => <RunBlockView key={block.run.id} block={block} onOpenSubagent={onOpenSubagent} />)}
-    {row.changes.map((run) => <MemoRunChanges key={run.id} runId={run.id} summary={run.changes} />)}
+    {row.changes.map((block) => <MemoRunReview key={block.run.id} block={block} />)}
   </>;
 });
 
-/** Messages, their run activity and change cards, then runs whose user message is not in the transcript. */
+/** Messages, their run activity and completion review cards, then runs whose user message is not in the transcript. */
 export const TranscriptList = memo(function TranscriptList({ layout, sessionId, provider, onOpenSubagent, onGrow }: {
   layout: TranscriptLayout; sessionId: string; provider: Provider; onOpenSubagent: (id: string) => void; onGrow: () => void;
 }) {
@@ -60,7 +60,7 @@ export const TranscriptList = memo(function TranscriptList({ layout, sessionId, 
     {layout.rows.map((row) => <TranscriptEntry key={row.key} row={row} provider={provider} onAskAboutThis={onAskAboutThis} onOpenSubagent={onOpenSubagent} onGrow={onGrow} />)}
     {layout.unplaced.map((block) => <Fragment key={block.run.id}>
       <RunBlockView block={block} onOpenSubagent={onOpenSubagent} />
-      {block.run.status !== 'running' ? <MemoRunChanges runId={block.run.id} summary={block.run.changes} /> : null}
+      {block.run.status !== 'running' ? <MemoRunReview block={block} /> : null}
     </Fragment>)}
   </>;
 });

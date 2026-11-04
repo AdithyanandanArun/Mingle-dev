@@ -136,7 +136,7 @@ try {
   await page.waitForFunction(() => document.querySelector('.chat__scroll').getAttribute('aria-live') === 'polite');
   assert.deepEqual(await page.evaluate(() => window.__liveValues), ['off', 'polite']);
 
-  // 3c. Placement of run activity and change cards in the older rows.
+  // 3c. Placement of run activity and completion reviews with one embedded change list in the older rows.
   const placement = await page.evaluate(([from, to]) => {
     const bad = [];
     for (let i = from; i < to; i++) {
@@ -144,7 +144,8 @@ try {
       const user = document.querySelector(`article[data-message-id="a-u-${p}"]`);
       const assistant = document.querySelector(`article[data-message-id="a-a-${p}"]`);
       if (!user?.nextElementSibling?.matches('details.run-activity')) bad.push(`activity after u-${p}`);
-      if (!assistant?.nextElementSibling?.matches('section.run-changes')) bad.push(`changes after a-${p}`);
+      if (!assistant?.nextElementSibling?.matches('section.run-review')) bad.push(`review after a-${p}`);
+      if (assistant?.nextElementSibling?.querySelectorAll('.run-changes').length !== 1) bad.push(`one embedded change list after a-${p}`);
     }
     return bad;
   }, [TURNS - (WINDOW + PAGE) / 2, TURNS - 1]);

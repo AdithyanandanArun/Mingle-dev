@@ -13,6 +13,7 @@ import './styles/message-context.css';
 import './styles/usage.css';
 import './styles/run-activity.css';
 import './styles/run-changes.css';
+import './styles/run-review.css';
 import './styles/import-dialog.css';
 import './styles/project-picker.css';
 import './styles/browser.css';

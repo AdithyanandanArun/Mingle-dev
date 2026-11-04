@@ -265,6 +265,13 @@ export function buildRouter(s: Services) {
     if (!run || !s.store.getSession(run.sessionId)) throw notFound('Run not found');
     return s.store.listRunTools(run.id);
   });
+  // Bounded metadata about what was recorded for a finished run: command rows, failures and the run's own goal report. No tool output.
+  add('GET', '/api/runs/:id/review', (ctx) => {
+    const run = s.store.getRun(param(ctx, 'id'));
+    if (!run || !s.store.getSession(run.sessionId)) throw notFound('Run not found');
+    if (run.status === 'running') throw conflict('A review is available after the run finishes');
+    return { ...s.store.runReviewEvidence(run), goalTurn: s.workflows.goalTurn(run.id) };
+  });
   add('GET', '/api/runs/:id/changes', (ctx) => {
     const run = s.store.getRun(param(ctx, 'id'));
     if (!run || !s.store.getSession(run.sessionId)) throw notFound('Run not found');

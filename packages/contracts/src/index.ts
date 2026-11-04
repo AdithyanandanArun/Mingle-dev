@@ -10,6 +10,7 @@ export * from './provider-config';
 export * from './provider-updates';
 export * from './session-workflow';
 export * from './session-snapshot';
+export * from './run-review';
 export type SessionStatus = 'idle' | 'running' | 'waiting' | 'interrupted' | 'error';
 export type TaskStatus = 'backlog' | 'ready' | 'running' | 'blocked' | 'review' | 'done';
 export interface Project { id: string; name: string; path: string; createdAt: string; isExample: boolean }

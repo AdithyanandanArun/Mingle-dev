@@ -132,7 +132,11 @@ function FileRows({ nodes, onOpen }: { nodes: Tree[]; onOpen: (path: string) => 
   </button></li> : <li key={node.path}>{(() => { const totals = treeTotals(node); return <details className="run-changes__folder"><summary><ChevronRight size={13} /><FolderOpen size={14} /><span>{node.name}</span><span className="run-changes__counts"><b className="add">+{count(totals.additions)}</b><b className="del">−{count(totals.deletions)}</b><span>{totals.files} {totals.files === 1 ? 'file' : 'files'}</span></span></summary><FileRows nodes={[...node.children.values()]} onOpen={onOpen} /></details>; })()}</li>)}</ul>;
 }
 
-export function RunChanges({ runId, summary }: { runId: string; summary?: RunChangesSummary | null }) {
+/**
+ * Saved changes for one run. `embedded` places the same file list and saved-diff dialog inside the completion review card (the
+ * card supplies the surrounding frame and heading) so a run never shows two change lists.
+ */
+export function RunChanges({ runId, summary, embedded = false }: { runId: string; summary?: RunChangesSummary | null; embedded?: boolean }) {
   const [expanded, setExpanded] = useState(true);
   const { present: bodyPresent, closing: bodyClosing } = usePresence(expanded);
   const [dialog, setDialog] = useState<{ path?: string } | null>(null);
@@ -143,9 +147,9 @@ export function RunChanges({ runId, summary }: { runId: string; summary?: RunCha
   if (!summary || (summary.status === 'available' && summary.fileCount === 0)) return null;
   const open = (path?: string) => setDialog({ path });
   return <>
-    <section className="run-changes" aria-label="Changes saved for this run">
+    <section className={`run-changes${embedded ? ' run-changes--embedded' : ''}`} aria-label="Changes saved for this run">
       {summary.status === 'unavailable' ? <><div className="run-changes__head"><span>Changes unavailable</span><span className="run-changes__quiet">This run’s change summary could not be captured.</span></div>{summary.notices.map((notice, index) => <p className="run-changes__notice" key={index}>{notice}</p>)}</> : <>
-        <header className="run-changes__head"><button type="button" className="run-changes__expand" aria-expanded={expanded} onClick={() => setExpanded(value => !value)}><ChevronDown size={14} className={expanded ? '' : 'is-collapsed'} /><span>{summary.fileCount} changed {summary.fileCount === 1 ? 'file' : 'files'}</span><span className="run-changes__counts"><b className="add">+{summary.additions}</b><b className="del">−{summary.deletions}</b></span></button><button type="button" className="run-changes__open" onClick={() => open()}><FileDiff size={14} />Open diff</button></header>
+        <header className="run-changes__head"><button type="button" className="run-changes__expand" aria-expanded={expanded} onClick={() => setExpanded(value => !value)}><ChevronDown size={14} className={expanded ? '' : 'is-collapsed'} /><span>{summary.fileCount} changed {summary.fileCount === 1 ? 'file' : 'files'}</span><span className="run-changes__counts"><b className="add">+{summary.additions}</b><b className="del">−{summary.deletions}</b></span></button><button type="button" className="run-changes__open" onClick={() => open()}><FileDiff size={14} />{embedded ? 'Review changes' : 'Open diff'}</button></header>
         {bodyPresent ? <div className={`run-changes__body-frame${bodyClosing ? ' is-closing' : ''}`} aria-hidden={bodyClosing || undefined} inert={bodyClosing}><div className="run-changes__body"><FileRows nodes={nodes} onOpen={open} />{summary.truncated ? <p className="run-changes__notice">The file list is truncated. Some changed files are not shown.</p> : null}{summary.notices.map((notice, index) => <p className="run-changes__notice" key={index}>{notice}</p>)}</div></div> : null}
       </>}
     </section>

@@ -1,6 +1,7 @@
-import type { Message, Provider, SessionRun, ToolCall } from '@mingle/contracts';
+import type { Message, Provider, SessionRun, SessionWorkflow, Task, ToolCall } from '@mingle/contracts';
 import type { DisplayMessage } from './conversation';
 import { deriveSubagents, type SubagentRun } from './subagents';
+import { deriveReviewHints, NO_HINTS, type RunReviewHints } from './runReview';
 
 /**
  * Pure, indexed derivation behind the single-agent transcript.
@@ -96,14 +97,21 @@ export function deriveDisplayMessages(stored: readonly Message[], input: Display
   return out;
 }
 
-export interface RunBlock { run: SessionRun; calls: ToolCall[]; subagents: readonly SubagentRun[] }
+export interface RunBlock {
+  run: SessionRun; calls: ToolCall[]; subagents: readonly SubagentRun[];
+  /** Checklist and goal facts the client already holds for this run (identity-stable while unchanged). */
+  hints: RunReviewHints;
+  /** True for the session's newest run, whose review evidence is fetched without being opened. */
+  latest: boolean;
+}
 export type TranscriptRow =
   | { kind: 'tools'; key: string; messages: readonly DisplayMessage[] }
   | { kind: 'delivery'; key: string; message: DisplayMessage; runs: readonly RunBlock[] }
-  | { kind: 'message'; key: string; message: DisplayMessage; streamed: boolean; runs: readonly RunBlock[]; changes: readonly SessionRun[] };
+  | { kind: 'message'; key: string; message: DisplayMessage; streamed: boolean; runs: readonly RunBlock[]; changes: readonly RunBlock[] };
 export interface TranscriptLayout { rows: readonly TranscriptRow[]; unplaced: readonly RunBlock[]; blocks: ReadonlyMap<string, RunBlock> }
 export interface LayoutInput {
   messages: readonly DisplayMessage[]; runs: readonly SessionRun[]; toolCalls: readonly ToolCall[]; subagents: readonly SubagentRun[]; streamIds: readonly string[];
+  hints?: ReadonlyMap<string, RunReviewHints>;
 }
 
 function groupBy<T>(items: readonly T[], key: (item: T) => string): Map<string, T[]> {
@@ -131,7 +139,7 @@ function rowsEqual(a: TranscriptRow, b: TranscriptRow): boolean {
 }
 
 /**
- * Places run activity under its user message, and a finished run's change card after the run's final assistant
+ * Places run activity under its user message, and a finished run's review card after the run's final assistant
  * message (falling back to its last non-tool message, then the user message), in one pass over the messages.
  */
 export function buildTranscriptLayout(input: LayoutInput, previous?: TranscriptLayout): TranscriptLayout {
@@ -149,6 +157,8 @@ export function buildTranscriptLayout(input: LayoutInput, previous?: TranscriptL
 
   const callsByRun = groupBy(input.toolCalls, (call) => call.runId);
   const subagentsByRun = groupBy(input.subagents, (subagent) => subagent.runId);
+  let latestRun: SessionRun | undefined;
+  for (const run of runs) if (!latestRun || run.startedAt.localeCompare(latestRun.startedAt) >= 0) latestRun = run;
   const blocks = new Map<string, RunBlock>();
   const blockFor = (run: SessionRun): RunBlock => {
     const old = previous?.blocks.get(run.id);
@@ -156,13 +166,15 @@ export function buildTranscriptLayout(input: LayoutInput, previous?: TranscriptL
     const nextSubagents = subagentsByRun.get(run.id) ?? EMPTY_SUBAGENTS;
     const calls = old && sameItems(old.calls, nextCalls) ? old.calls : nextCalls;
     const subagents = old && sameItems(old.subagents, nextSubagents) ? old.subagents : nextSubagents;
-    const block = old && old.run === run && old.calls === calls && old.subagents === subagents ? old : { run, calls, subagents };
+    const hints = input.hints?.get(run.id) ?? NO_HINTS;
+    const latest = run === latestRun;
+    const block = old && old.run === run && old.calls === calls && old.subagents === subagents && old.hints === hints && old.latest === latest ? old : { run, calls, subagents, hints, latest };
     blocks.set(run.id, block);
     return block;
   };
 
   const blocksByUserMessage = new Map<string, RunBlock[]>();
-  const changesByIndex = new Map<number, SessionRun[]>();
+  const changesByIndex = new Map<number, RunBlock[]>();
   const unplacedRuns: SessionRun[] = [];
   for (const run of runs) {
     const userIndex = indexById.get(run.userMessageId);
@@ -172,7 +184,7 @@ export function buildTranscriptLayout(input: LayoutInput, previous?: TranscriptL
     if (list) list.push(block); else blocksByUserMessage.set(run.userMessageId, [block]);
     const at = lastAssistantByRun.get(run.id) ?? lastNonToolByRun.get(run.id) ?? userIndex;
     const placed = changesByIndex.get(at);
-    if (placed) placed.push(run); else changesByIndex.set(at, [run]);
+    if (placed) placed.push(block); else changesByIndex.set(at, [block]);
   }
   unplacedRuns.sort((a, b) => a.startedAt.localeCompare(b.startedAt));
   const unplaced = unplacedRuns.map(blockFor);
@@ -195,7 +207,7 @@ export function buildTranscriptLayout(input: LayoutInput, previous?: TranscriptL
     } else if (isDelivery(message)) {
       keep({ kind: 'delivery', key: message.id, message, runs: blocksByUserMessage.get(message.id) ?? EMPTY });
     } else {
-      const finished = (changesByIndex.get(index) ?? EMPTY).filter((run) => run.status !== 'running');
+      const finished = (changesByIndex.get(index) ?? EMPTY).filter((block) => block.run.status !== 'running');
       keep({ kind: 'message', key: message.id, message, streamed: streamed.has(message.id), runs: message.role === 'user' ? blocksByUserMessage.get(message.id) ?? EMPTY : EMPTY, changes: finished });
     }
   }
@@ -210,6 +222,8 @@ export interface TranscriptInput {
   sessionId: string; provider: Provider; model: string; running: boolean;
   messages: readonly Message[] | undefined; runs: readonly SessionRun[] | undefined; toolCalls: readonly ToolCall[] | undefined;
   streamIds: readonly string[];
+  /** Tasks and goal records the review card's per-run checklist and goal hints come from. */
+  tasks?: readonly Task[]; workflows?: readonly SessionWorkflow[];
 }
 export interface TranscriptModel {
   messages: readonly DisplayMessage[]; runs: readonly SessionRun[]; toolCalls: readonly ToolCall[]; subagents: readonly SubagentRun[]; layout: TranscriptLayout;
@@ -229,6 +243,8 @@ export function createTranscriptDeriver(): (input: TranscriptInput) => Transcrip
   let toolCalls: readonly ToolCall[] = EMPTY_TOOL_CALLS;
   let subagentKey: unknown[] = [];
   let subagents: readonly SubagentRun[] = EMPTY_SUBAGENTS;
+  let hintKey: unknown[] = [];
+  let hints: ReadonlyMap<string, RunReviewHints> | undefined;
   let layoutKey: unknown[] = [];
   let layout: TranscriptLayout | undefined;
   let model: TranscriptModel | undefined;
@@ -238,7 +254,7 @@ export function createTranscriptDeriver(): (input: TranscriptInput) => Transcrip
     if (input.sessionId !== sessionId) {
       sessionId = input.sessionId;
       messageKey = []; messages = EMPTY; runKey = []; runs = EMPTY_RUNS; callKey = []; toolCalls = EMPTY_TOOL_CALLS;
-      subagentKey = []; subagents = EMPTY_SUBAGENTS; layoutKey = []; layout = undefined; model = undefined;
+      subagentKey = []; subagents = EMPTY_SUBAGENTS; hintKey = []; hints = undefined; layoutKey = []; layout = undefined; model = undefined;
     }
     const nextMessageKey = [input.messages, input.streamIds, input.running];
     if (changed(messageKey, nextMessageKey)) {
@@ -260,10 +276,15 @@ export function createTranscriptDeriver(): (input: TranscriptInput) => Transcrip
       subagentKey = nextSubagentKey;
       subagents = reuseById(subagents, deriveSubagents(toolCalls, input.provider, input.model));
     }
-    const nextLayoutKey = [messages, runs, toolCalls, subagents, input.streamIds];
+    const nextHintKey = [input.tasks, input.workflows];
+    if (changed(hintKey, nextHintKey) || !hints) {
+      hintKey = nextHintKey;
+      hints = deriveReviewHints(input.tasks, input.workflows, input.sessionId, hints);
+    }
+    const nextLayoutKey = [messages, runs, toolCalls, subagents, input.streamIds, hints];
     if (changed(layoutKey, nextLayoutKey) || !layout) {
       layoutKey = nextLayoutKey;
-      layout = buildTranscriptLayout({ messages, runs, toolCalls, subagents, streamIds: input.streamIds }, layout);
+      layout = buildTranscriptLayout({ messages, runs, toolCalls, subagents, streamIds: input.streamIds, hints }, layout);
     }
     if (model && model.messages === messages && model.runs === runs && model.toolCalls === toolCalls && model.subagents === subagents && model.layout === layout) return model;
     model = { messages, runs, toolCalls, subagents, layout };

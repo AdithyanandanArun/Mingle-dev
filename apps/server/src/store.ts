@@ -1,7 +1,8 @@
 import type { DatabaseSync, SQLInputValue } from 'node:sqlite';
-import type { TaskSource, ProjectContext, AppSettings, Approval, Message, Policy, Project, Provider, ProviderFailure, RecoveryCheckpoint, RunChanges, RunChangesSummary, Session, SessionStatus, SessionRun, ToolCall, ToolCategory, RunStatus, Task, TaskStatus, WorkspaceEvent, SessionPlan, UserQuestion, UserInputAnswers, QueuedMessage, DelegatedSubagent } from '@mingle/contracts';
+import type { TaskSource, ProjectContext, AppSettings, Approval, Message, Policy, Project, Provider, ProviderFailure, RecoveryCheckpoint, RunChanges, RunChangesSummary, Session, SessionStatus, SessionRun, ToolCall, ToolCategory, ToolStatus, RunReviewEvidence, RunStatus, Task, TaskStatus, WorkspaceEvent, SessionPlan, UserQuestion, UserInputAnswers, QueuedMessage, DelegatedSubagent } from '@mingle/contracts';
+import { RUN_REVIEW_COMMAND_LIMIT, RUN_REVIEW_PROBLEM_LIMIT } from '@mingle/contracts';
 import { SCHEMA_VERSION } from './db.ts';
-import { newId, nowIso } from './util.ts';
+import { newId, nowIso, redactSecrets } from './util.ts';
 import { AttachmentRepo } from './attachments/repo.ts';
 
 type Row = Record<string, unknown>;
@@ -13,6 +14,8 @@ const BOOTSTRAP_RUN_ORDER = `WHERE s.id IN (${VISIBLE_SESSIONS}) ORDER BY (r.sta
 const BOOTSTRAP_TOOL_ORDER = `ORDER BY (r.status = 'running') DESC, t.rowid DESC`;
 const BOOTSTRAP_PLAN_ORDER = "(p.status IN ('review', 'approved', 'executing')) DESC, p.rowid DESC";
 const BOOTSTRAP_QUESTION_ORDER = "(q.status = 'pending') DESC, q.rowid DESC";
+/** Characters of a recorded command a run review carries. */
+const RUN_REVIEW_COMMAND_TEXT = 300;
 const TOOL_INPUT_HEAD = 4000;
 const TOOL_OUTPUT_TAIL = 2000;
 /** Records stored before revisions existed have none; they are never rewritten, so 0 orders them consistently. */
@@ -264,6 +267,48 @@ export class Store {
   }
   listRunTools(runId: string, limit = 1000): ToolCall[] {
     return this.all('SELECT data FROM tool_calls WHERE run_id = ? ORDER BY rowid ASC LIMIT ?', runId, limit).map((row) => withRevisions(JSON.parse(row.data as string) as ToolCall));
+  }
+  /**
+   * Bounded, metadata-only account of what was recorded for one run, read with SQL over the stored tool records so no input or
+   * output is loaded. Counts cover every stored call; the listed rows are capped and say so. Nothing here interprets results.
+   */
+  runReviewEvidence(run: SessionRun): Omit<RunReviewEvidence, 'goalTurn'> {
+    const totals = this.get(`SELECT COUNT(*) AS total,
+        COALESCE(SUM(status = 'failed'), 0) AS failed, COALESCE(SUM(status = 'interrupted'), 0) AS interrupted, COALESCE(SUM(status = 'running'), 0) AS running,
+        COALESCE(SUM(json_extract(data, '$.exitCode') IS NOT NULL AND json_extract(data, '$.exitCode') != 0), 0) AS nonzero,
+        COALESCE(SUM(status IN ('failed', 'interrupted') OR (json_extract(data, '$.exitCode') IS NOT NULL AND json_extract(data, '$.exitCode') != 0)), 0) AS problems
+      FROM tool_calls WHERE run_id = ?`, run.id) ?? {};
+    const counts: Partial<Record<ToolCategory, number>> = {};
+    for (const row of this.all('SELECT category, COUNT(*) AS n FROM tool_calls WHERE run_id = ? GROUP BY category', run.id)) counts[row.category as ToolCategory] = Number(row.n);
+    const clip = (value: unknown, max: number): string | null => {
+      if (typeof value !== 'string') return null;
+      const text = redactSecrets(value);
+      return text.length > max ? `${text.slice(0, max)}…` : text;
+    };
+    const number = (value: unknown): number | null => typeof value === 'number' && Number.isFinite(value) ? value : null;
+    const commandRows = this.all(`SELECT json_extract(data, '$.id') AS id, json_extract(data, '$.name') AS name, substr(json_extract(data, '$.command'), 1, ?) AS command,
+        substr(json_extract(data, '$.summary'), 1, ?) AS summary, status, json_extract(data, '$.exitCode') AS exit_code, json_extract(data, '$.durationMs') AS duration_ms, json_extract(data, '$.cwd') AS cwd
+      FROM tool_calls WHERE run_id = ? AND category = 'command' ORDER BY rowid ASC LIMIT ?`, RUN_REVIEW_COMMAND_TEXT + 1, 201, run.id, RUN_REVIEW_COMMAND_LIMIT);
+    const problemRows = this.all(`SELECT json_extract(data, '$.id') AS id, json_extract(data, '$.name') AS name, category, status, json_extract(data, '$.exitCode') AS exit_code,
+        substr(json_extract(data, '$.summary'), 1, 201) AS summary
+      FROM tool_calls WHERE run_id = ? AND (status IN ('failed', 'interrupted') OR (json_extract(data, '$.exitCode') IS NOT NULL AND json_extract(data, '$.exitCode') != 0))
+      ORDER BY rowid ASC LIMIT ?`, run.id, RUN_REVIEW_PROBLEM_LIMIT);
+    const commandTotal = counts.command ?? 0;
+    const problemTotal = Number(totals.problems ?? 0);
+    const failure = this.providerFailureForRun(run.id);
+    return {
+      runId: run.id, sessionId: run.sessionId, status: run.status, readAt: nowIso(),
+      tools: { total: Number(totals.total ?? 0), counts, failed: Number(totals.failed ?? 0), interrupted: Number(totals.interrupted ?? 0), running: Number(totals.running ?? 0), nonZeroExit: Number(totals.nonzero ?? 0) },
+      commands: {
+        total: commandTotal, truncated: commandTotal > commandRows.length,
+        items: commandRows.map((row) => ({ id: String(row.id), name: String(row.name ?? ''), command: clip(row.command, RUN_REVIEW_COMMAND_TEXT), summary: clip(row.summary, 200) ?? '', status: row.status as ToolStatus, exitCode: number(row.exit_code), durationMs: number(row.duration_ms), cwd: clip(row.cwd, 300) })),
+      },
+      problems: {
+        total: problemTotal, truncated: problemTotal > problemRows.length,
+        items: problemRows.map((row) => ({ id: String(row.id), name: String(row.name ?? ''), category: row.category as ToolCategory, status: row.status as ToolStatus, exitCode: number(row.exit_code), summary: clip(row.summary, 200) ?? '' })),
+      },
+      failure: failure ? { kind: failure.kind, message: clip(failure.message, 1000) ?? '', occurredAt: failure.occurredAt, outcomeUnknown: Boolean(failure.outcomeUnknown) } : null,
+    };
   }
   bootstrapToolCalls(runIds: string[], limit = 1000): ToolCall[] {
     if (!runIds.length) return [];

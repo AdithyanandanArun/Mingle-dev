@@ -1,0 +1,42 @@
+/* Completion review: one flat card per finished run. Neutral surfaces only; wrapping is allowed everywhere so 390px stays readable. */
+.run-review {
+  width: 100%;
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--line-soft);
+  border-radius: 9px;
+  background: var(--bg-panel);
+  color: var(--fg-1);
+  font-size: 12px;
+}
+.run-review__head { display: flex; min-height: 34px; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 4px 12px; padding: 6px 12px 0; }
+.run-review__title { color: var(--fg-0); font-weight: 550; }
+.run-review__status { color: var(--fg-2); font-size: 11px; }
+.run-review.is-failed .run-review__status, .run-review.is-interrupted .run-review__status { color: var(--err); }
+.run-review__note { margin: 0; padding: 2px 12px 8px; color: var(--fg-3); font-size: 11px; line-height: 1.45; }
+.run-review__group { display: grid; gap: 6px; min-width: 0; padding: 8px 12px 10px; border-top: 1px solid var(--line-soft); }
+.run-review__label { margin: 0; color: var(--fg-3); font-size: 10px; letter-spacing: .04em; text-transform: uppercase; }
+.run-review__line { display: grid; gap: 4px; margin: 0; color: var(--fg-2); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+.run-review__line.is-bad, .run-review__list li.is-bad .run-review__outcome { color: var(--err); }
+.run-review__quiet { color: var(--fg-3); font-size: 11px; }
+.run-review__caveat { margin: 0; color: var(--fg-3); font-size: 11px; line-height: 1.45; }
+.run-review__details { min-width: 0; border: 1px solid var(--line-soft); border-radius: 7px; }
+.run-review__summary { display: flex; min-height: 32px; flex-wrap: wrap; align-items: center; gap: 2px 10px; padding: 4px 10px; list-style: none; color: var(--fg-1); cursor: pointer; }
+.run-review__summary::-webkit-details-marker { display: none; }
+.run-review__summary::before { content: '▸'; color: var(--fg-3); font-size: 10px; }
+.run-review__details[open] > .run-review__summary::before { content: '▾'; }
+.run-review__summary:hover { background: var(--bg-hover); }
+.run-review__summary:focus-visible, .run-review__retry:focus-visible { outline: 2px solid var(--blue); outline-offset: -2px; }
+.run-review__body { display: grid; gap: 7px; padding: 8px 10px 10px; border-top: 1px solid var(--line-soft); }
+.run-review__list { display: grid; gap: 4px; margin: 0; padding: 0; list-style: none; }
+.run-review__list li { display: flex; min-width: 0; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 2px 10px; }
+.run-review__command { min-width: 0; flex: 1 1 16ch; color: var(--fg-1); font: 11px/1.45 var(--font-mono); overflow-wrap: anywhere; }
+.run-review__outcome { flex: none; color: var(--fg-3); font: 11px/1.45 var(--font-mono); }
+.run-review__retry { min-height: 26px; margin-left: 4px; padding: 2px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg-panel); color: var(--fg-1); font: inherit; cursor: pointer; }
+/* The embedded changes list keeps its own header, file tree and saved-diff dialog; the card supplies the heading. */
+.run-review .run-changes--embedded { border-radius: 7px; background: transparent; }
+@media (max-width: 599px) {
+  .run-review__group { padding-inline: 10px; }
+  .run-review__head { padding-inline: 10px; }
+  .run-review__note { padding-inline: 10px; }
+}

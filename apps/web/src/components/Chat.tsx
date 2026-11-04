@@ -71,12 +71,14 @@ function SingleSessionPane() {
   const { history, messages: allMessages, loadOlder } = useSessionHistory(sessionId, bootstrapMessages);
   const allRuns = useMingle((s) => s.boot?.runs);
   const allToolCalls = useMingle((s) => s.boot?.toolCalls);
+  const reviewTasks = useMingle((s) => s.boot?.tasks);
+  const reviewWorkflows = useMingle((s) => s.boot?.workflows);
   const deriveTranscript = useRef<ReturnType<typeof createTranscriptDeriver>>(undefined);
   deriveTranscript.current ??= createTranscriptDeriver();
   const transcript = useMemo(() => session ? deriveTranscript.current!({
     sessionId: session.id, provider: session.provider, model: session.model, running: session.status === 'running',
-    messages: allMessages, runs: allRuns, toolCalls: allToolCalls, streamIds,
-  }) : null, [session?.id, session?.provider, session?.model, session?.status, allMessages, allRuns, allToolCalls, streamIds]);
+    messages: allMessages, runs: allRuns, toolCalls: allToolCalls, streamIds, tasks: reviewTasks, workflows: reviewWorkflows,
+  }) : null, [session?.id, session?.provider, session?.model, session?.status, allMessages, allRuns, allToolCalls, streamIds, reviewTasks, reviewWorkflows]);
   const messages = transcript?.messages ?? EMPTY_MESSAGES;
   const runs = transcript?.runs ?? EMPTY_SESSION_RUNS;
   const sessionToolCalls = transcript?.toolCalls ?? EMPTY_SESSION_CALLS;

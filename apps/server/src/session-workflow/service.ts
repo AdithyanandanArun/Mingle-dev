@@ -1,5 +1,5 @@
 import { StartSessionWorkflowSchema, ResumeSessionWorkflowSchema, type SessionWorkflow, type WorkflowFinish, type WorkflowStopReason } from '@mingle/contracts';
-import type { QueuedMessage, Session, DelegatedSubagent } from '@mingle/contracts';
+import type { QueuedMessage, Session, DelegatedSubagent, RunReviewGoalTurn } from '@mingle/contracts';
 import type { GroupService } from '../groups/service.ts';
 import type { RecoveryService } from '../recovery/service.ts';
 import type { SessionRuntime, StartOptions } from '../runtime.ts';
@@ -88,6 +88,14 @@ export class SessionWorkflowService {
   isRunning(sessionId: string): boolean { return this.repo.open(sessionId)?.state === 'running'; }
 
   ownsRun(runId: string): boolean { return this.repo.ownsRun(runId); }
+
+  /** Exact goal-turn binding and report of one run, from its own durable row; never the goal's latest summary. */
+  goalTurn(runId: string): RunReviewGoalTurn | null {
+    const row = this.repo.run(runId);
+    if (!row) return null;
+    const report = row.report && row.reportState !== 'none' ? { outcome: row.report.outcome, summary: clean(row.report.summary, 2000), state: row.reportState } : null;
+    return { workflowId: row.workflowId, sequence: row.seq, kind: row.kind, report };
+  }
 
   start(sessionId: string, input: unknown): SessionWorkflow {
     const parsed = StartSessionWorkflowSchema.safeParse(input);

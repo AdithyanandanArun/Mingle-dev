@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { Message, SessionRun, ToolCall } from '@mingle/contracts';
+import type { Message, SessionRun, SessionWorkflow, Task, ToolCall } from '@mingle/contracts';
 import type { DisplayMessage } from './conversation';
 import {
   buildTranscriptLayout, createTranscriptDeriver, deepEqualData, deriveDisplayMessages, overlayStream, pickSessionStreamIds, reuseById,
@@ -41,7 +41,7 @@ function layoutPlacement(rows: readonly TranscriptRow[], messages: readonly Disp
   const placements = new Map<number, string[]>();
   const activity = new Map<string, string[]>();
   for (const row of rows) {
-    if (row.kind === 'message' && row.changes.length) placements.set(indexOf.get(row.message.id)!, row.changes.map((r) => r.id));
+    if (row.kind === 'message' && row.changes.length) placements.set(indexOf.get(row.message.id)!, row.changes.map((block) => block.run.id));
     if (row.kind !== 'tools') activity.set(row.message.id, row.runs.map((block) => block.run.id));
   }
   return { placements, activity };
@@ -214,6 +214,34 @@ describe('identity across refetches and tokens', () => {
     const after = derive(next);
     const changed = after.layout.rows.filter((row, index) => row !== before.layout.rows[index]).map((row) => row.key);
     expect(changed).toEqual(['u2']);
+  });
+
+  it('hands each run block its own checklist and goal hint, and re-renders only the rows whose facts changed', () => {
+    const derive = createTranscriptDeriver();
+    const step = (id: string, runId: string, reported: 'pending' | 'completed', extra: Partial<Task> = {}): Task => ({
+      id, projectId: 'p1', title: `Step ${id}`, description: '', acceptanceCriteria: '', sessionId: 's1', dependsOn: [], status: 'review', createdAt: at(1), updatedAt: at(1),
+      source: { kind: 'provider', key: `provider:s1:plan:${id}`, runId, providerId: id, reportedStatus: reported }, ...extra,
+    });
+    const tasks = [step('t1', 'r2', 'pending'), step('t2', 'r2', 'completed'), step('t3', 'r1', 'completed', { sessionId: 's2' })];
+    const before = derive({ ...input(), tasks, workflows: [] });
+    const blocks = (model: ReturnType<typeof derive>) => new Map([...model.layout.blocks]);
+    expect(blocks(before).get('r2')!.hints.checklist.map((item) => [item.id, item.status])).toEqual([['t1', 'pending'], ['t2', 'completed']]);
+    expect(blocks(before).get('r1')!.hints.checklist).toEqual([]);
+    expect(blocks(before).get('r2')!.latest).toBe(true);
+    expect(blocks(before).get('r1')!.latest).toBe(false);
+    // An unrelated task change (another session) and an identical refetch keep every block and row.
+    const same = derive({ ...input(), tasks: [...tasks.map((task) => ({ ...task })), step('t9', 'r1', 'pending', { sessionId: 's9' })], workflows: [] });
+    expect(same).toBe(before);
+    // A step of r2 changes: only r2's block (and its row) is replaced.
+    const moved = derive({ ...input(), tasks: [step('t1', 'r2', 'completed'), tasks[1]!, tasks[2]!], workflows: [] });
+    expect(blocks(moved).get('r1')).toBe(blocks(before).get('r1'));
+    expect(blocks(moved).get('r2')).not.toBe(blocks(before).get('r2'));
+    const changed = moved.layout.rows.filter((row, index) => row !== before.layout.rows[index]).map((row) => row.key);
+    expect(changed).toEqual(['u2']);
+    // The goal's latest-turn pointer marks only that run.
+    const goal = derive({ ...input(), tasks, workflows: [{ id: 'w', sessionId: 's1', lastRunId: 'r1', currentRunId: null } as SessionWorkflow] });
+    expect(blocks(goal).get('r1')!.hints.goalTurn).toBe(true);
+    expect(blocks(goal).get('r2')!.hints.goalTurn).toBe(false);
   });
 
   it('starts clean when the session changes', () => {
