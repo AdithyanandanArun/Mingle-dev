@@ -49,7 +49,7 @@ function freshWorld() {
   return {
     projects: ['a', 'b'].map((key) => ({ id: `example-project-${key}`, name: `Example project ${key.toUpperCase()}`, path: `/example/${key}`, isExample: false, createdAt: '2026-11-03T00:00:00.000Z' })),
     sessions: [session('s-a', 'example-project-a', 'Example session A', 'claude'), session('s-b', 'example-project-b', 'Example session B', 'codex')],
-    workflows: [], delegated: [], attachments: {}, messages: [], runs: [], approvals: [], questions: [], failure: null, log: [], notExposed: [], sockets: [], startError: null, messageError: null, hold: null, uploadCounter: 0,
+    workflows: [], delegated: [], attachments: {}, messages: [], queuedMessages: [], runs: [], approvals: [], questions: [], failure: null, log: [], notExposed: [], sockets: [], startError: null, messageError: null, hold: null, uploadCounter: 0,
   };
 }
 const find = (sessionId) => world.workflows.find((item) => item.sessionId === sessionId);
@@ -67,7 +67,7 @@ async function handle(route, schemas) {
   const json = (payload, status = 200) => route.fulfill({ status, json: payload });
   const fail = (status, error) => json({ error }, status);
   let match;
-  if (path === '/api/bootstrap') return json({ projects: world.projects, sessions: world.sessions, messages: world.messages, queuedMessages: [], tasks: [], events: [], approvals: world.approvals, plans: [], questions: world.questions, providers, settings: {}, version: 'Example fixture', runs: world.runs, toolCalls: [], workflows: world.workflows, delegatedSubagents: world.delegated });
+  if (path === '/api/bootstrap') return json({ projects: world.projects, sessions: world.sessions, messages: world.messages, queuedMessages: world.queuedMessages, tasks: [], events: [], approvals: world.approvals, plans: [], questions: world.questions, providers, settings: {}, version: 'Example fixture', runs: world.runs, toolCalls: [], workflows: world.workflows, delegatedSubagents: world.delegated });
   if (path.match(/^\/api\/projects\/[^/]+\/memory\/context-preview$/)) return json({ injection: { query: url.searchParams.get('query') ?? '', entries: [{ id: '00000000-0000-4000-8000-000000000008', revision: 3, title: 'Example memory rule', kind: 'fact', lifecycle: 'active', pinned: false, reason: 'relevant' }], chars: 64, truncated: false }, text: 'Example preview only' });
   if (path.match(/^\/api\/sessions\/[^/]+\/memory-injections$/)) return json({ injections: [{ runId: 'example-run-memory', sessionId: 's-a', at: iso(Date.now() - 60_000), query: 'Example', entries: [{ id: '00000000-0000-4000-8000-000000000008', revision: 2, title: 'Earlier memory rule', kind: 'fact', lifecycle: 'active', pinned: false, reason: 'relevant' }], chars: 48, truncated: false }] });
   if (path === '/api/workspace/selection') return json({ projectId: body?.projectId ?? null });
@@ -88,7 +88,15 @@ async function handle(route, schemas) {
     return json({ ok: true });
   }
   if (path.match(/^\/api\/projects\/[^/]+\/files(\/search)?$/)) return json([{ path: 'src/app.ts', name: 'app.ts', type: 'file' }]);
-  if ((match = path.match(/^\/api\/sessions\/([^/]+)\/messages$/)) && method === 'POST') return world.messageError ? fail(world.messageError.status, world.messageError.error) : json({ accepted: true });
+  if ((match = path.match(/^\/api\/sessions\/([^/]+)\/messages$/)) && method === 'POST') {
+    if (world.messageError) return fail(world.messageError.status, world.messageError.error);
+    if (body?.queueOnly) {
+      const queued = { id: `example-queue-${world.queuedMessages.length + 1}`, sessionId: match[1], content: body.content, intent: body.intent ?? 'normal', skills: body.skills ?? [], attachmentIds: body.attachmentIds ?? [], contextRefs: body.contextRefs ?? [], createdAt: iso(Date.now()), ...(body.memory ? { memory: body.memory } : {}) };
+      world.queuedMessages.push(queued);
+      return json({ accepted: true, queued });
+    }
+    return json({ accepted: true });
+  }
   if ((match = path.match(/^\/api\/sessions\/([^/]+)$/)) && method === 'PATCH') {
     const target = world.sessions.find((item) => item.id === match[1]);
     if (!target) return fail(404, 'Unknown Example session.');
@@ -224,7 +232,12 @@ try {
   server = await createServer({
     configFile: join(root, 'apps/web/vite.config.ts'), root, appType: 'mpa', server: { host: '127.0.0.1', port: 0 },
     optimizeDeps: { entries: [join(root, 'scripts/session-workflow-browser-fixture.html')] },
-    resolve: { alias: [{ find: 'react', replacement: join(root, 'apps/web/node_modules/react') }, { find: 'react-dom', replacement: join(root, 'apps/web/node_modules/react-dom') }], dedupe: ['react', 'react-dom'] },
+    resolve: { alias: [
+      { find: /^@mingle\/contracts$/, replacement: join(root, 'packages/contracts/src/index.ts') },
+      { find: /^@mingle\/contracts\/(.*)$/, replacement: `${root}/packages/contracts/src/$1` },
+      { find: 'react', replacement: join(root, 'apps/web/node_modules/react') },
+      { find: 'react-dom', replacement: join(root, 'apps/web/node_modules/react-dom') },
+    ], dedupe: ['react', 'react-dom'] },
   });
   await server.listen();
   fixtureUrl = `http://127.0.0.1:${server.httpServer.address().port}/scripts/session-workflow-browser-fixture.html`;
@@ -366,6 +379,33 @@ try {
     await u.alert.filter({ hasText: 'Start an autonomous goal with a regular request' }).waitFor();
     assert.equal(await u.input.inputValue(), '/review the diff', 'draft survives the rejection');
     assert.equal(posts('/workflow').length, 0);
+  }));
+
+  await test('Ctrl/Cmd+Shift+Enter queues for next turn without steering or interrupting', () => run({ setup() { setStatus('s-a', 'running'); } }, async ({ page, ui: u }) => {
+    await u.input.fill('Keep this for the next turn.');
+    await u.input.press('Control+Shift+Enter');
+    await page.waitForFunction(() => document.querySelector('textarea.composer__input')?.value === '');
+    const request = posts('/messages').at(-1);
+    assert.deepEqual(request?.body, { content: 'Keep this for the next turn.', intent: 'normal', queueOnly: true, skills: [], attachmentIds: [], contextRefs: [] });
+    assert.equal(world.queuedMessages.length, 1, 'the text was stored as queued work');
+    assert.equal(request?.body.queueOnly, true, 'the real Composer request marks queue-only delivery');
+    assert.equal(world.log.some((item) => item.path.endsWith('/send-now')), false, 'the shortcut did not send-now');
+    assert.equal(world.log.some((item) => item.path.endsWith('/interrupt')), false, 'the shortcut did not interrupt');
+    assert.equal(world.sessions.find((item) => item.id === 's-a')?.status, 'running', 'the active provider turn remains running');
+  }));
+
+  await test('closing advanced settings aborts hidden memory previews while retaining disclosure intent', () => run({}, async ({ page, ui: u }) => {
+    await u.settings.click();
+    await page.getByText('Context inspector', { exact: true }).click();
+    await page.waitForTimeout(180);
+    await u.settings.click();
+    const closedCount = world.log.filter((item) => item.path.endsWith('/memory/context-preview')).length;
+    await u.input.fill('Typing while the inspector is hidden.');
+    await page.waitForTimeout(250);
+    assert.equal(world.log.filter((item) => item.path.endsWith('/memory/context-preview')).length, closedCount, 'hidden draft edits make no preview request');
+    await u.settings.click();
+    await page.waitForTimeout(180);
+    assert.ok(world.log.filter((item) => item.path.endsWith('/memory/context-preview')).length > closedCount, 'reopening refreshes the visible preview for the current draft');
   }));
 
   await test('a rejected start keeps the draft, budgets, attachments and context, then retries the same request', () => run({}, async ({ page, ui: u }) => {

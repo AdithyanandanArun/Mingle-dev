@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { ArrowUp, FilePlus2, SlidersHorizontal, Square } from 'lucide-react';
 import type { AttachmentRef, ProviderModel, Session, WorkflowLimits } from '@mingle/contracts';
@@ -19,6 +19,7 @@ import { reasoningEffortChoices } from '../lib/providers';
 import { SessionWorkflowPanel, WorkflowLimitsControl } from './session-workflow/SessionWorkflowPanel';
 import { SessionProgress } from './session-workflow/SessionProgress';
 import { memoryApi } from './project-memory/memory-api';
+import { clearDraftIfMatches, loadDraft, saveDraft } from '../lib/conversationPersistence';
 import type { StatusBarState } from './status-bar/deriveStatusBarState';
 import { QueuedMessages } from './composer/QueuedMessages';
 import {
@@ -35,6 +36,32 @@ const EMPTY_RUNS: import('@mingle/contracts').SessionRun[] = [];
 
 export function Composer({ session, progressState, helperRail, helperCount = 0 }: { session: Session; progressState?: StatusBarState | null; helperRail?: ReactNode; helperCount?: number }) {
   const draft = useMingle((s) => s.drafts[session.id] ?? '');
+  const draftHydrated = useRef(new Set<string>());
+  useLayoutEffect(() => {
+    if (draftHydrated.current.has(session.id)) return;
+    draftHydrated.current.add(session.id);
+    if (!useMingle.getState().drafts[session.id]) {
+      try {
+        const saved = loadDraft(session.id);
+        if (saved) useMingle.getState().setDraft(session.id, saved);
+      } catch { /* Private browser storage may be disabled or full. */ }
+    }
+  }, [session.id]);
+  useEffect(() => {
+    if (!draftHydrated.current.has(session.id)) return;
+    const timer = window.setTimeout(() => {
+      try { saveDraft(session.id, draft); } catch { /* Drafts remain available in memory if browser storage fails. */ }
+    }, 350);
+    return () => window.clearTimeout(timer);
+  }, [session.id, draft]);
+  useEffect(() => {
+    const flush = () => {
+      const current = useMingle.getState().drafts[session.id] ?? '';
+      try { saveDraft(session.id, current); } catch { /* Best effort lifecycle flush. */ }
+    };
+    window.addEventListener('pagehide', flush);
+    return () => { window.removeEventListener('pagehide', flush); flush(); };
+  }, [session.id]);
   const contextRefs = useMingle((s) => s.contextDrafts[session.id] ?? EMPTY_CONTEXT_REFS);
   const connection = useMingle((s) => s.connection);
   const provider = useMingle((s) => s.boot?.providers.find((p) => p.id === session.provider));
@@ -102,7 +129,7 @@ export function Composer({ session, progressState, helperRail, helperCount = 0 }
   const [memoryInfoError, setMemoryInfoError] = useState<string | null>(null);
   useEffect(() => { setMemoryPreview(null); setMemoryInjections(null); }, [session.id]);
   useEffect(() => {
-    if (!memoryDisclosure || !project || session.parentSessionId || session.id.startsWith('proxy_')) return;
+    if (!advancedOpen || !memoryDisclosure || !project || session.parentSessionId || session.id.startsWith('proxy_')) return;
     const controller = new AbortController();
     setMemoryInfoError(null); setMemoryPreview(null);
     const timer = window.setTimeout(() => {
@@ -111,7 +138,7 @@ export function Composer({ session, progressState, helperRail, helperCount = 0 }
         .catch((cause) => { if (!controller.signal.aborted) setMemoryInfoError(errorMessage(cause)); });
     }, 120);
     return () => { window.clearTimeout(timer); controller.abort(); };
-  }, [memoryDisclosure, project?.id, session.id, draft, session.parentSessionId]);
+  }, [advancedOpen, memoryDisclosure, project?.id, session.id, draft, session.parentSessionId]);
   const currentFailure = providerFailure && providerFailure.runId && session.status === 'error'
     && session.provider === providerFailure.provider
     && sessionRuns.some((run) => run.id === providerFailure.runId && run.status === 'failed' && run.provider === session.provider && run.model === session.model)
@@ -204,7 +231,7 @@ export function Composer({ session, progressState, helperRail, helperCount = 0 }
   const localDraftCommand = compactDraftCommand ?? (attachments.length || attachmentDraft.uploads.length ? null : /^\/(new|stop|settings|model|effort|permissions|tier|skills|usage|import|status|diff|compact|help)(?:\s.*)?$/i.exec(draft.trim()));
   const compactIntent = localDraftCommand?.[1]?.toLowerCase() === 'compact';
 
-  const submit = async (sendNow = false) => {
+  const submit = async (queueForNext = false) => {
     const compactCommand = /^\/(compact)(?:\s.*)?$/i.exec(draft.trim());
     const local = compactCommand ?? (attachments.length || attachmentDraft.uploads.length ? null : /^\/(new|stop|settings|model|effort|permissions|tier|skills|usage|import|status|diff|compact|help)(?:\s.*)?$/i.exec(draft.trim()));
     if (local?.[1]?.toLowerCase() === 'compact' && attachmentDraft.isBusy()) {
@@ -299,18 +326,20 @@ export function Composer({ session, progressState, helperRail, helperCount = 0 }
       const submittedAttachmentIds = attachments.map((item) => item.id);
       const submittedContextRefs = contextRefs;
       if (running) {
-        const response = await api.queueMessage(session.id,{content:draft.trim(),skills:messageSkills,attachmentIds:submittedAttachmentIds,contextRefs:submittedContextRefs,intent:planningMode?'plan':'normal',...(sendNow?{queueOnly:true}:{}),...(excludeProjectMemory?{memory:'exclude'}:{})});
+        const response = await api.queueMessage(session.id,{content:draft.trim(),skills:messageSkills,attachmentIds:submittedAttachmentIds,contextRefs:submittedContextRefs,intent:planningMode?'plan':'normal',...(queueForNext?{queueOnly:true}:{}),...(excludeProjectMemory?{memory:'exclude'}:{})});
         // A steered message already reached the running turn; only a queued one can be sent next.
         if (response.steered) useMingle.getState().toast('success', 'Sent to the running agent');
         else {
-          if (sendNow && response.queued) await api.sendQueuedNow(session.id, response.queued.id);
-          useMingle.getState().toast('success', sendNow ? (session.status === 'running' ? 'Active run interrupted; message will start after provider cleanup' : 'Queued message started') : 'Message queued for the next turn');
+          useMingle.getState().toast('success', 'Message queued for the next turn');
         }
       } else if (autonomousMode && canStartWorkflow && !workflowOpen) {
         if (messageSkills.length || /^\s*\//.test(draft)) throw new Error('Start an autonomous goal with a regular request. Use Chat for native commands and skills.');
         await api.startSessionWorkflow(session.id, { goal: draft.trim(), limits: workflowLimits, attachmentIds: submittedAttachmentIds, contextRefs: submittedContextRefs, ...(excludeProjectMemory?{memory:'exclude'}:{}) });
       } else await api.sendMessage(session.id, draft.trim(), messageSkills, submittedAttachmentIds, submittedContextRefs, planningMode ? 'plan' : 'normal', excludeProjectMemory ? 'exclude' : undefined);
-      if (useMingle.getState().drafts[session.id] === submittedDraft) useMingle.getState().setDraft(session.id, '');
+      if (useMingle.getState().drafts[session.id] === submittedDraft) {
+        useMingle.getState().setDraft(session.id, '');
+        try { clearDraftIfMatches(session.id, submittedDraft); } catch { /* The send succeeded; memory state is authoritative. */ }
+      }
       if (useMingle.getState().contextDrafts[session.id] === submittedContextRefs) useMingle.getState().setContextDraft(session.id, []);
       attachmentDraft.sent(submittedAttachmentIds);
       setSelectedSkills([]);

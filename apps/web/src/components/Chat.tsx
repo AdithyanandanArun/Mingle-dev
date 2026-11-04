@@ -23,6 +23,7 @@ import { useSessionHistory } from '../lib/sessionHistoryHooks';
 import { captureReaderAnchor, restoreReaderAnchor, type ReaderAnchor } from '../lib/readerAnchor';
 import { SessionHistoryControl } from './SessionHistoryControl';
 import { ConversationNavigation } from './ConversationNavigation';
+import { loadReaderPosition, saveReaderPosition, type SavedReaderPosition } from '../lib/conversationPersistence';
 
 /** How long after prepending history the reader's row is kept in place while deferred rows settle to their real height. */
 const ANCHOR_SETTLE_MS = 800;
@@ -120,6 +121,12 @@ function SingleSessionPane() {
   const scroller = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
   const [away, setAway] = useState(false);
+  const [readerNotice, setReaderNotice] = useState(false);
+  const restoredSession = useRef<string | null>(null);
+  const pendingReaderRestore = useRef<SavedReaderPosition | null>(null);
+  const pendingReaderSave = useRef<SavedReaderPosition | null>(null);
+  const userScrollDeadline = useRef(0);
+  const persistTimer = useRef<number | null>(null);
   const last = messages[messages.length - 1];
   const activitySig = useMemo(() => runs.map(run => `${run.id}:${run.status}:${run.toolCount}:${run.changes?.status ?? 'unknown'}:${run.changes?.fileCount ?? ''}:${run.changes?.additions ?? ''}:${run.changes?.deletions ?? ''}`).join('|'), [runs]);
   const planningSig = useMemo(() => `${plans.map((plan) => `${plan.id}:${plan.revision}:${plan.status}`).join(',')}|${questions.map((question) => `${question.id}:${question.status}`).join(',')}`, [plans, questions]);
@@ -130,6 +137,7 @@ function SingleSessionPane() {
     const el = scroller.current;
     if (el && stick.current) el.scrollTop = el.scrollHeight;
   }, []);
+  const markScrollIntent = useCallback(() => { userScrollDeadline.current = Date.now() + 1_000; pendingReaderRestore.current = null; }, []);
 
   /**
    * Deferred offscreen rows take their real height as they near the viewport, which grows the column after the view
@@ -154,6 +162,15 @@ function SingleSessionPane() {
   const readerAnchor = useRef<ReaderAnchor | null>(null);
   const settleAnchor = useRef<{ anchor: ReaderAnchor; until: number } | null>(null);
   const stopSettling = useCallback(() => { settleAnchor.current = null; }, []);
+  useEffect(() => {
+    const flushReaderPosition = () => {
+      const pending = pendingReaderSave.current;
+      if (!pending || !session?.id) return;
+      try { saveReaderPosition(session.id, pending); } catch { /* Browser storage is best effort. */ }
+    };
+    window.addEventListener('pagehide', flushReaderPosition);
+    return () => window.removeEventListener('pagehide', flushReaderPosition);
+  }, [session?.id]);
   const loadOlderMessages = useCallback(() => loadOlder({
     beforeApply: () => {
       const el = scroller.current;
@@ -163,20 +180,75 @@ function SingleSessionPane() {
     },
   }), [loadOlder]);
 
-  useEffect(() => { stick.current = true; setAway(false); readerAnchor.current = null; }, [session?.id]);
+  useLayoutEffect(() => {
+    const id = session?.id;
+    if (!id || restoredSession.current === id) return;
+    const previousId = restoredSession.current;
+    if (previousId) {
+      if (persistTimer.current !== null) window.clearTimeout(persistTimer.current);
+      persistTimer.current = null;
+      const pending = pendingReaderSave.current;
+      if (pending) try { saveReaderPosition(previousId, pending); } catch { /* Browser cache is best effort. */ }
+    }
+    pendingReaderSave.current = null;
+    pendingReaderRestore.current = null;
+    restoredSession.current = id;
+    readerAnchor.current = null;
+    let saved = null;
+    try { saved = loadReaderPosition(id); } catch { /* A disabled browser cache simply starts at the newest turn. */ }
+    const scrollerNode = scroller.current;
+    if (!scrollerNode || !saved) {
+      stick.current = true; setAway(false); setReaderNotice(false);
+      return;
+    }
+    if (saved.pinned) {
+      pendingReaderRestore.current = null;
+      stick.current = true; setAway(false); setReaderNotice(false); pinToBottom();
+      return;
+    }
+    stick.current = false; setAway(true);
+    pendingReaderRestore.current = saved;
+    const selector = saved.messageId ? `[data-message-id="${CSS.escape(saved.messageId)}"]` : saved.runId ? `[data-run-id="${CSS.escape(saved.runId)}"]` : null;
+    const target = selector ? scrollerNode.querySelector<HTMLElement>(selector) : null;
+    if (!target) { setReaderNotice(true); return; }
+    pendingReaderRestore.current = null;
+    setReaderNotice(false);
+    if (saved.offset !== undefined) {
+      const delta = target.getBoundingClientRect().top - scrollerNode.getBoundingClientRect().top - saved.offset;
+      scrollerNode.scrollTop += delta;
+      settleAnchor.current = { anchor: { node: target, top: saved.offset }, until: performance.now() + ANCHOR_SETTLE_MS };
+    }
+  }, [session?.id, pinToBottom]);
   useEffect(() => { setSelectedSubagentId(null); }, [session?.id]);
-  useLayoutEffect(pinToBottom, [sig, pinToBottom]);
+  useLayoutEffect(() => { if (restoredSession.current === session?.id && stick.current) pinToBottom(); }, [sig, pinToBottom, session?.id]);
   // After older messages are prepended, keep the reader on the same content they were looking at.
   useLayoutEffect(() => {
     const anchor = readerAnchor.current;
     const el = scroller.current;
-    if (!anchor || !el) return;
-    readerAnchor.current = null;
-    restoreReaderAnchor(el, anchor);
-    const near = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
-    settleAnchor.current = near ? null : { anchor, until: performance.now() + ANCHOR_SETTLE_MS };
-    stick.current = near;
-    setAway(!near);
+    if (!el) return;
+    if (anchor) {
+      readerAnchor.current = null;
+      restoreReaderAnchor(el, anchor);
+      const near = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+      settleAnchor.current = near ? null : { anchor, until: performance.now() + ANCHOR_SETTLE_MS };
+      stick.current = near;
+      setAway(!near);
+    }
+    const pending = pendingReaderRestore.current;
+    if (pending && Date.now() > userScrollDeadline.current) {
+      const selector = pending.messageId ? `[data-message-id="${CSS.escape(pending.messageId)}"]` : pending.runId ? `[data-run-id="${CSS.escape(pending.runId)}"]` : null;
+      const target = selector ? el.querySelector<HTMLElement>(selector) : null;
+      if (target) {
+        if (pending.offset !== undefined) {
+          el.scrollTop += target.getBoundingClientRect().top - el.getBoundingClientRect().top - pending.offset;
+          settleAnchor.current = { anchor: { node: target, top: pending.offset }, until: performance.now() + ANCHOR_SETTLE_MS };
+        }
+        pendingReaderRestore.current = null;
+        setReaderNotice(false);
+        stick.current = false;
+        setAway(true);
+      }
+    }
   }, [history.older]);
 
   if (!project) {
@@ -210,12 +282,30 @@ function SingleSessionPane() {
       <div className="chat__history">
       <ConversationNavigation key={`${project.id}:${session.id}`} projectId={project.id} sessionId={session.id} messages={allMessages?.filter((message) => message.sessionId === session.id) ?? []} runs={runs} calls={sessionToolCalls} hasOlder={history.hasMore} onLoadOlder={loadOlderMessages} />
       <div
-        className="chat__scroll" ref={scroller} onWheel={stopSettling} onTouchStart={stopSettling} onPointerDown={stopSettling} onKeyDown={stopSettling} role="log" aria-live="polite" aria-label={`Conversation with ${session.name}`}
+        className="chat__scroll" ref={scroller} onWheel={() => { stopSettling(); markScrollIntent(); }} onTouchStart={() => { stopSettling(); markScrollIntent(); }} onPointerDown={() => { stopSettling(); markScrollIntent(); }} onKeyDown={() => { stopSettling(); markScrollIntent(); }} role="log" aria-live="polite" aria-label={`Conversation with ${session.name}`}
         onScroll={(e) => {
           const el = e.currentTarget;
           const near = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
           stick.current = near;
           setAway(!near);
+          if (userScrollDeadline.current > Date.now()) {
+            if (persistTimer.current !== null) window.clearTimeout(persistTimer.current);
+            const candidates = [...el.querySelectorAll<HTMLElement>('[data-message-id], [data-run-id]')];
+            const visible = candidates.find((node) => { const rect = node.getBoundingClientRect(); return rect.bottom > el.getBoundingClientRect().top + 1 && rect.top < el.getBoundingClientRect().bottom; });
+            const message = visible?.closest<HTMLElement>('[data-message-id]');
+            const run = visible?.closest<HTMLElement>('[data-run-id]');
+            pendingReaderSave.current = {
+              pinned: near,
+              ...(message?.dataset.messageId ? { messageId: message.dataset.messageId } : run?.dataset.runId ? { runId: run.dataset.runId } : {}),
+              ...(visible ? { offset: visible.getBoundingClientRect().top - el.getBoundingClientRect().top } : {}),
+            };
+            persistTimer.current = window.setTimeout(() => {
+              persistTimer.current = null;
+              const pending = pendingReaderSave.current;
+              if (pending) try { saveReaderPosition(session.id, pending); }
+              catch { /* Scrolling remains available if browser storage is unavailable. */ }
+            }, 450);
+          }
         }}
       >
         <div className="chat__inner chat__inner--history" ref={observeColumn}>
@@ -239,6 +329,7 @@ function SingleSessionPane() {
           {questions.map((question) => <UserQuestionCard key={question.id} question={question} />)}
         </div>
       </div>
+      {readerNotice ? <p className="chat__reader-notice" role="status">The saved reading position is outside the loaded history.{history.hasMore ? <> <button type="button" onClick={loadOlderMessages}>Load older messages</button> to look for it.</> : ' It is not available in this session history.'}</p> : null}
       {away ? (
         <button type="button" className="jump" onClick={() => { stopSettling(); stick.current = true; pinToBottom(); }}>
           <ArrowDown size={13} /> Latest

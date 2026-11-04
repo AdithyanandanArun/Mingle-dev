@@ -47,8 +47,8 @@
 .queued-message small { display: block; color: var(--text-muted); }
 @media (max-width: 620px) { .queued-message { flex-wrap: wrap; } .queued-message__state { flex-basis: 100%; } }
 
-.conversation-nav { position: fixed; z-index: 8; top: 8px; right: 12px; }
-.conversation-nav__panel { box-sizing: border-box; position: absolute; top: calc(100% + 6px); right: 0; display: grid; gap: 8px; width: min(360px, calc(100vw - 48px)); max-height: min(70vh, 560px); overflow: auto; padding: 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--bg-panel); box-shadow: var(--shadow-card); }
+.conversation-nav { position: relative; z-index: 8; flex: 0 0 auto; display: flex; justify-content: flex-end; padding: 7px 12px 0; }
+.conversation-nav__panel { box-sizing: border-box; position: absolute; top: calc(100% + 5px); right: 12px; display: grid; gap: 8px; width: min(360px, calc(100% - 24px)); max-height: min(70vh, 560px); overflow: auto; padding: 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg-panel); box-shadow: var(--shadow-card); animation: nav-appear 120ms ease-out both; }
 .conversation-nav__heading { display: flex; align-items: center; justify-content: space-between; font-size: 12px; }
 .conversation-nav__heading button, .conversation-nav__panel li > button { color: var(--fg-1); background: transparent; border: 0; cursor: pointer; }
 .conversation-nav__panel input { width: 100%; min-height: 34px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 7px; color: var(--fg-0); background: var(--bg-app); }
@@ -59,5 +59,11 @@
 .conversation-nav__panel li > button:first-child { flex: 1; min-width: 0; padding: 5px 6px; overflow: hidden; text-align: left; text-overflow: ellipsis; white-space: nowrap; border-radius: 5px; }
 .conversation-nav__panel li > button:hover, .conversation-nav__heading button:hover { background: var(--bg-hover); }
 .conversation-nav__load, .conversation-nav__scope button { justify-self: start; color: var(--fg-1); background: transparent; border: 0; text-decoration: underline; cursor: pointer; font-size: 11px; }
+.queued-message__conflict { display: grid; gap: 6px; width: 100%; padding: 9px; border: 1px solid var(--line); border-radius: 7px; color: var(--fg-1); background: var(--bg-panel); font-size: 11px; }
+.queued-message__conflict p { margin: 0; max-height: 100px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+.chat__reader-notice { position: absolute; z-index: 3; left: 50%; bottom: 64px; translate: -50% 0; box-sizing: border-box; width: max-content; max-width: calc(100% - 28px); margin: 0; padding: 7px 10px; border: 1px solid var(--line); border-radius: 8px; color: var(--fg-1); background: var(--bg-panel); box-shadow: var(--shadow-card); font-size: 11px; line-height: 1.4; text-align: center; }
+.chat__reader-notice button { padding: 0; border: 0; color: inherit; background: transparent; text-decoration: underline; cursor: pointer; font: inherit; }
 [data-run-id]:focus, [data-message-id]:focus { outline: 2px solid var(--line); outline-offset: 2px; border-radius: 6px; }
-@media (max-width: 600px) { .conversation-nav { right: 8px; } .conversation-nav__panel { max-height: 65vh; } }
+@keyframes nav-appear { from { opacity: 0; transform: translateY(-3px); } to { opacity: 1; transform: translateY(0); } }
+@media (max-width: 600px) { .conversation-nav { padding-right: 8px; } .conversation-nav__panel { right: 8px; max-height: 65vh; } }
+@media (prefers-reduced-motion: reduce) { .conversation-nav__panel { animation: none; } }

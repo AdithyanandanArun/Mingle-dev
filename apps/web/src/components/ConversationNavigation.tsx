@@ -2,14 +2,42 @@ import { useMemo, useRef, useState } from 'react';
 import type { Message, SessionRun, ToolCall } from '@mingle/contracts';
 import { Bookmark, Search, X } from 'lucide-react';
 
-type SavedBookmark = { messageId: string; preview: string; createdAt: string };
+type SavedBookmark = { messageId: string; createdAt: string };
 const BOOKMARK_LIMIT = 80;
+const BOOKMARK_SESSION_LIMIT = 24;
+const BOOKMARK_INDEX_KEY = 'mingle:conversation-bookmark-index:v1';
 function key(projectId: string, sessionId: string) { return `mingle:conversation-bookmarks:${projectId}:${sessionId}`; }
+function registerBookmarkKey(storageKey: string) {
+  try {
+    const prior: unknown = JSON.parse(localStorage.getItem(BOOKMARK_INDEX_KEY) ?? '[]');
+    const indexed = Array.isArray(prior) ? prior.filter((entry): entry is string => typeof entry === 'string' && entry.startsWith('mingle:conversation-bookmarks:')) : [];
+    const legacy = indexed.length ? [] : Array.from({ length: localStorage.length }, (_, index) => localStorage.key(index))
+      .filter((entry): entry is string => Boolean(entry?.startsWith('mingle:conversation-bookmarks:')));
+    const keys = [storageKey, ...[...indexed, ...legacy].filter((entry) => entry !== storageKey)];
+    const kept = keys.slice(0, BOOKMARK_SESSION_LIMIT);
+    for (const stale of keys.slice(BOOKMARK_SESSION_LIMIT)) localStorage.removeItem(stale);
+    localStorage.setItem(BOOKMARK_INDEX_KEY, JSON.stringify(kept));
+    for (const savedKey of kept) {
+      if (savedKey === storageKey) continue;
+      try {
+        const value: unknown = JSON.parse(localStorage.getItem(savedKey) ?? '[]');
+        if (!Array.isArray(value)) { localStorage.removeItem(savedKey); continue; }
+        const safe = value.filter((item) => !!item && typeof item.messageId === 'string' && item.messageId.length <= 200 && typeof item.createdAt === 'string')
+          .slice(0, BOOKMARK_LIMIT).map((item) => ({ messageId: item.messageId, createdAt: item.createdAt }));
+        if (value.some((item) => !!item && typeof item === 'object' && 'preview' in item)) localStorage.setItem(savedKey, JSON.stringify(safe));
+      } catch { localStorage.removeItem(savedKey); }
+    }
+  } catch { /* Bookmark writes report storage failures at their call site. */ }
+}
 function readBookmarks(projectId: string, sessionId: string): SavedBookmark[] {
   try {
-    const value: unknown = JSON.parse(localStorage.getItem(key(projectId, sessionId)) ?? '[]');
+    const storageKey = key(projectId, sessionId);
+    const value: unknown = JSON.parse(localStorage.getItem(storageKey) ?? '[]');
     if (!Array.isArray(value)) return [];
-    return value.filter((item): item is SavedBookmark => !!item && typeof item.messageId === 'string' && typeof item.preview === 'string' && typeof item.createdAt === 'string').slice(0, BOOKMARK_LIMIT);
+    const bookmarks = value.filter((item): item is SavedBookmark => !!item && typeof item.messageId === 'string' && item.messageId.length <= 200 && typeof item.createdAt === 'string')
+      .slice(0, BOOKMARK_LIMIT).map(({ messageId, createdAt }) => ({ messageId, createdAt }));
+    if (value.some((item) => !!item && typeof item === 'object' && 'preview' in item)) localStorage.setItem(storageKey, JSON.stringify(bookmarks));
+    return bookmarks;
   } catch { return []; }
 }
 function preview(text: string) {
@@ -33,18 +61,26 @@ export function ConversationNavigation({ projectId, sessionId, messages, runs, c
     if (!q) return [];
     return messages.filter((message) => `${message.content}\n${message.id}\n${message.kind ?? ''}`.toLocaleLowerCase().includes(q)).slice(0, 100);
   }, [messages, open, query]);
-  const jump = (messageId: string, runId?: string, callId?: string, review = false) => {
-    const selector = callId ? `[data-tool-call-id="${CSS.escape(callId)}"]` : runId ? review ? `[data-run-review-id="${CSS.escape(runId)}"]` : `[data-run-id="${CSS.escape(runId)}"]` : `[data-message-id="${CSS.escape(messageId)}"]`;
-    const target = document.querySelector<HTMLElement>(selector);
+  const jump = async (messageId: string, runId?: string, callId?: string, review = false, changes = false) => {
+    const selector = callId ? `[data-tool-call-id="${CSS.escape(callId)}"]` : runId ? changes ? `[data-run-changes-id="${CSS.escape(runId)}"]` : review ? `[data-run-review-id="${CSS.escape(runId)}"]` : `[data-run-id="${CSS.escape(runId)}"]` : `[data-message-id="${CSS.escape(messageId)}"]`;
+    let target = document.querySelector<HTMLElement>(selector);
+    if (!target && runId && review) target = document.querySelector<HTMLElement>(`[data-run-id="${CSS.escape(runId)}"]`);
     if (!target) { setNotice('This message is not loaded. Load older messages to find it.'); return; }
+    let parent = target.parentElement;
+    while (parent) {
+      if (parent instanceof HTMLDetailsElement) parent.open = true;
+      parent = parent.parentElement;
+    }
+    await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+    if (!target.isConnected) { setNotice('This message is not loaded. Load older messages to find it.'); return; }
     target.scrollIntoView({ block: 'center' });
     if (!target.hasAttribute('tabindex')) target.tabIndex = -1;
     target.focus({ preventScroll: true });
     setNotice('');
   };
   const save = (message: Message) => {
-    const next = [{ messageId: message.id, preview: preview(message.content) || 'Attachment or empty message', createdAt: new Date().toISOString() }, ...bookmarks.filter((item) => item.messageId !== message.id)].slice(0, BOOKMARK_LIMIT);
-    try { localStorage.setItem(key(projectId, sessionId), JSON.stringify(next)); setBookmarks(next); setNotice('Bookmark saved on this device.'); }
+    const next = [{ messageId: message.id, createdAt: new Date().toISOString() }, ...bookmarks.filter((item) => item.messageId !== message.id)].slice(0, BOOKMARK_LIMIT);
+    try { registerBookmarkKey(key(projectId, sessionId)); localStorage.setItem(key(projectId, sessionId), JSON.stringify(next)); setBookmarks(next); setNotice('Bookmark saved on this device.'); }
     catch { setNotice('Could not save bookmark in this browser.'); }
   };
   const remove = (id: string) => { const next = bookmarks.filter((item) => item.messageId !== id); try { localStorage.setItem(key(projectId, sessionId), JSON.stringify(next)); setBookmarks(next); } catch { setNotice('Could not update bookmarks in this browser.'); } };
@@ -55,7 +91,7 @@ export function ConversationNavigation({ projectId, sessionId, messages, runs, c
       const message = byId.get(run.userMessageId);
       const reviewReady = run.status !== 'running';
       return message ? [{ id: message.id, label: `${reviewReady ? 'Task' : 'Run'} · ${preview(message.content) || 'Run'}`, runId: run.id, review: reviewReady, kind: 'task' as const },
-        ...(run.changes ? [{ id: message.id, label: `Changes · ${run.changes.fileCount} files`, runId: run.id, review: reviewReady, kind: 'changes' as const }] : []),
+        ...(run.changes ? [{ id: message.id, label: `Changes · ${run.changes.fileCount} files`, runId: run.id, review: reviewReady, changes: true, kind: 'changes' as const }] : []),
         ...calls.filter((call) => call.runId === run.id).slice(0, 20).map((call) => ({ id: message.id, callId: call.id, label: `Tool · ${call.name} · ${call.status}`, runId: run.id, kind: 'tool' as const }))] : [];
     }).slice(0, 100);
   }, [messages, open, runs, calls]);
@@ -68,8 +104,8 @@ export function ConversationNavigation({ projectId, sessionId, messages, runs, c
       <p className="conversation-nav__scope">Search loaded messages only · {messages.length.toLocaleString()} loaded</p>
       {hasOlder ? <button type="button" className="conversation-nav__load" onClick={onLoadOlder}>Load older messages to expand search scope</button> : null}
       {query.trim() ? <ul aria-label="Search results">{results.map((message) => <li key={message.id}><button type="button" onClick={() => jump(message.id)}>{message.role} · {preview(message.content) || message.id}</button><button type="button" aria-label={`Bookmark message ${message.id}`} onClick={() => save(message)}><Bookmark size={13} /></button></li>)}</ul> : null}
-      <h4>Bookmarks</h4>{bookmarks.length ? <ul>{bookmarks.map((item) => <li key={item.messageId}><button type="button" onClick={() => jump(item.messageId)}>{item.preview}</button><button type="button" aria-label="Remove bookmark" onClick={() => remove(item.messageId)}><X size={13} /></button></li>)}</ul> : <p className="conversation-nav__scope">No bookmarks for this conversation.</p>}
-      {landmarks.length ? <><h4>Tasks, tools & changes</h4><ul>{landmarks.map((item, index) => <li key={`${item.runId}:${item.kind}:${index}`}><button type="button" onClick={() => jump(item.id, item.runId, 'callId' in item ? item.callId : undefined, 'review' in item ? item.review : false)}>{item.label}</button></li>)}</ul></> : null}
+      <h4>Bookmarks</h4>{bookmarks.length ? <ul>{bookmarks.map((item) => <li key={item.messageId}><button type="button" onClick={() => jump(item.messageId)}>{messages.find((message) => message.id === item.messageId) ? preview(messages.find((message) => message.id === item.messageId)!.content) || item.messageId : `Message · ${item.messageId}`}</button><button type="button" aria-label="Remove bookmark" onClick={() => remove(item.messageId)}><X size={13} /></button></li>)}</ul> : <p className="conversation-nav__scope">No bookmarks for this conversation.</p>}
+      {landmarks.length ? <><h4>Tasks, tools & changes</h4><ul>{landmarks.map((item, index) => <li key={`${item.runId}:${item.kind}:${index}`}><button type="button" onClick={() => jump(item.id, item.runId, 'callId' in item ? item.callId : undefined, 'review' in item ? item.review : false, 'changes' in item && item.changes)}>{item.label}</button></li>)}</ul></> : null}
       {notice ? <p role="status" className="conversation-nav__scope">{notice}{notice.includes('not loaded') && hasOlder ? <> <button type="button" onClick={onLoadOlder}>Load older messages</button></> : null}</p> : null}
     </div> : null}
   </section>;

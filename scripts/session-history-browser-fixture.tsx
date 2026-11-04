@@ -3,6 +3,8 @@
 import { createRoot } from 'react-dom/client';
 import type { Bootstrap, Message, Session, SessionRun, ToolCall } from '@mingle/contracts';
 import { SessionPane } from '../apps/web/src/components/Chat';
+import { Header } from '../apps/web/src/components/Header';
+import { Sidebar } from '../apps/web/src/components/Sidebar';
 import { useMingle } from '../apps/web/src/store/store';
 import '../apps/web/src/styles/tokens.css';
 import '../apps/web/src/styles/base.css';
@@ -12,6 +14,7 @@ import '../apps/web/src/styles/conversation.css';
 import '../apps/web/src/styles/message-context.css';
 import '../apps/web/src/styles/run-activity.css';
 import '../apps/web/src/styles/run-changes.css';
+import '../apps/web/src/styles/polish.css';
 
 const WINDOW = 300; // the server's bootstrap window per session
 const RUN_WINDOW = 200; // the server's bootstrap run limit
@@ -42,16 +45,45 @@ function turn(sessionId: string, i: number, last: boolean): Turn {
 let turnsA = 0;
 let storedA: Message[] = [];
 let turnData: Turn[] = [];
+let statusA: Session['status'] = 'running';
 const bTurns = Array.from({ length: 6 }, (_, i) => turn('b', i, false));
 
 const log: Array<{ session: string; before: string | null; limit: number | null; status: number }> = [];
 const control: { hold: Promise<void> | null; release: (() => void) | null; failNext: string | null } = { hold: null, release: null, failNext: null };
+let sendFailure: string | null = null;
+const sends: unknown[] = [];
+let sendGate: { promise: Promise<void>; release: () => void } | null = null;
 const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
+
+function ExampleAppShell() {
+  const sidebarOpen = useMingle((state) => state.sidebarOpen);
+  return <div className="app"><Sidebar /><button type="button" className={`sidebar-scrim${sidebarOpen ? ' is-open' : ''}`} aria-label="Close sidebar" aria-hidden={!sidebarOpen} inert={!sidebarOpen} tabIndex={-1} onClick={() => useMingle.getState().setSidebarOpen(false)} /><main className="main" id="main"><Header /><div className="main__body"><SessionPane /></div></main></div>;
+}
 
 window.fetch = async (input, init) => {
   const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url, location.href);
+  if (url.pathname.endsWith('/attachments')) return json(200, []);
+  if (url.pathname.endsWith('/repository')) {
+    const projectId = url.pathname.split('/')[3] ?? 'p1';
+    return json(200, {
+      projectId, sessionId: url.searchParams.get('sessionId'), root: '/example', isRepo: true,
+      branch: 'example/session-history', head: '0'.repeat(40), detached: false,
+      branches: [{ name: 'example/session-history', current: true }], remotes: [], upstream: null,
+      ahead: 0, behind: 0, changes: [], fetchedAt: stamp(0), fingerprint: 'example-fixture', notices: [],
+    });
+  }
+  if (url.pathname.endsWith('/github')) {
+    return json(200, { status: 'unavailable', repository: null, url: null, branch: null, head: null, pullRequest: null, checks: [], workflows: [], fetchedAt: stamp(0), notices: ['Example fixture has no GitHub connection.'] });
+  }
   const match = url.pathname.match(/^\/api\/sessions\/([^/]+)\/messages$/);
-  if (!match || (init?.method ?? 'GET') !== 'GET') return json(404, { error: 'Example fixture route only.' });
+  if (!match) return json(404, { error: 'Example fixture route only.' });
+  if ((init?.method ?? 'GET') === 'POST') {
+    sends.push(JSON.parse(String(init?.body ?? '{}')));
+    if (sendGate) await sendGate.promise;
+    if (sendFailure) { const failure = sendFailure; sendFailure = null; return json(503, { error: failure }); }
+    return json(202, { accepted: true });
+  }
+  if ((init?.method ?? 'GET') !== 'GET') return json(404, { error: 'Example fixture route only.' });
   const sessionId = decodeURIComponent(match[1]!);
   const before = url.searchParams.get('before');
   const limit = Number(url.searchParams.get('limit') ?? 500);
@@ -81,7 +113,7 @@ function bootstrap(): Bootstrap {
   const b = bTurns;
   return {
     projects: [{ id: 'p1', name: 'Example project', path: '/example', createdAt: stamp(0), isExample: true }],
-    sessions: [session('a', 'running'), session('b', 'idle')],
+    sessions: [session('a', statusA), session('b', 'idle')],
     messages: [...window_, ...b.flatMap((t) => t.messages)],
     runs: [...runs, ...b.map((t) => t.run)],
     toolCalls: [...turnData.flatMap((t) => t.calls).filter((c) => runIds.has(c.runId)), ...b.flatMap((t) => t.calls)],
@@ -94,12 +126,13 @@ const publish = () => useMingle.setState({ boot: JSON.parse(JSON.stringify(boots
 
 (window as unknown as { __history: unknown }).__history = {
   log: () => log.slice(),
+  sends: () => sends.slice(),
   mount(turns: number) {
     turnsA = turns;
     turnData = Array.from({ length: turns }, (_, i) => turn('a', i, i === turns - 1));
     storedA = turnData.flatMap((t) => t.messages);
     useMingle.setState({ boot: bootstrap(), activeProjectId: 'p1', sessionByProject: { p1: 'a' }, connection: 'online', streams: {} });
-    createRoot(document.getElementById('root')!).render(<div style={{ height: '100vh', display: 'flex', flexDirection: 'column' }}><SessionPane /></div>);
+    createRoot(document.getElementById('root')!).render(<ExampleAppShell />);
   },
   /** New messages the server stored after the page loaded: the bootstrap window slides forward. */
   slide(count: number) {
@@ -120,6 +153,10 @@ const publish = () => useMingle.setState({ boot: JSON.parse(JSON.stringify(boots
   holdNext() { control.hold = new Promise<void>((resolve) => { control.release = () => { control.hold = null; control.release = null; resolve(); }; }); },
   release() { control.release?.(); },
   failNext(message: string) { control.failNext = message; },
+  failSend(message: string) { sendFailure = message; },
+  holdSend() { let release!: () => void; const promise = new Promise<void>((resolve) => { release = resolve; }); sendGate = { promise, release }; },
+  releaseSend() { sendGate?.release(); sendGate = null; },
+  setStatus(sessionId: string, status: Session['status']) { if (sessionId === 'a') statusA = status; publish(); },
   select(sessionId: string) { useMingle.setState((s) => ({ sessionByProject: { ...s.sessionByProject, p1: sessionId } })); },
   stream(sessionId: string, messageId: string, delta: string) {
     const { streams } = useMingle.getState(); const existing = streams[messageId];

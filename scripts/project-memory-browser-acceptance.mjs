@@ -17,7 +17,12 @@ await mkdir(output, { recursive: true });
 let server, browser;
 const entry = { id: 'example-memory', headRecordId: randomUUID(), title: 'Keep the UI neutral', body: 'Use existing flat surfaces and design tokens.', kind: 'convention', status: 'tentative', lifecycle: 'active', pinned: false, revision: 1, files: [{ path: 'src/theme.css' }], updatedAt: '2026-11-02T00:00:00.000Z', sources: [{ type: 'run', ref: 'example-run' }], updatedBy: { kind: 'agent', name: 'Example agent' }, origin: { local: true } };
 try {
-  server = await createServer({ configFile: join(root, 'apps/web/vite.config.ts'), root, appType: 'mpa', server: { host: '127.0.0.1', port: 0 }, optimizeDeps: { entries: [join(root, 'scripts/project-memory-browser-fixture.html')] }, resolve: { alias: [{ find: 'react', replacement: join(root, 'apps/web/node_modules/react') }, { find: 'react-dom', replacement: join(root, 'apps/web/node_modules/react-dom') }], dedupe: ['react', 'react-dom'] } });
+  server = await createServer({ configFile: join(root, 'apps/web/vite.config.ts'), root, appType: 'mpa', server: { host: '127.0.0.1', port: 0 }, optimizeDeps: { entries: [join(root, 'scripts/project-memory-browser-fixture.html')] }, resolve: { alias: [
+    { find: /^@mingle\/contracts$/, replacement: join(root, 'packages/contracts/src/index.ts') },
+    { find: /^@mingle\/contracts\/(.*)$/, replacement: `${root}/packages/contracts/src/$1` },
+    { find: 'react', replacement: join(root, 'apps/web/node_modules/react') },
+    { find: 'react-dom', replacement: join(root, 'apps/web/node_modules/react-dom') },
+  ], dedupe: ['react', 'react-dom'] } });
   await server.listen();
   const port = server.httpServer.address().port;
   browser = await chromium.launch({ executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH || chromium.executablePath(), headless: true });

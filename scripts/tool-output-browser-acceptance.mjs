@@ -28,7 +28,12 @@ const report = {};
 const errors = [];
 let passed = 0;
 try {
-  server = await createServer({ configFile: join(root, 'apps/web/vite.config.ts'), root, appType: 'mpa', logLevel: 'error', server: { host: '127.0.0.1', port: 0 }, optimizeDeps: { entries: [join(root, 'scripts/tool-output-browser-fixture.html')] }, resolve: { alias: [{ find: 'react', replacement: join(root, 'apps/web/node_modules/react') }, { find: 'react-dom', replacement: join(root, 'apps/web/node_modules/react-dom') }], dedupe: ['react', 'react-dom'] } });
+  server = await createServer({ configFile: join(root, 'apps/web/vite.config.ts'), root, appType: 'mpa', logLevel: 'error', server: { host: '127.0.0.1', port: 0 }, optimizeDeps: { entries: [join(root, 'scripts/tool-output-browser-fixture.html')] }, resolve: { alias: [
+    { find: /^@mingle\/contracts$/, replacement: join(root, 'packages/contracts/src/index.ts') },
+    { find: /^@mingle\/contracts\/(.*)$/, replacement: `${root}/packages/contracts/src/$1` },
+    { find: 'react', replacement: join(root, 'apps/web/node_modules/react') },
+    { find: 'react-dom', replacement: join(root, 'apps/web/node_modules/react-dom') },
+  ], dedupe: ['react', 'react-dom'] } });
   await server.listen();
   const url = `http://127.0.0.1:${server.httpServer.address().port}/scripts/tool-output-browser-fixture.html`;
   browser = await chromium.launch({ executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH || chromium.executablePath(), headless: true });
@@ -73,6 +78,7 @@ try {
   await test('an opened run shows nested tools, recorded facts per row and keeps its complete output', async () => {
     await fresh();
     await openRun(0);
+    await settle();
     assert.deepEqual((await tools()).map((e) => e.kind), ['list'], 'one run-list request');
     const build = tool('Build bundle');
     assert.match(await build.locator('> summary .run-tool__meta').innerText(), /exit 0 · 2\.4 s · 1 child call/);

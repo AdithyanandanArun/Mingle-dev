@@ -90,7 +90,10 @@ async function main() {
   writeFileSync(viteConfig, `
     import { mergeConfig } from ${JSON.stringify(pathToFileURL(viteModule).href)};
     import base from ${JSON.stringify(pathToFileURL(path.join(root, 'apps/web/vite.config.ts')).href)};
-    export default mergeConfig(base, { server: { port: ${uiPort}, strictPort: true, proxy: {
+    export default mergeConfig(base, { resolve: { alias: [
+      { find: /^@mingle\\/contracts$/, replacement: ${JSON.stringify(path.join(root, 'packages/contracts/src/index.ts'))} },
+      { find: /^@mingle\\/contracts\\/(.*)$/, replacement: ${JSON.stringify(`${path.join(root, 'packages/contracts/src')}/$1`)} },
+    ] }, server: { port: ${uiPort}, strictPort: true, proxy: {
       '/api': { target: ${JSON.stringify(serverUrl)}, changeOrigin: false },
       '/ws': { target: ${JSON.stringify(serverUrl.replace('http', 'ws'))}, ws: true, changeOrigin: false },
     } } });
