@@ -8,6 +8,7 @@ import type { Provider, Policy, Effort } from './provider-config';
 import type { ContextCompactionResult } from './resilience';
 export * from './provider-config';
 export * from './provider-updates';
+export * from './provider-account-usage';
 export * from './session-workflow';
 export * from './session-snapshot';
 export * from './run-review';
