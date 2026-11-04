@@ -132,10 +132,11 @@ async function main() {
     const s = useMingle.getState();
     return s.boot.sessions.find((session) => session.id === s.sessionByProject[s.activeProjectId]);
   });
-  const refresh = () => page.evaluate(async () => {
-    const { useMingle } = await import('/src/store/store.ts');
-    await useMingle.getState().refreshNow();
-  });
+  const refresh = async () => {
+    await page.evaluate(async () => { const { useMingle } = await import('/src/store/store.ts'); await useMingle.getState().refreshNow(); });
+    const strip = page.locator('.status-bar__toggle').first();
+    if (await strip.count() && await strip.getAttribute('aria-expanded') === 'false' && await page.locator('.single-subagents--embedded').count()) await strip.click();
+  };
   const rail = page.locator('.single-subagents');
   const makeActivity = (provider, name, status = 'running') => (boot) => {
     const at = new Date().toISOString();
@@ -220,7 +221,7 @@ async function main() {
     await page.getByRole('button', { name: 'Back to conversation', exact: true }).click();
     assert.equal(await page.locator('.composer textarea').inputValue(), 'Keep my draft');
   });
-  await test('model-callable Mingle delegation also appears automatically and expands on arrival', async () => {
+  await test('model-callable Mingle delegation appears automatically inside progress', async () => {
     fixture = null; await refresh();
     assert.equal(await rail.count(), 0);
     fixture = (boot) => {
@@ -231,7 +232,8 @@ async function main() {
     };
     await refresh();
     await rail.getByRole('button', { name: 'Open @example-reviewer subagent session', exact: true }).waitFor();
-    assert.equal(await rail.getByRole('button', { name: 'Collapse subagents' }).getAttribute('aria-expanded'), 'true');
+    assert.equal(await rail.getByRole('button', { name: /^(Expand|Collapse) subagents$/ }).count(), 0, 'one progress disclosure owns helper expansion');
+    assert.equal(await page.locator('.status-bar').count(), 1);
   });
   await test('narrow view remains bounded and there are no manual launch requests', async () => {
     await page.setViewportSize({ width: 390, height: 844 });

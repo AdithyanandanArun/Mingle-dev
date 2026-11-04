@@ -17,7 +17,6 @@ import { createTranscriptDeriver } from '../lib/transcript';
 import { useSessionStreamIds, useStableById } from '../lib/transcriptHooks';
 import { SubagentChatView } from './subagents/SubagentChatView';
 import { SubagentRail } from './subagents/SubagentRail';
-import { StatusBar } from './status-bar/StatusBar';
 import { deriveStatusBarState } from './status-bar/deriveStatusBarState';
 import { api, errorMessage } from '../lib/api';
 
@@ -87,11 +86,6 @@ function SingleSessionPane() {
     session, runs, toolCalls: sessionToolCalls, tasks: allTasks, events: allEvents, approvals: allApprovals, questions: allQuestions,
     delegatedSubagents, continuingSubagent,
   }) : null, [session, runs, sessionToolCalls, allTasks, allEvents, allApprovals, allQuestions, delegatedSubagents, continuingSubagent]);
-  const stopStatusRun = useCallback(async () => {
-    if (!session) return;
-    try { await api.interrupt(session.id); await useMingle.getState().refreshNow(); }
-    catch (cause) { useMingle.getState().toast('error', errorMessage(cause)); }
-  }, [session]);
   const plans = useStableById(useMemo(() => {
     const rows = allPlans.filter((plan) => plan.sessionId === sessionId);
     const completed = rows.filter((plan) => plan.status === 'completed').at(-1);
@@ -192,10 +186,10 @@ function SingleSessionPane() {
         </button>
       ) : null}
       </div>
-      <SubagentRail subagents={subagents} delegated={delegatedSubagents} provider={session.provider} onOpen={setSelectedSubagentId}
-        onOpenDelegated={(item) => useMingle.getState().selectSession(item.childSessionId)}
-        onCancel={(item) => void api.cancelSubagent(item.id).then(() => useMingle.getState().refreshNow()).catch((error) => useMingle.getState().toast('error', errorMessage(error)))} />
-      <Composer key={session.id} session={session} statusBar={<StatusBar state={statusBarState} onStop={stopStatusRun} />} />
+      <Composer key={session.id} session={session} progressState={statusBarState} helperCount={subagents.length + delegatedSubagents.length}
+        helperRail={<SubagentRail embedded subagents={subagents} delegated={delegatedSubagents} provider={session.provider} onOpen={setSelectedSubagentId}
+          onOpenDelegated={(item) => useMingle.getState().selectSession(item.childSessionId)}
+          onCancel={(item) => void api.cancelSubagent(item.id).then(() => useMingle.getState().refreshNow()).catch((error) => useMingle.getState().toast('error', errorMessage(error)))} />} />
       </>}
     </div>
   );

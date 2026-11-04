@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useId, useRef, useState, type ReactNode } from 'react';
 import { Check, ChevronDown, CircleDot, Pause, Play, Square } from 'lucide-react';
 import type { Session, SessionWorkflow, WorkflowLimits, WorkflowStopReason } from '@mingle/contracts';
 import { api, errorMessage } from '../../lib/api';
@@ -14,7 +14,7 @@ const reasons: Record<WorkflowStopReason, string> = {
   'session-unavailable': 'Session is no longer available',
 };
 
-export function SessionWorkflowPanel({ workflow, session }: { workflow: SessionWorkflow; session: Session }) {
+export function SessionWorkflowPanel({ workflow, session, children, currentTask, compact = false, totalHelpers = 0 }: { workflow: SessionWorkflow; session: Session; children?: ReactNode; currentTask?: string; compact?: boolean; totalHelpers?: number }) {
   const helpers = useMingle((state) => state.boot?.delegatedSubagents?.reduce((count, item) => count + Number(item.parentSessionId === session.id && item.status === 'running'), 0) ?? 0);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -23,7 +23,8 @@ export function SessionWorkflowPanel({ workflow, session }: { workflow: SessionW
   const running = workflow.state === 'running';
   const waiting = running && session.status === 'waiting';
   const terminal = workflow.state === 'completed' || workflow.state === 'stopped';
-  const [expanded, setExpanded] = useState(!terminal);
+  const [expanded, setExpanded] = useState(!compact && !terminal);
+  const bodyId = useId();
   const extraTurns = workflow.counters.turns >= workflow.limits.maxTurns ? Math.min(8, 50 - workflow.limits.maxTurns) : 0;
   const expired = Date.parse(workflow.deadlineAt) <= Date.now();
   const extraMinutes = expired ? Math.max(0, Math.min(240, 1440 - workflow.limits.maxElapsedMinutes)) : 0;
@@ -47,11 +48,11 @@ export function SessionWorkflowPanel({ workflow, session }: { workflow: SessionW
       void useMingle.getState().refreshNow();
     } finally { if (mounted.current) setBusy(null); }
   };
-  return <section className="session-workflow" aria-label="Autonomous workflow" aria-busy={busy !== null}>
+  return <section className={`session-workflow${compact ? ' session-workflow--compact' : ''}`} aria-label="Autonomous workflow" aria-busy={busy !== null} onKeyDown={event => { if (event.key === 'Escape') setExpanded(false); }}>
     <div className="session-workflow__header">
-      <button type="button" className="session-workflow__heading" aria-expanded={expanded} onClick={() => setExpanded((value) => !value)}>
+      <button type="button" className="session-workflow__heading" aria-expanded={expanded} aria-controls={bodyId} onClick={() => setExpanded((value) => !value)}>
         {workflow.state === 'completed' ? <Check size={14} /> : <CircleDot size={14} className={running && !waiting ? 'session-workflow__live' : undefined} />}
-        <span aria-live="polite">{label}</span><ChevronDown size={13} className={expanded ? 'is-open' : undefined} />
+        <span className="session-workflow__heading-copy" aria-live="polite">{currentTask ? <strong title={currentTask}>{currentTask}</strong> : null}<span>{label}{compact && totalHelpers ? ` · ${totalHelpers} helper${totalHelpers === 1 ? '' : 's'}` : ''}</span></span><ChevronDown size={13} className={expanded ? 'is-open' : undefined} />
       </button>
       <span className="session-workflow__turns" title="Provider turns used; this is a turn budget, not a percentage of work completed.">{workflow.counters.turns}/{workflow.limits.maxTurns} turns</span>
       <div className="session-workflow__actions">
@@ -60,7 +61,7 @@ export function SessionWorkflowPanel({ workflow, session }: { workflow: SessionW
         {!terminal ? <button type="button" disabled={busy !== null} onClick={() => void act('stop')} aria-label="Stop autonomous workflow"><Square size={12} /><span>Stop</span></button> : null}
       </div>
     </div>
-    {expanded ? <div className="session-workflow__body">
+    <div id={bodyId} className="session-workflow__body" hidden={!expanded}>
       <p className="session-workflow__goal">{workflow.goal}</p>
       {workflow.summary ? <p className="session-workflow__summary">{workflow.summary}</p> : null}
       {workflow.state === 'completed' ? <button type="button" className="link-btn" onClick={() => useMingle.getState().setContextTab('changes')}>Review changes</button> : null}
@@ -69,7 +70,8 @@ export function SessionWorkflowPanel({ workflow, session }: { workflow: SessionW
       {workflow.state === 'paused' && workflow.stopReason === 'app-closed' ? <p className="session-workflow__hint">Resume checks the current workspace before continuing partial work.</p> : null}
       {extraTurns && extraMinutes ? <p className="session-workflow__hint">Resuming grants {extraTurns} additional turns and {extraTimeLabel} more.</p> : null}
       {workflow.state === 'paused' && budgetExhausted ? <p className="session-workflow__hint">This goal reached its maximum budget. Stop it before starting a new goal.</p> : null}
-    </div> : null}
+      {children}
+    </div>
     {error ? <p className="session-workflow__error" role="alert">{error}</p> : null}
   </section>;
 }

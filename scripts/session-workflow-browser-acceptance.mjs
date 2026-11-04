@@ -145,7 +145,7 @@ async function handle(route, schemas) {
 let passed = 0;
 const failures = [];
 const screenshots = [];
-async function withPage({ viewport = { width: 1000, height: 860 }, reducedMotion = 'reduce', setup, schemas }, run) {
+async function withPage({ viewport = { width: 1000, height: 860 }, reducedMotion = 'reduce', setup, schemas, integratedProgress = false }, run) {
   world = freshWorld();
   setup?.();
   const context = await browser.newContext({ viewport, reducedMotion });
@@ -163,7 +163,7 @@ async function withPage({ viewport = { width: 1000, height: 860 }, reducedMotion
   await context.route('**/api/**', (route) => handle(route, schemas));
   const shot = async (name) => { const file = join(output, `${name}.png`); await page.screenshot({ path: file, fullPage: true }); screenshots.push(file); };
   try {
-    await page.goto(fixtureUrl, { waitUntil: 'domcontentloaded' });
+    await page.goto(fixtureUrl + (integratedProgress ? '?progress=1' : ''), { waitUntil: 'domcontentloaded' });
     await page.locator('textarea.composer__input').first().waitFor();
     await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
     await run({ page, shot, ui: ui(page) });
@@ -749,6 +749,32 @@ try {
     await run({ reducedMotion: 'reduce', setup }, async ({ ui: u, page }) => { await u.label('Working toward your goal').waitFor(); assert.equal(await live(page), 'none'); });
     await run({ reducedMotion: 'no-preference', setup }, async ({ ui: u, page }) => { await u.label('Working toward your goal').waitFor(); assert.equal(await live(page), 'workflow-live'); });
   });
+
+  await test('integrated progress has one collapsed goal strip, checklist and helper navigation; controls and refresh stay usable', () => run({
+    integratedProgress: true,
+    setup() { setStatus('s-a', 'running'); world.workflows = [workflow('s-a')]; world.delegated = [helper('s-a', 'running', 1)]; },
+  }, async ({ page, ui: u, shot }) => {
+    const heading = u.label('Working toward your goal');
+    assert.equal(await heading.getAttribute('aria-expanded'), 'false');
+    assert.equal(await page.locator('.status-bar').count(), 0, 'no second status panel outside the goal');
+    assert.equal(await page.getByRole('button', { name: /^(Expand|Collapse) subagents$/ }).count(), 0, 'no nested helper disclosure');
+    assert.equal(await u.pause.isVisible(), true, 'controls remain outside collapsed details');
+    await heading.click();
+    await page.getByRole('list', { name: 'Task checklist' }).waitFor();
+    await page.getByRole('button', { name: 'Open @example-helper-1 subagent session' }).click();
+    await page.getByText('Opened helper example-helper-1', { exact: true }).waitFor();
+    find('s-a').counters.turns = 2; await u.refresh();
+    assert.equal(await heading.getAttribute('aria-expanded'), 'true');
+    for (const width of [900, 390]) {
+      await page.setViewportSize({ width, height: 844 });
+      assert.equal(await noOverflow(page), true);
+      assert.equal(await inViewport(page, '.session-workflow, .session-workflow button, .single-subagents'), true);
+      await shot(`14-unified-progress-${width}`);
+    }
+    await heading.focus(); await page.keyboard.press('Escape');
+    assert.equal(await heading.getAttribute('aria-expanded'), 'false');
+    await u.pause.click(); await u.label('Paused by you').waitFor();
+  }));
 
   await test('boundary: only Example endpoints and mocked local sockets were used; no external hosts or run-control endpoints', () => {
     assert.ok(aggregate.sockets.every((url) => new URL(url).hostname === '127.0.0.1' && new URL(url).pathname === '/ws'));

@@ -7,7 +7,7 @@ import { AgentIdentity } from '../group/AgentIdentity';
 import './SubagentStyles.css';
 
 export function SubagentRail({
-  subagents, delegated = [], provider, onOpen, onOpenDelegated, onCancel, expandAtWidth = 960,
+  subagents, delegated = [], provider, onOpen, onOpenDelegated, onCancel, expandAtWidth = 960, embedded = false,
 }: {
   subagents: readonly SubagentRun[];
   delegated?: readonly DelegatedSubagent[];
@@ -16,6 +16,7 @@ export function SubagentRail({
   onOpenDelegated?: (subagent: DelegatedSubagent) => void;
   onCancel?: (subagent: DelegatedSubagent) => void;
   expandAtWidth?: number;
+  embedded?: boolean;
 }) {
   const panel = useRef<HTMLElement>(null);
   const preference = useRef<boolean | null>(null);
@@ -52,16 +53,16 @@ export function SubagentRail({
   };
 
   return (
-    <aside ref={panel} className={`agent-presence single-subagents${expanded ? ' is-expanded' : ' is-collapsed'}`} aria-label="Subagents">
+    <aside ref={panel} className={`agent-presence single-subagents${embedded || expanded ? ' is-expanded' : ' is-collapsed'}${embedded ? ' single-subagents--embedded' : ''}`} aria-label="Subagents">
       <span className="sr-only" aria-live="polite">{announcement}</span>
-      <header className="agent-presence__head">
+      {!embedded ? <header className="agent-presence__head">
         <strong>Subagents</strong>
         <span>{total}</span>
         <button type="button" className="agent-presence__toggle" aria-label={expanded ? 'Collapse subagents' : 'Expand subagents'} aria-expanded={expanded} aria-controls={listId} onClick={toggle}>
           <span aria-hidden="true">{expanded ? '−' : '+'}</span>
         </button>
-      </header>
-      <ul className="agent-presence__list" id={listId} aria-hidden={!expanded} inert={!expanded}>
+      </header> : null}
+      <ul className="agent-presence__list" id={listId} aria-hidden={!embedded && !expanded} inert={!embedded && !expanded}>
         {delegated.map((item) => {
           const status = item.status === 'running' ? 'Running' : item.status === 'completed' ? 'Done' : item.status === 'failed' ? 'Failed' : 'Cancelled';
           const elapsed = Math.max(0, Math.floor(((item.endedAt ? Date.parse(item.endedAt) : Date.now()) - Date.parse(item.startedAt)) / 1000));

@@ -7,7 +7,7 @@ Keep native conversations, provider availability and permissions truthful. Prese
 | Order | Improvement | Status | Acceptance |
 | --- | --- | --- | --- |
 | 1 | Simplify composer | Complete | One Chat / Plan / Autonomous selector; model and permissions stay visible; advanced effort, tier and goal budgets move into a keyboard-accessible popover. Existing commands, attachments, context, paused-goal chat and configuration locks still work. |
-| 2 | Unify progress | Pending | One expandable progress surface combines current task, goal, helpers and run state. Pause/Stop/Resume, checklist and helper navigation remain accessible without stacked status panels. |
+| 2 | Unify progress | Complete | One expandable progress surface combines current task, goal, helpers and run state. Pause/Stop/Resume, checklist and helper navigation remain accessible without stacked status panels. |
 | 3 | Long conversations | Pending | Older session history loads progressively; offscreen rendering stays bounded or deferred. Loading history preserves the reader's anchor and live output, run/tool/change placement and text accessibility. |
 | 4 | Reduce refresh traffic | Pending | Ordinary standalone session events update bounded session data; startup, reconnect and unsupported events retain full recovery snapshots. Measure request/payload counts and preserve gap recovery and all shared-session paths. |
 | 5 | Tool output | Pending | Compact factual activity summaries expand into detail. Live truncated snapshots cannot erase fetched full output; newer tool lifecycle fields still update. |
@@ -35,3 +35,9 @@ Keep native conversations, provider availability and permissions truthful. Prese
 - Moved reasoning/service tier and new-goal budgets into Advanced conversation settings; local `/effort` and `/tier` commands open the same controls.
 - Preserved routing, attachments, context, drafts, paused-goal chat and active configuration locks. Fixed nested choice-menu dismissal and keyboard focus during popover positioning.
 - Checks: web TypeScript; all 96 web unit tests; 29 local workflow/composer browser checks, including 390px/900px layouts and keyboard settings. Screenshots inspected. All browser data was explicitly labelled Example; no model or cloud calls.
+
+### 2 — Unified progress
+
+- Added one collapsed progress disclosure for standalone sessions. Goals show their current task, status, helper count, turn budget and Pause/Stop/Resume controls; expanded details contain the goal, checklist and helper navigation.
+- Embedded helper lists no longer float over the transcript or add a second expansion control. Standalone helper drill-down retains its Back action and the parent draft.
+- Checks: web TypeScript and 96 unit tests; 30 workflow/composer browser checks, 7 full-app task-strip checks and 8 full-app automatic-subagent checks. Rechecked the final integrated goal layout at 390px/900px and inspected screenshots after fixing inherited floating-rail geometry. Local Example fixtures only.

@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { createRoot } from 'react-dom/client';
+import { SubagentRail } from '../apps/web/src/components/subagents/SubagentRail';
 import { Composer } from '../apps/web/src/components/Composer';
 import { useMingle } from '../apps/web/src/store/store';
 import '../apps/web/src/styles/tokens.css';
@@ -11,6 +12,7 @@ import '../apps/web/src/styles/conversation.css';
 import '../apps/web/src/styles/message-context.css';
 import '../apps/web/src/styles/attachments.css';
 import '../apps/web/src/styles/git.css';
+import '../apps/web/src/styles/groups.css';
 import '../apps/web/src/styles/usage.css';
 import '../apps/web/src/styles/polish.css';
 
@@ -23,6 +25,9 @@ useMingle.setState({ connection: 'online' });
 function Fixture() {
   const sessions = useMingle((state) => state.boot?.sessions ?? []);
   const projects = useMingle((state) => state.boot?.projects ?? []);
+  const delegated = useMingle(state => state.boot?.delegatedSubagents);
+  const integrated = new URLSearchParams(location.search).has('progress');
+  const [openedHelper, setOpenedHelper] = useState('');
   const contextTab = useMingle((state) => state.contextTab);
   const [selected, setSelected] = useState(sessions[0]?.id ?? '');
   const session = sessions.find((item) => item.id === selected) ?? sessions[0];
@@ -37,8 +42,12 @@ function Fixture() {
       <p id="fixture-project" role="status">Project: {project?.name ?? 'none'}</p>
       <p id="fixture-context-tab" role="status">Context tab: {contextTab ?? 'none'}</p>
     </header>
+    <p>{openedHelper ? `Opened helper ${openedHelper}` : ''}</p>
     <div style={{ flex: 1 }} />
-    {session ? <Composer key={session.id} session={session} /> : <p role="alert">Example bootstrap failed.</p>}
+    {session ? <Composer key={session.id} session={session}
+      progressState={integrated ? { primary: 'Example current activity', running: session.status === 'running', steps: [{ id: 'example-step', title: 'Verify the Example change', status: 'in_progress' }] } : undefined}
+      helperCount={delegated?.filter(item => item.parentSessionId === session.id).length ?? 0}
+      helperRail={integrated ? <SubagentRail embedded subagents={[]} delegated={delegated?.filter(item => item.parentSessionId === session.id)} provider={session.provider} onOpen={() => {}} onOpenDelegated={item => setOpenedHelper(item.name)} /> : undefined} /> : <p role="alert">Example bootstrap failed.</p>}
   </main>;
 }
 

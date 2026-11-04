@@ -17,6 +17,8 @@ import { useTeamStructure } from '../lib/team-structure-context';
 import { providerSwitchFailureCopy } from '../lib/providerFailureUi';
 import { reasoningEffortChoices } from '../lib/providers';
 import { SessionWorkflowPanel, WorkflowLimitsControl } from './session-workflow/SessionWorkflowPanel';
+import { SessionProgress } from './session-workflow/SessionProgress';
+import type { StatusBarState } from './status-bar/deriveStatusBarState';
 import { QueuedMessages } from './composer/QueuedMessages';
 import {
   appendContextReference, ContextReferenceChips, EMPTY_CONTEXT_REFS, FileContextPicker,
@@ -29,7 +31,7 @@ const removeSkillMarker = (text: string, name: string) => text.replace(new RegEx
 const localCommandNames = ['new', 'stop', 'settings', 'model', 'effort', 'permissions', 'tier', 'skills', 'usage', 'import', 'status', 'diff', 'compact', 'help'];
 const reservedCommands = new Set(localCommandNames);
 
-export function Composer({ session, statusBar }: { session: Session; statusBar?: ReactNode }) {
+export function Composer({ session, progressState, helperRail, helperCount = 0 }: { session: Session; progressState?: StatusBarState | null; helperRail?: ReactNode; helperCount?: number }) {
   const draft = useMingle((s) => s.drafts[session.id] ?? '');
   const contextRefs = useMingle((s) => s.contextDrafts[session.id] ?? EMPTY_CONTEXT_REFS);
   const connection = useMingle((s) => s.connection);
@@ -490,8 +492,8 @@ export function Composer({ session, statusBar }: { session: Session; statusBar?:
         <button type="button" className="link-btn" onClick={() => setModelOpenRequest((value) => value + 1)} disabled={disabled} title={running ? 'Wait for the active run to finish before switching providers.' : 'Choose another available provider.'}>Switch provider</button>
         {canRetryFailedMessage ? <>{' '}<button type="button" className="link-btn" onClick={() => void retryFailedMessage()} disabled={disabled}>Retry with {PROVIDER_NAME[session.provider]}</button></> : null}
       </div> : null}
-      {workflow ? <SessionWorkflowPanel key={workflow.id} workflow={workflow} session={session} /> : null}
-      {statusBar}
+      {progressState !== undefined || helperRail ? <SessionProgress session={session} workflow={workflow} state={progressState} helpers={helperRail} helperCount={helperCount} onStop={() => void stop()} />
+        : workflow ? <SessionWorkflowPanel key={workflow.id} workflow={workflow} session={session} /> : null}
       <div className={cx('composer', blocker && 'is-blocked')}>
         <label htmlFor={`composer-${session.id}`} className="sr-only">Message {session.name}</label>
         <ContextReferenceChips refs={contextRefs} disabled={sending || updating} onRemove={(index) => useMingle.getState().setContextDraft(session.id, contextRefs.filter((_, i) => i !== index))} />

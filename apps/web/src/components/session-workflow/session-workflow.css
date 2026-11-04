@@ -23,3 +23,22 @@
 .session-workflow__live { animation: workflow-live 2s ease-in-out infinite; }
 @media (prefers-reduced-motion: reduce) { .session-workflow__live { animation: none; } }
 @media (max-width: 520px) { .session-workflow__header { gap: 7px; } .workflow-setup { align-items: flex-start; flex-direction: column; gap: 5px; } .session-workflow__actions { width: 100%; margin-left: 0; } }
+.session-workflow__body[hidden], .session-progress__details[hidden] { display: none; }
+.session-workflow--compact { margin-bottom: 0; border-bottom: 0; border-radius: 12px 12px 0 0; background: var(--bg-surface); }
+.session-workflow--compact + .composer { border-top-left-radius: 0; border-top-right-radius: 0; }
+.session-workflow--compact .session-workflow__header { padding: 6px 9px; gap: 7px; }
+.session-workflow--compact .session-workflow__heading { flex: 1; }
+.session-workflow__heading-copy { display: grid; min-width: 0; gap: 3px; }
+.session-workflow__heading-copy strong { font-size: 12px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.session-workflow__heading-copy > span { font-size: 11px; color: var(--fg-3); }
+.session-progress__details { max-height: 340px; overflow: auto; min-width: 0; }
+.session-progress__details .status-bar__steps { border-top: 0; max-height: none; }
+.session-progress__details .agent-presence.single-subagents--embedded.is-expanded { position: static; width: 100%; max-width: none; margin: 0; padding: 0; border: 0; border-radius: 0; box-shadow: none; background: transparent; }
+.session-progress__details .single-subagents--embedded .agent-presence__list { max-height: none; }
+@media (max-width: 520px) { .session-workflow--compact .session-workflow__actions { width: auto; } }
+.session-workflow--compact .session-workflow__heading-copy > span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+@media (max-width: 520px) {
+  .session-workflow--compact .session-workflow__actions button { width: 30px; padding-inline: 0; }
+  .session-workflow--compact .session-workflow__actions button span { display: none; }
+}
+.session-progress__details .agent-presence.single-subagents--embedded.is-expanded { max-height: none; flex: none; z-index: auto; top: auto; right: auto; transform: none; animation: none; overflow: visible; }
