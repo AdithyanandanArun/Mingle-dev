@@ -21,7 +21,8 @@ const old = new Date(Date.now() - 60_000).toISOString();
 const window = (id, label, windowMinutes, usedPercent, remainingPercent, scope = null) => ({ id, label, windowMinutes, usedPercent, remainingPercent, resetAt: future, ...(scope ? { scope } : {}) });
 const usage = (provider, overrides = {}) => ({
   provider, fetchedAt: new Date().toISOString(), status: 'partial', plan: 'Example plan',
-  windows: provider === 'codex' ? [window('5h', 'Five hour limit', 300, 140, 0), window('week', 'Weekly limit', 10080, 35.5, 64.5), window('model', 'Model scoped', 15, null, null, 'Example model') ] : [],
+  // Native Codex scopes its main bucket too; those windows must be visible without opening additional model limits.
+  windows: provider === 'codex' ? [window('codex:primary', 'Five hour limit', 300, 140, 0, 'codex'), window('codex:secondary', 'Weekly limit', 10080, 35.5, 64.5, 'codex'), window('model', 'Model scoped', 15, null, null, 'Example model') ] : [],
   credits: null,
   resets: provider === 'codex' ? { available: 2, grants: [], detailsKnown: false, replenishesAt: future } : null,
   notices: ['Example provider note.'], ...overrides,
@@ -138,7 +139,7 @@ try {
   postMode = 'conflict';
   await page.getByRole('button', { name: 'Use one available reset' }).click();
   await page.getByRole('group', { name: 'Confirm Codex reset' }).getByRole('button', { name: 'Use one reset' }).click();
-  await page.getByRole('status').filter({ hasText: 'usage changed before this reset' }).waitFor();
+  await page.getByRole('status').filter({ hasText: 'Example snapshot became stale.' }).waitFor();
   await page.getByText('Five hour limit', { exact: true }).waitFor();
   assert.equal(postCount, 1, 'a stale snapshot conflict triggers a fresh read without retrying the POST');
 
@@ -173,6 +174,16 @@ try {
   await grantConfirm.getByRole('button', { name: 'Use one reset' }).click();
   await page.getByRole('alert').filter({ hasText: 'The result is unknown.' }).waitFor();
   const uncertainBody = postBodies.at(-1);
+  const postsBeforeRecovery = postCount;
+  // A timeout may have spent a real credit. Refreshing, navigation and reload must retain its identity, never start anew.
+  await page.getByRole('button', { name: 'General', exact: true }).click();
+  await page.reload();
+  await page.getByRole('button', { name: 'Usage', exact: true }).click();
+  await page.getByRole('button', { name: 'Retry same attempt' }).waitFor();
+  await page.getByRole('button', { name: /Refresh Codex usage/ }).click();
+  await page.getByText('Expired example grant', { exact: true }).waitFor();
+  assert.equal(await page.getByRole('button', { name: 'Use this reset' }).isDisabled(), true, 'an unresolved attempt blocks another grant action');
+  assert.equal(postCount, postsBeforeRecovery, 'refresh, navigation and reload never redeem automatically');
   await page.getByRole('button', { name: 'Retry same attempt' }).click();
   await page.waitForTimeout(400);
   await page.getByRole('status').filter({ hasText: 'latest usage could not be loaded' }).waitFor();
@@ -183,11 +194,12 @@ try {
   assert.equal(await claudeAnchor.getAttribute('href'), 'https://claude.ai/settings/usage', 'Claude URL is fixed to the official destination');
 
   // The real settings category unmounts UsageSettings; a delayed old read cannot repopulate it after returning.
+  const beforeLeaving = { ...getCount };
   await page.getByRole('button', { name: 'General', exact: true }).click();
-  assert.deepEqual(getCount, { codex: 4, claude: 1 }, 'leaving Usage causes no provider requests');
+  assert.deepEqual(getCount, beforeLeaving, 'leaving Usage causes no provider requests');
   await page.getByRole('button', { name: 'Usage', exact: true }).click();
   await page.getByText('Five hour limit', { exact: true }).waitFor();
-  assert.deepEqual(getCount, { codex: 5, claude: 2 }, 're-entering Usage starts fresh independent reads');
+  assert.deepEqual(getCount, { codex: beforeLeaving.codex + 1, claude: beforeLeaving.claude + 1 }, 're-entering Usage starts fresh independent reads');
 
   deferNextCodexGet = true;
   await page.getByRole('button', { name: /Refresh Codex usage/ }).click();
@@ -199,7 +211,7 @@ try {
   await page.getByRole('button', { name: 'Usage', exact: true }).click();
   await page.getByText('Five hour limit', { exact: true }).waitFor();
   assert.equal(await page.getByText('Stale pre-unmount example', { exact: true }).count(), 0, 'an aborted refresh cannot apply after Usage unmount and re-entry');
-  assert.deepEqual(getCount, { codex: 7, claude: 3 }, 'a fresh entry loads current snapshots after the old GET is abandoned');
+  assert.deepEqual(getCount, { codex: beforeLeaving.codex + 3, claude: beforeLeaving.claude + 2 }, 'a fresh entry loads current snapshots after the old GET is abandoned');
   assert.deepEqual(pageErrors, []);
   console.log(`Settings Usage browser acceptance passed. Screenshots: ${output}`);
 } finally { await browser?.close(); await server?.close(); }

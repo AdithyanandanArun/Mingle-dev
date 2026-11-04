@@ -3,6 +3,8 @@ import type { AccountUsageProvider, ProviderAccountUsageSnapshot, ProviderResetR
 import { ArrowUpRight, Check, Clock3, Coins, RotateCcw, ShieldAlert } from 'lucide-react';
 import { ApiError, api, errorMessage } from '../lib/api';
 import { useMingle } from '../store/store';
+import { ProviderMark } from './ui';
+import { clearUsageResetAttempt, loadUsageResetAttempt, saveUsageResetAttempt } from '../lib/usageResetAttempt';
 import './usage-settings.css';
 
 const PROVIDERS: readonly AccountUsageProvider[] = ['codex', 'claude'];
@@ -24,9 +26,9 @@ interface ProviderState {
   lastRefreshAt: number;
 }
 
-const initialState = (): ProviderState => ({
+const initialState = (provider: AccountUsageProvider): ProviderState => ({
   snapshot: null, loading: true, refreshing: false, error: null, resetMessage: null, resetKind: null,
-  pending: null, attempt: null, redeeming: false, redeemError: null, lastRefreshAt: 0,
+  pending: null, attempt: (() => { const saved = loadUsageResetAttempt(provider); return saved ? { ...saved, uncertain: true } : null; })(), redeeming: false, redeemError: null, lastRefreshAt: 0,
 });
 
 function formatPercent(value: number | null): string {
@@ -112,11 +114,14 @@ function outcomeCopy(result: ProviderResetResult, hasFreshSnapshot: boolean): { 
 
 function ProviderUsage({ provider, now }: { provider: AccountUsageProvider; now: number }) {
   const providerInfo = useMingle((store) => store.boot?.providers.find((item) => item.id === provider));
-  const [state, setState] = useState<ProviderState>(initialState);
+  const [state, setState] = useState<ProviderState>(() => {
+    const initial = initialState(provider);
+    return initial.attempt ? { ...initial, resetMessage: 'A previous reset result is unconfirmed. Retry the same attempt to check it; usage refresh alone does not confirm redemption.', resetKind: 'error' } : initial;
+  });
   const requestRef = useRef<AbortController | null>(null);
   const generationRef = useRef(0);
   const inFlightRef = useRef(false);
-  const attemptRef = useRef<RedemptionAttempt | null>(null);
+  const attemptRef = useRef<RedemptionAttempt | null>(state.attempt);
   const mountedRef = useRef(false);
   const [confirmationRef, setConfirmationRef] = useState<HTMLDivElement | null>(null);
   const confirmationTriggerRef = useRef<HTMLElement | null>(null);
@@ -168,6 +173,7 @@ function ProviderUsage({ provider, now }: { provider: AccountUsageProvider; now:
   }, []);
 
   const beginConfirmation = (label: string, creditId?: string, expiresAt?: string | null) => {
+    if (attemptRef.current || inFlightRef.current) return;
     if (!state.snapshot || state.snapshot.reset.mode !== 'native' || !state.snapshot.reset.snapshotToken) return;
     if (expiresAt && formatDate(expiresAt, Date.now())?.passed) return;
     confirmationTriggerRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -191,8 +197,11 @@ function ProviderUsage({ provider, now }: { provider: AccountUsageProvider; now:
       const snapshotToken = current.snapshot.reset.snapshotToken;
       if (!snapshotToken) return;
       attempt = { idempotencyKey: newIdempotencyKey(), snapshotToken, ...(pending.creditId ? { creditId: pending.creditId } : {}) };
+      saveUsageResetAttempt(provider, attempt);
       attemptRef.current = attempt;
     }
+    requestRef.current?.abort();
+    generationRef.current++;
     inFlightRef.current = true;
     setPatch({ redeeming: true, redeemError: null, resetMessage: null, resetKind: null, pending: null, snapshot: null, loading: false, refreshing: false });
     // An aborted renderer request cannot prove that the provider action stopped. Keep the attempt for an explicit same-key retry.
@@ -200,15 +209,19 @@ function ProviderUsage({ provider, now }: { provider: AccountUsageProvider; now:
       const { idempotencyKey, snapshotToken, creditId } = attempt;
       const input: RedeemProviderResetInput = { idempotencyKey, snapshotToken, ...(creditId ? { creditId } : {}) };
       const result = await api.redeemProviderReset(provider, input);
+      if (!['reset', 'alreadyRedeemed', 'nothingToReset', 'noCredit'].includes(result.outcome)) throw new Error('The provider reset result was not recognized.');
+      clearUsageResetAttempt(provider, input.idempotencyKey);
       if (!mountedRef.current) return;
       const copy = outcomeCopy(result, Boolean(result.snapshot));
       attemptRef.current = null;
       setPatch({ redeeming: false, attempt: null, redeemError: null, resetMessage: result.notice ? `${copy.text} ${result.notice}` : copy.text, resetKind: copy.kind, snapshot: result.snapshot, error: null });
     } catch (cause) {
+      const rejectedBeforeDispatch = cause instanceof ApiError && (cause.status === 409 || cause.status === 501) && !retry;
+      if (rejectedBeforeDispatch) clearUsageResetAttempt(provider, attempt.idempotencyKey);
       if (!mountedRef.current) return;
-      if (cause instanceof ApiError && cause.status === 409) {
+      if (rejectedBeforeDispatch) {
         attemptRef.current = null;
-        setPatch({ redeeming: false, attempt: null, pending: null, redeemError: null, resetMessage: 'Codex usage changed before this reset could be checked. Refreshing the latest usage; review it before trying again.', resetKind: 'info', snapshot: null });
+        setPatch({ redeeming: false, attempt: null, pending: null, redeemError: null, resetMessage: errorMessage(cause), resetKind: 'info', snapshot: null });
         void load(true, true);
         return;
       }
@@ -221,18 +234,20 @@ function ProviderUsage({ provider, now }: { provider: AccountUsageProvider; now:
   };
 
   const onRefresh = () => {
-    attemptRef.current = null;
-    setPatch({ pending: null, attempt: null, redeemError: null, resetMessage: null, resetKind: null });
+    if (inFlightRef.current) return;
+    setPatch({ pending: null, ...(!attemptRef.current ? { redeemError: null, resetMessage: null, resetKind: null } : {}) });
     void load(true);
   };
 
   const snapshot = state.snapshot;
   const usage = snapshot?.usage;
   const resets = usage?.resets;
-  const primaryWindows = usage?.windows.filter((item) => !item.scope) ?? [];
-  const scopedWindows = usage?.windows.filter((item) => Boolean(item.scope)) ?? [];
+  // Native Codex labels even its main bucket with a scope. It belongs on the page, alongside unscoped Claude limits.
+  const isPrimary = (item: UsageWindow) => !item.scope || provider === 'codex' && (item.id.startsWith('codex:') || item.scope.toLowerCase() === 'codex');
+  const primaryWindows = usage?.windows.filter(isPrimary) ?? [];
+  const scopedWindows = usage?.windows.filter((item) => !isPrimary(item)) ?? [];
   const hasGrants = Boolean(resets?.grants.length);
-  const canRedeem = provider === 'codex' && snapshot?.reset.mode === 'native' && Boolean(snapshot.reset.snapshotToken);
+  const canRedeem = provider === 'codex' && snapshot?.reset.mode === 'native' && Boolean(snapshot.reset.snapshotToken) && !state.attempt;
   const countAvailable = resets?.available !== null && resets?.available !== undefined && resets.available > 0;
   const cooldown = Math.max(0, REFRESH_COOLDOWN_MS - (Date.now() - state.lastRefreshAt));
   const busy = state.redeeming || state.refreshing || state.loading;
@@ -242,7 +257,7 @@ function ProviderUsage({ provider, now }: { provider: AccountUsageProvider; now:
 
   return <section className="usage-settings__provider" aria-labelledby={`usage-${provider}-title`}>
     <header className="usage-settings__provider-head">
-      <div className="usage-settings__provider-id"><span className={`usage-settings__provider-mark usage-settings__provider-mark--${provider}`} aria-hidden="true">{provider === 'codex' ? 'C' : 'A'}</span><div><h2 id={`usage-${provider}-title`}>{title}</h2><p>{usage?.plan ? `${usage.plan} · ` : ''}Account usage</p><small className="usage-settings__runtime">{providerInfo ? `Provider runtime ${providerInfo.available ? 'available' : 'unavailable'}${providerInfo.version ? ` · ${providerInfo.version}` : ''}` : 'Provider runtime status not reported'}</small></div></div>
+      <div className="usage-settings__provider-id"><span className={`usage-settings__provider-mark usage-settings__provider-mark--${provider}`} aria-hidden="true"><ProviderMark provider={provider} size={19} /></span><div><h2 id={`usage-${provider}-title`}>{title}</h2><p>{usage?.plan ? `${usage.plan} · ` : ''}Account usage</p><small className="usage-settings__runtime">{providerInfo ? `Provider runtime ${providerInfo.available ? 'available' : 'unavailable'}${providerInfo.version ? ` · ${providerInfo.version}` : ''}` : 'Provider runtime status not reported'}</small></div></div>
       <div className="usage-settings__provider-actions"><span className={`usage-settings__status${status ? ` is-${status}` : ''}`}>{state.loading && !usage ? 'Loading' : status === 'available' ? 'Available' : status === 'partial' ? 'Partial data' : status === 'unavailable' ? 'Unavailable' : 'Not loaded'}</span>
         <button type="button" className="usage-settings__button" onClick={onRefresh} disabled={busy || cooldown > 0} aria-label={`Refresh ${title} usage`} title={cooldown > 0 ? `Refresh available in ${Math.ceil(cooldown / 1000)} seconds` : `Refresh ${title} usage`}><RotateCcw size={14} className={state.refreshing ? 'is-refreshing' : undefined} /><span>{state.refreshing ? 'Refreshing…' : cooldown > 0 && usage ? `Refresh in ${Math.ceil(cooldown / 1000)}s` : 'Refresh'}</span></button>
       </div>
@@ -255,12 +270,12 @@ function ProviderUsage({ provider, now }: { provider: AccountUsageProvider; now:
       <div className="usage-settings__updated"><span>{usage.fetchedAt ? <>Updated <DateLabel value={usage.fetchedAt} now={now} /></> : 'Update time not reported'}</span><span>{snapshot?.reset.mode === 'native' ? 'Reset controls available in Mingle' : snapshot?.reset.mode === 'external' ? 'Manage resets with the provider' : 'Reset action unavailable'}</span></div>
       {usage.windows.length ? <>
         {primaryWindows.length ? <div className="usage-settings__windows">{primaryWindows.map((item) => <UsageMeter key={item.id} item={item} now={now} />)}</div> : null}
-        {scopedWindows.length ? <details className="usage-settings__scoped"><summary>Additional scoped limits <span>{scopedWindows.length}</span></summary><div className="usage-settings__windows">{scopedWindows.map((item) => <UsageMeter key={item.id} item={item} now={now} />)}</div></details> : null}
+        {scopedWindows.length ? <details className="usage-settings__scoped" open={primaryWindows.length ? undefined : true}><summary>Additional scoped limits <span>{scopedWindows.length}</span></summary><div className="usage-settings__windows">{scopedWindows.map((item) => <UsageMeter key={item.id} item={item} now={now} />)}</div></details> : null}
       </> : <div className="usage-settings__empty"><Clock3 size={16} /><span>{status === 'unavailable' ? 'Account usage is unavailable for this provider.' : 'No usage windows were reported.'}</span></div>}
       {usage.credits || usage.resets ? <div className="usage-settings__details">
         {usage.credits ? <section className="usage-settings__detail"><h3><Coins size={14} /> Credits</h3><dl><div><dt>Balance</dt><dd>{usage.credits.unlimited === true ? 'Unlimited' : usage.credits.balance === null ? 'Not reported' : `${usage.credits.balance}${usage.credits.unit ? ` ${usage.credits.unit}` : ''}`}</dd></div><div><dt>Credit reset</dt><dd><DateLabel value={usage.credits.resetAt} now={now} past="Time passed · refresh to recheck" /></dd></div></dl></section> : null}
         {usage.resets ? <section className="usage-settings__detail"><h3><RotateCcw size={14} /> Reset credits</h3><dl><div><dt>Available</dt><dd>{usage.resets.available === null ? 'Not reported' : usage.resets.available}</dd></div><div><dt>Next replenishment</dt><dd><DateLabel value={usage.resets.replenishesAt} now={now} past="Time passed · refresh to recheck" /></dd></div></dl>
-          <div className="usage-settings__grants"><h4>Banked resets</h4>{hasGrants ? usage.resets.grants.map((grant) => <GrantRow key={grant.id} grant={grant} now={now} busy={busy} onUse={(selected) => beginConfirmation(selected.label, selected.id, selected.expiresAt)} />) : <p className="usage-settings__muted">{usage.resets.detailsKnown ? 'No banked reset grants.' : 'Individual grant details are not reported.'}</p>}
+          <div className="usage-settings__grants"><h4>Banked resets</h4>{hasGrants ? usage.resets.grants.map((grant) => <GrantRow key={grant.id} grant={grant} now={now} busy={busy || !canRedeem} onUse={(selected) => beginConfirmation(selected.label, selected.id, selected.expiresAt)} />) : <p className="usage-settings__muted">{usage.resets.detailsKnown ? 'No banked reset grants.' : 'Individual grant details are not reported.'}</p>}
             {canRedeem && countAvailable ? <button type="button" className="usage-settings__button usage-settings__button--wide" disabled={busy} onClick={() => beginConfirmation('one available reset')}>Use one available reset</button> : null}
           </div>
         </section> : null}
