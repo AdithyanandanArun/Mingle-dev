@@ -14,7 +14,7 @@ export const SessionHistoryControl = memo(function SessionHistoryControl({ histo
     return history.older.length > 0 ? <p className="history-note" role="status" data-history="start">Start of conversation</p> : null;
   }
   if (history.older.length >= HISTORY_OPEN_LIMIT) {
-    return <p className="history-note" role="status" data-history="limit">{`Showing ${HISTORY_OPEN_LIMIT.toLocaleString()} earlier messages, the most this view keeps. Reopen the session to continue from the start of its history.`}</p>;
+    return <p className="history-note" role="status" data-history="limit">{history.notice ? `${history.notice} ` : ''}{`Showing ${HISTORY_OPEN_LIMIT.toLocaleString()} earlier messages, the most this view keeps. Reopening resets the cache so you can load older messages again.`}</p>;
   }
   return (
     <div className="history-control" data-history={loading ? 'loading' : failed ? 'error' : 'ready'}>

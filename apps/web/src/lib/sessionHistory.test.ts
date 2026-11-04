@@ -107,6 +107,30 @@ describe('pageLoaded', () => {
 });
 
 describe('settleIdle and limits', () => {
+  it('bounds a continuously sliding live window, keeps contiguous recent history and fences older requests', () => {
+    let history: SessionHistory = { ...syncWindow(EMPTY_HISTORY, full(HISTORY_OPEN_LIMIT)), older: range(0, HISTORY_OPEN_LIMIT), hasMore: false, phase: 'loading' };
+    const request = { cursor: oldestDisplayed(history)!.id, epoch: history.epoch };
+    for (let shift = 125; shift <= 1000; shift += 125) {
+      history = syncWindow(history, full(HISTORY_OPEN_LIMIT + shift));
+      expect(history.older).toHaveLength(HISTORY_OPEN_LIMIT);
+      expect(ids(history.older)).toEqual(ids(range(shift, HISTORY_OPEN_LIMIT + shift)));
+      expect(history.hasMore).toBe(true);
+    }
+    expect(history.notice).toMatch(/remain saved/);
+    expect(history.epoch).toBeGreaterThan(request.epoch);
+    expect(history.phase).toBe('idle');
+    expect(pageLoaded(history, request, 's1', [message(-1)], false)).toBe(history);
+  });
+
+  it('caps a page that crosses the remaining capacity and does not falsely report the start of history', () => {
+    const history: SessionHistory = { ...syncWindow(EMPTY_HISTORY, full(5100)), older: range(110, 5100) };
+    const next = pageLoaded(history, { cursor: message(110).id, epoch: history.epoch }, 's1', range(10, 110), false);
+    expect(ids(next.older)).toEqual(ids(range(100, 5100)));
+    expect(next.hasMore).toBe(true);
+    expect(canLoadOlder(next)).toBe(false);
+    expect(next.notice).toMatch(/cache/);
+  });
+
   it('keeps only the part nearest the live window for a session that is left, and reports more history exists', () => {
     const history: SessionHistory = { ...syncWindow(EMPTY_HISTORY, full(2000)), older: range(1000, 2000), hasMore: false };
     const settled = settleIdle(history);

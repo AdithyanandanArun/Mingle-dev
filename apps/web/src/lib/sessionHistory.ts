@@ -23,7 +23,7 @@ import { api, errorMessage } from './api';
 export const BOOTSTRAP_MESSAGES_PER_SESSION = 300;
 /** Messages requested per click. One extra is requested so "is there more" is answered without another request. */
 export const HISTORY_PAGE_SIZE = 100;
-/** Most older messages one open session holds; loading stops there rather than growing without bound. */
+/** Most older messages one open session holds, including messages leaving the live window. */
 export const HISTORY_OPEN_LIMIT = 5000;
 /** Older messages kept for a session that is no longer open (the ones nearest the live window). */
 export const HISTORY_IDLE_KEEP = 400;
@@ -51,6 +51,16 @@ export const EMPTY_HISTORY: SessionHistory = Object.freeze({
 }) as SessionHistory;
 
 const durable = (message: Message): boolean => !isOptimisticMessage(message);
+
+function boundOpenHistory(history: SessionHistory): SessionHistory {
+  if (history.older.length <= HISTORY_OPEN_LIMIT) return history;
+  return {
+    ...history,
+    older: history.older.slice(-HISTORY_OPEN_LIMIT),
+    hasMore: true, phase: 'idle', error: null, epoch: history.epoch + 1,
+    notice: 'Earlier messages left this view’s cache to keep it bounded. They remain saved in the conversation.',
+  };
+}
 
 function sameMessages(a: readonly Message[], b: readonly Message[]): boolean {
   if (a === b) return true;
@@ -89,7 +99,7 @@ export function syncWindow(history: SessionHistory, bootstrapMessages: readonly 
   if (firstKept === 0) return { ...history, window: next };
   const known = new Set(history.older.map((message) => message.id));
   const slid = history.window.slice(0, firstKept).filter((message) => !known.has(message.id));
-  return { ...history, older: slid.length ? [...history.older, ...slid] : history.older, window: next };
+  return boundOpenHistory({ ...history, older: slid.length ? [...history.older, ...slid] : history.older, window: next });
 }
 
 /**
@@ -127,7 +137,7 @@ export function pageLoaded(history: SessionHistory, request: HistoryRequest, ses
     added.push(message);
   }
   if (added.length === 0 && hasMore) return { ...history, phase: 'error', error: 'The server returned no new older messages.' };
-  return { ...history, older: added.length ? [...added, ...history.older] : history.older, hasMore, phase: 'idle', error: null, notice: null };
+  return boundOpenHistory({ ...history, older: added.length ? [...added, ...history.older] : history.older, hasMore, phase: 'idle', error: null, notice: null });
 }
 
 export function loadFailed(history: SessionHistory, request: HistoryRequest, message: string): SessionHistory {
