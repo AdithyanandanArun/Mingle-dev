@@ -185,6 +185,19 @@
 
 .composer__options .composer__select { width: 100%; }
 
+.composer__advanced { display: inline-flex; align-items: center; justify-content: center; flex: none; width: 30px; height: 30px; padding: 0; border: 1px solid transparent; border-radius: 7px; color: var(--fg-3); background: transparent; cursor: pointer; }
+.composer__advanced:hover, .composer__advanced[aria-expanded='true'] { background: var(--bg-hover); color: var(--fg-1); }
+.composer__advanced:focus-visible { outline: 2px solid var(--fg-2); outline-offset: 2px; }
+.composer__mode { font-weight: 500; }
+.popover.composer-settings { padding: 14px; display: grid; gap: 14px; }
+.composer-settings__heading { display: grid; gap: 5px; font-size: 12px; }
+.composer-settings__heading span, .composer-settings__hint { color: var(--fg-3); font-size: 11px; line-height: 1.5; }
+.composer-settings__field { display: grid; gap: 6px; font-size: 11px; color: var(--fg-2); }
+.composer-settings__field .composer__select { width: 100%; max-width: none; background: var(--bg-surface); border-color: var(--line-soft); min-height: 32px; }
+.composer-settings .workflow-setup { display: block; padding: 12px 0 0; margin: 0; border: 0; border-top: 1px solid var(--line-soft); min-width: 0; }
+.composer-settings .workflow-setup legend { font-size: 11px; color: var(--fg-1); padding: 0; }
+.composer-settings .workflow-setup p { margin: 7px 0; line-height: 1.5; }
+
 .sendbtn {
   width: 32px;
   height: 32px;

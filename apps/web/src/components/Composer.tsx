@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
-import { ArrowUp, FilePlus2, Square } from 'lucide-react';
+import { ArrowUp, FilePlus2, SlidersHorizontal, Square } from 'lucide-react';
 import type { AttachmentRef, ProviderModel, Session, WorkflowLimits } from '@mingle/contracts';
 import { useMingle } from '../store/store';
 import { api, errorMessage, type ApiProviderFailure, type ProviderCatalog, type SessionPatch } from '../lib/api';
@@ -8,6 +8,7 @@ import { MOD, PROVIDER_NAME, Badge } from './ui';
 import { cx } from '../lib/format';
 import { SelectMenu } from './SelectMenu';
 import { ModelPicker } from './ModelPicker';
+import { Popover } from './git/Popover';
 import { UsagePanel } from './UsagePanel';
 import { GitBar } from './git/GitBar';
 import { AttachmentDrafts, AttachmentTray, useAttachmentDraft } from './AttachmentDrafts';
@@ -83,6 +84,8 @@ export function Composer({ session, statusBar }: { session: Session; statusBar?:
   const modelControl = useRef<HTMLButtonElement>(null);
   const reasoningControl = useRef<HTMLButtonElement>(null);
   const policyControl = useRef<HTMLButtonElement>(null);
+  const advancedControl = useRef<HTMLButtonElement>(null);
+  const [advancedOpen, setAdvancedOpen] = useState(false);
   const failedMessage = useMingle((s) => providerFailure?.runId
     ? s.boot?.messages.find((message) => message.sessionId === session.id && message.runId === providerFailure.runId && message.role === 'user')
     : undefined);
@@ -224,7 +227,7 @@ export function Composer({ session, statusBar }: { session: Session; statusBar?:
         if (action === 'stop') await api.interrupt(session.id);
         if (action === 'settings') useMingle.getState().openSettings();
         if (action === 'model') { focusComposerAfter = false; setModelOpenRequest((value) => value + 1); }
-        if (action === 'effort' || action === 'tier') { focusComposerAfter = false; setReasoningOpenRequest((value) => value + 1); }
+        if (action === 'effort' || action === 'tier') { focusComposerAfter = false; setAdvancedOpen(true); setReasoningOpenRequest((value) => value + 1); }
         if (action === 'permissions') { focusComposerAfter = false; setPolicyOpenRequest((value) => value + 1); }
         if (action === 'skills') {
           caret.current = 1; setCaretPosition(1);
@@ -498,7 +501,7 @@ export function Composer({ session, statusBar }: { session: Session; statusBar?:
           role="combobox" aria-autocomplete="list" aria-haspopup="listbox" aria-expanded={Boolean(suggestion && suggestions.length)}
           aria-controls={suggestion && suggestions.length ? pickerId : undefined}
           aria-activedescendant={suggestion && suggestions.length ? `${pickerId}-option-${activeSuggestion}` : undefined}
-          placeholder={planningMode ? 'Describe what to plan… or type @/path to add file context' : steerable ? 'Will steer the running agent…' : running ? 'Queued · will send when the agent finishes…' : 'Ask anything, or type @/path to add file context…'}
+          placeholder={planningMode ? 'Describe what to plan… or type @/path to add file context' : steerable ? 'Will steer the running agent…' : running ? 'Queued · will send when the agent finishes…' : autonomousMode && !workflowOpen ? 'Describe the goal to work through…' : 'Ask anything, or type @/path to add file context…'}
           onChange={(e) => {
             const nextDraft = e.target.value;
             caret.current = e.target.selectionStart ?? nextDraft.length;
@@ -555,26 +558,28 @@ export function Composer({ session, statusBar }: { session: Session; statusBar?:
           </div>)}
         </div> : null}
         {focused && trigger.startsWith('$') && !suggestions.length && !catalogError ? <div className="composer-picker-empty" role="status">{!catalog ? 'Loading skills…' : catalog.skills.some((item) => item.enabled) ? 'No matching skills.' : 'No skills are available for this provider and session.'}</div> : null}
-        {autonomousMode && !workflowOpen && !running ? <WorkflowLimitsControl limits={workflowLimits} onChange={setWorkflowLimits} disabled={sending || updating} /> : null}
         <div className="composer__bar">
           <div className="composer__controls" aria-busy={updating}>
-            <button type="button" className={cx('composer__plan-toggle', planningMode && 'is-active')} aria-pressed={planningMode} disabled={disabled || workflowRunning} title="Ask the provider for a native read-only plan" onClick={() => { setPlanningMode((value) => !value); setAutonomousMode(false); setSelectedSkills([]); setError(null); }}>
-              {planningMode ? 'Planning on' : 'Plan'}
-            </button>
-            {canStartWorkflow ? <button type="button" className={cx('composer__plan-toggle', (autonomousMode || workflowRunning) && 'is-active')} aria-pressed={autonomousMode || workflowRunning} disabled={disabled || workflowOpen} title={workflow?.state === 'paused' ? 'Resume or stop the paused goal above before starting another.' : 'Work toward a goal across turns using this session’s current permissions'} onClick={() => { setAutonomousMode((value) => !value); setPlanningMode(false); setError(null); }}>Autonomous</button> : null}
+            <SelectMenu label="Conversation mode" className="composer__select composer__mode" placement="top"
+              value={workflowRunning || (autonomousMode && !workflowOpen) ? 'autonomous' : planningMode ? 'plan' : 'chat'} disabled={disabled || workflowRunning}
+              options={[
+                { value: 'chat', label: 'Chat', description: 'Send a request or follow-up in this conversation.' },
+                { value: 'plan', label: 'Plan', description: 'Ask for a native read-only plan.' },
+                ...(canStartWorkflow ? [{ value: 'autonomous', label: 'Autonomous', description: workflowOpen ? 'Resume or stop the existing goal above first.' : running ? 'Finish the active turn before starting a goal.' : 'Work toward a goal across turns within a budget.', disabled: Boolean(workflowOpen || running) }] : []),
+              ]}
+              onChange={(value) => { setPlanningMode(value === 'plan'); setAutonomousMode(value === 'autonomous'); if (value === 'plan') setSelectedSkills([]); setError(null); }} />
             {session.handoffFromProvider ? <Badge tone="info" title="No extra model call; context is included with your next message.">Handoff pending from {PROVIDER_NAME[session.handoffFromProvider]}</Badge> : null}
             <ModelPicker triggerRef={modelControl} openRequest={modelOpenRequest} className="composer__model-picker" label="Model"
               value={{ provider: session.provider, model: selectedModelId }} providers={providers ?? []}
               title={running ? 'Provider and model selection is disabled while this session is running.' : undefined}
               disabled={disabled || workflowRunning} placement="top"
               onChange={({ provider, model }) => { void configure({ provider, model }); }} />
-            <SelectMenu triggerRef={reasoningControl} className="composer__select" label="Reasoning effort and service tier" value={combinedValue} selectedValues={combinedSelectedValues} displayValue={combinedDisplay} openRequest={reasoningOpenRequest} disabled={disabled || workflowRunning}
-              options={combinedOptions}
-              onChange={(value) => { const [kind, option] = value.split(':'); if (kind === 'effort') void configure({ effort: option }); else if (kind === 'tier') void configure({ serviceTier: option }); }} placement="top" />
             <SelectMenu triggerRef={policyControl} openRequest={policyOpenRequest} className="composer__select composer__select--policy" label={isTeamSessionAnchor ? 'Team permission level' : 'Approval policy'} value={session.policy} disabled={disabled || workflowRunning || policyChoices.length === 0}
               displayValue={policyChoices.length ? policyChoices.includes(session.policy) ? undefined : 'Not available' : 'Native/default'}
               options={policyChoices.map((value) => ({ value, label: policyLabels[value]?.[0] ?? value, description: policyLabels[value]?.[1] }))}
               onChange={(value) => void configure({ policy: value as Session['policy'] })} placement="top" />
+            <button ref={advancedControl} type="button" className="composer__advanced" aria-label="Advanced conversation settings" aria-haspopup="dialog" aria-expanded={advancedOpen}
+              title={`Advanced settings · ${combinedDisplay}${autonomousMode && !workflowOpen ? ` · up to ${workflowLimits.maxTurns} turns` : ''}`} onClick={() => setAdvancedOpen(value => !value)}><SlidersHorizontal size={14} /></button>
           </div>
           <div className="composer__send">
             <button type="button" className="composer__context-button" onClick={() => openFilePicker()} disabled={!project || disabled} aria-label="Add workspace file context" title="Add a file from this worktree, or type @/path"><FilePlus2 size={15} /></button>
@@ -591,6 +596,15 @@ export function Composer({ session, statusBar }: { session: Session; statusBar?:
           </div>
         </div>
       </div>
+      <Popover anchor={advancedControl} open={advancedOpen} onClose={() => setAdvancedOpen(false)} label="Advanced conversation settings" className="composer-settings" width={310}>
+        <div className="composer-settings__heading"><strong>Conversation settings</strong><span>Uses this session’s provider and permissions.</span></div>
+        <label className="composer-settings__field"><span>Reasoning and speed</span>
+          <SelectMenu triggerRef={reasoningControl} className="composer__select" label="Reasoning effort and service tier" value={combinedValue} selectedValues={combinedSelectedValues} displayValue={combinedDisplay} openRequest={reasoningOpenRequest} disabled={disabled || running || workflowRunning}
+            options={combinedOptions} onChange={(value) => { const [kind, option] = value.split(':'); if (kind === 'effort') void configure({ effort: option }); else if (kind === 'tier') void configure({ serviceTier: option }); }} placement="top" />
+        </label>
+        {autonomousMode && !workflowOpen && !running ? <WorkflowLimitsControl limits={workflowLimits} onChange={setWorkflowLimits} disabled={sending || updating} /> : null}
+        {running || workflowRunning ? <p className="composer-settings__hint">Run settings stay locked while work is active.</p> : null}
+      </Popover>
       {project ? <GitBar project={project} session={session} /> : null}
       {blocker || error ? (
         <p className={cx('composer__note', error && 'is-error')} role={error ? 'alert' : 'status'}>{error ?? blocker}{!error && provider && !provider.available ? <> <button type="button" className="link-btn" onClick={() => useMingle.getState().openDialog({ kind: 'settings' })}>Open Settings</button></> : null}</p>

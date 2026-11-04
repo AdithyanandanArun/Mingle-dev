@@ -75,11 +75,12 @@ export function SessionWorkflowPanel({ workflow, session }: { workflow: SessionW
 }
 
 export function WorkflowLimitsControl({ limits, onChange, disabled }: { limits: WorkflowLimits; onChange: (value: WorkflowLimits) => void; disabled: boolean }) {
-  return <div className="workflow-setup">
-    <span>Work through the goal, check the result, and report what needs you.</span>
-    <details><summary>Up to {limits.maxTurns} turns <ChevronDown size={12} /></summary><div className="workflow-setup__fields">
+  return <fieldset className="workflow-setup">
+    <legend>Autonomous budget</legend>
+    <p>Up to {limits.maxTurns} turns. Work through the goal and report what needs you.</p>
+    <div className="workflow-setup__fields">
       <label>Turn budget<input type="number" min={1} max={50} step={1} value={limits.maxTurns} disabled={disabled} onChange={(event) => { const value = event.currentTarget.valueAsNumber; if (Number.isInteger(value) && value >= 1 && value <= 50) onChange({ ...limits, maxTurns: value }); }} /></label>
       <label>Time budget (minutes)<input type="number" min={1} max={1440} step={1} value={limits.maxElapsedMinutes} disabled={disabled} onChange={(event) => { const value = event.currentTarget.valueAsNumber; if (Number.isInteger(value) && value >= 1 && value <= 1440) onChange({ ...limits, maxElapsedMinutes: value }); }} /></label>
-    </div></details>
-  </div>;
+    </div>
+  </fieldset>;
 }

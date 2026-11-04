@@ -6,7 +6,7 @@ Keep native conversations, provider availability and permissions truthful. Prese
 
 | Order | Improvement | Status | Acceptance |
 | --- | --- | --- | --- |
-| 1 | Simplify composer | Pending | One Chat / Plan / Autonomous selector; model and permissions stay visible; advanced effort, tier and goal budgets move into a keyboard-accessible popover. Existing commands, attachments, context, paused-goal chat and configuration locks still work. |
+| 1 | Simplify composer | Complete | One Chat / Plan / Autonomous selector; model and permissions stay visible; advanced effort, tier and goal budgets move into a keyboard-accessible popover. Existing commands, attachments, context, paused-goal chat and configuration locks still work. |
 | 2 | Unify progress | Pending | One expandable progress surface combines current task, goal, helpers and run state. Pause/Stop/Resume, checklist and helper navigation remain accessible without stacked status panels. |
 | 3 | Long conversations | Pending | Older session history loads progressively; offscreen rendering stays bounded or deferred. Loading history preserves the reader's anchor and live output, run/tool/change placement and text accessibility. |
 | 4 | Reduce refresh traffic | Pending | Ordinary standalone session events update bounded session data; startup, reconnect and unsupported events retain full recovery snapshots. Measure request/payload counts and preserve gap recovery and all shared-session paths. |
@@ -28,3 +28,10 @@ Keep native conversations, provider availability and permissions truthful. Prese
 ## Progress log
 
 - Roadmap recorded before implementation. Work is isolated on `feature/single-agent-refinements-20261104`.
+
+### 1 — Composer
+
+- Replaced independent mode toggles with one accessible Chat / Plan / Autonomous choice. Model and permissions remain on the toolbar.
+- Moved reasoning/service tier and new-goal budgets into Advanced conversation settings; local `/effort` and `/tier` commands open the same controls.
+- Preserved routing, attachments, context, drafts, paused-goal chat and active configuration locks. Fixed nested choice-menu dismissal and keyboard focus during popover positioning.
+- Checks: web TypeScript; all 96 web unit tests; 29 local workflow/composer browser checks, including 390px/900px layouts and keyboard settings. Screenshots inspected. All browser data was explicitly labelled Example; no model or cloud calls.

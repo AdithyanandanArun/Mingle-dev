@@ -177,8 +177,11 @@ function ui(page) {
   return {
     input: page.locator('textarea.composer__input'),
     panel: page.getByRole('region', { name: 'Autonomous workflow' }),
-    autonomous: page.getByRole('button', { name: 'Autonomous', exact: true }),
-    plan: page.getByRole('button', { name: /^(Plan|Planning on)$/ }),
+    mode: page.getByRole('combobox', { name: 'Conversation mode' }),
+    settings: page.getByRole('button', { name: 'Advanced conversation settings', exact: true }),
+    async chooseMode(name) { await this.mode.click(); await page.getByRole('option', { name: new RegExp(`^${name}\\b`) }).click(); },
+    async autonomousDisabled() { if (await this.mode.isDisabled()) return true; await this.mode.click(); const option = page.getByRole('option', { name: /^Autonomous/ }); await option.waitFor(); const disabled = await option.getAttribute('aria-disabled') === 'true'; await this.mode.press('Escape'); return disabled; },
+    async budgets() { if (await this.settings.getAttribute('aria-expanded') !== 'true') await this.settings.click(); await page.getByLabel('Turn budget').waitFor(); },
     send: page.getByRole('button', { name: /^(Send message|Start autonomous workflow)$/ }),
     model: page.getByRole('combobox', { name: 'Model', exact: true }),
     effort: page.getByRole('combobox', { name: 'Reasoning effort and service tier' }),
@@ -227,11 +230,12 @@ try {
 
   await test('opt-in: initial composer is ordinary chat and native controls stay editable', () => run({}, async ({ page, ui: u }) => {
     assert.equal(await page.getByText('Example workspace · fixture data only', { exact: false }).count(), 1, 'fixture identifies itself as Example data');
-    assert.equal(await u.autonomous.getAttribute('aria-pressed'), 'false');
-    assert.equal(await u.plan.getAttribute('aria-pressed'), 'false');
+    assert.equal((await u.mode.innerText()).trim() === 'Autonomous', false);
+    assert.equal((await u.mode.innerText()).trim() === 'Plan', false);
     assert.equal(await u.panel.count(), 0, 'no workflow panel without a workflow');
-    assert.equal(await page.getByText(/Up to \d+ turns/).count(), 0, 'no budget setup until Autonomous is chosen');
-    for (const control of [u.model, u.effort, u.policy, u.plan, u.autonomous]) assert.equal(await control.isDisabled(), false);
+    assert.equal(await page.getByText(/Up to \d+ turns/).filter({ visible: true }).count(), 0, 'no budget setup until Autonomous is chosen');
+    for (const control of [u.model, u.policy, u.mode]) assert.equal(await control.isDisabled(), false);
+    await u.settings.click();
     await u.effort.scrollIntoViewIfNeeded();
     await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
     await u.effort.click();
@@ -246,11 +250,32 @@ try {
     assert.equal(posts('/workflow').length, 0, 'an ordinary send never starts a workflow');
   }));
 
+  await test('advanced settings preserve nested choices and Escape restores focus; slash effort opens the same controls', () => run({}, async ({ page, ui: u, shot }) => {
+    assert.equal(await u.effort.count(), 0, 'advanced settings are absent from the toolbar');
+    await u.settings.click();
+    const settings = page.getByRole('dialog', { name: 'Advanced conversation settings' });
+    await settings.waitFor();
+    await u.effort.click();
+    await page.getByRole('option', { name: /^High/ }).click();
+    await settings.waitFor();
+    assert.equal(await u.settings.getAttribute('aria-expanded'), 'true', 'choosing from a nested portal keeps settings open');
+    await shot('00-advanced-desktop');
+    await u.effort.press('Escape');
+    await page.waitForFunction(() => document.activeElement?.getAttribute('aria-label') === 'Advanced conversation settings');
+    assert.equal(await u.settings.getAttribute('aria-expanded'), 'false');
+    await page.waitForFunction(() => !document.querySelector('[aria-label=\"Conversation mode\"]')?.disabled);
+    await u.input.fill('/effort');
+    await u.input.press('Escape');
+    await u.input.press('Enter');
+    await page.getByRole('listbox', { name: 'Reasoning effort and service tier' }).waitFor();
+    assert.equal(posts('/messages').length, 0, 'local command never starts inference');
+  }));
+
   await test('start sends the selected budgets, goal, original attachments and context references', () => run({}, async ({ page, ui: u, shot }) => {
-    await u.autonomous.click();
-    assert.equal(await u.autonomous.getAttribute('aria-pressed'), 'true');
+    await u.chooseMode('Autonomous');
+    assert.equal((await u.mode.innerText()).trim() === 'Autonomous', true);
     assert.equal(await u.send.getAttribute('aria-label'), 'Start autonomous workflow');
-    await page.getByText('Up to 8 turns').click();
+    await u.budgets();
     await page.getByLabel('Turn budget').fill('12');
     await page.getByLabel('Time budget (minutes)').fill('90');
     await page.getByText('Up to 12 turns').waitFor();
@@ -272,7 +297,7 @@ try {
   }));
 
   await test('untouched budgets are still sent explicitly as the visible defaults', () => run({}, async ({ ui: u }) => {
-    await u.autonomous.click();
+    await u.chooseMode('Autonomous');
     await u.input.fill(GOAL);
     await u.send.click();
     await u.label('Working toward your goal').waitFor();
@@ -280,22 +305,22 @@ try {
   }));
 
   await test('Autonomous and Plan are mutually exclusive and keep their separate send paths', () => run({}, async ({ page, ui: u }) => {
-    await u.plan.click();
-    assert.equal(await u.plan.getAttribute('aria-pressed'), 'true');
-    assert.equal(await u.autonomous.getAttribute('aria-pressed'), 'false');
-    await u.autonomous.click();
-    assert.equal(await u.autonomous.getAttribute('aria-pressed'), 'true');
-    assert.equal(await u.plan.getAttribute('aria-pressed'), 'false');
-    await page.getByText('Up to 8 turns').waitFor();
-    await u.plan.click();
-    assert.equal(await u.autonomous.getAttribute('aria-pressed'), 'false');
-    assert.equal(await page.getByText(/Up to \d+ turns/).count(), 0, 'budget setup leaves with Autonomous');
+    await u.chooseMode('Plan');
+    assert.equal((await u.mode.innerText()).trim() === 'Plan', true);
+    assert.equal((await u.mode.innerText()).trim() === 'Autonomous', false);
+    await u.chooseMode('Autonomous');
+    assert.equal((await u.mode.innerText()).trim() === 'Autonomous', true);
+    assert.equal((await u.mode.innerText()).trim() === 'Plan', false);
+    await u.budgets();
+    await u.chooseMode('Plan');
+    assert.equal((await u.mode.innerText()).trim() === 'Autonomous', false);
+    assert.equal(await page.getByText(/Up to \d+ turns/).filter({ visible: true }).count(), 0, 'budget setup leaves with Autonomous');
     await u.input.fill('Plan the migration');
     await u.send.click();
     await page.waitForFunction(() => document.querySelector('textarea.composer__input')?.value === '');
     assert.deepEqual(posts('/messages').map((item) => item.body), [{ content: 'Plan the migration', intent: 'plan' }]);
     assert.equal(posts('/workflow').length, 0);
-    await u.autonomous.click();
+    await u.chooseMode('Autonomous');
     await u.input.fill('/review the diff');
     await u.send.click();
     await u.alert.filter({ hasText: 'Start an autonomous goal with a regular request' }).waitFor();
@@ -305,8 +330,8 @@ try {
 
   await test('a rejected start keeps the draft, budgets, attachments and context, then retries the same request', () => run({}, async ({ page, ui: u }) => {
     world.startError = { status: 409, error: 'Another run is already active in this session.' };
-    await u.autonomous.click();
-    await page.getByText('Up to 8 turns').click();
+    await u.chooseMode('Autonomous');
+    await u.budgets();
     await page.getByLabel('Turn budget').fill('14');
     await u.attach();
     await u.addFileContext();
@@ -316,8 +341,9 @@ try {
     assert.equal(await u.input.inputValue(), GOAL);
     assert.equal(await page.getByRole('button', { name: 'Remove spec.txt' }).count(), 1);
     assert.equal(await page.getByRole('button', { name: 'Remove file src/app.ts' }).count(), 1);
-    assert.equal(await u.autonomous.getAttribute('aria-pressed'), 'true');
-    await page.getByText('Up to 14 turns').waitFor();
+    assert.equal((await u.mode.innerText()).trim() === 'Autonomous', true);
+    await u.budgets();
+    await page.getByText('Up to 14 turns', { exact: false }).waitFor();
     assert.equal(await u.panel.count(), 0);
     world.startError = null;
     await u.send.click();
@@ -332,15 +358,17 @@ try {
     setup() { setStatus('s-a', 'running'); world.workflows = [workflow('s-a', { version: 2 })]; },
   }, async ({ page, ui: u }) => {
     await u.label('Working toward your goal').waitFor();
-    for (const control of [u.model, u.effort, u.policy, u.plan, u.autonomous]) assert.equal(await control.isDisabled(), true);
-    assert.equal(await u.autonomous.getAttribute('aria-pressed'), 'true');
+    for (const control of [u.model, u.policy, u.mode]) assert.equal(await control.isDisabled(), true);
+    assert.equal((await u.mode.innerText()).trim() === 'Autonomous', true);
     assert.equal(await page.getByRole('button', { name: 'Interrupt run' }).isEnabled(), true);
-    await u.effort.click({ force: true, timeout: 1000 }).catch(() => {});
+    await u.settings.click();
+    assert.equal(await u.effort.isDisabled(), true);
+    await u.settings.click();
     assert.equal(world.log.filter((item) => item.method === 'PATCH').length, 0, 'no configuration write while locked');
     setStatus('s-a', 'idle');
     await u.refresh();
     await u.label('Continuing your goal').waitFor();
-    for (const control of [u.model, u.effort, u.policy, u.plan, u.autonomous]) assert.equal(await control.isDisabled(), true, 'still locked between turns');
+    for (const control of [u.model, u.policy, u.mode]) assert.equal(await control.isDisabled(), true, 'still locked between turns');
     await u.input.fill('Please also use tabs.');
     await u.send.click();
     await page.waitForFunction(() => document.querySelector('textarea.composer__input')?.value === '');
@@ -352,10 +380,10 @@ try {
     setup() { world.workflows = [workflow('s-a', { state: 'paused', stopReason: 'user-pause', version: 3 })]; },
   }, async ({ page, ui: u }) => {
     await u.label('Paused by you').waitFor();
-    for (const control of [u.model, u.effort, u.policy, u.plan]) assert.equal(await control.isDisabled(), false);
-    assert.equal(await u.autonomous.isDisabled(), true, 'a second goal cannot be started while one is paused');
-    assert.equal(await u.autonomous.getAttribute('aria-pressed'), 'false');
-    assert.match(await u.autonomous.getAttribute('title'), /Resume or stop the paused goal/);
+    for (const control of [u.model, u.policy, u.mode]) assert.equal(await control.isDisabled(), false);
+    assert.equal(await u.autonomousDisabled(), true, 'a second goal cannot be started while one is paused');
+    assert.equal((await u.mode.innerText()).trim() === 'Autonomous', false);
+    assert.equal((await u.mode.innerText()).trim(), 'Chat');
     assert.equal(await u.send.getAttribute('aria-label'), 'Send message');
     await u.input.fill('Quick question while paused.');
     await u.send.click();
@@ -370,14 +398,14 @@ try {
   }));
 
   await test('Autonomous mode armed before a goal arrives paused is reset and locked', () => run({}, async ({ page, ui: u }) => {
-    await u.autonomous.click();
-    await page.getByText('Up to 8 turns').waitFor();
+    await u.chooseMode('Autonomous');
+    await u.budgets();
     world.workflows = [workflow('s-a', { state: 'paused', stopReason: 'user-pause', version: 2 })];
     await u.refresh();
     await u.label('Paused by you').waitFor();
-    assert.equal(await u.autonomous.getAttribute('aria-pressed'), 'false');
-    assert.equal(await u.autonomous.isDisabled(), true);
-    assert.equal(await page.getByText(/Up to \d+ turns/).count(), 0, 'budget setup is gone');
+    assert.equal((await u.mode.innerText()).trim() === 'Autonomous', false);
+    assert.equal(await u.autonomousDisabled(), true);
+    assert.equal(await page.getByText(/Up to \d+ turns/).filter({ visible: true }).count(), 0, 'budget setup is gone');
     assert.equal(await u.send.getAttribute('aria-label'), 'Send message');
   }));
 
@@ -385,8 +413,8 @@ try {
     setup() { world.workflows = [workflow('s-a', { state: 'stopped', stopReason: 'user-stop', version: 4, goal: 'Previous goal' })]; },
   }, async ({ page, ui: u }) => {
     await u.label('Stopped by you').waitFor();
-    assert.equal(await u.autonomous.isDisabled(), false);
-    await u.autonomous.click();
+    assert.equal(await u.autonomousDisabled(), false);
+    await u.chooseMode('Autonomous');
     await u.input.fill('A fresh goal');
     await u.send.click();
     await page.getByText('A fresh goal', { exact: true }).waitFor();
@@ -609,16 +637,16 @@ try {
     assert.equal(await u.panel.count(), 0, 'B shows nothing from A');
     assert.equal(await u.input.inputValue(), '');
     assert.equal(await page.getByRole('button', { name: 'Remove a-notes.txt' }).count(), 0, 'A attachments do not leak into B');
-    assert.equal(await u.autonomous.isDisabled(), false);
+    assert.equal(await u.autonomousDisabled(), false);
     await u.input.fill('draft for B');
     await u.open('Example session A').click();
     await page.getByText('Project: Example project A', { exact: true }).waitFor();
     assert.equal(await u.input.inputValue(), 'draft for A');
-    assert.equal(await u.autonomous.isDisabled(), true);
+    assert.equal(await u.autonomousDisabled(), true);
     await u.open('Example session B').click();
     assert.equal(await u.input.inputValue(), 'draft for B');
-    assert.equal(await u.autonomous.getAttribute('aria-pressed'), 'false', 'mode does not follow the draft across sessions');
-    await u.autonomous.click();
+    assert.equal((await u.mode.innerText()).trim() === 'Autonomous', false, 'mode does not follow the draft across sessions');
+    await u.chooseMode('Autonomous');
     await u.send.click();
     await u.label('Working toward your goal').waitFor();
     assert.deepEqual(posts('/workflow').map((item) => [item.path, item.body.goal, item.body.attachmentIds, item.body.contextRefs]), [['/api/sessions/s-b/workflow', 'draft for B', [], []]]);
@@ -672,8 +700,8 @@ try {
       await shot(`11-paused-${width}`);
       world.workflows = []; await u.refresh();
       await u.panel.waitFor({ state: 'detached' });
-      await u.autonomous.click();
-      await page.getByText('Up to 8 turns').click();
+      await u.chooseMode('Autonomous');
+      await u.budgets();
       await u.input.fill(GOAL);
       await check('setup open');
       await shot(`12-setup-${width}`);
@@ -681,12 +709,16 @@ try {
   }
 
   await test('keyboard: start, adjust budget, toggle details and pause without a pointer', () => run({ viewport: { width: 390, height: 844 } }, async ({ page, ui: u, shot }) => {
-    await u.autonomous.focus();
+    await u.mode.focus();
     await page.keyboard.press('Space');
-    assert.equal(await u.autonomous.getAttribute('aria-pressed'), 'true');
-    await page.getByText('Up to 8 turns').focus();
+    await page.keyboard.press('End');
     await page.keyboard.press('Enter');
-    assert.equal(await page.locator('.workflow-setup details').evaluate((node) => node.open), true);
+    assert.equal((await u.mode.innerText()).trim() === 'Autonomous', true);
+    await u.settings.focus();
+    await page.keyboard.press('Enter');
+    await page.getByRole('dialog', { name: 'Advanced conversation settings' }).waitFor();
+    await page.waitForFunction(() => document.activeElement?.getAttribute('role') === 'dialog');
+    await page.keyboard.press('Tab');
     await page.keyboard.press('Tab');
     assert.equal(await page.evaluate(() => document.activeElement?.closest('label')?.textContent), 'Turn budget', await page.evaluate(() => document.activeElement?.outerHTML));
     await page.keyboard.press('ControlOrMeta+A');
