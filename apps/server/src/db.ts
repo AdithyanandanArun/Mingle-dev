@@ -9,6 +9,11 @@ function addColumn(db: DatabaseSync, table: string, column: string, statement: s
   if (!hasColumn(db, table, column)) db.exec(statement);
 }
 
+function ensureRunContextScopes(db: DatabaseSync): void {
+  addColumn(db, 'queued_messages', 'memory_mode', "ALTER TABLE queued_messages ADD COLUMN memory_mode TEXT NOT NULL DEFAULT 'include' CHECK (memory_mode IN ('include','exclude'))");
+  db.exec('CREATE TABLE IF NOT EXISTS run_context_scopes (run_id TEXT PRIMARY KEY REFERENCES session_runs(id) ON DELETE CASCADE, memory_excluded INTEGER NOT NULL CHECK(memory_excluded IN (0,1)));');
+}
+
 function ensurePlanTables(db: DatabaseSync): void {
   db.exec(`CREATE TABLE IF NOT EXISTS session_plans (
     id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id), run_id TEXT NOT NULL REFERENCES session_runs(id),
@@ -422,8 +427,6 @@ const MIGRATIONS: (string | ((db: DatabaseSync) => void))[] = [
       content TEXT NOT NULL, intent TEXT NOT NULL, skills_json TEXT NOT NULL, attachment_ids_json TEXT NOT NULL,
       context_refs_json TEXT NOT NULL, created_at TEXT NOT NULL
     ); CREATE INDEX IF NOT EXISTS queued_messages_order ON queued_messages(session_id, created_at, id);`,
-    (db) => addColumn(db, 'queued_messages', 'memory_mode', "ALTER TABLE queued_messages ADD COLUMN memory_mode TEXT NOT NULL DEFAULT 'include' CHECK (memory_mode IN ('include','exclude'))"),
-    `CREATE TABLE IF NOT EXISTS run_context_scopes (run_id TEXT PRIMARY KEY REFERENCES session_runs(id) ON DELETE CASCADE, memory_excluded INTEGER NOT NULL CHECK(memory_excluded IN (0,1)));`,
     (db) => addColumn(db, 'conversation_groups', 'preferred_coordinator_member_id',
       'ALTER TABLE conversation_groups ADD COLUMN preferred_coordinator_member_id TEXT;'),
     // Idempotent: schema-upgrade paths can replay later migrations against databases that already have these objects.
@@ -444,6 +447,11 @@ const MIGRATIONS: (string | ((db: DatabaseSync) => void))[] = [
     ); CREATE TABLE IF NOT EXISTS provider_update_checks (
       provider TEXT PRIMARY KEY, data_json TEXT NOT NULL, checked_at TEXT NOT NULL
     );`,
+    // Append new migrations after every released migration: v0.1.0 databases are already at v30.
+    (db) => addColumn(db, 'queued_messages', 'memory_mode', "ALTER TABLE queued_messages ADD COLUMN memory_mode TEXT NOT NULL DEFAULT 'include' CHECK (memory_mode IN ('include','exclude'))"),
+    `CREATE TABLE IF NOT EXISTS run_context_scopes (run_id TEXT PRIMARY KEY REFERENCES session_runs(id) ON DELETE CASCADE, memory_excluded INTEGER NOT NULL CHECK(memory_excluded IN (0,1)));`,
+    // Repair unreleased v32 databases upgraded while these two migrations were incorrectly inserted before v28.
+    ensureRunContextScopes,
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;
