@@ -158,7 +158,7 @@ export function ApprovalCard({ approval, speaker, provider }: { approval: Approv
     }
   };
   return (
-    <section className="approval" aria-label={`Approval requested for ${approval.tool}${speaker ? ` by @${speaker.handle}` : ''}`}>
+    <section className="approval" data-approval-id={approval.id} aria-label={`Approval requested for ${approval.tool}${speaker ? ` by @${speaker.handle}` : ''}`}>
       <div className="approval__head">
         <ShieldAlert size={15} aria-hidden="true" />
         <strong>Approval needed</strong>
@@ -340,7 +340,7 @@ export function UserQuestionCard({ question, speaker }: { question: UserQuestion
     } finally { setBusy(false); }
   };
   return (
-    <section className="question-card" aria-label={`Provider question, ${question.status}`}>
+    <section className="question-card" data-question-id={question.id} aria-label={`Provider question, ${question.status}`}>
       <header className="question-card__header">
         <CircleHelp size={15} aria-hidden="true" />
         <strong>{pending ? 'Provider needs your input' : question.status === 'answered' ? 'Provider question answered' : 'Provider question cancelled'}</strong>

@@ -14,7 +14,7 @@ import { GitBar } from './git/GitBar';
 import { AttachmentDrafts, AttachmentTray, useAttachmentDraft } from './AttachmentDrafts';
 import { usePresence } from '../lib/motion';
 import { useTeamStructure } from '../lib/team-structure-context';
-import { providerSwitchFailureCopy } from '../lib/providerFailureUi';
+import { isSafeUndispatchedTransientFailure, providerRecoveryCopy, providerRecoveryKind } from '../lib/providerFailureUi';
 import { reasoningEffortChoices } from '../lib/providers';
 import { SessionWorkflowPanel, WorkflowLimitsControl } from './session-workflow/SessionWorkflowPanel';
 import { SessionProgress } from './session-workflow/SessionProgress';
@@ -30,6 +30,7 @@ const hasSkillMarker = (text: string, name: string) => new RegExp(`(?:^|\\s)\\$$
 const removeSkillMarker = (text: string, name: string) => text.replace(new RegExp(`(^|\\s)\\$${escapeRegExp(name)}(?=\\s|$)`, 'g'), '$1').replace(/[ \t]{2,}/g, ' ');
 const localCommandNames = ['new', 'stop', 'settings', 'model', 'effort', 'permissions', 'tier', 'skills', 'usage', 'import', 'status', 'diff', 'compact', 'help'];
 const reservedCommands = new Set(localCommandNames);
+const EMPTY_RUNS: import('@mingle/contracts').SessionRun[] = [];
 
 export function Composer({ session, progressState, helperRail, helperCount = 0 }: { session: Session; progressState?: StatusBarState | null; helperRail?: ReactNode; helperCount?: number }) {
   const draft = useMingle((s) => s.drafts[session.id] ?? '');
@@ -37,6 +38,10 @@ export function Composer({ session, progressState, helperRail, helperCount = 0 }
   const connection = useMingle((s) => s.connection);
   const provider = useMingle((s) => s.boot?.providers.find((p) => p.id === session.provider));
   const providers = useMingle((s) => s.boot?.providers);
+  const bootRuns = useMingle((s) => s.boot?.runs ?? EMPTY_RUNS);
+  const sessionRuns = useMemo(() => bootRuns.filter((run) => run.sessionId === session.id), [bootRuns, session.id]);
+  const pendingApproval = useMingle((s) => s.boot?.approvals.find((item) => item.sessionId === session.id && item.status === 'pending'));
+  const pendingQuestion = useMingle((s) => s.boot?.questions.find((item) => item.sessionId === session.id && item.status === 'pending'));
   const project = useMingle((s) => s.boot?.projects.find((p) => p.id === session.projectId));
   const teamStructure = useTeamStructure().snapshot;
   const allQueuedMessages = useMingle((s) => s.boot?.queuedMessages);
@@ -88,9 +93,11 @@ export function Composer({ session, progressState, helperRail, helperCount = 0 }
   const policyControl = useRef<HTMLButtonElement>(null);
   const advancedControl = useRef<HTMLButtonElement>(null);
   const [advancedOpen, setAdvancedOpen] = useState(false);
-  const failedMessage = useMingle((s) => providerFailure?.runId
-    ? s.boot?.messages.find((message) => message.sessionId === session.id && message.runId === providerFailure.runId && message.role === 'user')
-    : undefined);
+  const currentFailure = providerFailure && providerFailure.runId && session.status === 'error'
+    && session.provider === providerFailure.provider
+    && sessionRuns.some((run) => run.id === providerFailure.runId && run.status === 'failed' && run.provider === session.provider && run.model === session.model)
+    ? providerFailure : null;
+  const currentFailedRun = [...sessionRuns].reverse().find((run) => run.status === 'failed');
 
   const closeFilePicker = () => {
     const position = filePickerRestoreCaret.current ?? fileMentionTrigger.current?.end ?? caret.current;
@@ -338,24 +345,28 @@ export function Composer({ session, progressState, helperRail, helperCount = 0 }
       setUpdating(false);
     }
   };
-  const retryFailedMessage = async () => {
-    if (!failedMessage || (!failedMessage.content.trim() && !failedMessage.attachments?.length) || !providerFailure
-      || session.provider === providerFailure.provider || !provider?.available || sending || updating) return;
-    setSending(true);
-    setError(null);
-    try {
-      await api.retryMessage(session.id, failedMessage.id);
-      await useMingle.getState().refreshNow();
-    } catch (cause) {
-      setError(errorMessage(cause));
-    } finally {
-      setSending(false);
-    }
+  const focusPendingBoundary = () => {
+    const selector = pendingQuestion ? `[data-question-id="${CSS.escape(pendingQuestion.id)}"]` : pendingApproval ? `[data-approval-id="${CSS.escape(pendingApproval.id)}"]` : null;
+    if (!selector) return;
+    const target = document.querySelector<HTMLElement>(selector);
+    target?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    target?.querySelector<HTMLElement>('button, input, [tabindex="0"]')?.focus({ preventScroll: true });
+  };
+  const focusRunReview = () => {
+    const runId = currentFailure?.runId ?? currentFailedRun?.id;
+    if (!runId) return;
+    const review = document.querySelector<HTMLElement>(`[data-run-id="${CSS.escape(runId)}"]`);
+    review?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    review?.focus({ preventScroll: true });
+  };
+  const startCompactionDraft = () => {
+    useMingle.getState().setDraft(session.id, '/compact');
+    requestAnimationFrame(() => ref.current?.focus());
   };
   const disabled = session.status === 'waiting' || sending || updating || connection !== 'online';
-  const providerFailureCopy = providerFailure ? providerSwitchFailureCopy(providerFailure) : null;
-  const canRetryFailedMessage = Boolean(providerFailure && session.provider !== providerFailure.provider && provider?.available && failedMessage
-    && (failedMessage.content.trim() || failedMessage.attachments?.length));
+  const providerFailureCopy = currentFailure ? providerRecoveryCopy(currentFailure) : null;
+  const recoveryKind = currentFailure ? providerRecoveryKind(currentFailure) : null;
+  const retrySafetyProven = currentFailure ? isSafeUndispatchedTransientFailure(currentFailure) : false;
   const currentProvider = providers?.find((p) => p.id === session.provider);
   const modelData = (currentProvider?.models ?? []) as ProviderModel[];
   const currentModel = modelData.find((m) => m.id === session.model || m.aliases?.includes(session.model));
@@ -489,8 +500,17 @@ export function Composer({ session, progressState, helperRail, helperCount = 0 }
       <QueuedMessages sessionId={session.id} steerable={steerable} items={queuedMessages} />
       {providerFailureCopy ? <div className="composer__note is-error" role="alert">
         <span>{providerFailureCopy}</span>{' '}
-        <button type="button" className="link-btn" onClick={() => setModelOpenRequest((value) => value + 1)} disabled={disabled} title={running ? 'Wait for the active run to finish before switching providers.' : 'Choose another available provider.'}>Switch provider</button>
-        {canRetryFailedMessage ? <>{' '}<button type="button" className="link-btn" onClick={() => void retryFailedMessage()} disabled={disabled}>Retry with {PROVIDER_NAME[session.provider]}</button></> : null}
+        {recoveryKind === 'authentication' || recoveryKind === 'unavailable' ? <button type="button" className="link-btn" onClick={() => useMingle.getState().openSettings({ section: 'providers' })}>Open Providers settings</button> : null}
+        {recoveryKind === 'quota' ? <button type="button" className="link-btn" onClick={openUsage}>Check provider usage</button> : null}
+        {recoveryKind === 'context' ? <button type="button" className="link-btn" onClick={startCompactionDraft}>Prepare /compact</button> : null}
+        <button type="button" className="link-btn" onClick={focusRunReview}>Review this run</button>
+        {pendingQuestion || pendingApproval ? <button type="button" className="link-btn" onClick={focusPendingBoundary}>Go to {pendingQuestion ? 'the question' : 'the approval'}</button> : null}
+        {workflow?.state === 'paused' ? <span> Use the goal controls above to review its pause reason and resume only within the shown limits.</span> : null}
+        {!retrySafetyProven ? <span> The stored evidence does not prove a safe retry. Inspect its run review and worktree before continuing; this turn will not be replayed automatically.</span> : <span> The provider recorded this request as undispatched. It still will not be replayed automatically.</span>}
+      </div> : null}
+      {session.status === 'error' && !providerFailureCopy ? <div className="composer__note is-error" role="alert">
+        <span>This turn failed without a matching classified recovery record. Review the run before continuing; Mingle will not retry it automatically.</span>
+        {currentFailedRun ? <button type="button" className="link-btn" onClick={focusRunReview}>Review this run</button> : null}
       </div> : null}
       {progressState !== undefined || helperRail ? <SessionProgress session={session} workflow={workflow} state={progressState} helpers={helperRail} helperCount={helperCount} onStop={() => void stop()} />
         : workflow ? <SessionWorkflowPanel key={workflow.id} workflow={workflow} session={session} /> : null}
