@@ -293,6 +293,7 @@ try {
     await u.expandRail();
     await u.rail.locator('.single-subagents__history > summary').filter({ hasText: 'Finished' }).click();
     await u.rail.getByText('Example inspectable helper result.', { exact: true }).waitFor();
+    await shot('finished-helper-history');
     await page.getByRole('button', { name: /Find.*bookmarks/i }).click();
     const search = page.getByRole('searchbox');
     await search.fill('Example private handoff payload');

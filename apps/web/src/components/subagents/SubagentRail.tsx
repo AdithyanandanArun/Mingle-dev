@@ -115,7 +115,7 @@ export function SubagentRail({
         {history.map((section) => {
           const count = section.native.length + section.delegated.length;
           return count ? <details key={section.id} className="single-subagents__history">
-            <summary>{section.label}<span>{count}</span></summary>
+            <summary>{section.label}{' '}<span>{count}</span></summary>
             <ul className="single-subagents__rows" aria-label={`${section.label} subagents`}>{renderRows(section.native, section.delegated)}</ul>
           </details> : null;
         })}
