@@ -25,7 +25,7 @@ const pad = (n) => String(n).padStart(4, '0');
 let server, browser, failed = false;
 const report = {};
 try {
-  server = await createServer({ configFile: join(root, 'apps/web/vite.config.ts'), root, appType: 'mpa', logLevel: 'error', server: { host: '127.0.0.1', port: 0 }, optimizeDeps: { entries: [join(root, 'scripts/session-history-browser-fixture.html')] }, resolve: { alias: [
+  server = await createServer({ configFile: join(root, 'apps/web/vite.config.ts'), root, publicDir: join(root, 'apps/web/public'), appType: 'mpa', logLevel: 'error', server: { host: '127.0.0.1', port: 0 }, optimizeDeps: { entries: [join(root, 'scripts/session-history-browser-fixture.html')] }, resolve: { alias: [
     { find: /^@mingle\/contracts$/, replacement: join(root, 'packages/contracts/src/index.ts') },
     { find: /^@mingle\/contracts\/(.*)$/, replacement: `${root}/packages/contracts/src/$1` },
     { find: 'react', replacement: join(root, 'apps/web/node_modules/react') },
@@ -364,6 +364,10 @@ try {
 
   // 9. Actual application shell layout: the navigation control remains below the global header.
   await page.setViewportSize({ width: 900, height: 900 });
+  await page.waitForFunction(() => {
+    const logo = document.querySelector('.sidebar__logo');
+    return logo instanceof HTMLImageElement && logo.complete && logo.naturalWidth > 0;
+  });
   await frame();
   const desktopShell = await page.evaluate(() => {
     const header = document.querySelector('.header').getBoundingClientRect();

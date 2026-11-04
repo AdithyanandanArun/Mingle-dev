@@ -10,10 +10,19 @@ import '../apps/web/src/styles/tokens.css';
 import '../apps/web/src/styles/base.css';
 import '../apps/web/src/styles/ui.css';
 import '../apps/web/src/styles/app.css';
+import '../apps/web/src/styles/shell.css';
+import '../apps/web/src/styles/select-menu.css';
+import '../apps/web/src/styles/context-menu.css';
+import '../apps/web/src/styles/settings.css';
 import '../apps/web/src/styles/conversation.css';
 import '../apps/web/src/styles/message-context.css';
+import '../apps/web/src/styles/usage.css';
 import '../apps/web/src/styles/run-activity.css';
 import '../apps/web/src/styles/run-changes.css';
+import '../apps/web/src/styles/run-review.css';
+import '../apps/web/src/styles/git.css';
+import '../apps/web/src/styles/groups.css';
+import '../apps/web/src/styles/attachments.css';
 import '../apps/web/src/styles/polish.css';
 
 const WINDOW = 300; // the server's bootstrap window per session
