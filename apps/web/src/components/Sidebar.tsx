@@ -11,6 +11,7 @@ import { activeMembers, findGroupForSession, groupChildSessionIds, groupSessionS
 import { RemoveProjectDialog } from './RemoveProjectDialog';
 import { useRetainedPresence } from '../lib/motion';
 import { useTeamStructure } from '../lib/team-structure-context';
+import { liveSidebarSubagents, liveSubagentDotStatus } from '../lib/sidebarSubagents';
 
 const VIEWS: { view: View; label: string; icon: typeof Activity }[] = [
   { view: 'activity', label: 'Activity', icon: Activity }, { view: 'map', label: 'Agent map', icon: Network }, { view: 'team-structure', label: 'Team structure', icon: Network },
@@ -42,7 +43,7 @@ export function Sidebar() {
   const { value: retainedProject, present: removePresent, closing: removeClosing, key: removeKey } = useRetainedPresence(removingProject, 160);
   const now = useNow();
   const childSessions = groupChildSessionIds(boot?.groups);
-  const delegatedChildren = (boot?.sessions ?? []).filter((item) => item.parentSessionId && item.projectId === project?.id);
+  const liveSubagents = liveSidebarSubagents(boot?.sessions ?? [], boot?.delegatedSubagents, project?.id);
   const [expandedChildren, setExpandedChildren] = useState<Record<string, boolean>>({});
   const sessions = (boot?.sessions ?? []).filter((session) => session.projectId === project?.id && !childSessions.has(session.id) && !session.parentSessionId).map((session) => {
     const group = findGroupForSession(boot?.groups, session.id);
@@ -143,7 +144,7 @@ export function Sidebar() {
               const teamAgent = teamStructure && teamStructure.projectId === project?.id
                 ? teamStructure.members.find((member) => member.local && member.sessionId === session.id) : undefined;
               const kind = groupConversation ? 'Shared group conversation' : teamAgent ? `Your agent · @${teamAgent.handle}` : 'Individual session';
-              const nested = delegatedChildren.filter((child) => child.parentSessionId === session.id);
+              const nested = liveSubagents.get(session.id) ?? [];
               return <div key={session.id}>
               <div role="listitem" className={cx('sitem-row', teamAgent && 'sitem-row--agent', groupConversation && 'sitem-row--group')} data-session-id={session.id} onContextMenu={(event) => {
               event.preventDefault();
@@ -172,8 +173,8 @@ export function Sidebar() {
                 }
               }}><MoreHorizontal size={14} /></button>
             </div>
-            {expandedChildren[session.id] ? nested.map((child) => <div role="listitem" key={child.id} className="sitem-row sitem-row--child" data-session-id={child.id}>
-              <button type="button" className={cx('sitem', child.id === activeSessionId && view === 'workspace' && 'is-active')} onClick={() => selectSession(child.id)} aria-current={child.id === activeSessionId && view === 'workspace' ? 'true' : undefined} aria-label={`Subagent session: ${child.name}`}><span className="sitem__text"><strong>{child.name}</strong><span className="sitem__meta"><span>↳ Subagent · {child.provider}</span><span>{relativeTime(child.updatedAt, now)}</span></span></span><span className="sitem__state">{child.status !== 'idle' ? <StatusDot status={child.status} label={false} /> : null}</span></button>
+            {expandedChildren[session.id] ? nested.map(({ subagent, session: child }) => <div role="listitem" key={subagent.id} className="sitem-row sitem-row--child" data-session-id={child.id}>
+              <button type="button" className={cx('sitem', child.id === activeSessionId && view === 'workspace' && 'is-active')} onClick={() => selectSession(child.id)} aria-current={child.id === activeSessionId && view === 'workspace' ? 'true' : undefined} aria-label={`Subagent session: ${subagent.name}`}><span className="sitem__text"><strong>{subagent.name}</strong><span className="sitem__meta"><span>↳ Subagent · {child.provider}</span><span>{relativeTime(child.updatedAt, now)}</span></span></span><span className="sitem__state"><StatusDot status={liveSubagentDotStatus(child)} label={false} /></span></button>
             </div>) : null}
             </div>;
             })}
