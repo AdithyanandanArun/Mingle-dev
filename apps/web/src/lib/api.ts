@@ -222,7 +222,7 @@ export const api = {
   sessionMessages: (id: string, params: { limit?: number; before?: string }, signal?: AbortSignal) =>
     json<Message[]>(`/api/sessions/${encodeURIComponent(id)}/messages${q(params)}`, 'GET', undefined, signal),
   deleteSession: (id: string) => json<{ ok: boolean; notices?: string[] }>(`/api/sessions/${encodeURIComponent(id)}`, 'DELETE'),
-  sendMessage: async (id: string, content: string, skills?: string[], attachmentIds?: string[], contextRefs?: MessageContextRef[], intent: 'normal' | 'plan' = 'normal') => {
+  sendMessage: async (id: string, content: string, skills?: string[], attachmentIds?: string[], contextRefs?: MessageContextRef[], intent: 'normal' | 'plan' = 'normal', memory?: 'exclude') => {
     const message: Message = {
       id: `optimistic:${crypto.randomUUID()}`, sessionId: id, role: 'user', content, createdAt: new Date().toISOString(),
       ...(contextRefs?.length ? { contextRefs } : {}),
@@ -230,14 +230,14 @@ export const api = {
     dispatchLocalEvent('mingle:optimistic-session-message', { message });
     try {
       return await json<{ accepted: boolean }>(`/api/sessions/${encodeURIComponent(id)}/messages`, 'POST', {
-        content, intent, ...(skills?.length ? { skills } : {}), ...(attachmentIds?.length ? { attachmentIds } : {}), ...(contextRefs?.length ? { contextRefs } : {}),
+        content, intent, ...(memory ? { memory } : {}), ...(skills?.length ? { skills } : {}), ...(attachmentIds?.length ? { attachmentIds } : {}), ...(contextRefs?.length ? { contextRefs } : {}),
       });
     } catch (error) {
       dispatchLocalEvent('mingle:optimistic-session-remove', { messageId: message.id });
       throw error;
     }
   },
-  queueMessage: (id:string,input:{content:string;intent:'normal'|'plan';skills?:string[];attachmentIds?:string[];contextRefs?:MessageContextRef[]}) => json<{accepted:boolean;queued?:import('@mingle/contracts').QueuedMessage;steered?:boolean}>(`/api/sessions/${encodeURIComponent(id)}/messages`,'POST',input),
+  queueMessage: (id:string,input:{content:string;intent:'normal'|'plan';memory?:'exclude';skills?:string[];attachmentIds?:string[];contextRefs?:MessageContextRef[]}) => json<{accepted:boolean;queued?:import('@mingle/contracts').QueuedMessage;steered?:boolean}>(`/api/sessions/${encodeURIComponent(id)}/messages`,'POST',input),
   removeQueuedMessage: (id:string,messageId:string) => json<{ok:boolean}>(`/api/sessions/${encodeURIComponent(id)}/queue/${encodeURIComponent(messageId)}`,'DELETE'),
   editQueuedMessage: (id:string,messageId:string,content:string) => json<import('@mingle/contracts').QueuedMessage>(`/api/sessions/${encodeURIComponent(id)}/queue/${encodeURIComponent(messageId)}`,'PATCH',{content}),
   sendQueuedNow: (id:string,messageId:string) => json<{accepted:boolean}>(`/api/sessions/${encodeURIComponent(id)}/queue/${encodeURIComponent(messageId)}/send-now`,'POST',{}),

@@ -123,11 +123,13 @@ export class SessionWorkflowService {
       const task = this.tasks.create({ projectId: session.projectId, title, description: clean(body.goal, 20_000), acceptanceCriteria: '', sessionId, dependsOn: [] });
       row.taskId = task.id;
       this.repo.insert(row);
-      this.runtime.start(sessionId, startPrompt(body.goal, row), {
+      const startRunId = this.runtime.start(sessionId, startPrompt(body.goal, row), {
+        excludeProjectMemory: body.memory === 'exclude',
         taskId: task.id, userMessage: { content: body.goal, kind: 'workflow-start' },
         ...(body.attachmentIds?.length ? { attachmentIds: body.attachmentIds } : {}), ...(body.contextRefs?.length ? { contextRefs: body.contextRefs } : {}),
         deferContextResolution: true, workflow: { workflowId: row.id, kind: 'start' },
       });
+      if (body.memory === 'exclude') this.store.setRunMemoryExcluded(startRunId);
       this.announce(this.repo.get(row.id)!, 'started', `Autonomous goal started (up to ${body.limits.maxTurns} turns, ${body.limits.maxElapsedMinutes} minutes).`, false);
     });
     const started = this.repo.get(row.id)!;

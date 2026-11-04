@@ -72,7 +72,7 @@ export interface ToolActivity {
   cwd?: string | null; exitCode?: number | null; processId?: string | null; durationMs?: number | null;
 }
 export interface Message { id: string; sessionId: string; role: 'user' | 'assistant' | 'system' | 'tool'; content: string; createdAt: string; kind?: string; runId?: string; attachments?: import('./attachments').AttachmentRef[]; contextRefs?: import('./message-context').MessageContextRef[] }
-export interface QueuedMessage { id: string; sessionId: string; content: string; intent: 'normal' | 'plan'; skills: string[]; attachmentIds: string[]; contextRefs: import('./message-context').MessageContextRef[]; createdAt: string }
+export interface QueuedMessage { id: string; sessionId: string; content: string; intent: 'normal' | 'plan'; memory?: 'exclude'; skills: string[]; attachmentIds: string[]; contextRefs: import('./message-context').MessageContextRef[]; createdAt: string }
 export interface Task { id: string; projectId: string; title: string; description: string; acceptanceCriteria: string; sessionId: string | null; dependsOn: string[]; status: TaskStatus; createdAt: string; updatedAt: string; source?: import('./project-context').TaskSource }
 export interface WorkspaceEvent { id: number; projectId: string | null; sessionId: string | null; type: string; summary: string; payload: Record<string, unknown>; createdAt: string }
 export interface Approval { id: string; sessionId: string; tool: string; description: string; input: Record<string, unknown>; status: 'pending' | 'approved' | 'denied'; createdAt: string }
@@ -212,7 +212,7 @@ export const UpdateSessionSchema = z.object({
   pinned: z.boolean().optional(), unread: z.boolean().optional(),
 }).strict().refine((patch) => Object.keys(patch).length > 0, 'Supply a session setting to update');
 export const SendMessageSchema = z.object({
-  content: z.string().trim().max(100_000).default(''), intent: z.enum(['normal', 'plan']).default('normal'), skills: z.array(z.string().min(1).max(4096)).max(20).optional(),
+  content: z.string().trim().max(100_000).default(''), intent: z.enum(['normal', 'plan']).default('normal'), memory: z.enum(['exclude']).optional(), skills: z.array(z.string().min(1).max(4096)).max(20).optional(),
   attachmentIds: AttachmentIdsSchema.optional(),
   contextRefs: MessageContextRefsSchema.optional(),
 }).strict().refine((body) => body.content.length > 0 || (body.attachmentIds?.length ?? 0) > 0, { message: 'Write a message or attach a file', path: ['content'] });

@@ -208,6 +208,15 @@
 .composer-settings__heading span, .composer-settings__hint { color: var(--fg-3); font-size: 11px; line-height: 1.5; }
 .composer-settings__field { display: grid; gap: 6px; font-size: 11px; color: var(--fg-2); }
 .composer-settings__field .composer__select { width: 100%; max-width: none; background: var(--bg-surface); border-color: var(--line-soft); min-height: 32px; }
+.composer-settings__memory { display: flex; align-items: flex-start; gap: 9px; padding-top: 10px; border-top: 1px solid var(--line-soft); font-size: 11px; color: var(--fg-1); }
+.composer-settings__memory input { margin: 2px 0 0; accent-color: var(--fg-2); }
+.composer-settings__memory span { display: grid; gap: 4px; }
+.composer-settings__memory small, .composer-settings__context p { color: var(--fg-3); font-size: 11px; line-height: 1.45; margin: 0; }
+.composer-settings__context { border-top: 1px solid var(--line-soft); padding-top: 9px; font-size: 11px; }
+.composer-settings__context summary { cursor: pointer; color: var(--fg-1); font-weight: 600; }
+.composer-settings__context > p { margin-top: 8px; overflow-wrap: anywhere; }
+.composer-settings__context-item { padding-left: 8px; border-left: 2px solid var(--line-soft); }
+.composer-settings__preview-text { max-height: 180px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; padding: 8px; border: 1px solid var(--line-soft); border-radius: 6px; color: var(--fg-2); font: inherit; font-size: 10px; }
 .composer-settings .workflow-setup { display: block; padding: 12px 0 0; margin: 0; border: 0; border-top: 1px solid var(--line-soft); min-width: 0; }
 .composer-settings .workflow-setup legend { font-size: 11px; color: var(--fg-1); padding: 0; }
 .composer-settings .workflow-setup p { margin: 7px 0; line-height: 1.5; }

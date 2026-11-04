@@ -95,7 +95,7 @@ function Grant({ grant, now }: { grant: UsageResetGrant; now: number }) {
 
 function SessionFacts({ usage }: { usage: SessionUsage }) {
   return <section className="usage-section usage-section--session">
-    <header><div><h2>This session</h2><p>Conversation totals for this Mingle session.</p></div></header>
+    <header><div><h2>This session</h2><p>Cumulative conversation totals for this Mingle session; these are not current context occupancy.</p></div></header>
     <dl className="usage__facts usage__facts--session">
       <div><dt>Input tokens</dt><dd>{tokenCount(usage.session.inputTokens)}</dd></div>
       <div><dt>Output tokens</dt><dd>{tokenCount(usage.session.outputTokens)}</dd></div>

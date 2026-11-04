@@ -18,6 +18,7 @@ import { isSafeUndispatchedTransientFailure, providerRecoveryCopy, providerRecov
 import { reasoningEffortChoices } from '../lib/providers';
 import { SessionWorkflowPanel, WorkflowLimitsControl } from './session-workflow/SessionWorkflowPanel';
 import { SessionProgress } from './session-workflow/SessionProgress';
+import { memoryApi } from './project-memory/memory-api';
 import type { StatusBarState } from './status-bar/deriveStatusBarState';
 import { QueuedMessages } from './composer/QueuedMessages';
 import {
@@ -93,6 +94,24 @@ export function Composer({ session, progressState, helperRail, helperCount = 0 }
   const policyControl = useRef<HTMLButtonElement>(null);
   const advancedControl = useRef<HTMLButtonElement>(null);
   const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [memoryExclusion, setMemoryExclusion] = useState<{ sessionId: string; enabled: boolean }>({ sessionId: session.id, enabled: false });
+  const excludeProjectMemory = memoryExclusion.sessionId === session.id && memoryExclusion.enabled;
+  const [memoryDisclosure, setMemoryDisclosure] = useState(false);
+  const [memoryPreview, setMemoryPreview] = useState<import('@mingle/contracts').ProjectMemoryContextPreview | null>(null);
+  const [memoryInjections, setMemoryInjections] = useState<import('@mingle/contracts').ProjectMemoryInjectionsResponse | null>(null);
+  const [memoryInfoError, setMemoryInfoError] = useState<string | null>(null);
+  useEffect(() => { setMemoryPreview(null); setMemoryInjections(null); }, [session.id]);
+  useEffect(() => {
+    if (!memoryDisclosure || !project || session.parentSessionId || session.id.startsWith('proxy_')) return;
+    const controller = new AbortController();
+    setMemoryInfoError(null); setMemoryPreview(null);
+    const timer = window.setTimeout(() => {
+      void Promise.all([memoryApi.contextPreview(project.id, draft.trim() || 'current draft', controller.signal), memoryApi.injections(session.id, controller.signal)])
+        .then(([preview, injections]) => { if (!controller.signal.aborted) { setMemoryPreview(preview); setMemoryInjections(injections); } })
+        .catch((cause) => { if (!controller.signal.aborted) setMemoryInfoError(errorMessage(cause)); });
+    }, 120);
+    return () => { window.clearTimeout(timer); controller.abort(); };
+  }, [memoryDisclosure, project?.id, session.id, draft, session.parentSessionId]);
   const currentFailure = providerFailure && providerFailure.runId && session.status === 'error'
     && session.provider === providerFailure.provider
     && sessionRuns.some((run) => run.id === providerFailure.runId && run.status === 'failed' && run.provider === session.provider && run.model === session.model)
@@ -280,7 +299,7 @@ export function Composer({ session, progressState, helperRail, helperCount = 0 }
       const submittedAttachmentIds = attachments.map((item) => item.id);
       const submittedContextRefs = contextRefs;
       if (running) {
-        const response = await api.queueMessage(session.id,{content:draft.trim(),skills:messageSkills,attachmentIds:submittedAttachmentIds,contextRefs:submittedContextRefs,intent:planningMode?'plan':'normal'});
+        const response = await api.queueMessage(session.id,{content:draft.trim(),skills:messageSkills,attachmentIds:submittedAttachmentIds,contextRefs:submittedContextRefs,intent:planningMode?'plan':'normal',...(excludeProjectMemory?{memory:'exclude'}:{})});
         // A steered message already reached the running turn; only a queued one can be sent next.
         if (response.steered) useMingle.getState().toast('success', 'Sent to the running agent');
         else {
@@ -289,12 +308,13 @@ export function Composer({ session, progressState, helperRail, helperCount = 0 }
         }
       } else if (autonomousMode && canStartWorkflow && !workflowOpen) {
         if (messageSkills.length || /^\s*\//.test(draft)) throw new Error('Start an autonomous goal with a regular request. Use Chat for native commands and skills.');
-        await api.startSessionWorkflow(session.id, { goal: draft.trim(), limits: workflowLimits, attachmentIds: submittedAttachmentIds, contextRefs: submittedContextRefs });
-      } else await api.sendMessage(session.id, draft.trim(), messageSkills, submittedAttachmentIds, submittedContextRefs, planningMode ? 'plan' : 'normal');
+        await api.startSessionWorkflow(session.id, { goal: draft.trim(), limits: workflowLimits, attachmentIds: submittedAttachmentIds, contextRefs: submittedContextRefs, ...(excludeProjectMemory?{memory:'exclude'}:{}) });
+      } else await api.sendMessage(session.id, draft.trim(), messageSkills, submittedAttachmentIds, submittedContextRefs, planningMode ? 'plan' : 'normal', excludeProjectMemory ? 'exclude' : undefined);
       if (useMingle.getState().drafts[session.id] === submittedDraft) useMingle.getState().setDraft(session.id, '');
       if (useMingle.getState().contextDrafts[session.id] === submittedContextRefs) useMingle.getState().setContextDraft(session.id, []);
       attachmentDraft.sent(submittedAttachmentIds);
       setSelectedSkills([]);
+      setMemoryExclusion({ sessionId: session.id, enabled: false });
       setPlanningMode(false);
       await useMingle.getState().refreshNow();
     } catch (e) {
@@ -628,6 +648,18 @@ export function Composer({ session, progressState, helperRail, helperCount = 0 }
             options={combinedOptions} onChange={(value) => { const [kind, option] = value.split(':'); if (kind === 'effort') void configure({ effort: option }); else if (kind === 'tier') void configure({ serviceTier: option }); }} placement="top" />
         </label>
         {autonomousMode && !workflowOpen && !running ? <WorkflowLimitsControl limits={workflowLimits} onChange={setWorkflowLimits} disabled={sending || updating} /> : null}
+        {!session.parentSessionId && !session.id.startsWith('proxy_') && <label className="composer-settings__memory"><input type="checkbox" checked={excludeProjectMemory} disabled={sending || updating || workflowRunning} onChange={(event) => setMemoryExclusion({ sessionId: session.id, enabled: event.target.checked })} /><span><strong>Exclude project memory next turn</strong><small>Skips recall and memory search tools for one successfully sent turn. It cannot erase memory already present in provider conversation history. Future goal turns use memory normally.</small></span></label>}
+        {!session.parentSessionId && !session.id.startsWith('proxy_') && <details className="composer-settings__context" open={memoryDisclosure} onToggle={(event) => setMemoryDisclosure(event.currentTarget.open)}>
+          <summary>Context inspector</summary>
+          <p><strong>Draft context</strong> · {attachments.length} attachment{attachments.length===1?'':'s'}, {contextRefs.filter((item)=>item.kind==='file').length} file reference{contextRefs.filter((item)=>item.kind==='file').length===1?'':'s'}, {contextRefs.filter((item)=>item.kind==='quote').length} quote{contextRefs.filter((item)=>item.kind==='quote').length===1?'':'s'}. File contents are read by the server when the run starts.</p>
+          {attachments.map((item)=><p className="composer-settings__context-item" key={item.id}>Attachment · {item.name} · {item.size.toLocaleString()} bytes</p>)}
+          {contextRefs.map((item,index)=><p key={`${item.kind}:${index}`} className="composer-settings__context-item">{item.kind==='file'?`File · ${item.path}`:`Quote · ${item.excerpt.slice(0,140)}`}</p>)}
+          <p><strong>Memory preview</strong> · This is a fresh preview for the current draft, not a promise that these exact entries will be injected.</p>
+          {memoryInfoError?<p role="status">Memory details unavailable: {memoryInfoError}</p>:memoryPreview?<><p>{memoryPreview.injection.entries.length} entries · {memoryPreview.injection.chars} characters {memoryPreview.injection.truncated?'· truncated':''}</p>{memoryPreview.injection.entries.map((entry)=><p className="composer-settings__context-item" key={`${entry.id}:${entry.revision}`}>{entry.title} · revision {entry.revision} · {entry.reason}</p>)}<pre className="composer-settings__preview-text">{memoryPreview.text || 'No project memory would be recalled for this draft.'}</pre></>:<p>Loading preview…</p>}
+          <p><strong>Saved run memory</strong></p>{memoryInjections?.excludedRunIds?.map((runId)=><p className="composer-settings__context-item" key={`excluded:${runId}`}>run {runId} · project memory excluded for this turn</p>)}{memoryInjections?.injections.length?memoryInjections.injections.slice(0,5).map((entry)=><div className="composer-settings__context-item" key={entry.runId}><p>{new Date(entry.at).toLocaleString()} · run {entry.runId} · {entry.entries.length} entries · {entry.chars} characters{entry.truncated?' · truncated':''}</p>{entry.entries.map((item)=><p key={`${item.id}:${item.revision}`}>{item.title} · saved revision {item.revision}{item.lifecycle==='stale'?' · stale at injection time':''}</p>)}<p>These saved titles and revisions identify what was injected; entry bodies may have changed since then.</p></div>):!memoryInjections?.excludedRunIds?.length?<p>No saved memory injection is recorded for recent runs.</p>:null}
+          <p>Provider context limit and current context occupancy: unreported. Token usage in Usage is cumulative for this Mingle session, not current context occupancy.</p>
+          <p>Compaction asks the provider to summarize older conversation context when supported. The provider controls what its summary retains; Mingle cannot report exact context occupancy here.</p>
+        </details>}
         {running || workflowRunning ? <p className="composer-settings__hint">Run settings stay locked while work is active.</p> : null}
       </Popover>
       {project ? <GitBar project={project} session={session} /> : null}

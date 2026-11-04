@@ -180,6 +180,8 @@ export const ProjectMemoryInjectionSchema = z.object({
 }).strict();
 export const ProjectMemoryInjectionsResponseSchema = z.object({
   injections: z.array(ProjectMemoryInjectionSchema).max(50),
+  /** Recent runs where the user explicitly disabled both automatic recall and memory tools. */
+  excludedRunIds: z.array(z.string().min(1).max(100)).max(50).optional(),
 }).strict();
 /** What a run started now with `query` would receive, including the exact text block. */
 export const ProjectMemoryContextPreviewSchema = z.object({

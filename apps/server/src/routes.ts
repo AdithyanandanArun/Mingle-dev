@@ -586,7 +586,8 @@ export function buildRouter(s: Services) {
       if (s.runtime.isActive(id) || latest.status === 'running' || latest.status === 'waiting') {
         throw conflict('Session already has an active run or provider cleanup is still in progress');
       }
-      s.runtime.start(id, message.content, { attachmentIds, contextRefs: message.contextRefs, deferContextResolution: true });
+      if (s.store.runMemoryExcluded(run.id) && s.workflows.ownsRun(run.id)) throw conflict('This generated goal turn is retried only with its exact saved context.');
+      s.runtime.start(id, message.content, { excludeProjectMemory: s.store.runMemoryExcluded(run.id), attachmentIds, contextRefs: message.contextRefs, deferContextResolution: true });
       return new Reply(202, { accepted: true });
     } catch (error) {
       await discardClones();
@@ -595,11 +596,12 @@ export function buildRouter(s: Services) {
   });
   add('POST', '/api/sessions/:id/messages', async (ctx) => {
     const id = param(ctx, 'id');
-    const { content, intent, skills: selected, attachmentIds, contextRefs } = await ctx.body(SendMessageSchema);
+    const { content, intent, memory, skills: selected, attachmentIds, contextRefs } = await ctx.body(SendMessageSchema);
     const session = s.store.getSession(id);
     if (!session) throw notFound('Session not found');
     const group = s.groups.forSession(id);
     if (group) {
+      if (memory === 'exclude') throw badRequest('Project memory exclusion is available only for standalone sessions.');
       if (intent === 'plan') throw badRequest('Native read-only plan mode is not available for group-delivered turns. Open the member session to plan independently.');
       if (selected?.length) throw badRequest('Select skills in an independent session. Address provider actions directly to one group agent.');
       const member = group.members.find((row) => row.sessionId === id && !row.removedAt);
@@ -610,12 +612,12 @@ export function buildRouter(s: Services) {
       if (session.status === 'waiting') throw conflict('A pending question or approval must be resolved before sending a message.');
       const attachments = s.attachments.validate({ kind: 'session', id }, attachmentIds ?? []);
       validateSessionAttachmentSupport(s, session, attachments, content);
-      if (!attachments.length && !selected?.length && intent !== 'plan' && await s.runtime.steer(id, content)) return new Reply(202, { accepted: true, steered: true });
+      if (!attachments.length && !selected?.length && intent !== 'plan' && !memory && await s.runtime.steer(id, content)) return new Reply(202, { accepted: true, steered: true });
       const queuedId = `queued-${crypto.randomUUID()}`;
       let queued!: import('@mingle/contracts').QueuedMessage;
       s.store.tx(() => {
         if (attachmentIds?.length) s.attachments.claim({ kind: 'session', id }, attachmentIds, 'message', queuedId);
-        queued = s.store.enqueueMessage({ id: queuedId, sessionId:id, content, intent, skills:[...new Set(selected ?? [])], attachmentIds:attachmentIds ?? [], contextRefs:contextRefs ?? [] });
+        queued = s.store.enqueueMessage({ id: queuedId, sessionId:id, content, intent, ...(memory ? { memory } : {}), skills:[...new Set(selected ?? [])], attachmentIds:attachmentIds ?? [], contextRefs:contextRefs ?? [] });
       });
       return new Reply(202, { accepted:true, queued });
     }
@@ -633,7 +635,7 @@ export function buildRouter(s: Services) {
       if (ref.kind === 'quote' && (ref.sourceGroupId || ref.sourceSessionId !== id)) throw badRequest('A quoted source must come from this session. Choose text from a message in this conversation.');
       if (ref.kind === 'file' && ref.sourceSessionId !== id) throw badRequest('A file reference must come from this session worktree. Choose the file again.');
     }
-    s.runtime.start(id, content, { intent, attachmentIds, contextRefs, deferContextResolution: true, resolveSkills });
+    s.runtime.start(id, content, { intent, excludeProjectMemory: memory === 'exclude', attachmentIds, contextRefs, deferContextResolution: true, resolveSkills });
     return new Reply(202, { accepted: true });
   });
   add('GET', '/api/sessions/:id/workflow', (ctx) => {

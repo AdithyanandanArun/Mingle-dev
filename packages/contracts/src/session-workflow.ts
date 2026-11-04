@@ -11,6 +11,7 @@ export const WorkflowLimitsSchema = z.object({
 export type WorkflowLimits = z.infer<typeof WorkflowLimitsSchema>;
 export const StartSessionWorkflowSchema = z.object({
   goal: z.string().trim().min(1).max(30_000),
+  memory: z.enum(['exclude']).optional(),
   limits: WorkflowLimitsSchema.default({ maxTurns: 8, maxElapsedMinutes: 240, maxStalls: 2 }),
   attachmentIds: AttachmentIdsSchema.optional(), contextRefs: MessageContextRefsSchema.optional(),
 }).strict();

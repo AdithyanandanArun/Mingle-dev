@@ -49,7 +49,7 @@ function freshWorld() {
   return {
     projects: ['a', 'b'].map((key) => ({ id: `example-project-${key}`, name: `Example project ${key.toUpperCase()}`, path: `/example/${key}`, isExample: false, createdAt: '2026-11-03T00:00:00.000Z' })),
     sessions: [session('s-a', 'example-project-a', 'Example session A', 'claude'), session('s-b', 'example-project-b', 'Example session B', 'codex')],
-    workflows: [], delegated: [], attachments: {}, messages: [], runs: [], approvals: [], questions: [], failure: null, log: [], notExposed: [], sockets: [], startError: null, hold: null, uploadCounter: 0,
+    workflows: [], delegated: [], attachments: {}, messages: [], runs: [], approvals: [], questions: [], failure: null, log: [], notExposed: [], sockets: [], startError: null, messageError: null, hold: null, uploadCounter: 0,
   };
 }
 const find = (sessionId) => world.workflows.find((item) => item.sessionId === sessionId);
@@ -68,6 +68,8 @@ async function handle(route, schemas) {
   const fail = (status, error) => json({ error }, status);
   let match;
   if (path === '/api/bootstrap') return json({ projects: world.projects, sessions: world.sessions, messages: world.messages, queuedMessages: [], tasks: [], events: [], approvals: world.approvals, plans: [], questions: world.questions, providers, settings: {}, version: 'Example fixture', runs: world.runs, toolCalls: [], workflows: world.workflows, delegatedSubagents: world.delegated });
+  if (path.match(/^\/api\/projects\/[^/]+\/memory\/context-preview$/)) return json({ injection: { query: url.searchParams.get('query') ?? '', entries: [{ id: '00000000-0000-4000-8000-000000000008', revision: 3, title: 'Example memory rule', kind: 'fact', lifecycle: 'active', pinned: false, reason: 'relevant' }], chars: 64, truncated: false }, text: 'Example preview only' });
+  if (path.match(/^\/api\/sessions\/[^/]+\/memory-injections$/)) return json({ injections: [{ runId: 'example-run-memory', sessionId: 's-a', at: iso(Date.now() - 60_000), query: 'Example', entries: [{ id: '00000000-0000-4000-8000-000000000008', revision: 2, title: 'Earlier memory rule', kind: 'fact', lifecycle: 'active', pinned: false, reason: 'relevant' }], chars: 48, truncated: false }] });
   if (path === '/api/workspace/selection') return json({ projectId: body?.projectId ?? null });
   if ((match = path.match(/^\/api\/sessions\/([^/]+)\/catalog$/))) return json({ commands: [], skills: [], warnings: [] });
   if ((match = path.match(/^\/api\/sessions\/([^/]+)\/recovery$/))) return json({ checkpoint: null, failure: world.failure });
@@ -86,7 +88,7 @@ async function handle(route, schemas) {
     return json({ ok: true });
   }
   if (path.match(/^\/api\/projects\/[^/]+\/files(\/search)?$/)) return json([{ path: 'src/app.ts', name: 'app.ts', type: 'file' }]);
-  if ((match = path.match(/^\/api\/sessions\/([^/]+)\/messages$/)) && method === 'POST') return json({ accepted: true });
+  if ((match = path.match(/^\/api\/sessions\/([^/]+)\/messages$/)) && method === 'POST') return world.messageError ? fail(world.messageError.status, world.messageError.error) : json({ accepted: true });
   if ((match = path.match(/^\/api\/sessions\/([^/]+)$/)) && method === 'PATCH') {
     const target = world.sessions.find((item) => item.id === match[1]);
     if (!target) return fail(404, 'Unknown Example session.');
@@ -251,6 +253,41 @@ try {
     await page.waitForFunction(() => document.querySelector('textarea.composer__input')?.value === '');
     assert.deepEqual(posts('/messages').map((item) => item.body), [{ content: 'Explain the build.', intent: 'normal' }]);
     assert.equal(posts('/workflow').length, 0, 'an ordinary send never starts a workflow');
+  }));
+
+  await test('context inspector separates draft inputs, a preview and saved revisions; failed sends keep one-turn exclusion', () => run({ viewport: { width: 390, height: 844 } }, async ({ page, ui: u }) => {
+    await u.settings.click();
+    const exclude = page.getByRole('checkbox', { name: /Exclude project memory next turn/ });
+    await exclude.check();
+    await page.getByText('Context inspector', { exact: true }).click();
+    await page.waitForTimeout(100);
+    await page.getByText(/Example memory rule · revision 3/).waitFor();
+    await page.getByText(/Earlier memory rule · saved revision 2/).waitFor();
+    assert.match(await page.locator('.composer-settings__context').innerText(), /not a promise that these exact entries will be injected/);
+    assert.match(await page.locator('.composer-settings__context').innerText(), /saved revision 2/);
+    assert.match(await page.locator('.composer-settings__context').innerText(), /current context occupancy: unreported/i);
+    assert.equal(await noOverflow(page), true, 'narrow context inspector does not overflow');
+    await u.settings.click();
+    await u.attach('selected-notes.txt');
+    await u.addFileContext();
+    await u.input.fill('Example inspector request');
+    world.messageError = { status: 503, error: 'Example send failure.' };
+    await u.send.click();
+    await page.getByRole('alert').filter({ hasText: 'Example send failure.' }).waitFor();
+    await u.settings.click();
+    const exclusionAfterFailure = page.getByRole('checkbox', { name: /Exclude project memory next turn/ });
+    assert.equal(await exclusionAfterFailure.isChecked(), true, 'failed send does not consume the next-turn choice');
+    await u.settings.click();
+    world.messageError = null;
+    await u.send.click();
+    await page.waitForFunction(() => document.querySelector('textarea.composer__input')?.value === '');
+    const body = posts('/messages').at(-1).body;
+    assert.equal(body.memory, 'exclude');
+    assert.equal(body.attachmentIds.length, 1);
+    assert.equal(body.contextRefs[0].path, 'src/app.ts');
+    await u.settings.click();
+    assert.equal(await page.getByRole('checkbox', { name: /Exclude project memory next turn/ }).isChecked(), false, 'successful send consumes the one-turn choice');
+    await page.screenshot({ path: join(output, '18-context-inspector-390.png'), fullPage: true });
   }));
 
   await test('advanced settings preserve nested choices and Escape restores focus; slash effort opens the same controls', () => run({}, async ({ page, ui: u, shot }) => {

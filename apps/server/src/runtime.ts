@@ -105,6 +105,7 @@ interface ActiveRun {
   providerPhase: boolean;
   invocation?: NativeInvocation;
   intent: 'normal' | 'plan';
+  excludeProjectMemory: boolean;
   executionPlanId?: string;
   context?: string;
   providerHandoff?: {
@@ -147,7 +148,7 @@ interface ActiveCompaction {
 export interface StartOptions {
   groupDeliveryId?: string; taskId?: string; userMessage?: { content: string; kind?: string }; skills?: ProviderSkill[];
   attachmentIds?: string[]; attachmentOwnerKind?: 'message' | 'group_message'; attachmentOwnerId?: string; queuedAttachmentOwnerId?: string;
-  invocation?: NativeInvocation; context?: string; contextRefs?: Message['contextRefs']; deferContextResolution?: boolean;
+  invocation?: NativeInvocation; context?: string; contextRefs?: Message['contextRefs']; deferContextResolution?: boolean; excludeProjectMemory?: boolean;
   resolveSkills?: () => Promise<ProviderSkill[]>; intent?: 'normal' | 'plan'; executionPlanId?: string;
   /** Device-owned team delivery: bypass local group context and use its encrypted Team MCP proxy. */
   teamRun?: boolean; teamMcp?: import('@mingle/contracts').TeamMcpConnection;
@@ -209,7 +210,7 @@ export class SessionRuntime {
     if(this.store.getSession(sessionId)?.status==='waiting') { this.store.enqueueMessage({...item,createdAt:item.createdAt}); return; }
     try {
       const session=this.store.getSession(sessionId);
-      this.start(sessionId,item.content,{intent:item.intent,attachmentIds:item.attachmentIds,contextRefs:item.contextRefs,deferContextResolution:true,resolveSkills:session ? this.resolveQueuedSkills?.(session,item.skills) : undefined,queuedAttachmentOwnerId:item.id,origin:'queue'});
+      this.start(sessionId,item.content,{intent:item.intent,excludeProjectMemory:item.memory==='exclude',attachmentIds:item.attachmentIds,contextRefs:item.contextRefs,deferContextResolution:true,resolveSkills:session ? this.resolveQueuedSkills?.(session,item.skills) : undefined,queuedAttachmentOwnerId:item.id,origin:'queue'});
     } catch(error) { this.requeueFront(sessionId,item,`Could not start queued message: ${errorMessage(error)}`); }
   }
   private requeueFront(sessionId:string,item:import('@mingle/contracts').QueuedMessage,reason:string): void {
@@ -379,7 +380,7 @@ export class SessionRuntime {
     const run: ActiveRun = {
       id: runId, startedAt: nowIso(), provider: session.provider, tick: performance.now(), tools: new Map(), activityTimer: null,
       sessionId, controller: new AbortController(), closed: false, cleanupPending: false, acceptingTools: false, approvals: new Map(), questions: new Map(), stream: null, flushTimer: null, consumedHandoffs: handoffs.map((h) => h.id), firstEvent: false, capabilityTokens: [],
-      baseInput: session.inputTokens, baseOutput: session.outputTokens, baseCost: session.costUsd, taskId: options.taskId ?? null, skills: options.skills ?? [], providerPhase: false, invocation, intent: options.intent ?? 'normal', executionPlanId: options.executionPlanId,
+      baseInput: session.inputTokens, baseOutput: session.outputTokens, baseCost: session.costUsd, taskId: options.taskId ?? null, skills: options.skills ?? [], providerPhase: false, invocation, intent: options.intent ?? 'normal', excludeProjectMemory: options.excludeProjectMemory === true || (options.workflow?.retryOfRunId ? this.store.runMemoryExcluded(options.workflow.retryOfRunId) : false), executionPlanId: options.executionPlanId,
       contextRefs: options.contextRefs, deferContextResolution: options.deferContextResolution, resolveSkills: options.resolveSkills,
       context: [options.context, invocation && handoffs.length ? this.composePrompt(handoffs, '') : undefined].filter(Boolean).join('\n\n') || undefined,
       providerHandoff: pendingProviderHandoff,
@@ -399,6 +400,7 @@ export class SessionRuntime {
         else this.attachmentService.claim({ kind: 'session', id: sessionId }, options.attachmentIds, 'message', userMessage.id);
       }
       this.store.insertRun({ id: run.id, sessionId, userMessageId: userMessage.id, provider: session.provider, model: session.model, startedAt: run.startedAt });
+      if (run.excludeProjectMemory) this.store.setRunMemoryExcluded(run.id);
       if (options.executionPlanId) {
         const current = this.store.getSessionPlan(options.executionPlanId);
         if (!current || current.sessionId !== sessionId
@@ -647,12 +649,13 @@ export class SessionRuntime {
         ? this.subagentMcp?.create({runId:run.id,session,signal:run.controller.signal,live:()=>this.isRunLive(run.sessionId,run.id)}) : undefined;
       if(subagentMcp) capabilityTokens.push(subagentMcp.token);
       // Project memory: agent tools exist only for runs that may act (never read-only planning); recalled entries are reference data in every run.
-      const memoryMcp = run.intent !== 'plan' ? this.memoryMcp?.create({
+      const memoryMcp = run.intent !== 'plan' && !run.excludeProjectMemory ? this.memoryMcp?.create({
         runId: run.id, session, signal: run.controller.signal, isLive: () => this.isRunLive(run.sessionId, run.id),
       }) : undefined;
       if (memoryMcp) capabilityTokens.push(memoryMcp.token);
       let memoryContext: string | undefined;
-      try { memoryContext = this.projectMemory?.buildRunContext({ session, runId: run.id, prompt, tools: Boolean(memoryMcp) }); }
+      const replayingExactContext = Boolean(run.workflow?.retryOfRunId && run.workflow.replayPrompt !== undefined && run.workflow.replayContext !== undefined);
+      try { if (!run.excludeProjectMemory && !replayingExactContext) memoryContext = this.projectMemory?.buildRunContext({ session, runId: run.id, prompt, tools: Boolean(memoryMcp) }); }
       catch (error) { this.log('warn', `Project memory context was skipped: ${redactSecrets(errorMessage(error)).slice(0, 200)}`); }
       const explicit = run.invocation;
       const providerHandoffBlock = await this.providerHandoffBlock(run, session);
@@ -1557,7 +1560,7 @@ export class SessionRuntime {
     const queued = next ? this.store.dequeueMessage(sessionId, next.id) : undefined;
     if (!queued) return false;
     try {
-      this.start(sessionId, queued.content, { intent: queued.intent, attachmentIds: queued.attachmentIds, contextRefs: queued.contextRefs, deferContextResolution: true, resolveSkills: this.resolveQueuedSkills?.(session, queued.skills), queuedAttachmentOwnerId: queued.id, origin: 'queue' });
+      this.start(sessionId, queued.content, { intent: queued.intent, excludeProjectMemory: queued.memory === 'exclude', attachmentIds: queued.attachmentIds, contextRefs: queued.contextRefs, deferContextResolution: true, resolveSkills: this.resolveQueuedSkills?.(session, queued.skills), queuedAttachmentOwnerId: queued.id, origin: 'queue' });
       return true;
     } catch (error) {
       this.log('error', `Could not drain queued message for ${sessionId}`, error);

@@ -215,7 +215,8 @@ export class ProjectMemoryService {
 
   injections(sessionId: string, limit: number): ProjectMemoryInjectionsResponse {
     if (!this.store.getSession(sessionId, true)) throw notFound('Session not found.');
-    return { injections: this.repo.listInjections(sessionId, Math.min(50, Math.max(1, limit))) };
+    const excludedRunIds = this.store.db.prepare('SELECT s.run_id FROM run_context_scopes s JOIN session_runs r ON r.id=s.run_id WHERE r.session_id=? AND s.memory_excluded=1 ORDER BY r.rowid DESC LIMIT ?').all(sessionId, Math.min(50, Math.max(1, limit))).map((row) => String((row as { run_id: unknown }).run_id));
+    return { injections: this.repo.listInjections(sessionId, Math.min(50, Math.max(1, limit))), ...(excludedRunIds.length ? { excludedRunIds } : {}) };
   }
 
   // ---- run context ---------------------------------------------------------------------------------------------
