@@ -8,7 +8,7 @@ With development dependencies installed, `pnpm package:linux` builds the UI, dow
 
 `pnpm package:arch` additionally invokes `makepkg` on Arch Linux as an ordinary user. It creates `release/mingle-bin-<version>-1-x86_64.pkg.tar.zst` and its checksum. The generated recipe in `release/arch-build/PKGBUILD` receives the exact archive checksum; the build does not install packages or request sudo. `makepkg --nodeps` is used for this repackaging step; install-time dependencies remain recorded in the package and are resolved by `pacman -U`.
 
-`pnpm package:deb` builds the same Linux stage and uses `dpkg-deb` to create `release/mingle_<version>_amd64.deb` and its SHA-256 file. Run it on Debian/Ubuntu. It installs under `/opt/mingle`, with a desktop entry, icon, launcher and a root-owned sandbox helper. It declares system library dependencies and Git; it never modifies user profiles or starts a service. Install a downloaded package with `sudo apt install ./mingle_0.1.0_amd64.deb`.
+`pnpm package:deb` builds the same Linux stage and uses `dpkg-deb` to create `release/mingle_<version>_amd64.deb` and its SHA-256 file. Run it on Debian/Ubuntu. It installs under `/opt/mingle`, with a desktop entry, icon, launcher and a root-owned sandbox helper. It declares system library dependencies and Git; it never modifies user profiles or starts a service. Install a downloaded package with `sudo apt install ./mingle_0.1.1_amd64.deb`.
 
 The manual **Build desktop packages** GitHub workflow builds Linux on Ubuntu 22.04 and validates Debian extraction, native PTY operation, SQLite/server startup, HTTP/static assets, installation and removal in its disposable runner. Arch output is optional via `include_arch`; it verifies the input archive sidecar and resulting package metadata/checksum. Artifacts expire after seven days. The workflow does not create tags, public releases or AUR entries. The separate **Publish desktop release** workflow accepts `include_arch=true` to publish the Arch artifact from that same successful Linux build alongside the Debian, archive, and Windows assets.
 
@@ -22,7 +22,7 @@ For a locally staged release, copy the archive next to the recipe, build it with
 
 ```sh
 node scripts/package-arch.mjs
-sudo pacman -U ./release/mingle-bin-0.1.0-1-x86_64.pkg.tar.zst
+sudo pacman -U ./release/mingle-bin-0.1.1-1-x86_64.pkg.tar.zst
 ```
 
 The command above assumes the current Linux archive and SHA-256 sidecar are already in `release/`; `pnpm package:arch` also builds that archive. `pacman -U` installs a local package file and resolves its declared runtime dependencies. For an already published binary, download the `.pkg.tar.zst` and its checksum from GitHub, verify the checksum, and install with `pacman -U`.
