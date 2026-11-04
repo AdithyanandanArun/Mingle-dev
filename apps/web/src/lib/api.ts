@@ -215,6 +215,9 @@ export const api = {
   runChanges: (id: string, signal?: AbortSignal) => json<RunChanges>(`/api/runs/${encodeURIComponent(id)}/changes`, 'GET', undefined, signal),
   toolCall: (id: string) => json<ToolCall>(`/api/tool-calls/${encodeURIComponent(id)}`),
   renameSession: (id: string, name: string) => json<Session>(`/api/sessions/${encodeURIComponent(id)}`, 'PATCH', { name }),
+  /** One page of stored messages, oldest first. With `before`, the newest ones stored before that message of this session. */
+  sessionMessages: (id: string, params: { limit?: number; before?: string }, signal?: AbortSignal) =>
+    json<Message[]>(`/api/sessions/${encodeURIComponent(id)}/messages${q(params)}`, 'GET', undefined, signal),
   deleteSession: (id: string) => json<{ ok: boolean; notices?: string[] }>(`/api/sessions/${encodeURIComponent(id)}`, 'DELETE'),
   sendMessage: async (id: string, content: string, skills?: string[], attachmentIds?: string[], contextRefs?: MessageContextRef[], intent: 'normal' | 'plan' = 'normal') => {
     const message: Message = {

@@ -5,6 +5,20 @@
   gap: 30px;
 }
 
+/*
+ * Long single-session transcripts defer layout and paint of rows far outside the viewport (content-visibility:auto).
+ * Rows stay in the DOM, so React still mounts them, and text search, selection, copy, focus and screen readers see
+ * all of them; the browser renders a skipped row again as it nears the viewport, or when it holds focus or a
+ * selection, or when find-in-page needs it. `auto` remembers each row's last rendered height, so only rows that
+ * were never shown use these estimates.
+ */
+.chat__inner--history > .msg--user { content-visibility: auto; contain-intrinsic-block-size: auto 64px; }
+.chat__inner--history > .msg--assistant { content-visibility: auto; contain-intrinsic-block-size: auto 180px; }
+
+.history-control { display: grid; justify-items: center; gap: 8px; }
+.history-note { margin: 0; color: var(--fg-3); font-size: var(--text-xs); line-height: 1.5; text-align: center; }
+.history-note--error { color: var(--err); }
+
 .msg {
   display: block;
   min-width: 0;

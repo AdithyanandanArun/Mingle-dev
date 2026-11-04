@@ -19,7 +19,14 @@ import { SubagentChatView } from './subagents/SubagentChatView';
 import { SubagentRail } from './subagents/SubagentRail';
 import { deriveStatusBarState } from './status-bar/deriveStatusBarState';
 import { api, errorMessage } from '../lib/api';
+import { useSessionHistory } from '../lib/sessionHistoryHooks';
+import { captureReaderAnchor, restoreReaderAnchor, type ReaderAnchor } from '../lib/readerAnchor';
+import { SessionHistoryControl } from './SessionHistoryControl';
 
+/** How long after prepending history the reader's row is kept in place while deferred rows settle to their real height. */
+const ANCHOR_SETTLE_MS = 800;
+/** How long the conversation's live region stays silent while a page of older messages is inserted. */
+const QUIET_LIVE_REGION_MS = 500;
 const EMPTY_MESSAGES: readonly DisplayMessage[] = [];
 const EMPTY_SESSION_RUNS: readonly SessionRun[] = [];
 const EMPTY_SESSION_CALLS: readonly ToolCall[] = [];
@@ -59,7 +66,9 @@ function SingleSessionPane() {
   const sessionId = session?.id;
   // Token deltas are followed by the one streaming row, not here: this pane only sees which buffers exist.
   const streamIds = useSessionStreamIds(sessionId);
-  const allMessages = useMingle((s) => s.boot?.messages);
+  const bootstrapMessages = useMingle((s) => s.boot?.messages);
+  // Older history is paged on demand over the bootstrap's recent window; until some is loaded this is the bootstrap array itself.
+  const { history, messages: allMessages, loadOlder } = useSessionHistory(sessionId, bootstrapMessages);
   const allRuns = useMingle((s) => s.boot?.runs);
   const allToolCalls = useMingle((s) => s.boot?.toolCalls);
   const deriveTranscript = useRef<ReturnType<typeof createTranscriptDeriver>>(undefined);
@@ -111,16 +120,61 @@ function SingleSessionPane() {
   const last = messages[messages.length - 1];
   const activitySig = useMemo(() => runs.map(run => `${run.id}:${run.status}:${run.toolCount}:${run.changes?.status ?? 'unknown'}:${run.changes?.fileCount ?? ''}:${run.changes?.additions ?? ''}:${run.changes?.deletions ?? ''}`).join('|'), [runs]);
   const planningSig = useMemo(() => `${plans.map((plan) => `${plan.id}:${plan.revision}:${plan.status}`).join(',')}|${questions.map((question) => `${question.id}:${question.status}`).join(',')}`, [plans, questions]);
-  const sig = `${session?.id}|${messages.length}|${last?.content.length ?? 0}|${pending.length}|${activitySig}|${allToolCalls?.length ?? 0}|${planningSig}`;
+  // Prepended history is not new output: it must neither pin the view to the bottom nor count as growth.
+  const sig = `${session?.id}|${messages.length - history.older.length}|${last?.id}|${last?.content.length ?? 0}|${pending.length}|${activitySig}|${allToolCalls?.length ?? 0}|${planningSig}`;
   /** Streamed text grows inside its own row, which asks to stay pinned to the latest output when the reader has not scrolled away. */
   const pinToBottom = useCallback(() => {
     const el = scroller.current;
     if (el && stick.current) el.scrollTop = el.scrollHeight;
   }, []);
 
-  useEffect(() => { stick.current = true; setAway(false); }, [session?.id]);
+  /**
+   * Deferred offscreen rows take their real height as they near the viewport, which grows the column after the view
+   * was pinned. While pinned, follow that growth (the observer runs before the scroll event the shift causes).
+   */
+  const columnObserver = useRef<ResizeObserver | undefined>(undefined);
+  const observeColumn = useCallback((node: HTMLDivElement | null) => {
+    columnObserver.current?.disconnect();
+    columnObserver.current = undefined;
+    if (!node || typeof ResizeObserver === 'undefined') return;
+    columnObserver.current = new ResizeObserver(() => {
+      pinToBottom();
+      // Rows near the viewport take their real height for a moment after history was prepended: keep the reader's row put.
+      const settling = settleAnchor.current;
+      const el = scroller.current;
+      if (!settling || !el) return;
+      if (performance.now() > settling.until) settleAnchor.current = null;
+      else restoreReaderAnchor(el, settling.anchor);
+    });
+    columnObserver.current.observe(node);
+  }, [pinToBottom]);
+  const readerAnchor = useRef<ReaderAnchor | null>(null);
+  const settleAnchor = useRef<{ anchor: ReaderAnchor; until: number } | null>(null);
+  const stopSettling = useCallback(() => { settleAnchor.current = null; }, []);
+  const loadOlderMessages = useCallback(() => loadOlder({
+    beforeApply: () => {
+      const el = scroller.current;
+      readerAnchor.current = captureReaderAnchor(el);
+      // Older messages are history, not new output: keep assistive technology from reading out every prepended row.
+      if (el) { el.setAttribute('aria-live', 'off'); window.setTimeout(() => el.setAttribute('aria-live', 'polite'), QUIET_LIVE_REGION_MS); }
+    },
+  }), [loadOlder]);
+
+  useEffect(() => { stick.current = true; setAway(false); readerAnchor.current = null; }, [session?.id]);
   useEffect(() => { setSelectedSubagentId(null); }, [session?.id]);
   useLayoutEffect(pinToBottom, [sig, pinToBottom]);
+  // After older messages are prepended, keep the reader on the same content they were looking at.
+  useLayoutEffect(() => {
+    const anchor = readerAnchor.current;
+    const el = scroller.current;
+    if (!anchor || !el) return;
+    readerAnchor.current = null;
+    restoreReaderAnchor(el, anchor);
+    const near = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+    settleAnchor.current = near ? null : { anchor, until: performance.now() + ANCHOR_SETTLE_MS };
+    stick.current = near;
+    setAway(!near);
+  }, [history.older]);
 
   if (!project) {
     return (
@@ -152,7 +206,7 @@ function SingleSessionPane() {
       </> : <>
       <div className="chat__history">
       <div
-        className="chat__scroll" ref={scroller} role="log" aria-live="polite" aria-label={`Conversation with ${session.name}`}
+        className="chat__scroll" ref={scroller} onWheel={stopSettling} onTouchStart={stopSettling} onPointerDown={stopSettling} onKeyDown={stopSettling} role="log" aria-live="polite" aria-label={`Conversation with ${session.name}`}
         onScroll={(e) => {
           const el = e.currentTarget;
           const near = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
@@ -160,7 +214,8 @@ function SingleSessionPane() {
           setAway(!near);
         }}
       >
-        <div className="chat__inner">
+        <div className="chat__inner chat__inner--history" ref={observeColumn}>
+          {hasConversation ? <SessionHistoryControl history={history} onLoad={loadOlderMessages} /> : null}
           {!hasConversation ? (
             <div className="chat__empty">
               <span className="chat__welcome-mark" aria-hidden="true"><MingleGlyph size={28} /></span>
@@ -181,7 +236,7 @@ function SingleSessionPane() {
         </div>
       </div>
       {away ? (
-        <button type="button" className="jump" onClick={() => { const el = scroller.current; if (el) { el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' }); } }}>
+        <button type="button" className="jump" onClick={() => { stopSettling(); stick.current = true; pinToBottom(); }}>
           <ArrowDown size={13} /> Latest
         </button>
       ) : null}

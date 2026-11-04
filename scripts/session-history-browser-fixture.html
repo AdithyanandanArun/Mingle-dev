@@ -1,0 +1,17 @@
+<!doctype html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Example session history</title>
+<script>
+// Counts components whose function actually executed in each React commit (PerformedWork); bailed-out memo components are not counted.
+(() => {
+  const counts = {}; let commits = 0;
+  const nameOf = (type) => type && (type.displayName || type.name || (type.type && nameOf(type.type)) || (type.render && nameOf(type.render)));
+  function visit(next, prev) {
+    if ((next.tag === 0 || next.tag === 11 || next.tag === 15) && (!prev || (next.flags & 1))) {
+      let name = (nameOf(next.type) || '').replace(/\d+$/, ''); if (name === 'Markdown' && next.tag === 0) name = 'ReactMarkdown'; if (name) { counts[name] = (counts[name] || 0) + 1; }
+    }
+    if (prev && next.child === prev.child) return;
+    for (let child = next.child; child; child = child.sibling) visit(child, child.alternate);
+  }
+  window.__renderCounts = { snapshot: () => ({ ...counts }), reset: () => { for (const key of Object.keys(counts)) delete counts[key]; commits = 0; }, commits: () => commits };
+  window.__REACT_DEVTOOLS_GLOBAL_HOOK__ = { supportsFiber: true, renderers: new Map(), inject() { return 1; }, checkDCE() {}, onCommitFiberUnmount() {}, onScheduleFiberRoot() {}, onPostCommitFiberRoot() {}, onCommitFiberRoot(_id, root) { commits++; visit(root.current, root.current.alternate); } };
+})();
+</script></head><body><div id="root"></div><script type="module" src="/scripts/session-history-browser-fixture.tsx"></script></body></html>

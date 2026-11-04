@@ -114,7 +114,7 @@ const SettingsPatch = UpdateSettingsSchema.extend({ claudeExecutable: executable
   if (!value) return true;
   try { const url = new URL(value); return ['http:', 'ws:'].includes(url.protocol) && ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname) && Boolean(url.port) && !url.username && !url.password && !url.search && !url.hash; } catch { return false; }
 }, 'Use a loopback HTTP or WebSocket endpoint with an explicit port').optional() });
-const MessagesQuery = z.object({ limit: z.coerce.number().int().min(1).max(2000).optional(), before: z.string().max(100).optional() });
+const MessagesQuery = z.object({ limit: z.coerce.number().int().min(1).max(2000).optional(), before: z.string().min(1).max(100).optional() });
 const EventsQuery = z.object({ after: z.coerce.number().int().min(0).default(0), projectId: z.string().max(100).optional(), limit: z.coerce.number().int().min(1).max(5000).optional() });
 const WriteFile = z.object({ content: z.string() });
 const ImportsQuery = z.object({ provider: ProviderSchema, projectId: z.string().min(1).max(100).optional(), cursor: z.string().min(1).max(4096).optional() }).strict();
@@ -524,6 +524,8 @@ export function buildRouter(s: Services) {
     const id = param(ctx, 'id');
     if (!s.store.getSession(id)) throw notFound('Session not found');
     const query = parse(MessagesQuery, Object.fromEntries(ctx.url.searchParams));
+    // One answer for unknown and other-session cursors, so a cursor cannot probe whether a message exists elsewhere.
+    if (query.before !== undefined && !s.store.hasSessionMessage(id, query.before)) throw notFound('History cursor not found in this session');
     return s.store.listMessages(id, { limit: query.limit, beforeId: query.before });
   });
   add('GET', '/api/sessions/:id/catalog', (ctx) => {

@@ -502,12 +502,24 @@ export class Store {
     if (patch.content !== undefined) this.run('UPDATE messages SET content = ? WHERE id = ?', patch.content, id);
     if (patch.kind !== undefined) this.run('UPDATE messages SET kind = ? WHERE id = ?', patch.kind, id);
   }
+  /** Whether `messageId` is a stored message of this session; the only valid kind of `beforeId` cursor. */
+  hasSessionMessage(sessionId: string, messageId: string): boolean {
+    return this.get('SELECT 1 AS found FROM messages WHERE id = ? AND session_id = ?', messageId, sessionId) !== undefined;
+  }
+  /**
+   * Newest `limit` messages of a session, oldest first; with `beforeId`, the newest ones stored before that message.
+   * A cursor that is not a message of this session yields nothing, never the newest page.
+   */
   listMessages(sessionId: string, options: { limit?: number; beforeId?: string } = {}): Message[] {
     const limit = Math.min(Math.max(options.limit ?? 500, 1), 2000);
-    const before = options.beforeId ? (this.get('SELECT seq FROM messages WHERE id = ?', options.beforeId)?.seq as number | undefined) : undefined;
-    const rows = before !== undefined
-      ? this.all('SELECT * FROM messages WHERE session_id = ? AND seq < ? ORDER BY seq DESC LIMIT ?', sessionId, before, limit)
-      : this.all('SELECT * FROM messages WHERE session_id = ? ORDER BY seq DESC LIMIT ?', sessionId, limit);
+    let rows: Array<Record<string, unknown>>;
+    if (options.beforeId !== undefined) {
+      const before = this.get('SELECT seq FROM messages WHERE id = ? AND session_id = ?', options.beforeId, sessionId)?.seq as number | undefined;
+      if (before === undefined) return [];
+      rows = this.all('SELECT * FROM messages WHERE session_id = ? AND seq < ? ORDER BY seq DESC LIMIT ?', sessionId, before, limit);
+    } else {
+      rows = this.all('SELECT * FROM messages WHERE session_id = ? ORDER BY seq DESC LIMIT ?', sessionId, limit);
+    }
     return this.withAttachments(rows.reverse().map(mapMessage));
   }
   /** Most recent `perSession` messages of every active session, oldest first within each session. */
