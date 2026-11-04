@@ -9,7 +9,7 @@ import { applySessionSnapshot, applyStreamDelta, findById, pendingOptimisticMess
 import { createRefreshCoordinator, type ScopedOutcome } from './refreshCoordinator';
 
 export type View = 'workspace' | 'tasks' | 'activity' | 'map' | 'team-structure' | 'settings';
-export type SettingsSection = 'account' | 'general' | 'project' | 'agents' | 'team' | 'providers' | 'browser' | 'appearance';
+export type SettingsSection = 'account' | 'general' | 'project' | 'agents' | 'team' | 'providers' | 'usage' | 'browser' | 'appearance';
 export type TeamWorkspaceTab = 'people' | 'projects' | 'devices' | 'agents' | 'conversation' | 'recovery' | 'transfers';
 export type ContextTab = 'overview' | 'files' | 'changes' | 'memory' | 'browser';
 export type Scope = 'session' | 'project';

@@ -17,9 +17,10 @@ import { ProviderExecutableSetting, executableSetting } from './ProviderExecutab
 import { RemoveProjectButton } from './RemoveProjectDialog';
 import { TeamWorkspace } from './distributed/TeamWorkspace';
 import { ProviderUpdates } from './ProviderUpdates';
+import { UsageSettings } from './UsageSettings';
 
 const CATEGORIES: { id: SettingsSection; name: string }[] = [
-  { id: 'general', name: 'General' }, { id: 'account', name: 'Account' }, { id: 'team', name: 'Team workspace' }, { id: 'project', name: 'Project' }, { id: 'agents', name: 'Agents' }, { id: 'providers', name: 'Providers' }, { id: 'browser', name: 'Browser' }, { id: 'appearance', name: 'Appearance' },
+  { id: 'general', name: 'General' }, { id: 'account', name: 'Account' }, { id: 'team', name: 'Team workspace' }, { id: 'project', name: 'Project' }, { id: 'agents', name: 'Agents' }, { id: 'providers', name: 'Providers' }, { id: 'usage', name: 'Usage' }, { id: 'browser', name: 'Browser' }, { id: 'appearance', name: 'Appearance' },
 ];
 const effortName = (id: string, label: string) => ({ low: 'Low', medium: 'Medium', high: 'High', xhigh: 'Extra High', 'extra-high': 'Extra High', max: 'Max', ultra: 'Ultra' } as Record<string, string>)[id.toLowerCase()] ?? label;
 const serviceTiersFor = (model: ProviderModel | undefined) => [
@@ -113,7 +114,7 @@ export function SettingsPage({ onReplayOnboarding }: { onReplayOnboarding: () =>
     }
     void update(patch, 'provider');
   };
-  const status = category === 'account' ? 'Mingle account' : busy === 'providers' ? 'Checking providers…' : busy ? 'Saving…' : error ? 'Could not complete change' : category === 'providers' ? 'Provider settings' : saved ? 'All changes saved' : category === 'project' ? 'Project details' : 'Changes save automatically';
+  const status = category === 'account' ? 'Mingle account' : category === 'usage' ? 'Provider account limits' : busy === 'providers' ? 'Checking providers…' : busy ? 'Saving…' : error ? 'Could not complete change' : category === 'providers' ? 'Provider settings' : saved ? 'All changes saved' : category === 'project' ? 'Project details' : 'Changes save automatically';
 
   return <div className="settings-page" aria-labelledby="settings-title">
     <div className="settings-page__inner">
@@ -123,6 +124,7 @@ export function SettingsPage({ onReplayOnboarding }: { onReplayOnboarding: () =>
       </nav>
       {error ? <InlineError>{error}</InlineError> : null}
       {category === 'account' ? <AccountSettings settings={settings} /> : null}
+      {category === 'usage' ? <UsageSettings /> : null}
       {category === 'team' ? <TeamWorkspace initialTab={teamTab} /> : null}
       {category === 'general' ? <div className="settings-page__section">
         <div className="settings-page__section-head"><h2>New sessions</h2><p>Defaults for your next session. Existing conversations keep their own settings.</p></div>

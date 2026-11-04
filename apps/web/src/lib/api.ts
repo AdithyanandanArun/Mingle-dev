@@ -7,6 +7,7 @@ import type { AccountState, AccountConnection, AccountPreferences, SavedAccountP
 import type { ProjectCollaborationSnapshot, SendTeamChatMessage, TeamChatSnapshot, TeamChatMessage } from '@mingle/contracts';
 import type { ProgressBoardResponse, RunReviewEvidence } from '@mingle/contracts';
 import type { SessionWorkflow, StartSessionWorkflowInput, ResumeSessionWorkflowInput, ProviderUpdateInfo, ProviderUpdatesSnapshot } from '@mingle/contracts';
+import type { AccountUsageProvider, ProviderAccountUsageSnapshot, ProviderResetResult, RedeemProviderResetInput } from '@mingle/contracts';
 import type {
   ContextCompactionResult as ContractContextCompactionResult,
   ProviderFailure as ContractProviderFailure,
@@ -251,6 +252,8 @@ export const api = {
   compactSession: (id: string, signal?: AbortSignal, operationId?: string) => json<ContextCompactionResult>(`/api/sessions/${encodeURIComponent(id)}/compact`, 'POST', operationId ? { operationId } : {}, signal),
   interruptCompaction: (id: string, operationId: string) => json<{ interrupted: boolean }>(`/api/sessions/${encodeURIComponent(id)}/compact/interrupt`, 'POST', { operationId }),
   sessionRecovery: (id: string, signal?: AbortSignal) => json<{ checkpoint: ApiRecoveryCheckpoint | null; failure: ApiProviderFailure | null }>(`/api/sessions/${encodeURIComponent(id)}/recovery`, 'GET', undefined, signal),
+  providerAccountUsage: (provider: AccountUsageProvider, refresh = false, signal?: AbortSignal) => json<ProviderAccountUsageSnapshot>(`/api/providers/${provider}/usage${refresh ? '?refresh=true' : ''}`, 'GET', undefined, signal),
+  redeemProviderReset: (provider: AccountUsageProvider, input: RedeemProviderResetInput, signal?: AbortSignal) => json<ProviderResetResult>(`/api/providers/${provider}/usage/reset`, 'POST', input, signal),
   createCheckpoint: (id: string, reason: string, runId?: string) => json<ApiRecoveryCheckpoint>(`/api/sessions/${encodeURIComponent(id)}/checkpoints`, 'POST', { reason, ...(runId ? { runId } : {}) }),
   attachmentDrafts: (scope: { kind: 'session' | 'group'; id: string }, signal?: AbortSignal) => json<AttachmentRef[]>(`/api/${scope.kind === 'session' ? 'sessions' : 'groups'}/${encodeURIComponent(scope.id)}/attachments`, 'GET', undefined, signal),
   uploadAttachment: async (scope: { kind: 'session' | 'group'; id: string }, file: File, signal?: AbortSignal): Promise<AttachmentRef> => {
