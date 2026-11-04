@@ -147,6 +147,30 @@ describe('autonomous single-session workflow', () => {
     expect(h.t.app.store.db.prepare('SELECT status FROM session_workflow_retries').get()).toEqual({ status: 'cancelled' });
   });
 
+  it('keeps a goal running when its retry timer wakes before the retry and goal deadlines', async () => {
+    const h = await harness();
+    h.scripts.push(
+      async (o, emit) => { emit({ type: 'session', providerSessionId: 'example-native-session' }); await tool(o, 'mingle_plan_update', plan('in_progress')); edit(h, 'work.txt'); },
+      async () => { throw new Error('temporary failure'); },
+    );
+    const retryAt = new Date(Date.now() + 60_000).toISOString();
+    const recovery = h.t.app.recovery as unknown as { failureForRun: (id: string) => unknown };
+    recovery.failureForRun = (id) => {
+      const run = h.t.app.store.getRun(id);
+      if (!run || run.status !== 'failed') return null;
+      return { id: 'failure_test', sessionId: h.sessionId, runId: id, actor: 'session', provider: 'claude', kind: 'temporary_rate_limit', retryable: true, safeToRetry: true, outcomeUnknown: false, dispatchState: 'not-dispatched', continuationSafety: 'safe', retryAt, message: 'Transient.', occurredAt: new Date().toISOString() };
+    };
+    h.service.start(h.sessionId, { goal: 'Keep going', limits: { maxTurns: 5, maxElapsedMinutes: 5, maxStalls: 2 } });
+    await waitFor(() => h.t.app.store.db.prepare("SELECT 1 FROM session_workflow_retries WHERE status='pending'").get(), 6000, 'pending retry');
+    const workflow = h.service.get(h.sessionId)!;
+    // Reproduce a native timer waking early, without depending on scheduler jitter.
+    (h.service as unknown as { onDeadline(id: string): void }).onDeadline(workflow.id);
+    expect(h.service.get(h.sessionId)).toMatchObject({ state: 'running', stopReason: null });
+    expect(h.runs()).toBe(2);
+    expect(h.t.app.store.db.prepare('SELECT status FROM session_workflow_retries').get()).toEqual({ status: 'pending' });
+    h.service.pause(h.sessionId, workflow.version);
+  });
+
   it('pauses a pending retry as app-closed on restart instead of dispatching it', async () => {
     const h = await harness();
     h.scripts.push(
@@ -291,15 +315,14 @@ describe('autonomous single-session workflow', () => {
     h.scripts.push(async (o) => { entered.resolve(); await new Promise<void>((_r, reject) => o.signal.addEventListener('abort', () => reject(new Error('stopped')), { once: true })); });
     const started = h.service.start(h.sessionId, { goal: 'Wait', limits: { maxTurns: 8, maxElapsedMinutes: 1, maxStalls: 2 } });
     await entered.promise;
-    // Move the deadline into the past in storage, then let the single timer fire immediately by re-arming through resume bookkeeping.
-    h.t.app.store.db.prepare('UPDATE session_workflows SET deadline_at=? WHERE id=?').run(new Date(Date.now() + 40).toISOString(), started.id);
+    // Move the persisted deadline into the past before emulating its timer callback.
+    h.t.app.store.db.prepare('UPDATE session_workflows SET deadline_at=? WHERE id=?').run(new Date(Date.now() - 1).toISOString(), started.id);
     // The timer armed at start() still targets the original deadline; emulate expiry via the same code path used by the timer.
     (h.service as unknown as { onDeadline(id: string): void }).onDeadline(started.id);
     const paused = h.service.get(h.sessionId)!;
     expect(paused).toMatchObject({ state: 'paused', stopReason: 'limit', currentRunId: null });
     await idle(h);
     expect(h.t.app.store.bootstrapRuns().find((r) => r.id === started.currentRunId)?.status).toBe('interrupted');
-    await new Promise((r) => setTimeout(r, 60));
     expect(() => h.service.resume(h.sessionId, { expectedVersion: paused.version })).toThrow(/time budget is used up/);
     expect(h.service.resume(h.sessionId, { expectedVersion: paused.version, extendMinutes: 30 })).toMatchObject({ state: 'running', limits: { maxElapsedMinutes: expect.any(Number) } });
   });

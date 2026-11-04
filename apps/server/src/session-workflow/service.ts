@@ -293,6 +293,12 @@ export class SessionWorkflowService {
       }
       return;
     }
+    // A timer can wake before its target millisecond. Recheck the durable deadline
+    // instead of treating an early retry wakeup as an exhausted time budget.
+    if (Date.now() < Date.parse(wf.deadlineAt)) {
+      this.armTimer(wf);
+      return;
+    }
     try {
       this.detach(wf, { state: 'paused', stopReason: 'limit', summary: `The ${wf.limits.maxElapsedMinutes}-minute time budget was reached.` }, 'paused', `Autonomous goal paused: the ${wf.limits.maxElapsedMinutes}-minute time budget was reached.`);
     } catch (error) { this.log('error', 'Could not pause a goal at its deadline', error); }
