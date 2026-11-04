@@ -418,7 +418,7 @@ describe('autonomous single-session workflow', () => {
     expect(h.runs()).toBe(1); // awaiting: no continuation, no polling
     expect(h.service.get(h.sessionId)).toMatchObject({ state: 'running', currentRunId: null });
     store.updateDelegatedSubagent(row.id, { status: 'completed', endedAt: new Date().toISOString() });
-    store.enqueueMessage({ id: newId('msg'), sessionId: h.sessionId, content: 'Subagent @helper (Claude m) finished.\n\nResult:\nok\n\nContinue your work using this result.', intent: 'normal', skills: [], attachmentIds: [], contextRefs: [] });
+    store.enqueueMessage({ id: newId('msg'), sessionId: h.sessionId, content: 'Subagent @helper (Claude m) finished.\n\nResult:\nok\n\nContinue your work using this result.', intent: 'normal', skills: [], attachmentIds: [], contextRefs: [], kind: 'subagent-result', subagentId: row.id });
     h.t.app.runtime.drainQueued(h.sessionId);
     expect(await settled(h)).toMatchObject({ state: 'completed', counters: { turns: 2 } });
     expect(h.t.app.store.getTask(h.service.get(h.sessionId)!.taskId)!.status).toBe('review');
@@ -429,7 +429,8 @@ describe('autonomous single-session workflow', () => {
     const { store } = h.t.app;
     const entered = deferred<void>();
     const child = store.insertSession({ projectId: EXAMPLE_PROJECT_ID, name: '↳ late', provider: 'claude', model: 'claude-sonnet-5-5', effort: 'high', policy: 'supervised', isolated: false, worktreePath: h.dir, branch: 'main', parentSessionId: h.sessionId });
-    store.insertDelegatedSubagent({ id: newId('run'), parentSessionId: h.sessionId, childSessionId: child.id, name: 'late', provider: 'claude', model: 'claude-sonnet-5-5', task: 'x', status: 'completed', requestedBy: 'agent', startedAt: new Date(Date.now() - 1000).toISOString(), endedAt: new Date().toISOString(), resultPreview: null, error: null, resultDelivered: false });
+    const late = { id: newId('run'), parentSessionId: h.sessionId, childSessionId: child.id, name: 'late', provider: 'claude' as const, model: 'claude-sonnet-5-5', task: 'x', status: 'completed' as const, requestedBy: 'agent' as const, startedAt: new Date(Date.now() - 1000).toISOString(), endedAt: new Date().toISOString(), resultPreview: null, error: null, resultDelivered: false };
+    store.insertDelegatedSubagent(late);
     h.scripts.push(
       async (o) => { entered.resolve(); await new Promise<void>((_r, reject) => o.signal.addEventListener('abort', () => reject(new Error('stopped')), { once: true })); },
       async () => undefined,
@@ -439,14 +440,14 @@ describe('autonomous single-session workflow', () => {
     h.service.start(h.sessionId, { goal: 'Late' });
     await entered.promise;
     const paused = h.service.pause(h.sessionId, h.service.get(h.sessionId)!.version);
-    store.enqueueMessage({ id: newId('msg'), sessionId: h.sessionId, content: 'Subagent @late (Claude m) finished.\n\nResult:\nok', intent: 'normal', skills: [], attachmentIds: [], contextRefs: [] });
+    store.enqueueMessage({ id: newId('msg'), sessionId: h.sessionId, content: 'Subagent @late (Claude m) finished.\n\nResult:\nok', intent: 'normal', skills: [], attachmentIds: [], contextRefs: [], kind: 'subagent-result', subagentId: late.id });
     await idle(h);
     h.t.app.runtime.drainQueued(h.sessionId);
     await new Promise((r) => setTimeout(r, 50));
     expect(h.runs()).toBe(1);
     expect(store.listQueuedMessages(h.sessionId)).toHaveLength(1);
-    // An explicit human message still starts a normal, un-adopted run.
-    store.enqueueMessage({ id: 'queued-human', sessionId: h.sessionId, content: 'Hello, please also check X', intent: 'normal', skills: [], attachmentIds: [], contextRefs: [] });
+    // An explicit human message still starts a normal, un-adopted run, even when its text copies a helper result prefix.
+    store.enqueueMessage({ id: 'queued-human', sessionId: h.sessionId, content: 'Subagent @late (Claude m) finished. Hello, please also check X', intent: 'normal', skills: [], attachmentIds: [], contextRefs: [] });
     h.t.app.runtime.drainQueued(h.sessionId);
     await waitFor(() => h.runs() === 2, 4000, 'human run');
     await idle(h);
@@ -468,7 +469,7 @@ describe('autonomous single-session workflow', () => {
     await idle(h);
     await new Promise((r) => setTimeout(r, 20));
     store.updateDelegatedSubagent(row.id, { status: 'completed', endedAt: new Date().toISOString() });
-    store.enqueueMessage({ id: newId('msg'), sessionId: h.sessionId, content: 'Subagent @old (Claude m) finished.\n\nResult:\nok\n\nContinue your work using this result.', intent: 'normal', skills: [], attachmentIds: [], contextRefs: [] });
+    store.enqueueMessage({ id: newId('msg'), sessionId: h.sessionId, content: 'Subagent @old (Claude m) finished.\n\nResult:\nok\n\nContinue your work using this result.', intent: 'normal', skills: [], attachmentIds: [], contextRefs: [], kind: 'subagent-result', subagentId: row.id });
     h.t.app.runtime.drainQueued(h.sessionId);
     await new Promise((r) => setTimeout(r, 60));
     expect(h.runs()).toBe(1);

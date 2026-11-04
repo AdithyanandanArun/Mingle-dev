@@ -200,6 +200,11 @@ function sanitizeProviderFailureInput(error: unknown, scrub: (value: string) => 
   return clean;
 }
 
+/** Queued items keep their server-owned kind when they start, so an internal result is stored as one. */
+function queuedUserMessage(item: import('@mingle/contracts').QueuedMessage): Pick<StartOptions, 'userMessage'> {
+  return item.kind ? { userMessage: { content: item.content, kind: item.kind } } : {};
+}
+
 export class SessionRuntime {
   sendQueuedNow(sessionId:string,messageId:string): void { const item=this.store.listQueuedMessages(sessionId).find((m)=>m.id===messageId); if(!item) throw notFound('Queued message not found'); this.store.removeQueuedMessage(sessionId,messageId); this.interrupt(sessionId); void this.waitAndStartQueued(sessionId,item); }
   private async waitAndStartQueued(sessionId:string,item:import('@mingle/contracts').QueuedMessage): Promise<void> {
@@ -210,7 +215,7 @@ export class SessionRuntime {
     if(this.store.getSession(sessionId)?.status==='waiting') { this.store.enqueueMessage({...item,createdAt:item.createdAt}); return; }
     try {
       const session=this.store.getSession(sessionId);
-      this.start(sessionId,item.content,{intent:item.intent,excludeProjectMemory:item.memory==='exclude',attachmentIds:item.attachmentIds,contextRefs:item.contextRefs,deferContextResolution:true,resolveSkills:session ? this.resolveQueuedSkills?.(session,item.skills) : undefined,queuedAttachmentOwnerId:item.id,origin:'queue'});
+      this.start(sessionId,item.content,{intent:item.intent,excludeProjectMemory:item.memory==='exclude',attachmentIds:item.attachmentIds,contextRefs:item.contextRefs,deferContextResolution:true,resolveSkills:session ? this.resolveQueuedSkills?.(session,item.skills) : undefined,queuedAttachmentOwnerId:item.id,origin:'queue',...queuedUserMessage(item)});
     } catch(error) { this.requeueFront(sessionId,item,`Could not start queued message: ${errorMessage(error)}`); }
   }
   private requeueFront(sessionId:string,item:import('@mingle/contracts').QueuedMessage,reason:string): void {
@@ -292,12 +297,13 @@ export class SessionRuntime {
   isProviderUnderMaintenance(provider: Provider): boolean { return this.providerMaintenance.has(provider); }
   canQueue(sessionId:string): boolean { const run=this.active.get(sessionId); return Boolean(run && !run.cleanupPending && !run.closed); }
   isSteerable(sessionId: string): boolean { const run=this.active.get(sessionId); return Boolean(run && run.providerPhase && !run.closed && !run.cleanupPending && run.provider==='codex' && run.adapter?.steer && run.adapter.isSteerable?.()); }
-  async steer(sessionId: string, content: string): Promise<boolean> {
+  /** `kind` is server-owned provenance for the stored user-side record; internal results are never shown as ordinary chat. */
+  async steer(sessionId: string, content: string, kind: string = 'steered'): Promise<boolean> {
     const run=this.active.get(sessionId);
     if (!run || !run.providerPhase || run.closed || run.cleanupPending || run.provider!=='codex' || !run.adapter?.steer || !run.adapter.isSteerable?.()) return false;
     try {
       await run.adapter.steer(content);
-      this.store.insertMessage({sessionId,role:'user',content,kind:'steered'});
+      this.store.insertMessage({sessionId,role:'user',content,kind});
       return true;
     } catch { return false; }
   }
@@ -1560,7 +1566,7 @@ export class SessionRuntime {
     const queued = next ? this.store.dequeueMessage(sessionId, next.id) : undefined;
     if (!queued) return false;
     try {
-      this.start(sessionId, queued.content, { intent: queued.intent, excludeProjectMemory: queued.memory === 'exclude', attachmentIds: queued.attachmentIds, contextRefs: queued.contextRefs, deferContextResolution: true, resolveSkills: this.resolveQueuedSkills?.(session, queued.skills), queuedAttachmentOwnerId: queued.id, origin: 'queue' });
+      this.start(sessionId, queued.content, { intent: queued.intent, excludeProjectMemory: queued.memory === 'exclude', attachmentIds: queued.attachmentIds, contextRefs: queued.contextRefs, deferContextResolution: true, resolveSkills: this.resolveQueuedSkills?.(session, queued.skills), queuedAttachmentOwnerId: queued.id, origin: 'queue', ...queuedUserMessage(queued) });
       return true;
     } catch (error) {
       this.log('error', `Could not drain queued message for ${sessionId}`, error);

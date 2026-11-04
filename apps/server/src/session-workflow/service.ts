@@ -1,5 +1,6 @@
 import { StartSessionWorkflowSchema, ResumeSessionWorkflowSchema, type SessionWorkflow, type WorkflowFinish, type WorkflowStopReason } from '@mingle/contracts';
-import type { QueuedMessage, Session, DelegatedSubagent, RunReviewGoalTurn } from '@mingle/contracts';
+import type { QueuedMessage, Session, RunReviewGoalTurn } from '@mingle/contracts';
+import { SUBAGENT_RESULT_KIND } from '@mingle/contracts';
 import type { GroupService } from '../groups/service.ts';
 import type { RecoveryService } from '../recovery/service.ts';
 import type { SessionRuntime, StartOptions } from '../runtime.ts';
@@ -333,11 +334,6 @@ export class SessionWorkflowService {
 
   // ---- runtime hooks ------------------------------------------------------------------------------------------------
 
-  private wakeupRow(sessionId: string, content: string): DelegatedSubagent | null {
-    const name = /^Subagent @(\S+) /.exec(content)?.[1];
-    return name ? this.store.listDelegatedSubagents(sessionId).find((row) => row.name === name) ?? null : null;
-  }
-
   private childrenRunning(sessionId: string): boolean {
     return this.store.listDelegatedSubagents(sessionId).some((row) => row.status === 'running');
   }
@@ -374,7 +370,8 @@ export class SessionWorkflowService {
       this.pauseWith(wf, 'limit', 'The goal reached its turn or time budget before this turn could start.');
       throw conflict('The autonomous goal reached its budget and is paused. Resume it with an explicit extension or send your message again as ordinary chat.');
     }
-    const kind: WorkflowRunKind = options.origin === 'queue' ? (this.wakeupRow(sessionId, content) ? 'wakeup' : 'queue') : 'human';
+    // Provenance is server-owned: only a queued delegated-subagent result, never human text that happens to look like one.
+    const kind: WorkflowRunKind = options.origin === 'queue' ? (options.userMessage?.kind === SUBAGENT_RESULT_KIND ? 'wakeup' : 'queue') : 'human';
     return {
       ...options, taskId: wf.taskId, workflow: { workflowId: wf.id, kind } satisfies WorkflowRunBinding,
       context: [options.context, adoptedContext(wf)].filter(Boolean).join('\n\n'),
@@ -574,9 +571,9 @@ export class SessionWorkflowService {
   }
 
   private allowQueuedStart(sessionId: string, item: QueuedMessage): boolean {
-    if (item.id.startsWith('queued-')) return true;
-    const row = this.wakeupRow(sessionId, item.content);
-    if (!row) return true;
+    if (item.kind !== SUBAGENT_RESULT_KIND || !item.subagentId) return true;
+    const row = this.store.getDelegatedSubagent(item.subagentId);
+    if (!row || row.parentSessionId !== sessionId) return true;
     const wf = this.repo.latest(sessionId);
     if (!wf || wf.state === 'running') return true;
     // A result from a helper that started before the goal paused, stopped or completed must not silently start an unbound,

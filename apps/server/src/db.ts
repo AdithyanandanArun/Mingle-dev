@@ -452,6 +452,11 @@ const MIGRATIONS: (string | ((db: DatabaseSync) => void))[] = [
     `CREATE TABLE IF NOT EXISTS run_context_scopes (run_id TEXT PRIMARY KEY REFERENCES session_runs(id) ON DELETE CASCADE, memory_excluded INTEGER NOT NULL CHECK(memory_excluded IN (0,1)));`,
     // Repair unreleased v32 databases upgraded while these two migrations were incorrectly inserted before v28.
     ensureRunContextScopes,
+    // Queued delegated-subagent results keep their server-owned provenance across restarts. Idempotent and additive.
+    (db) => {
+      addColumn(db, 'queued_messages', 'kind', "ALTER TABLE queued_messages ADD COLUMN kind TEXT CHECK (kind IS NULL OR kind = 'subagent-result')");
+      addColumn(db, 'queued_messages', 'subagent_id', 'ALTER TABLE queued_messages ADD COLUMN subagent_id TEXT');
+    },
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;

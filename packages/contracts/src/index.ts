@@ -72,8 +72,20 @@ export interface ToolActivity {
   parentId?: string | null; summary?: string; command?: string | null; input?: string; output?: string;
   cwd?: string | null; exitCode?: number | null; processId?: string | null; durationMs?: number | null;
 }
-export interface Message { id: string; sessionId: string; role: 'user' | 'assistant' | 'system' | 'tool'; content: string; createdAt: string; kind?: string; runId?: string; attachments?: import('./attachments').AttachmentRef[]; contextRefs?: import('./message-context').MessageContextRef[] }
-export interface QueuedMessage { id: string; sessionId: string; content: string; intent: 'normal' | 'plan'; memory?: 'exclude'; skills: string[]; attachmentIds: string[]; contextRefs: import('./message-context').MessageContextRef[]; createdAt: string }
+/**
+ * Server-owned provenance for a delegated subagent's result handed back to its parent. Clients can never set it: client
+ * message bodies are strict and have no `kind`. Chat and queue views hide these; the child session and the subagent
+ * record remain the place to inspect the result.
+ */
+export const SUBAGENT_RESULT_KIND = 'subagent-result';
+export interface Message { id: string; sessionId: string; role: 'user' | 'assistant' | 'system' | 'tool'; content: string; createdAt: string; /** Server-assigned provenance such as `subagent-result`; never copied from client input. */ kind?: string; runId?: string; attachments?: import('./attachments').AttachmentRef[]; contextRefs?: import('./message-context').MessageContextRef[] }
+export interface QueuedMessage {
+  id: string; sessionId: string; content: string; intent: 'normal' | 'plan'; memory?: 'exclude'; skills: string[]; attachmentIds: string[]; contextRefs: import('./message-context').MessageContextRef[]; createdAt: string;
+  /** Server-owned: `subagent-result` marks an internal delegated-subagent result that the queue view should hide. */
+  kind?: 'subagent-result';
+  /** Server-owned: the DelegatedSubagent whose result this internal queued item carries. */
+  subagentId?: string;
+}
 export interface Task { id: string; projectId: string; title: string; description: string; acceptanceCriteria: string; sessionId: string | null; dependsOn: string[]; status: TaskStatus; createdAt: string; updatedAt: string; source?: import('./project-context').TaskSource }
 export interface WorkspaceEvent { id: number; projectId: string | null; sessionId: string | null; type: string; summary: string; payload: Record<string, unknown>; createdAt: string }
 export interface Approval { id: string; sessionId: string; tool: string; description: string; input: Record<string, unknown>; status: 'pending' | 'approved' | 'denied'; createdAt: string }
@@ -212,6 +224,7 @@ export const UpdateSessionSchema = z.object({
   model: z.string().trim().min(1).max(150).optional(), effort: EffortSchema.optional(), policy: PolicySchema.optional(), serviceTier: ServiceTierSchema.optional(),
   pinned: z.boolean().optional(), unread: z.boolean().optional(),
 }).strict().refine((patch) => Object.keys(patch).length > 0, 'Supply a session setting to update');
+/** Strict on purpose: no `kind` field, so a client cannot forge server-owned provenance such as `SUBAGENT_RESULT_KIND`. */
 export const SendMessageSchema = z.object({
   content: z.string().trim().max(100_000).default(''), intent: z.enum(['normal', 'plan']).default('normal'), memory: z.enum(['exclude']).optional(), skills: z.array(z.string().min(1).max(4096)).max(20).optional(),
   /** Persist for the next turn even if this provider currently accepts steering. */
