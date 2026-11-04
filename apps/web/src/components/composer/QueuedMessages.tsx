@@ -10,7 +10,8 @@ interface QueuedMessagesProps {
   active?: boolean;
 }
 
-export function QueuedMessages({ sessionId, items, active = false }: QueuedMessagesProps) {
+export function QueuedMessages({ sessionId, items: queuedItems, active = false }: QueuedMessagesProps) {
+  const items = queuedItems.filter((item) => item.kind !== 'subagent-result');
   const refresh = useMingle((state) => state.refreshNow);
   const [editing, setEditing] = useState<string | null>(null);
   const [text, setText] = useState('');

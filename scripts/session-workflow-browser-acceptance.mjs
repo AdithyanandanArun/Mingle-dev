@@ -7,6 +7,7 @@ import { createRequire } from 'node:module';
 import { mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createServer as createPortProbe } from 'node:net';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
@@ -158,6 +159,10 @@ async function handle(route, schemas) {
 let passed = 0;
 const failures = [];
 const screenshots = [];
+async function openWorkflowDetails(page) {
+  const heading = page.locator('.session-workflow__heading');
+  if (await heading.count() && await heading.getAttribute('aria-expanded') === 'false') await heading.click();
+}
 async function withPage({ viewport = { width: 1000, height: 860 }, reducedMotion = 'reduce', setup, schemas, integratedProgress = false }, run) {
   world = freshWorld();
   setup?.();
@@ -179,6 +184,11 @@ async function withPage({ viewport = { width: 1000, height: 860 }, reducedMotion
     await page.goto(fixtureUrl + (integratedProgress ? '?progress=1' : ''), { waitUntil: 'domcontentloaded' });
     await page.locator('textarea.composer__input').first().waitFor();
     await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    // Most lifecycle cases inspect the expanded controls. Production starts compact; open it explicitly here.
+    if (!integratedProgress) {
+      const heading = page.locator('.session-workflow__heading');
+      if (await heading.count() && await heading.getAttribute('aria-expanded') === 'false') await heading.click();
+    }
     await run({ page, shot, ui: ui(page) });
     assert.deepEqual(errors, [], 'page errors');
     assert.deepEqual(external, [], 'external requests');
@@ -229,8 +239,12 @@ const inViewport = (page, selector) => page.evaluate((sel) => [...document.query
 const textOf = (locator) => locator.innerText();
 
 try {
+  const probe = createPortProbe();
+  await new Promise((resolve, reject) => { probe.once('error', reject); probe.listen(0, '127.0.0.1', resolve); });
+  const fixturePort = probe.address().port;
+  await new Promise((resolve, reject) => probe.close((error) => error ? reject(error) : resolve()));
   server = await createServer({
-    configFile: join(root, 'apps/web/vite.config.ts'), root, appType: 'mpa', server: { host: '127.0.0.1', port: 0 },
+    configFile: join(root, 'apps/web/vite.config.ts'), root, appType: 'mpa', server: { host: '127.0.0.1', port: fixturePort, strictPort: true },
     optimizeDeps: { entries: [join(root, 'scripts/session-workflow-browser-fixture.html')] },
     resolve: { alias: [
       { find: /^@mingle\/contracts$/, replacement: join(root, 'packages/contracts/src/index.ts') },
@@ -345,7 +359,7 @@ try {
     assert.equal(await page.getByRole('button', { name: 'Remove file src/app.ts' }).count(), 0, 'context chips are consumed');
     assert.equal(await page.getByRole('button', { name: 'Remove spec.txt' }).count(), 0, 'attachment tray is consumed');
     await page.getByText('0/12 turns').waitFor();
-    await page.getByText(GOAL, { exact: true }).waitFor();
+    await openWorkflowDetails(page); await page.getByText(GOAL, { exact: true }).waitFor();
     await shot('02-started-desktop');
   }));
 
@@ -492,7 +506,7 @@ try {
   await test('after Stop the Autonomous mode is available again and a new goal replaces the stopped one', () => run({
     setup() { world.workflows = [workflow('s-a', { state: 'stopped', stopReason: 'user-stop', version: 4, goal: 'Previous goal' })]; },
   }, async ({ page, ui: u }) => {
-    await u.label('Stopped by you').waitFor();
+    await page.waitForFunction(() => !document.querySelector('.session-workflow'));
     assert.equal(await u.autonomousDisabled(), false);
     await u.chooseMode('Autonomous');
     await u.input.fill('A fresh goal');
@@ -536,14 +550,14 @@ try {
     assert.equal(await u.resume.isEnabled(), true);
     assert.equal(await u.pause.count(), 0);
     await u.stop.click();
-    await u.label('Stopped by you').waitFor();
+    await page.waitForFunction(() => !document.querySelector('.session-workflow'));
     assert.deepEqual(posts('/workflow/stop').map((item) => item.body), [{ expectedVersion: 4 }]);
     for (const control of [u.pause, u.stop, u.resume]) assert.equal(await control.count(), 0, 'a stopped workflow offers no actions');
     world.workflows = [workflow('s-a', { version: 5 })];
     setStatus('s-a', 'running');
-    await page.reload();
+    await page.reload(); await page.locator('textarea.composer__input').waitFor(); await openWorkflowDetails(page);
     await page.getByRole('button', { name: 'Interrupt run' }).click();
-    await u.label('Stopped by you').waitFor();
+    await page.waitForFunction(() => !document.querySelector('.session-workflow'));
     assert.deepEqual(posts('/workflow/stop').map((item) => item.body).slice(-1), [{ expectedVersion: 5 }]);
     assert.equal(posts('/interrupt').length, 0, 'workflow stop does not fall back to a bare run interrupt');
   }));
@@ -561,7 +575,7 @@ try {
     assert.equal(posts('/workflow/stop').length + posts('/workflow/resume').length, 0);
     assert.equal(find('s-a').version, 2, 'the stale request changed nothing');
     await u.stop.click();
-    await u.label('Stopped by you').waitFor();
+    await page.waitForFunction(() => !document.querySelector('.session-workflow'));
     assert.deepEqual(posts('/workflow/stop').map((item) => item.body), [{ expectedVersion: 2 }], 'the next action uses the refreshed version');
   }));
 
@@ -598,7 +612,7 @@ try {
     assert.ok(Date.parse(find('s-a').deadlineAt) > Date.now(), 'the persisted deadline moved forward');
     world.workflows = [workflow('s-a', { state: 'paused', stopReason: 'limit', version: 6, counters: { turns: 8, stalls: 0 }, deadlineAt: iso(Date.now() - 60_000) })];
     setStatus('s-a', 'idle');
-    await page.reload();
+    await page.reload(); await page.locator('textarea.composer__input').waitFor(); await openWorkflowDetails(page);
     await page.getByText('Resuming grants 8 additional turns and 4 hours more.').waitFor();
     await u.resume.click();
     await u.label('Working toward your goal').waitFor();
@@ -614,7 +628,7 @@ try {
     assert.deepEqual(posts('/workflow/resume').map((item) => item.body), [{ expectedVersion: 7 }]);
     world.workflows = [workflow('s-a', { state: 'paused', stopReason: 'limit', version: 9, limits: { maxTurns: 50, maxElapsedMinutes: 240, maxStalls: 2 }, counters: { turns: 50, stalls: 0 } })];
     setStatus('s-a', 'idle');
-    await page.reload();
+    await page.reload(); await page.locator('textarea.composer__input').waitFor(); await openWorkflowDetails(page);
     await page.getByText('50/50 turns').waitFor();
     assert.equal(await u.resume.isDisabled(), true);
     await page.getByText('This goal reached its maximum budget. Stop it before starting a new goal.').waitFor();
@@ -630,13 +644,13 @@ try {
     assert.deepEqual(posts('/workflow/resume').map((item) => item.body), [{ expectedVersion: 3, extendMinutes: 140 }]);
     world.workflows = [workflow('s-a', { state: 'paused', stopReason: 'limit', version: 5, limits: { maxTurns: 8, maxElapsedMinutes: 1440, maxStalls: 2 }, deadlineAt: iso(Date.now() - 60_000) })];
     setStatus('s-a', 'idle');
-    await page.reload();
+    await page.reload(); await page.locator('textarea.composer__input').waitFor(); await openWorkflowDetails(page);
     await u.label('Run limit reached').waitFor();
     assert.equal(await u.resume.isDisabled(), true);
     await page.getByText('This goal reached its maximum budget. Stop it before starting a new goal.').waitFor();
     assert.equal(posts('/workflow/resume').length, 1, 'no resume attempt past the cap');
     await u.stop.click();
-    await u.label('Stopped by you').waitFor();
+    await page.waitForFunction(() => !document.querySelector('.session-workflow'));
   }));
 
   await test('needs-human waiting is explicit and offers no hidden continuation', () => run({
@@ -657,7 +671,7 @@ try {
     await run({ setup() { world.workflows = [workflow('s-a', { state: 'paused', stopReason: reasons[0][0], summary: `Example summary for ${reasons[0][0]}.` })]; } }, async ({ page, ui: u }) => {
       for (const [reason, label] of reasons) {
         Object.assign(find('s-a'), { stopReason: reason, summary: `Example summary for ${reason}.` });
-        await page.reload();
+        await page.reload(); await page.locator('textarea.composer__input').waitFor(); await openWorkflowDetails(page);
         await u.label(label).waitFor();
         await page.getByText(`Example summary for ${reason}.`, { exact: true }).waitFor();
         assert.equal(await u.resume.isEnabled(), true, `${reason} offers an explicit Resume`);
@@ -666,20 +680,13 @@ try {
     });
   });
 
-  await test('completion is worded as an agent report and Review changes opens the Changes pane', () => run({
+  await test('completed goals leave the composer activity dock once no work or helpers remain', () => run({
     setup() { world.workflows = [workflow('s-a', { state: 'completed', stopReason: 'goal-complete', version: 5, counters: { turns: 4, stalls: 0 }, summary: 'The agent reports the README is updated and the example checks ran.' })]; },
   }, async ({ page, ui: u, shot }) => {
-    const heading = u.label('Agent reported completion');
-    await heading.waitFor();
-    assert.equal(await heading.getAttribute('aria-expanded'), 'false', 'finished workflows start collapsed');
+    assert.equal(await u.panel.count(), 0, 'completed goals do not keep the activity dock open');
+    assert.equal(await page.locator('.composer-activity').count(), 0);
     for (const control of [u.pause, u.stop, u.resume]) assert.equal(await control.count(), 0);
-    await heading.click();
-    await page.getByText('The agent reports the README is updated and the example checks ran.', { exact: true }).waitFor();
-    const text = await textOf(u.panel);
-    assert.doesNotMatch(text.replace('The agent reports the README is updated and the example checks ran.', ''), /\b(verified|certified|accepted|merged|published|passed|done|succeeded)\b/i, 'the host claims nothing beyond the agent report');
     await shot('04-completed-desktop');
-    await page.getByRole('button', { name: 'Review changes' }).click();
-    await page.getByText('Context tab: changes', { exact: true }).waitFor();
   }));
 
   await test('running and paused snapshots restore after a page load without any automatic action', () => run({
@@ -687,12 +694,12 @@ try {
   }, async ({ page, ui: u }) => {
     await u.label('Working toward your goal').waitFor();
     await page.getByText('3/8 turns').waitFor();
-    await page.getByText(GOAL, { exact: true }).waitFor();
-    await page.reload();
+    await openWorkflowDetails(page); await page.getByText(GOAL, { exact: true }).waitFor();
+    await page.reload(); await page.locator('textarea.composer__input').waitFor(); await openWorkflowDetails(page);
     await u.label('Working toward your goal').waitFor();
     await page.getByText('3/8 turns').waitFor();
     Object.assign(find('s-a'), { state: 'paused', stopReason: 'app-closed', version: 6 }); setStatus('s-a', 'idle');
-    await page.reload();
+    await page.reload(); await page.locator('textarea.composer__input').waitFor(); await openWorkflowDetails(page);
     await u.label('Ready to resume after restart').waitFor();
     await page.getByText('Resume checks the current workspace before continuing partial work.').waitFor();
     await page.waitForTimeout(500);
@@ -709,7 +716,7 @@ try {
     setup() { setStatus('s-a', 'running'); world.workflows = [workflow('s-a', { version: 2 })]; world.attachments['s-a'] = [{ id: `att_${hex32(900)}`, name: 'a-notes.txt', mimeType: 'text/plain', size: 3, kind: 'file', createdAt: iso(Date.now()) }]; },
   }, async ({ page, ui: u }) => {
     await page.getByText('Project: Example project A', { exact: true }).waitFor();
-    await page.getByText(GOAL, { exact: true }).waitFor();
+    await openWorkflowDetails(page); await page.getByText(GOAL, { exact: true }).waitFor();
     await page.getByRole('button', { name: 'Remove a-notes.txt' }).waitFor();
     await u.input.fill('draft for A');
     await u.open('Example session B').click();
@@ -732,7 +739,7 @@ try {
     assert.deepEqual(posts('/workflow').map((item) => [item.path, item.body.goal, item.body.attachmentIds, item.body.contextRefs]), [['/api/sessions/s-b/workflow', 'draft for B', [], []]]);
     assert.equal(find('s-a').goal, GOAL);
     assert.equal(find('s-a').version, 2, 'A was untouched');
-    await page.getByText('draft for B', { exact: true }).waitFor();
+    await openWorkflowDetails(page); await page.getByText('draft for B', { exact: true }).waitFor();
   }));
 
   await test('an action in flight when the session changes cannot leak a result or error into the new session', () => run({
@@ -810,10 +817,12 @@ try {
     assert.equal(posts('/workflow')[0].body.limits.maxTurns, 5);
     const heading = u.label('Working toward your goal');
     await heading.focus();
-    await page.keyboard.press('Enter');
     assert.equal(await heading.getAttribute('aria-expanded'), 'false');
-    await page.keyboard.press('Space');
+    await page.keyboard.press('Enter');
     assert.equal(await heading.getAttribute('aria-expanded'), 'true');
+    await page.keyboard.press('Space');
+    assert.equal(await heading.getAttribute('aria-expanded'), 'false');
+    await page.keyboard.press('Enter');
     await page.keyboard.press('Tab');
     assert.equal(await page.evaluate(() => document.activeElement?.getAttribute('aria-label')), 'Pause autonomous workflow');
     assert.notEqual(await page.evaluate(() => getComputedStyle(document.activeElement).outlineStyle), 'none', 'keyboard focus is visible');
@@ -830,17 +839,19 @@ try {
     await run({ reducedMotion: 'no-preference', setup }, async ({ ui: u, page }) => { await u.label('Working toward your goal').waitFor(); assert.equal(await live(page), 'workflow-live'); });
   });
 
-  await test('integrated progress has one collapsed goal strip, checklist and helper navigation; controls and refresh stay usable', () => run({
+  await test('integrated progress has one goal strip and checklist with helpers in a separate floating bubble', () => run({
     integratedProgress: true,
     setup() { setStatus('s-a', 'running'); world.workflows = [workflow('s-a')]; world.delegated = [helper('s-a', 'running', 1)]; },
   }, async ({ page, ui: u, shot }) => {
     const heading = u.label('Working toward your goal');
     assert.equal(await heading.getAttribute('aria-expanded'), 'false');
     assert.equal(await page.locator('.status-bar').count(), 0, 'no second status panel outside the goal');
-    assert.equal(await page.getByRole('button', { name: /^(Expand|Collapse) subagents$/ }).count(), 0, 'no nested helper disclosure');
+    const helperToggle = page.getByRole('button', { name: /^(Expand|Collapse) subagents$/ });
+    assert.equal(await helperToggle.count(), 1, 'helpers have their own floating disclosure');
     assert.equal(await u.pause.isVisible(), true, 'controls remain outside collapsed details');
     await heading.click();
     await page.getByRole('list', { name: 'Task checklist' }).waitFor();
+    if (await helperToggle.getAttribute('aria-expanded') === 'false') await helperToggle.click();
     await page.getByRole('button', { name: 'Open @example-helper-1 subagent session' }).click();
     await page.getByText('Opened helper example-helper-1', { exact: true }).waitFor();
     find('s-a').counters.turns = 2; await u.refresh();

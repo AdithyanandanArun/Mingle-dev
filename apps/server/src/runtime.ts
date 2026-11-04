@@ -1,4 +1,4 @@
-import { ContextCompactionResultSchema, EditSessionPlanSchema, NativeUserInputRequestSchema, ProviderTaskPlanSchema, SessionPlanProposalSchema, SessionPlanStepsSchema, UserInputAnswersSchema } from '@mingle/contracts';
+import { ContextCompactionResultSchema, EditSessionPlanSchema, NativeUserInputRequestSchema, ProviderTaskPlanSchema, SessionPlanProposalSchema, SessionPlanStepsSchema, UserInputAnswersSchema, SUBAGENT_RESULT_KIND } from '@mingle/contracts';
 import type { ProjectIntelligenceService } from './project-intelligence/service.ts';
 import { existsSync, statSync } from 'node:fs';
 import type { ProviderTaskPlan, AdapterEvent, Approval, ContextCompactionResult, EditSessionPlan, Message, MinglePlanUpdate, MingleStatusSet, Provider, ProviderFailure, ProviderSkill, RunChanges, RunOptions, Session, SessionPlan, SubagentMessage, Task, UserInputAnswers, UserQuestion, ToolActivity, ToolCall } from '@mingle/contracts';
@@ -206,7 +206,7 @@ function queuedUserMessage(item: import('@mingle/contracts').QueuedMessage): Pic
 }
 
 export class SessionRuntime {
-  sendQueuedNow(sessionId:string,messageId:string): void { const item=this.store.listQueuedMessages(sessionId).find((m)=>m.id===messageId); if(!item) throw notFound('Queued message not found'); this.store.removeQueuedMessage(sessionId,messageId); this.interrupt(sessionId); void this.waitAndStartQueued(sessionId,item); }
+  sendQueuedNow(sessionId:string,messageId:string): void { const item=this.store.listQueuedMessages(sessionId).find((m)=>m.id===messageId); if(!item) throw notFound('Queued message not found'); if(item.kind===SUBAGENT_RESULT_KIND)throw conflict('Internal subagent results are delivered automatically.'); this.store.removeQueuedMessage(sessionId,messageId); this.interrupt(sessionId); void this.waitAndStartQueued(sessionId,item); }
   private async waitAndStartQueued(sessionId:string,item:import('@mingle/contracts').QueuedMessage): Promise<void> {
     const run=this.active.get(sessionId); if(run) await run.promise;
     const deadline=Date.now()+15_000;
@@ -425,7 +425,8 @@ export class SessionRuntime {
       }
       // Budget freezing and the run binding share this transaction: a refusal rolls back the run row too.
       if (run.workflow) this.workflowHooks!.runBound({ sessionId, runId: run.id, workflow: run.workflow });
-      this.intelligence?.trackRequest(session, run.id, options.userMessage?.content ?? content, options.taskId);
+      // Internal handoffs continue the existing request instead of creating a task from the helper's raw report.
+      this.intelligence?.trackRequest(session, run.id, options.userMessage?.kind === SUBAGENT_RESULT_KIND ? 'Continue' : options.userMessage?.content ?? content, options.taskId);
       this.store.recordEvent({ projectId: session.projectId, sessionId, type: 'session.run.started', summary: `Run started: ${session.name}`, payload: { runId: run.id, provider: session.provider, model: session.model, taskId: options.taskId ?? null, handoffsIncluded: handoffs.length } });
     });
     this.active.set(sessionId, run);

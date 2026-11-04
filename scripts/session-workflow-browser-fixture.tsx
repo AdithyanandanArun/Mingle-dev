@@ -50,12 +50,12 @@ function Fixture() {
     <p>{openedHelper ? `Opened helper ${openedHelper}` : ''}</p>
     {runs.filter((run) => run.status !== 'running').map((run) => <section key={run.id} data-run-id={run.id} tabIndex={-1} aria-label="Example run review target">Example run review for {run.id}</section>)}
     <div style={{ flex: 1 }} />
-    {questions.filter((item) => item.sessionId === session?.id).map((item) => <UserQuestionCard key={item.id} question={item} />)}
+    {questions.filter((item) => item.sessionId === session?.id && item.status !== 'pending').map((item) => <UserQuestionCard key={item.id} question={item} />)}
     {approvals.filter((item) => item.sessionId === session?.id).map((item) => <ApprovalCard key={item.id} approval={item} provider={session?.provider} />)}
+    {session && integrated ? <SubagentRail subagents={[]} delegated={delegated?.filter(item => item.parentSessionId === session.id)} provider={session.provider} onOpen={() => {}} onOpenDelegated={item => setOpenedHelper(item.name)} /> : null}
     {session ? <Composer key={session.id} session={session}
       progressState={integrated ? { primary: 'Example current activity', running: session.status === 'running', steps: [{ id: 'example-step', title: 'Verify the Example change', status: 'in_progress' }] } : undefined}
-      helperCount={delegated?.filter(item => item.parentSessionId === session.id).length ?? 0}
-      helperRail={integrated ? <SubagentRail embedded subagents={[]} delegated={delegated?.filter(item => item.parentSessionId === session.id)} provider={session.provider} onOpen={() => {}} onOpenDelegated={item => setOpenedHelper(item.name)} /> : undefined} /> : <p role="alert">Example bootstrap failed.</p>}
+      helperCount={delegated?.filter(item => item.parentSessionId === session.id && item.status === 'running').length ?? 0} /> : <p role="alert">Example bootstrap failed.</p>}
   </main>;
 }
 

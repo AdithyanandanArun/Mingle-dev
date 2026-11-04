@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import type { ReactNode } from 'react';
 import { ArrowUp, FilePlus2, SlidersHorizontal, Square } from 'lucide-react';
 import type { AttachmentRef, ProviderModel, Session, WorkflowLimits } from '@mingle/contracts';
 import { useMingle } from '../store/store';
@@ -16,7 +15,7 @@ import { usePresence } from '../lib/motion';
 import { useTeamStructure } from '../lib/team-structure-context';
 import { isSafeUndispatchedTransientFailure, providerRecoveryCopy, providerRecoveryKind } from '../lib/providerFailureUi';
 import { reasoningEffortChoices } from '../lib/providers';
-import { SessionWorkflowPanel, WorkflowLimitsControl } from './session-workflow/SessionWorkflowPanel';
+import { WorkflowLimitsControl } from './session-workflow/SessionWorkflowPanel';
 import { SessionProgress } from './session-workflow/SessionProgress';
 import { memoryApi } from './project-memory/memory-api';
 import { clearDraftIfMatches, loadDraft, saveDraft } from '../lib/conversationPersistence';
@@ -34,7 +33,7 @@ const localCommandNames = ['new', 'stop', 'settings', 'model', 'effort', 'permis
 const reservedCommands = new Set(localCommandNames);
 const EMPTY_RUNS: import('@mingle/contracts').SessionRun[] = [];
 
-export function Composer({ session, progressState, helperRail, helperCount = 0 }: { session: Session; progressState?: StatusBarState | null; helperRail?: ReactNode; helperCount?: number }) {
+export function Composer({ session, progressState, helperCount = 0 }: { session: Session; progressState?: StatusBarState | null; helperCount?: number }) {
   const draft = useMingle((s) => s.drafts[session.id] ?? '');
   const draftHydrated = useRef(new Set<string>());
   useLayoutEffect(() => {
@@ -69,11 +68,13 @@ export function Composer({ session, progressState, helperRail, helperCount = 0 }
   const bootRuns = useMingle((s) => s.boot?.runs ?? EMPTY_RUNS);
   const sessionRuns = useMemo(() => bootRuns.filter((run) => run.sessionId === session.id), [bootRuns, session.id]);
   const pendingApproval = useMingle((s) => s.boot?.approvals.find((item) => item.sessionId === session.id && item.status === 'pending'));
-  const pendingQuestion = useMingle((s) => s.boot?.questions.find((item) => item.sessionId === session.id && item.status === 'pending'));
+  const allQuestions = useMingle((s) => s.boot?.questions);
+  const pendingQuestions = useMemo(() => (allQuestions ?? []).filter((item) => item.sessionId === session.id && item.status === 'pending'), [allQuestions, session.id]);
+  const pendingQuestion = pendingQuestions[0];
   const project = useMingle((s) => s.boot?.projects.find((p) => p.id === session.projectId));
   const teamStructure = useTeamStructure().snapshot;
   const allQueuedMessages = useMingle((s) => s.boot?.queuedMessages);
-  const queuedMessages = useMemo(() => (allQueuedMessages ?? []).filter((item) => item.sessionId === session.id), [allQueuedMessages, session.id]);
+  const queuedMessages = useMemo(() => (allQueuedMessages ?? []).filter((item) => item.sessionId === session.id && item.kind !== 'subagent-result'), [allQueuedMessages, session.id]);
   const ref = useRef<HTMLTextAreaElement>(null);
   const compactController = useRef<{ controller: AbortController; targetSessionId: string; operationId: string } | null>(null);
   const [sending, setSending] = useState(false);
@@ -564,8 +565,8 @@ export function Composer({ session, progressState, helperRail, helperCount = 0 }
         <span>This turn failed without a matching classified recovery record. Review the run before continuing; Mingle will not retry it automatically.</span>
         {currentFailedRun ? <button type="button" className="link-btn" onClick={focusRunReview}>Review this run</button> : null}
       </div> : null}
-      {progressState !== undefined || helperRail ? <SessionProgress session={session} workflow={workflow} state={progressState} helpers={helperRail} helperCount={helperCount} onStop={() => void stop()} />
-        : workflow ? <SessionWorkflowPanel key={workflow.id} workflow={workflow} session={session} /> : null}
+      <div className="composer-surface">
+      <SessionProgress session={session} workflow={workflow} state={progressState} questions={pendingQuestions} helperCount={helperCount} onStop={() => void stop()} />
       <div className={cx('composer', blocker && 'is-blocked')}>
         <label htmlFor={`composer-${session.id}`} className="sr-only">Message {session.name}</label>
         <ContextReferenceChips refs={contextRefs} disabled={sending || updating} onRemove={(index) => useMingle.getState().setContextDraft(session.id, contextRefs.filter((_, i) => i !== index))} />
@@ -669,6 +670,7 @@ export function Composer({ session, progressState, helperRail, helperCount = 0 }
             )}
           </div>
         </div>
+      </div>
       </div>
       <Popover anchor={advancedControl} open={advancedOpen} onClose={() => setAdvancedOpen(false)} label="Advanced conversation settings" className="composer-settings" width={310}>
         <div className="composer-settings__heading"><strong>Conversation settings</strong><span>Uses this session’s provider and permissions.</span></div>

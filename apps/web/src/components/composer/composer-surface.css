@@ -1,0 +1,97 @@
+/* One outline owns the activity dock and input, including their shared focus state. */
+.composer-surface {
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  background: var(--bg-panel);
+  box-shadow: var(--shadow-card);
+  transition: border-color var(--motion-fast, 120ms) ease, box-shadow var(--motion-fast, 120ms) ease;
+}
+.composer-surface:focus-within {
+  border-color: var(--line-strong);
+  box-shadow: 0 0 0 1px var(--line-soft), var(--shadow-card);
+}
+.composer-surface > .composer,
+.composer-surface > .composer:focus-within {
+  border: 0;
+  border-radius: 20px;
+  background: transparent;
+  box-shadow: none;
+}
+.composer-activity {
+  display: grid;
+  grid-template-rows: 1fr;
+  min-width: 0;
+  overflow: hidden;
+  border-radius: 19px 19px 0 0;
+  animation: composer-activity-enter 180ms var(--ease-out, ease-out) both;
+}
+.composer-activity.is-closing { pointer-events: none; animation: composer-activity-exit 180ms var(--ease-out, ease-out) both; }
+.composer-activity__inner { min-height: 0; min-width: 0; overflow: hidden; }
+.composer-activity__inner > :last-child { border-bottom: 1px solid var(--line-soft); }
+.composer-surface .status-bar, .composer-surface .session-workflow--compact {
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  animation: none;
+}
+.composer-surface .status-bar__row { min-height: 36px; }
+.composer-surface .status-bar__primary { flex: 1; max-width: none; font-weight: 500; }
+.composer-surface .status-bar__secondary { flex: 0 1 auto; max-width: 44%; }
+.composer-surface .status-bar__task-count { margin-left: auto; }
+.composer-surface .status-bar__toggle:focus-visible, .composer-surface .status-bar__stop:focus-visible {
+  outline: 1px solid var(--fg-3);
+  outline-offset: -4px;
+  border-radius: 8px;
+}
+.composer-surface .session-workflow__body { max-height: min(300px, 42dvh); overflow-y: auto; overscroll-behavior: contain; }
+.composer-question-dock { min-width: 0; }
+.composer-question-dock__toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+  min-height: 38px;
+  border: 0;
+  padding: 8px 12px;
+  background: transparent;
+  color: var(--fg-1);
+  text-align: left;
+  cursor: pointer;
+}
+.composer-question-dock__toggle:hover { background: var(--bg-hover); }
+.composer-question-dock__toggle:focus-visible { outline: 1px solid var(--fg-3); outline-offset: -4px; border-radius: 9px; }
+.composer-question-dock__toggle strong { flex: 1; min-width: 0; font-size: 12px; font-weight: 550; }
+.composer-question-dock__toggle span { color: var(--fg-3); font-size: 11px; }
+.composer-question-dock__count { flex: none; color: var(--fg-3); font-size: 10px; font-variant-numeric: tabular-nums; }
+.composer-question-dock__toggle svg { flex: none; }
+.composer-question-dock__toggle svg:last-child { transition: transform 160ms ease; }
+.composer-question-dock__toggle svg.is-open { transform: rotate(180deg); }
+.composer-question-dock__body { max-height: min(400px, 50dvh); min-width: 0; overflow-y: auto; overscroll-behavior: contain; padding: 2px 14px 14px; animation: composer-question-enter 180ms var(--ease-out, ease-out) both; }
+.composer-question-dock__body[hidden] { display: none; }
+.composer-question-dock__body .question-card__header { display: none; }
+.composer-question-dock__body .question-card + .question-card { padding-top: 12px; margin-top: 12px; border-top: 1px solid var(--line-soft); }
+.composer-question-dock__body .question-card__option { padding: 7px 9px; border-radius: 8px; background: color-mix(in srgb, var(--fg-0) 3%, transparent); }
+.composer-question-dock__body .question-card__option:has(input:checked) { background: color-mix(in srgb, var(--fg-0) 8%, transparent); }
+@keyframes composer-question-enter {
+  from { max-height: 0; opacity: 0; transform: translateY(4px); }
+  to { max-height: min(400px, 50dvh); opacity: 1; transform: translateY(0); }
+}
+@keyframes composer-activity-enter {
+  from { grid-template-rows: 0fr; opacity: 0; transform: translateY(5px); }
+  to { grid-template-rows: 1fr; opacity: 1; transform: translateY(0); }
+}
+@keyframes composer-activity-exit {
+  from { grid-template-rows: 1fr; opacity: 1; }
+  to { grid-template-rows: 0fr; opacity: 0; }
+}
+@media (max-width: 520px) {
+  .composer-question-dock__toggle span { display: none; }
+  .composer-surface .status-bar__secondary { display: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .composer-activity, .composer-activity.is-closing, .composer-question-dock__body { animation: none; }
+  .composer-surface, .composer-question-dock__toggle svg:last-child { transition: none; }
+}

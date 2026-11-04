@@ -7,7 +7,7 @@ import { AgentIdentity } from '../group/AgentIdentity';
 import './SubagentStyles.css';
 
 export function SubagentRail({
-  subagents, delegated = [], provider, onOpen, onOpenDelegated, onCancel, expandAtWidth = 960, embedded = false,
+  subagents, delegated = [], provider, onOpen, onOpenDelegated, onCancel, expandAtWidth = 960, hidden = false,
 }: {
   subagents: readonly SubagentRun[];
   delegated?: readonly DelegatedSubagent[];
@@ -16,7 +16,7 @@ export function SubagentRail({
   onOpenDelegated?: (subagent: DelegatedSubagent) => void;
   onCancel?: (subagent: DelegatedSubagent) => void;
   expandAtWidth?: number;
-  embedded?: boolean;
+  hidden?: boolean;
 }) {
   const panel = useRef<HTMLElement>(null);
   const preference = useRef<boolean | null>(null);
@@ -26,13 +26,16 @@ export function SubagentRail({
   useLayoutEffect(() => {
     const container = panel.current?.parentElement;
     if (!container) return;
+    const composer = container.querySelector('.composer-wrap');
     const update = () => {
       if (preference.current === null) setExpanded(container.clientWidth >= expandAtWidth);
+      panel.current?.style.setProperty('--agent-presence-max-height', `${Math.max(80, Math.min(340, container.clientHeight - (composer?.getBoundingClientRect().height ?? 0) - 70))}px`);
     };
     update();
     window.addEventListener('resize', update);
     const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(update);
     observer?.observe(container);
+    if (composer) observer?.observe(composer);
     return () => {
       observer?.disconnect();
       window.removeEventListener('resize', update);
@@ -53,16 +56,17 @@ export function SubagentRail({
   };
 
   return (
-    <aside ref={panel} className={`agent-presence single-subagents${embedded || expanded ? ' is-expanded' : ' is-collapsed'}${embedded ? ' single-subagents--embedded' : ''}`} aria-label="Subagents">
+    <aside ref={panel} className={`agent-presence single-subagents${expanded ? ' is-expanded' : ' is-collapsed'}${hidden ? ' is-hidden' : ''}`} aria-label="Subagents" aria-hidden={hidden || undefined} inert={hidden}
+      onKeyDown={(event) => { if (event.key === 'Escape' && expanded) { event.preventDefault(); preference.current = false; setExpanded(false); panel.current?.querySelector<HTMLButtonElement>('.agent-presence__toggle')?.focus(); } }}>
       <span className="sr-only" aria-live="polite">{announcement}</span>
-      {!embedded ? <header className="agent-presence__head">
+      <header className="agent-presence__head">
         <strong>Subagents</strong>
         <span>{total}</span>
         <button type="button" className="agent-presence__toggle" aria-label={expanded ? 'Collapse subagents' : 'Expand subagents'} aria-expanded={expanded} aria-controls={listId} onClick={toggle}>
           <span aria-hidden="true">{expanded ? '−' : '+'}</span>
         </button>
-      </header> : null}
-      <ul className="agent-presence__list" id={listId} aria-hidden={!embedded && !expanded} inert={!embedded && !expanded}>
+      </header>
+      <ul className="agent-presence__list" id={listId} aria-hidden={!expanded} inert={!expanded}>
         {delegated.map((item) => {
           const status = item.status === 'running' ? 'Running' : item.status === 'completed' ? 'Done' : item.status === 'failed' ? 'Failed' : 'Cancelled';
           const elapsed = Math.max(0, Math.floor(((item.endedAt ? Date.parse(item.endedAt) : Date.now()) - Date.parse(item.startedAt)) / 1000));

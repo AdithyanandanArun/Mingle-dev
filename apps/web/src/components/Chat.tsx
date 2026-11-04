@@ -64,6 +64,7 @@ function TeammateConsentBanner({ projectId }: { projectId: string }) {
 function SingleSessionPane() {
   const project = useProject();
   const session = useActiveSession();
+  const contextOpen = useMingle((state) => state.contextOpen);
   const hasSessions = useMingle((s) => s.boot?.sessions.some((x) => x.projectId === s.activeProjectId) ?? false);
   const sessionId = session?.id;
   // Token deltas are followed by the one streaming row, not here: this pane only sees which buffers exist.
@@ -88,7 +89,6 @@ function SingleSessionPane() {
   // Select the stable store array, then filter: a selector that returns a new array each time re-renders forever.
   const allDelegatedSubagents = useMingle((s) => s.boot?.delegatedSubagents);
   const delegatedSubagents = useStableById(useMemo(() => (allDelegatedSubagents ?? []).filter((item) => item.parentSessionId === sessionId), [allDelegatedSubagents, sessionId]));
-  const continuingSubagent = delegatedSubagents.find((item) => item.status === 'completed' && item.resultDelivered)?.name;
   const allPlans = useMingle((s) => s.boot?.plans ?? EMPTY_PLANS);
   const allQuestions = useMingle((s) => s.boot?.questions ?? EMPTY_QUESTIONS);
   const allTasks = useMingle((s) => s.boot?.tasks ?? EMPTY_TASKS);
@@ -97,8 +97,8 @@ function SingleSessionPane() {
   const pending = useStableById(useMemo(() => allApprovals.filter((a) => a.sessionId === sessionId && a.status === 'pending'), [allApprovals, sessionId]));
   const statusBarState = useMemo(() => session ? deriveStatusBarState({
     session, runs, toolCalls: sessionToolCalls, tasks: allTasks, events: allEvents, approvals: allApprovals, questions: allQuestions,
-    delegatedSubagents, continuingSubagent,
-  }) : null, [session, runs, sessionToolCalls, allTasks, allEvents, allApprovals, allQuestions, delegatedSubagents, continuingSubagent]);
+    delegatedSubagents,
+  }) : null, [session, runs, sessionToolCalls, allTasks, allEvents, allApprovals, allQuestions, delegatedSubagents]);
   const plans = useStableById(useMemo(() => {
     const rows = allPlans.filter((plan) => plan.sessionId === sessionId);
     const completed = rows.filter((plan) => plan.status === 'completed').at(-1);
@@ -273,14 +273,14 @@ function SingleSessionPane() {
   return (
     <div className="chat">
       {project ? <TeammateConsentBanner projectId={project.id} /> : null}
+      <SubagentRail hidden={contextOpen} subagents={subagents} delegated={delegatedSubagents} provider={session.provider} onOpen={setSelectedSubagentId}
+        onOpenDelegated={(item) => useMingle.getState().selectSession(item.childSessionId)}
+        onCancel={(item) => void api.cancelSubagent(item.id).then(() => useMingle.getState().refreshNow()).catch((error) => useMingle.getState().toast('error', errorMessage(error)))} />
       {selectedSubagent ? <>
         <SubagentChatView key={selectedSubagent.id} subagent={selectedSubagent} provider={session.provider} calls={sessionToolCalls} onBack={closeSubagent} />
-        <SubagentRail subagents={subagents} delegated={delegatedSubagents} provider={session.provider} onOpen={setSelectedSubagentId}
-          onOpenDelegated={(item) => useMingle.getState().selectSession(item.childSessionId)}
-          onCancel={(item) => void api.cancelSubagent(item.id).then(() => useMingle.getState().refreshNow()).catch((error) => useMingle.getState().toast('error', errorMessage(error)))} />
       </> : <>
       <div className="chat__history">
-      <ConversationNavigation key={`${project.id}:${session.id}`} projectId={project.id} sessionId={session.id} messages={allMessages?.filter((message) => message.sessionId === session.id) ?? []} runs={runs} calls={sessionToolCalls} hasOlder={history.hasMore} onLoadOlder={loadOlderMessages} />
+      <ConversationNavigation key={`${project.id}:${session.id}`} projectId={project.id} sessionId={session.id} messages={allMessages?.filter((message) => message.sessionId === session.id && message.kind !== 'subagent-result') ?? []} runs={runs} calls={sessionToolCalls} hasOlder={history.hasMore} onLoadOlder={loadOlderMessages} />
       <div
         className="chat__scroll" ref={scroller} onWheel={() => { stopSettling(); markScrollIntent(); }} onTouchStart={() => { stopSettling(); markScrollIntent(); }} onPointerDown={() => { stopSettling(); markScrollIntent(); }} onKeyDown={() => { stopSettling(); markScrollIntent(); }} role="log" aria-live="polite" aria-label={`Conversation with ${session.name}`}
         onScroll={(e) => {
@@ -326,7 +326,7 @@ function SingleSessionPane() {
           {session.error && session.status === 'error' ? <div className="chat__error" role="alert"><strong>Session error</strong><span>{session.error}</span></div> : null}
           {pending.map((a) => <ApprovalCard key={a.id} approval={a} />)}
           {plans.map((plan) => <SessionPlanCard key={plan.id} plan={plan} reviewReady={completedRunIds.has(plan.runId)} />)}
-          {questions.map((question) => <UserQuestionCard key={question.id} question={question} />)}
+          {questions.filter((question) => question.status !== 'pending').map((question) => <UserQuestionCard key={question.id} question={question} />)}
         </div>
       </div>
       {readerNotice ? <p className="chat__reader-notice" role="status">The saved reading position is outside the loaded history.{history.hasMore ? <> <button type="button" onClick={loadOlderMessages}>Load older messages</button> to look for it.</> : ' It is not available in this session history.'}</p> : null}
@@ -336,10 +336,8 @@ function SingleSessionPane() {
         </button>
       ) : null}
       </div>
-      <Composer key={session.id} session={session} progressState={statusBarState} helperCount={subagents.length + delegatedSubagents.length}
-        helperRail={<SubagentRail embedded subagents={subagents} delegated={delegatedSubagents} provider={session.provider} onOpen={setSelectedSubagentId}
-          onOpenDelegated={(item) => useMingle.getState().selectSession(item.childSessionId)}
-          onCancel={(item) => void api.cancelSubagent(item.id).then(() => useMingle.getState().refreshNow()).catch((error) => useMingle.getState().toast('error', errorMessage(error)))} />} />
+      <Composer key={session.id} session={session} progressState={statusBarState}
+        helperCount={subagents.filter((item) => item.status === 'running').length + delegatedSubagents.filter((item) => item.status === 'running').length} />
       </>}
     </div>
   );

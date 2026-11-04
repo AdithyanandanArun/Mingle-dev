@@ -20,7 +20,6 @@ export interface StatusBarInput {
   questions: readonly UserQuestion[];
   waitingAgents?: readonly { name: string; running: boolean }[];
   delegatedSubagents?: readonly DelegatedSubagent[];
-  continuingSubagent?: string;
 }
 
 interface PlanCandidate { steps: StatusBarStep[]; updatedAt: string }
@@ -143,11 +142,18 @@ export function deriveStatusBarState(input: StatusBarInput): StatusBarState | nu
   const delegatedSubagents = (input.delegatedSubagents ?? []).filter((item) => item.parentSessionId === session.id && item.status === 'running');
   const subagents = [...nativeSubagents, ...delegatedSubagents.map((item) => `@${item.name}`)];
   // An idle agent that is waiting on its subagents still shows the strip ("Waiting for subagent to finish").
-  if (!running && !unfinished && !agents.length && !subagents.length) return null;
+  if (!running && !unfinished && !agents.length && !subagents.length && !pendingQuestion && !pendingApproval) return null;
 
   let primary = 'Working…';
   let secondary: string | undefined;
-  if (explicit && running) {
+  if (pendingQuestion) {
+    primary = 'Waiting for your answer';
+  } else if (pendingApproval) {
+    primary = 'Waiting for approval';
+  } else if (!running && subagents.length) {
+    primary = subagents.length === 1 ? 'Waiting for subagent to finish' : `Waiting for ${subagents.length} subagents to finish`;
+    secondary = subagents.join(', ');
+  } else if (explicit && running) {
     primary = explicit.step;
     const progress = explicit.progress ? `Step ${explicit.progress.current} of ${explicit.progress.total}` : undefined;
     secondary = [progress, explicit.detail, subagents.length ? subagents.join(', ') : undefined, agents.length ? `${agents.length} agent${agents.length === 1 ? '' : 's'} active` : undefined].filter(Boolean).join(' · ') || undefined;
@@ -164,15 +170,9 @@ export function deriveStatusBarState(input: StatusBarInput): StatusBarState | nu
   } else if (agents.length) {
     primary = `Waiting on ${agents.length} agent${agents.length === 1 ? '' : 's'}`;
     secondary = agents.map((agent) => agent.name).filter(Boolean).join(', ') || undefined;
-  } else if (pendingQuestion) {
-    primary = 'Waiting for your answer';
-  } else if (pendingApproval) {
-    primary = 'Waiting for approval';
   } else if (session.status === 'waiting') {
     primary = 'Waiting…';
   }
-
-  if (input.continuingSubagent && !running) primary = `Subagent @${input.continuingSubagent} finished · continuing`;
 
   return { primary, secondary, running, steps: unfinished ? steps : [] };
 }

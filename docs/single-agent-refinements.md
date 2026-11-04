@@ -17,6 +17,10 @@ Keep native conversations, provider availability and permissions truthful. Prese
 | 9 | Navigation and steering | Complete | Search/jump/bookmark loaded conversation activity and edit queued messages. Clearly distinguish supported live steering from queued delivery. |
 | 10 | Interaction polish | Complete | Preserve drafts and reading position across navigation. Verify keyboard controls, narrow layouts and reduced motion without blue accents or gradients. |
 
+## Subsequent composer activity change — 5 November 2026
+
+Helper details now use the top-right floating subagent bubble. The composer dock keeps the activity/checklist/waiting summary and inline pending questions, shares one outer outline with the input, and animates closed once work settles. Completed helper records remain inspectable in the bubble without keeping the dock open. This supersedes item 2's embedded-helper layout. Delegated result prompts are internal handoffs excluded from chat, search and the user queue; see the [implementation contract](implementation-contract.md#automatic-subagent-display).
+
 ## Validation approach
 
 - Run direct TypeScript and focused Vitest/Node checks for substantive changes.

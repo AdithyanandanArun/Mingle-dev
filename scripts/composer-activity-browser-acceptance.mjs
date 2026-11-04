@@ -7,6 +7,7 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createServer as createPortProbe } from 'node:net';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
@@ -44,7 +45,7 @@ const QUESTIONS = [
 ];
 function freshWorld() {
   return {
-    sessionStatus: 'idle', questions: [], nativeChild: null, delegated: [], steps: [], questionFailures: [],
+    sessionStatus: 'idle', questions: [], nativeChild: null, delegated: [], steps: [], questionFailures: [], messages: [], queuedMessages: [],
     log: [], sockets: [],
   };
 }
@@ -73,8 +74,8 @@ function bootstrapPayload() {
     sessions: [{ id: SESSION, projectId: PROJECT, name: 'Example session', provider: 'claude', model: 'claude-example', effort: 'medium', status: world.sessionStatus, policy: 'supervised',
       serviceTier: 'standard', isolated: true, worktreePath: '/example/project/worktree', branch: 'example/session', providerSessionId: null, createdAt: at, updatedAt: at,
       error: null, inputTokens: 0, outputTokens: 0, costUsd: null, pinned: false, unread: false }],
-    messages: [{ id: 'example-parent-request', sessionId: SESSION, role: 'user', content: 'Example request for the composer activity fixture', createdAt: at }],
-    queuedMessages: [], delegatedSubagents: world.delegated, tasks: [], events, approvals: [], plans: [], questions: world.questions, providers, settings,
+    messages: [{ id: 'example-parent-request', sessionId: SESSION, role: 'user', content: 'Example request for the composer activity fixture', createdAt: at }, ...world.messages],
+    queuedMessages: world.queuedMessages, delegatedSubagents: world.delegated, tasks: [], events, approvals: [], plans: [], questions: world.questions, providers, settings,
     version: 'Example fixture', runs, toolCalls, groups: [], workflows: [], lastProjectId: PROJECT,
   };
 }
@@ -131,12 +132,14 @@ async function withPage({ viewport = { width: 1000, height: 860 }, reducedMotion
   page.setDefaultTimeout(6000);
   const errors = [];
   page.on('pageerror', (error) => errors.push(error.message));
-  page.on('console', (message) => { if (message.type() === 'error' && !/Failed to load resource/.test(message.text()) && !hmrNoise.test(message.text())) errors.push(message.text()); });
+  page.on('console', (message) => { if (message.type() === 'error' && !/Failed to load resource/.test(message.text())) errors.push(message.text()); });
   page.on('request', (request) => { if (!sameOrigin(request.url())) aggregate.external.push(request.url()); });
   // The store opens its socket during bootstrap. Keep it inside Playwright so the real onopen path runs without a runtime.
   const socket = (ws) => world.sockets.push(ws.url());
   await context.routeWebSocket('**/ws', socket);
   await context.routeWebSocket('**/ws/**', socket);
+  // Vite's injected dev client opens a separate socket even with HMR disabled; mock only its exact URL shape.
+  await context.routeWebSocket(/^ws:\/\/127\.0\.0\.1:\d+\/\?token=/, () => {});
   await context.route('**/api/**', handle);
   await context.route(`**${PAGE_PATH}`, async (route) => {
     const html = await server.transformIndexHtml(PAGE_PATH, '<!doctype html><html lang="en" data-theme="dark"><head><meta charset="UTF-8" /><title>Composer activity acceptance (Example data)</title></head><body><div id="root"></div><script type="module" src="/scripts/composer-activity-browser-fixture.tsx"></script></body></html>');
@@ -198,17 +201,18 @@ async function test(name, run) {
   try { await run(); passed++; console.log(`PASS ${name}`); }
   catch (error) { failures.push({ name, error }); console.log(`FAIL ${name}\n  ${error instanceof Error ? error.stack : error}`); }
 }
-// Vite's client always probes its own HMR socket (base config port, or port 0 here). That socket is not the mocked store
-// boundary, and the disabled-HMR server rejects it; only these exact messages are ignored, everything else stays fatal.
-const hmrNoise = /WebSocket connection to 'ws:\/\/127\.0\.0\.1:(5173|0)\/\?token=|\[vite\] failed to connect to websocket/;
 const noOverflow = (page) => page.evaluate(() => document.documentElement.scrollWidth <= innerWidth);
 const posts = (suffix) => world.log.filter((item) => item.method === 'POST' && item.path.endsWith(suffix));
 const nativeOpen = (page, state) => page.getByRole('button', { name: `Open @example-source-review subagent chat, ${state}`, exact: true });
 
 try {
+  const probe = createPortProbe();
+  await new Promise((resolve, reject) => { probe.once('error', reject); probe.listen(0, '127.0.0.1', resolve); });
+  const fixturePort = probe.address().port;
+  await new Promise((resolve, reject) => probe.close((error) => error ? reject(error) : resolve()));
   server = await createServer({
     // HMR is disabled: its socket would target the base config port and is not part of the mocked store boundary.
-    configFile: join(root, 'apps/web/vite.config.ts'), root, appType: 'custom', server: { host: '127.0.0.1', port: 0, hmr: false },
+    configFile: join(root, 'apps/web/vite.config.ts'), root, appType: 'custom', server: { host: '127.0.0.1', port: fixturePort, strictPort: true, hmr: false },
     optimizeDeps: { entries: [join(root, 'scripts/composer-activity-browser-fixture.tsx')] },
     resolve: { alias: [
       { find: /^@mingle\/contracts$/, replacement: join(root, 'packages/contracts/src/index.ts') },
@@ -272,6 +276,27 @@ try {
     const text = await u.strip.innerText();
     assert.match(text, /\b2\b/, `strip counts the two running children: ${text}`);
     await shot('strip-summary-waiting-and-working');
+  }));
+
+  await test('internal helper handoffs stay out of chat, search and the editable queue while human text stays visible', () => withPage({ setup: () => {
+    world.delegated = [{ ...delegatedRecord('completed'), resultPreview: 'Example inspectable helper result.', resultDelivered: true }];
+    world.messages = [
+      { id: 'example-internal-result', sessionId: SESSION, role: 'user', kind: 'subagent-result', content: 'Example private handoff payload', createdAt: iso() },
+      { id: 'example-human-result-text', sessionId: SESSION, role: 'user', content: 'Subagent @example-reviewer finished. Human discussion.', createdAt: iso() },
+    ];
+    world.queuedMessages = [{ id: 'example-internal-queue', sessionId: SESSION, kind: 'subagent-result', subagentId: world.delegated[0].id, content: 'Example private queued handoff', intent: 'normal', skills: [], attachmentIds: [], contextRefs: [], createdAt: iso() }];
+  } }, async ({ page, ui: u, shot }) => {
+    await page.getByText('Subagent @example-reviewer finished. Human discussion.', { exact: true }).waitFor();
+    assert.equal(await page.getByText('Example private handoff payload', { exact: true }).count(), 0);
+    assert.equal(await page.getByText('Example private queued handoff', { exact: true }).count(), 0);
+    assert.equal(await page.getByRole('region', { name: 'Queued messages', exact: true }).count(), 0);
+    await u.expandRail();
+    await u.rail.getByText('Example inspectable helper result.', { exact: true }).waitFor();
+    await page.getByRole('button', { name: /Find.*bookmarks/i }).click();
+    const search = page.getByRole('searchbox');
+    await search.fill('Example private handoff payload');
+    assert.equal(await page.getByRole('list', { name: 'Search results', exact: true }).locator('li').count(), 0);
+    await shot('internal-helper-handoff-hidden');
   }));
 
   await test('strip hides when every task is done and no child is running', () => withPage({ setup: () => { world.nativeChild = 'completed'; world.steps = [{ id: 'example-step-1', title: 'Example checklist item', status: 'done' }]; } }, async ({ page, shot, ui: u }) => {

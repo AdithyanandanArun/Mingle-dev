@@ -137,8 +137,6 @@ async function main() {
   });
   const refresh = async () => {
     await page.evaluate(async () => { const { useMingle } = await import('/src/store/store.ts'); await useMingle.getState().refreshNow(); });
-    const strip = page.locator('.status-bar__toggle').first();
-    if (await strip.count() && await strip.getAttribute('aria-expanded') === 'false' && await page.locator('.single-subagents--embedded').count()) await strip.click();
   };
   const rail = page.locator('.single-subagents');
   const makeActivity = (provider, name, status = 'running') => (boot) => {
@@ -224,7 +222,7 @@ async function main() {
     await page.getByRole('button', { name: 'Back to conversation', exact: true }).click();
     assert.equal(await page.locator('.composer textarea').inputValue(), 'Keep my draft');
   });
-  await test('model-callable Mingle delegation appears automatically inside progress', async () => {
+  await test('model-callable Mingle delegation appears in the floating bubble independently of progress', async () => {
     fixture = null; await refresh();
     assert.equal(await rail.count(), 0);
     fixture = (boot) => {
@@ -235,7 +233,9 @@ async function main() {
     };
     await refresh();
     await rail.getByRole('button', { name: 'Open @example-reviewer subagent session', exact: true }).waitFor();
-    assert.equal(await rail.getByRole('button', { name: /^(Expand|Collapse) subagents$/ }).count(), 0, 'one progress disclosure owns helper expansion');
+    if (await rail.getByRole('button', { name: 'Expand subagents' }).count()) await rail.getByRole('button', { name: 'Expand subagents' }).click();
+    assert.equal(await rail.getByRole('button', { name: /^(Expand|Collapse) subagents$/ }).count(), 1, 'the floating bubble owns helper expansion');
+    assert.equal(await page.locator('.composer-surface .single-subagents').count(), 0);
     assert.equal(await page.locator('.status-bar').count(), 1);
   });
   await test('narrow view remains bounded and there are no manual launch requests', async () => {

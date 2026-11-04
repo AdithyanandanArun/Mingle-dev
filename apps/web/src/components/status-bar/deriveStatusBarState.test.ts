@@ -57,6 +57,20 @@ describe('deriveStatusBarState', () => {
     expect(deriveStatusBarState({ ...defaults, session: { ...session, status: 'idle' }, runs: [], waitingAgents: [{ name: '@worker', running: true }] })).toMatchObject({ primary: 'Waiting on 1 agent', secondary: '@worker' });
     expect(deriveStatusBarState({ ...defaults, session: { ...session, status: 'idle' }, runs: [{ ...run, status: 'completed' }], events: [event(1, 'session.progress.plan', { steps: [{ title: 'Done', status: 'done' }] })] })).toBeNull();
   });
+
+  it('keeps questions visible even while idle and prioritizes them over stale progress', () => {
+    const question: UserQuestion = { id: 'question-1', sessionId: session.id, runId: run.id, provider: 'claude', tool: 'AskUserQuestion', status: 'pending', questions: [{ id: 'q', question: 'Which one?', options: [], multiSelect: false, allowOther: true, secret: false }], createdAt: '', resolvedAt: null };
+    const events = [event(1, 'session.progress.status', { runId: run.id, status: { step: 'Inspecting routes' } }), event(2, 'session.progress.plan', { steps: [{ title: 'Inspect routes', status: 'in_progress' }] })];
+    expect(deriveStatusBarState({ ...defaults, events, questions: [question] })?.primary).toBe('Waiting for your answer');
+    expect(deriveStatusBarState({ ...defaults, session: { ...session, status: 'idle' }, runs: [], questions: [question] })?.primary).toBe('Waiting for your answer');
+  });
+
+  it('does not resurrect activity for delivered results or completed children', () => {
+    const child = { id: 'sub-1', parentSessionId: session.id, childSessionId: 'child-1', name: 'review', provider: 'claude' as const, model: session.model, task: 'Review', status: 'completed' as const, requestedBy: 'agent' as const, startedAt: '', endedAt: '', resultPreview: 'Done', error: null, resultDelivered: true };
+    expect(deriveStatusBarState({ ...defaults, session: { ...session, status: 'idle' }, runs: [], delegatedSubagents: [child] })).toBeNull();
+    const events = [event(1, 'session.progress.plan', { steps: [{ title: 'Review current work', status: 'in_progress' }] })];
+    expect(deriveStatusBarState({ ...defaults, session: { ...session, status: 'idle' }, runs: [], events, delegatedSubagents: [child] })?.primary).toBe('Review current work');
+  });
 });
 
 function toolCall(id: string, name: string, category: ToolCall['category']): ToolCall {

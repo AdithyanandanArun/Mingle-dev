@@ -89,6 +89,7 @@ export function deriveDisplayMessages(stored: readonly Message[], input: Display
   for (const m of stored) {
     if (m.sessionId !== input.sessionId) continue;
     seen.add(m.id);
+    if (m.kind === 'subagent-result') continue;
     out.push({ id: m.id, sessionId: m.sessionId, role: m.role, content: m.content, createdAt: m.createdAt, kind: m.kind, runId: m.runId, live: (tracked.has(m.id) || m.kind === 'streaming') && input.running, attachments: m.attachments, contextRefs: m.contextRefs });
   }
   for (const id of input.streamIds) {

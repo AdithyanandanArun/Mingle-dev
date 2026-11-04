@@ -81,6 +81,14 @@ describe('stream buffers', () => {
     expect(pickSessionStreamIds(streams, undefined)).toEqual([]);
   });
 
+  it('keeps internal subagent handoffs out of chat without hiding matching human text', () => {
+    const content = 'Subagent @reviewer finished. Result: checked the routes.';
+    const stored = [message('human', 'user', { content }), message('internal', 'user', { content, kind: 'subagent-result' }), message('reply', 'assistant', { content: 'I reviewed the result.' })];
+    const display = deriveDisplayMessages(stored, { sessionId: 's1', running: true, streamIds: ['internal'] });
+    expect(display.map((item) => item.id)).toEqual(['human', 'reply']);
+    expect(display[0]?.content).toBe(content);
+  });
+
   it('shows streamed text only when it is longer than the stored text', () => {
     const stored: DisplayMessage = { id: 'm', role: 'assistant', content: 'hello', createdAt: '', live: true };
     expect(overlayStream(stored, undefined)).toBe(stored);

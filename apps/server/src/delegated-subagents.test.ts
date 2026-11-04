@@ -143,7 +143,14 @@ describe('delegated subagents',()=>{
     const started=await t.api('POST',`/api/sessions/${EXAMPLE_CLIENT_SESSION_ID}/subagents`,{task:'Parallel task'});expect(started.status).toBe(201);
     await waitFor(()=>t.app.store.getDelegatedSubagent(started.json.id)?.status==='completed');
     const queue=(await t.api('GET',`/api/sessions/${EXAMPLE_CLIENT_SESSION_ID}/queue`)).json;
-    expect(queue).toEqual([expect.objectContaining({kind:SUBAGENT_RESULT_KIND,subagentId:started.json.id,content:expect.stringContaining('Queued result.')})]);
+    expect(queue).toEqual([]);
+    const internal=t.app.store.listQueuedMessages(EXAMPLE_CLIENT_SESSION_ID)[0]!;
+    expect(internal).toMatchObject({kind:SUBAGENT_RESULT_KIND,subagentId:started.json.id,content:expect.stringContaining('Queued result.')});
+    const url=`/api/sessions/${EXAMPLE_CLIENT_SESSION_ID}/queue/${internal.id}`;
+    expect((await t.api('PATCH',url,{content:'Rewrite the internal report'})).status).toBe(409);
+    expect((await t.api('DELETE',url)).status).toBe(409);
+    expect((await t.api('POST',`${url}/send-now`,{})).status).toBe(409);
+    expect(t.app.store.listQueuedMessages(EXAMPLE_CLIENT_SESSION_ID)[0]?.content).toBe(internal.content);
     firstParent.resolve(undefined);
     expect(await parentResult.promise).toContain('Queued result.');
     await waitFor(()=>t.app.store.listQueuedMessages(EXAMPLE_CLIENT_SESSION_ID).length===0);
@@ -160,6 +167,43 @@ describe('delegated subagents',()=>{
     await waitFor(()=>runs.length===1);
     const stored=t.app.store.listMessages(EXAMPLE_CLIENT_SESSION_ID).find(message=>message.content.startsWith('Subagent @researcher finished.'));
     expect(stored).toBeDefined();expect(stored!.kind).toBeUndefined();
+  });
+
+  it('continues the existing parent task instead of turning a helper report into a new request',async()=>{
+    const t=await boot();
+    const parent=t.app.store.getSession(EXAMPLE_CLIENT_SESSION_ID)!;
+    t.app.store.db.prepare('UPDATE projects SET is_example=0 WHERE id=?').run(parent.projectId);
+    const received=deferred<void>();
+    t.fake.script=async(o,emit)=>{if(o.session.parentSessionId)emit({type:'text',text:'The Example code has been reviewed and all requested routes are present.'});else if(o.prompt.includes('Subagent @'))received.resolve(undefined);};
+    await t.api('POST',`/api/sessions/${parent.id}/messages`,{content:'Build the Example routes with a review'});
+    await waitFor(()=>!t.app.runtime.isActive(parent.id));
+    const before=t.app.store.listTasks().filter(task=>task.sessionId===parent.id&&task.source?.kind==='request');
+    expect(before).toHaveLength(1);
+    await t.api('POST',`/api/sessions/${parent.id}/subagents`,{task:'Review the Example routes',name:'review'});
+    await received.promise;
+    const after=t.app.store.listTasks().filter(task=>task.sessionId===parent.id&&task.source?.kind==='request');
+    expect(after.map(task=>task.id)).toEqual(before.map(task=>task.id));
+  });
+
+  it('keeps a result delivered through native Codex steering internal without starting another parent turn',async()=>{
+    const t=await boot();const hold=deferred<void>();gates.push(hold);const steered=deferred<string>();
+    const detect=t.fake.detectProviders.bind(t.fake);
+    t.fake.detectProviders=async settings=>(await detect(settings)).map(info=>info.id==='codex'?{...info,available:true,reason:null}:info);
+    const create=t.fake.createAdapter.bind(t.fake);
+    t.fake.createAdapter=provider=>({...create(provider),...(provider==='codex'?{isSteerable:()=>true,steer:async(content:string)=>{steered.resolve(content);}}:{})});
+    await t.api('POST','/api/providers/refresh',{});
+    const updated=await t.api('PATCH',`/api/sessions/${EXAMPLE_CLIENT_SESSION_ID}`,{provider:'codex',model:'gpt-6.1-sol'});
+    expect(updated.status).toBe(200);
+    t.fake.script=async(o,emit)=>{if(o.session.parentSessionId)emit({type:'text',text:'Example private steered result.'});else await hold.promise;};
+    await t.api('POST',`/api/sessions/${EXAMPLE_CLIENT_SESSION_ID}/messages`,{content:'Build the Example feature'});
+    await waitFor(()=>t.app.runtime.isSteerable(EXAMPLE_CLIENT_SESSION_ID));
+    await t.api('POST',`/api/sessions/${EXAMPLE_CLIENT_SESSION_ID}/subagents`,{task:'Review the Example feature',name:'steering-review'});
+    expect(await steered.promise).toContain('Example private steered result.');
+    await waitFor(()=>t.app.store.listMessages(EXAMPLE_CLIENT_SESSION_ID).some(message=>message.kind===SUBAGENT_RESULT_KIND));
+    expect(t.fake.runs.filter(run=>run.session.id===EXAMPLE_CLIENT_SESSION_ID)).toHaveLength(1);
+    expect(t.app.store.listQueuedMessages(EXAMPLE_CLIENT_SESSION_ID)).toHaveLength(0);
+    const result=t.app.store.listMessages(EXAMPLE_CLIENT_SESSION_ID).find(message=>message.content.includes('Example private steered result.'));
+    expect(result?.kind).toBe(SUBAGENT_RESULT_KIND);
   });
 
   it('persists a queued internal result with its provenance across restart until the parent drains it',async()=>{

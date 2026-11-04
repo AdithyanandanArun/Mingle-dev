@@ -4,7 +4,7 @@ import {
   CreateGroupSchema, AddGroupAgentSchema, UpdateGroupSchema, SendGroupMessageSchema, RepositoryCommitSchema, RepositoryPushSchema, RepositoryBranchSchema, RepositoryPullRequestSchema, BrowserConnectSchema, BrowserSignInSchema, BrowserActionSchema, ApprovalDecisionSchema, ConversationIdSchema, ImportConversationSchema, ProviderSchema, CloneProjectSchema, NewProjectSchema, CreateProjectSchema, CreateSessionSchema, CreateTaskSchema, HandoffSchema, SendMessageSchema, UpdateProjectSchema, UpdateSessionSchema, UpdateSettingsSchema, UpdateTaskSchema, EditSessionPlanSchema, UserInputAnswersSchema, StartSubagentSchema,
   RecoveryActionRequestSchema, InitializeGitSchema,
   StartSessionWorkflowSchema, WorkflowControlSchema, ResumeSessionWorkflowSchema,
-  AccountUsageProviderSchema, RedeemProviderResetSchema,
+  AccountUsageProviderSchema, RedeemProviderResetSchema, SUBAGENT_RESULT_KIND,
 } from '@mingle/contracts';
 import { BrowserImportSchema } from '@mingle/contracts';
 import type { Bootstrap, Session, SessionUsage } from '@mingle/contracts';
@@ -675,9 +675,12 @@ export function buildRouter(s: Services) {
     const id = param(ctx, 'id');
     return s.workflows.resume(id, await ctx.body(ResumeSessionWorkflowSchema));
   });
-  add('GET', '/api/sessions/:id/queue', (ctx) => { const id=param(ctx,'id'); if(!s.store.getSession(id)) throw notFound('Session not found'); return s.store.listQueuedMessages(id); });
-  add('PATCH', '/api/sessions/:id/queue/:messageId', async (ctx) => { const id=param(ctx,'id'); const messageId=param(ctx,'messageId'); const {content,expectedContent}=await ctx.body(z.object({content:z.string().trim().min(1).max(100_000),expectedContent:z.string().max(100_000).optional()}).strict()); const message=s.store.updateQueuedMessage(id,messageId,content,expectedContent); if(!message) { if(s.store.listQueuedMessages(id).some((item)=>item.id===messageId)) throw conflict('Queued message changed while it was being edited. Review the latest version and try again.'); throw notFound('Queued message not found'); } return message; });
-  add('DELETE', '/api/sessions/:id/queue/:messageId', async (ctx) => { const id=param(ctx,'id'); const messageId=param(ctx,'messageId'); s.store.removeQueuedMessage(id,messageId); await s.attachments.discardQueued(messageId); return {ok:true}; });
+  const checkEditableQueueItem = (sessionId: string, messageId: string) => {
+    if (s.store.listQueuedMessages(sessionId).find((item) => item.id === messageId)?.kind === SUBAGENT_RESULT_KIND) throw conflict('Internal subagent results are delivered automatically.');
+  };
+  add('GET', '/api/sessions/:id/queue', (ctx) => { const id=param(ctx,'id'); if(!s.store.getSession(id)) throw notFound('Session not found'); return s.store.listQueuedMessages(id).filter((item) => item.kind !== SUBAGENT_RESULT_KIND); });
+  add('PATCH', '/api/sessions/:id/queue/:messageId', async (ctx) => { const id=param(ctx,'id'); const messageId=param(ctx,'messageId'); checkEditableQueueItem(id,messageId); const {content,expectedContent}=await ctx.body(z.object({content:z.string().trim().min(1).max(100_000),expectedContent:z.string().max(100_000).optional()}).strict()); const message=s.store.updateQueuedMessage(id,messageId,content,expectedContent); if(!message) { if(s.store.listQueuedMessages(id).some((item)=>item.id===messageId)) throw conflict('Queued message changed while it was being edited. Review the latest version and try again.'); throw notFound('Queued message not found'); } return message; });
+  add('DELETE', '/api/sessions/:id/queue/:messageId', async (ctx) => { const id=param(ctx,'id'); const messageId=param(ctx,'messageId'); checkEditableQueueItem(id,messageId); s.store.removeQueuedMessage(id,messageId); await s.attachments.discardQueued(messageId); return {ok:true}; });
   add('POST', '/api/sessions/:id/queue/:messageId/send-now', (ctx) => { const id=param(ctx,'id'); if(!s.store.getSession(id)) throw notFound('Session not found'); if(s.store.getSession(id)?.status==='waiting') throw conflict('Resolve the pending question or approval first.'); s.runtime.sendQueuedNow(id,param(ctx,'messageId')); return new Reply(202,{accepted:true}); });
   add('POST', '/api/sessions/:id/interrupt', (ctx) => {
     const id = param(ctx, 'id');
