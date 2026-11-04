@@ -47,27 +47,22 @@ export function SubagentRail({
   }, [subagents.length, delegated.length]);
 
   if (subagents.length + delegated.length === 0) return null;
-  const total = subagents.length + delegated.length;
-  const announcement = [...subagents.map((item) => `${item.label} ${subagentStatusLabel(item.status)}`), ...delegated.map((item) => `${item.name} ${item.status}`)].join('. ');
+  const liveNative = subagents.filter((item) => item.status === 'running');
+  const liveDelegated = delegated.filter((item) => item.status === 'running');
+  const liveTotal = liveNative.length + liveDelegated.length;
+  const history = [
+    { id: 'finished', label: 'Finished', native: subagents.filter((item) => item.status === 'completed'), delegated: delegated.filter((item) => item.status === 'completed') },
+    { id: 'unsuccessful', label: 'Cancelled / failed', native: subagents.filter((item) => item.status === 'failed' || item.status === 'interrupted'), delegated: delegated.filter((item) => item.status === 'failed' || item.status === 'cancelled') },
+  ];
+  const announcement = `${liveTotal} live subagents. ${history.map((section) => `${section.native.length + section.delegated.length} ${section.label.toLowerCase()}`).join('. ')}.`;
   const toggle = () => {
     const next = !expanded;
     preference.current = next;
     setExpanded(next);
   };
 
-  return (
-    <aside ref={panel} className={`agent-presence single-subagents${expanded ? ' is-expanded' : ' is-collapsed'}${hidden ? ' is-hidden' : ''}`} aria-label="Subagents" aria-hidden={hidden || undefined} inert={hidden}
-      onKeyDown={(event) => { if (event.key === 'Escape' && expanded) { event.preventDefault(); preference.current = false; setExpanded(false); panel.current?.querySelector<HTMLButtonElement>('.agent-presence__toggle')?.focus(); } }}>
-      <span className="sr-only" aria-live="polite">{announcement}</span>
-      <header className="agent-presence__head">
-        <strong>Subagents</strong>
-        <span>{total}</span>
-        <button type="button" className="agent-presence__toggle" aria-label={expanded ? 'Collapse subagents' : 'Expand subagents'} aria-expanded={expanded} aria-controls={listId} onClick={toggle}>
-          <span aria-hidden="true">{expanded ? '−' : '+'}</span>
-        </button>
-      </header>
-      <ul className="agent-presence__list" id={listId} aria-hidden={!expanded} inert={!expanded}>
-        {delegated.map((item) => {
+  const renderRows = (nativeItems: readonly SubagentRun[], delegatedItems: readonly DelegatedSubagent[]) => <>
+        {delegatedItems.map((item) => {
           const status = item.status === 'running' ? 'Running' : item.status === 'completed' ? 'Done' : item.status === 'failed' ? 'Failed' : 'Cancelled';
           const elapsed = Math.max(0, Math.floor(((item.endedAt ? Date.parse(item.endedAt) : Date.now()) - Date.parse(item.startedAt)) / 1000));
           return <li key={`delegated:${item.id}`} className={`agent-presence__row is-${item.status}`}>
@@ -82,7 +77,7 @@ export function SubagentRail({
             </div>
           </li>;
         })}
-        {subagents.map((subagent) => {
+        {nativeItems.map((subagent) => {
           const status = subagentStatusLabel(subagent.status);
           return <li key={subagent.id} className={`agent-presence__row is-${subagent.status}`}>
             <button type="button" className="agent-presence__open" aria-label={`Open @${subagent.handle} subagent chat, ${status}`} onClick={() => onOpen(subagent.id)}>
@@ -101,7 +96,30 @@ export function SubagentRail({
             </button>
           </li>;
         })}
-      </ul>
+  </>;
+
+  return (
+    <aside ref={panel} className={`agent-presence single-subagents${expanded ? ' is-expanded' : ' is-collapsed'}${hidden ? ' is-hidden' : ''}`} aria-label="Subagents" aria-hidden={hidden || undefined} inert={hidden}
+      onKeyDown={(event) => { if (event.key === 'Escape' && expanded) { event.preventDefault(); preference.current = false; setExpanded(false); panel.current?.querySelector<HTMLButtonElement>('.agent-presence__toggle')?.focus(); } }}>
+      <span className="sr-only" aria-live="polite">{announcement}</span>
+      <header className="agent-presence__head">
+        <strong>Subagents</strong>
+        <span>{liveTotal} live</span>
+        <button type="button" className="agent-presence__toggle" aria-label={expanded ? 'Collapse subagents' : 'Expand subagents'} aria-expanded={expanded} aria-controls={listId} onClick={toggle}>
+          <span aria-hidden="true">{expanded ? '−' : '+'}</span>
+        </button>
+      </header>
+      <div className="agent-presence__list" id={listId} aria-hidden={!expanded} inert={!expanded}>
+        {liveTotal ? <ul className="single-subagents__rows" aria-label="Live subagents">{renderRows(liveNative, liveDelegated)}</ul>
+          : <p className="single-subagents__empty">No live subagents</p>}
+        {history.map((section) => {
+          const count = section.native.length + section.delegated.length;
+          return count ? <details key={section.id} className="single-subagents__history">
+            <summary>{section.label}<span>{count}</span></summary>
+            <ul className="single-subagents__rows" aria-label={`${section.label} subagents`}>{renderRows(section.native, section.delegated)}</ul>
+          </details> : null;
+        })}
+      </div>
     </aside>
   );
 }

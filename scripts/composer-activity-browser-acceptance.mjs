@@ -291,6 +291,7 @@ try {
     assert.equal(await page.getByText('Example private queued handoff', { exact: true }).count(), 0);
     assert.equal(await page.getByRole('region', { name: 'Queued messages', exact: true }).count(), 0);
     await u.expandRail();
+    await u.rail.locator('.single-subagents__history > summary').filter({ hasText: 'Finished' }).click();
     await u.rail.getByText('Example inspectable helper result.', { exact: true }).waitFor();
     await page.getByRole('button', { name: /Find.*bookmarks/i }).click();
     const search = page.getByRole('searchbox');

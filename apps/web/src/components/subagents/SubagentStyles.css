@@ -48,3 +48,11 @@
 
 /* Delegated subagents show a handle, status, provider/model and a result preview: give the expanded rail room for them. */
 .agent-presence.single-subagents.is-expanded { width: min(320px, calc(100% - 24px)); }
+
+.single-subagents__rows { margin: 0; padding: 0; list-style: none; }
+.single-subagents__empty { margin: 0; padding: 9px 1px; color: var(--fg-3); font-size: var(--text-xs); }
+.single-subagents__history { min-width: 0; border-top: 1px solid var(--line-soft); }
+.single-subagents__history > summary { padding: 9px 1px; color: var(--fg-2); font-size: var(--text-xs); cursor: pointer; }
+.single-subagents__history > summary > span { float: right; padding-left: 8px; color: var(--fg-3); font-variant-numeric: tabular-nums; }
+.single-subagents__history > summary:hover { color: var(--fg-0); }
+.single-subagents__history > summary:focus-visible { outline: 2px solid var(--fg-1); outline-offset: -2px; border-radius: 4px; }
