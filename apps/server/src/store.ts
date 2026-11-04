@@ -8,6 +8,13 @@ type Row = Record<string, unknown>;
 const RUN_FIELDS = 'id, session_id, user_message_id, provider, model, status, started_at, finished_at, duration_ms, changes_summary';
 const VISIBLE_PROJECTS = 'SELECT id FROM projects WHERE archived_at IS NULL';
 const VISIBLE_SESSIONS = `SELECT id FROM sessions WHERE archived_at IS NULL AND project_id IN (${VISIBLE_PROJECTS})`;
+/** Which runs a bootstrap carries, shared with the per-session snapshot so both select identical rows. */
+const BOOTSTRAP_RUN_ORDER = `WHERE s.id IN (${VISIBLE_SESSIONS}) ORDER BY (r.status = 'running') DESC, r.rowid DESC LIMIT ?`;
+const BOOTSTRAP_TOOL_ORDER = `ORDER BY (r.status = 'running') DESC, t.rowid DESC`;
+const BOOTSTRAP_PLAN_ORDER = "(p.status IN ('review', 'approved', 'executing')) DESC, p.rowid DESC";
+const BOOTSTRAP_QUESTION_ORDER = "(q.status = 'pending') DESC, q.rowid DESC";
+const TOOL_OUTPUT_TAIL = 2000;
+const trimToolCall = (call: ToolCall): ToolCall => ({ ...call, input: call.input.slice(0, 4000), output: call.output.slice(-TOOL_OUTPUT_TAIL), outputTruncated: Boolean(call.outputTruncated || call.output.length > TOOL_OUTPUT_TAIL) });
 
 export const DEFAULT_SETTINGS: AppSettings = {
   defaultProvider: 'codex', defaultCodexModel: 'gpt-6.1-sol', defaultClaudeModel: 'claude-sonnet-5-5', defaultAntigravityModel: 'default', defaultOpencodeModel: 'default', defaultEffort: 'high', defaultIsolated: true,
@@ -23,7 +30,8 @@ export interface NewSession {
 
 export interface NewTask { id?: string; projectId: string; title: string; description: string; acceptanceCriteria: string; sessionId: string | null; dependsOn: string[]; status: TaskStatus }
 
-export type ChangeListener = (event: WorkspaceEvent | undefined) => void;
+/** `sessionId` accompanies an event-less touch that provably changed only that session's own rows. */
+export type ChangeListener = (event: WorkspaceEvent | undefined, sessionId?: string) => void;
 
 export interface SessionResumeEntry {
   runId: string; sessionId: string; reason: string; createdAt: string; attempts: number;
@@ -70,9 +78,13 @@ export class Store {
     return () => this.listeners.delete(listener);
   }
 
-  /** Signals that durable state changed without a workspace event (messages, settings, deltas). */
-  touch(): void {
-    for (const listener of this.listeners) listener(undefined);
+  /**
+   * Signals that durable state changed without a workspace event (messages, settings, deltas). Pass `sessionId` only when
+   * the change is confined to that session's messages, runs, tool calls, queue, approvals, plans, questions or counters;
+   * anything else must stay unscoped so every client reloads the whole workspace.
+   */
+  touch(sessionId?: string): void {
+    for (const listener of this.listeners) listener(undefined, sessionId);
   }
 
   /** Runs `fn` in an IMMEDIATE transaction; nested calls join the outer one. */
@@ -231,8 +243,7 @@ export class Store {
     return { summary: JSON.parse(row.changes_summary as string) as RunChangesSummary, diff: (row.changes_diff as string | null) ?? '', diffTruncated: row.changes_diff_truncated === 1 };
   }
   bootstrapRuns(limit = 200): SessionRun[] {
-    return this.all(`SELECT ${RUN_FIELDS.split(', ').map(field => `r.${field}`).join(', ')} FROM session_runs r JOIN sessions s ON s.id = r.session_id WHERE s.id IN (${VISIBLE_SESSIONS})
-      ORDER BY (r.status = 'running') DESC, r.rowid DESC LIMIT ?`, limit).map((row) => this.mapRun(row));
+    return this.all(`SELECT ${RUN_FIELDS.split(', ').map(field => `r.${field}`).join(', ')} FROM session_runs r JOIN sessions s ON s.id = r.session_id ${BOOTSTRAP_RUN_ORDER}`, limit).map((row) => this.mapRun(row));
   }
   putToolCall(call: ToolCall): void {
     this.run(`INSERT INTO tool_calls(id, run_id, session_id, provider_id, category, status, data) VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -249,9 +260,43 @@ export class Store {
   bootstrapToolCalls(runIds: string[], limit = 1000): ToolCall[] {
     if (!runIds.length) return [];
     const rows = this.all(`SELECT t.data FROM tool_calls t JOIN session_runs r ON r.id = t.run_id
-      WHERE t.run_id IN (${runIds.map(() => '?').join(',')}) ORDER BY (r.status = 'running') DESC, t.rowid DESC LIMIT ?`, ...runIds, limit);
+      WHERE t.run_id IN (${runIds.map(() => '?').join(',')}) ${BOOTSTRAP_TOOL_ORDER} LIMIT ?`, ...runIds, limit);
     // Full bounded output is loaded on demand when a tool disclosure opens.
-    return rows.reverse().map((row) => { const call = JSON.parse(row.data as string) as ToolCall; return { ...call, input: call.input.slice(0, 4000), output: call.output.slice(-2000), outputTruncated: Boolean(call.outputTruncated || call.output.length > 2000) }; });
+    return rows.reverse().map((row) => trimToolCall(JSON.parse(row.data as string) as ToolCall));
+  }
+
+  /** Newest recorded workspace event id, or 0. */
+  lastEventId(): number {
+    return Number(this.get('SELECT MAX(id) AS id FROM events')?.id ?? 0);
+  }
+  /**
+   * One session's share of `bootstrapRuns` and `bootstrapToolCalls`. The global ranking (running first, newest first, 200 runs
+   * and 1,000 tool calls across every session) is evaluated on row ids only; just this session's winners are read and mapped,
+   * so the result equals the bootstrap's rows for the session without materializing anyone else's.
+   */
+  sessionBootstrapRunsAndTools(sessionId: string, runLimit = 200, toolLimit = 1000): { runs: SessionRun[]; toolCalls: ToolCall[] } {
+    const ranked = this.all(`SELECT r.id AS id, r.session_id AS sid FROM session_runs r JOIN sessions s ON s.id = r.session_id ${BOOTSTRAP_RUN_ORDER}`, runLimit);
+    const ownedRunIds = ranked.filter((row) => row.sid === sessionId).map((row) => row.id as string);
+    if (!ownedRunIds.length) return { runs: [], toolCalls: [] };
+    const byId = new Map(this.all(`SELECT ${RUN_FIELDS} FROM session_runs WHERE id IN (${ownedRunIds.map(() => '?').join(',')})`, ...ownedRunIds).map((row) => [row.id as string, row]));
+    const runs = ownedRunIds.map((id) => this.mapRun(byId.get(id)!));
+    const rankedTools = this.all(`SELECT t.rowid AS rid, r.session_id AS sid FROM tool_calls t JOIN session_runs r ON r.id = t.run_id
+      WHERE t.run_id IN (${ranked.map(() => '?').join(',')}) ${BOOTSTRAP_TOOL_ORDER} LIMIT ?`, ...ranked.map((row) => row.id as string), toolLimit);
+    const ownedTools = rankedTools.filter((row) => row.sid === sessionId).map((row) => row.rid as number);
+    const toolCalls = ownedTools.length
+      ? this.all(`SELECT t.data FROM tool_calls t JOIN session_runs r ON r.id = t.run_id WHERE t.rowid IN (${ownedTools.map(() => '?').join(',')}) ${BOOTSTRAP_TOOL_ORDER}`, ...ownedTools)
+        .reverse().map((row) => trimToolCall(JSON.parse(row.data as string) as ToolCall))
+      : [];
+    return { runs, toolCalls };
+  }
+  /** Payload column of the rows a bootstrap's global `order`/`limit` selects from `table`, restricted to one session and chosen by rowid first. */
+  private sessionBootstrapData(sessionId: string, table: 'session_plans' | 'user_questions', alias: 'p' | 'q', order: string, limit: number): string[] {
+    const ranked = this.all(`SELECT ${alias}.rowid AS rid, ${alias}.session_id AS sid FROM ${table} ${alias} JOIN sessions s ON s.id = ${alias}.session_id
+      WHERE s.id IN (${VISIBLE_SESSIONS}) ORDER BY ${order} LIMIT ?`, limit);
+    const owned = ranked.filter((row) => row.sid === sessionId).map((row) => row.rid as number);
+    if (!owned.length) return [];
+    return this.all(`SELECT ${alias}.data FROM ${table} ${alias} WHERE ${alias}.rowid IN (${owned.map(() => '?').join(',')}) ORDER BY ${order}`, ...owned)
+      .reverse().map((row) => row.data as string);
   }
 
   // Durable native plans and interactive questions.
@@ -268,7 +313,7 @@ export class Store {
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(run_id, provider_plan_id) DO UPDATE SET status = excluded.status, data = excluded.data, updated_at = excluded.updated_at`,
       plan.id, plan.sessionId, plan.runId, plan.providerPlanId, plan.status, JSON.stringify(plan), plan.createdAt, plan.updatedAt);
-    this.touch();
+    this.touch(plan.sessionId);
     return plan;
   }
   updateSessionPlan(plan: SessionPlan): SessionPlan { return this.saveSessionPlan(plan); }
@@ -279,8 +324,12 @@ export class Store {
   }
   bootstrapPlans(limit = 300): SessionPlan[] {
     return this.all(`SELECT p.data FROM session_plans p JOIN sessions s ON s.id = p.session_id
-      WHERE s.id IN (${VISIBLE_SESSIONS}) ORDER BY (p.status IN ('review', 'approved', 'executing')) DESC, p.rowid DESC LIMIT ?`, Math.min(Math.max(limit, 1), 1000))
+      WHERE s.id IN (${VISIBLE_SESSIONS}) ORDER BY ${BOOTSTRAP_PLAN_ORDER} LIMIT ?`, Math.min(Math.max(limit, 1), 1000))
       .reverse().map((row) => JSON.parse(row.data as string) as SessionPlan);
+  }
+  /** One session's share of `bootstrapPlans`. */
+  sessionBootstrapPlans(sessionId: string, limit = 300): SessionPlan[] {
+    return this.sessionBootstrapData(sessionId, 'session_plans', 'p', BOOTSTRAP_PLAN_ORDER, Math.min(Math.max(limit, 1), 1000)).map((data) => JSON.parse(data) as SessionPlan);
   }
   interruptExecutingPlans(): void {
     const plans = this.all("SELECT data FROM session_plans WHERE status = 'executing'");
@@ -296,7 +345,7 @@ export class Store {
     this.run(`INSERT INTO user_questions(id, session_id, run_id, native_request_id, status, data, created_at)
       VALUES (?, ?, ?, ?, ?, ?, ?)`, input.question.id, input.question.sessionId, input.question.runId, input.nativeRequestId,
       input.question.status, JSON.stringify(input.question), input.question.createdAt);
-    this.touch();
+    this.touch(input.question.sessionId);
     return input.question;
   }
   getUserQuestion(id: string): UserQuestion | undefined {
@@ -310,8 +359,12 @@ export class Store {
   }
   bootstrapQuestions(limit = 300): UserQuestion[] {
     return this.all(`SELECT q.data FROM user_questions q JOIN sessions s ON s.id = q.session_id
-      WHERE s.id IN (${VISIBLE_SESSIONS}) ORDER BY (q.status = 'pending') DESC, q.rowid DESC LIMIT ?`, Math.min(Math.max(limit, 1), 1000))
+      WHERE s.id IN (${VISIBLE_SESSIONS}) ORDER BY ${BOOTSTRAP_QUESTION_ORDER} LIMIT ?`, Math.min(Math.max(limit, 1), 1000))
       .reverse().map((row) => JSON.parse(row.data as string) as UserQuestion);
+  }
+  /** One session's share of `bootstrapQuestions`. */
+  sessionBootstrapQuestions(sessionId: string, limit = 300): UserQuestion[] {
+    return this.sessionBootstrapData(sessionId, 'user_questions', 'q', BOOTSTRAP_QUESTION_ORDER, Math.min(Math.max(limit, 1), 1000)).map((data) => JSON.parse(data) as UserQuestion);
   }
   resolveUserQuestion(id: string, status: 'answered' | 'cancelled', answers?: UserInputAnswers, reason?: string): UserQuestion {
     const question = this.getUserQuestion(id);
@@ -320,7 +373,7 @@ export class Store {
     const safeAnswers = answers ? Object.fromEntries(Object.entries(answers).filter(([fieldId]) => !question.questions.find((field) => field.id === fieldId)?.secret)) : undefined;
     const updated: UserQuestion = { ...question, status, resolvedAt, ...(safeAnswers ? { answers: safeAnswers } : {}), ...(reason ? { reason } : {}) };
     this.run("UPDATE user_questions SET status = ?, data = ?, resolved_at = ? WHERE id = ? AND status = 'pending'", status, JSON.stringify(updated), resolvedAt, id);
-    this.touch();
+    this.touch(question.sessionId);
     return updated;
   }
   cancelPendingUserQuestions(reason: string, sessionId?: string, runId?: string): UserQuestion[] {
@@ -469,11 +522,11 @@ export class Store {
 
   // messages
   listQueuedMessages(sessionId: string): QueuedMessage[] { return this.all('SELECT * FROM queued_messages WHERE session_id=? ORDER BY created_at,id', sessionId).map((r) => ({ id:r.id as string, sessionId:r.session_id as string, content:r.content as string, intent:r.intent as QueuedMessage['intent'], skills:JSON.parse(r.skills_json as string) as string[], attachmentIds:JSON.parse(r.attachment_ids_json as string) as string[], contextRefs:JSON.parse(r.context_refs_json as string) as QueuedMessage['contextRefs'], createdAt:r.created_at as string })); }
-  enqueueMessage(input: Omit<QueuedMessage, 'createdAt'> & { createdAt?: string }): QueuedMessage { const previous=this.listQueuedMessages(input.sessionId).at(-1)?.createdAt; const candidate=input.createdAt??nowIso(); const createdAt=previous && candidate<=previous ? new Date(Date.parse(previous)+1).toISOString() : candidate; this.run('INSERT INTO queued_messages VALUES(?,?,?,?,?,?,?,?)',input.id,input.sessionId,input.content,input.intent,JSON.stringify(input.skills),JSON.stringify(input.attachmentIds),JSON.stringify(input.contextRefs),createdAt); this.touch(); return this.listQueuedMessages(input.sessionId).find((m)=>m.id===input.id)!; }
-  enqueueMessageFront(input: Omit<QueuedMessage, 'createdAt'> & { createdAt?: string }): QueuedMessage { const first=this.listQueuedMessages(input.sessionId)[0]?.createdAt; const candidate=input.createdAt??nowIso(); const createdAt=first && candidate>=first ? new Date(Date.parse(first)-1).toISOString() : candidate; this.run('INSERT INTO queued_messages VALUES(?,?,?,?,?,?,?,?)',input.id,input.sessionId,input.content,input.intent,JSON.stringify(input.skills),JSON.stringify(input.attachmentIds),JSON.stringify(input.contextRefs),createdAt); this.touch(); return this.listQueuedMessages(input.sessionId).find((m)=>m.id===input.id)!; }
-  dequeueMessage(sessionId: string, id?: string): QueuedMessage | undefined { const message=id?this.listQueuedMessages(sessionId).find((m)=>m.id===id):this.listQueuedMessages(sessionId)[0]; if(message){this.run('DELETE FROM queued_messages WHERE id=?',message.id);this.touch();} return message; }
-  updateQueuedMessage(sessionId:string,id:string,content:string): QueuedMessage | undefined { this.run('UPDATE queued_messages SET content=? WHERE id=? AND session_id=?',content,id,sessionId);this.touch();return this.listQueuedMessages(sessionId).find((m)=>m.id===id); }
-  removeQueuedMessage(sessionId:string,id:string): void { this.run('DELETE FROM queued_messages WHERE id=? AND session_id=?',id,sessionId);this.touch(); }
+  enqueueMessage(input: Omit<QueuedMessage, 'createdAt'> & { createdAt?: string }): QueuedMessage { const previous=this.listQueuedMessages(input.sessionId).at(-1)?.createdAt; const candidate=input.createdAt??nowIso(); const createdAt=previous && candidate<=previous ? new Date(Date.parse(previous)+1).toISOString() : candidate; this.run('INSERT INTO queued_messages VALUES(?,?,?,?,?,?,?,?)',input.id,input.sessionId,input.content,input.intent,JSON.stringify(input.skills),JSON.stringify(input.attachmentIds),JSON.stringify(input.contextRefs),createdAt); this.touch(input.sessionId); return this.listQueuedMessages(input.sessionId).find((m)=>m.id===input.id)!; }
+  enqueueMessageFront(input: Omit<QueuedMessage, 'createdAt'> & { createdAt?: string }): QueuedMessage { const first=this.listQueuedMessages(input.sessionId)[0]?.createdAt; const candidate=input.createdAt??nowIso(); const createdAt=first && candidate>=first ? new Date(Date.parse(first)-1).toISOString() : candidate; this.run('INSERT INTO queued_messages VALUES(?,?,?,?,?,?,?,?)',input.id,input.sessionId,input.content,input.intent,JSON.stringify(input.skills),JSON.stringify(input.attachmentIds),JSON.stringify(input.contextRefs),createdAt); this.touch(input.sessionId); return this.listQueuedMessages(input.sessionId).find((m)=>m.id===input.id)!; }
+  dequeueMessage(sessionId: string, id?: string): QueuedMessage | undefined { const message=id?this.listQueuedMessages(sessionId).find((m)=>m.id===id):this.listQueuedMessages(sessionId)[0]; if(message){this.run('DELETE FROM queued_messages WHERE id=?',message.id);this.touch(sessionId);} return message; }
+  updateQueuedMessage(sessionId:string,id:string,content:string): QueuedMessage | undefined { this.run('UPDATE queued_messages SET content=? WHERE id=? AND session_id=?',content,id,sessionId);this.touch(sessionId);return this.listQueuedMessages(sessionId).find((m)=>m.id===id); }
+  removeQueuedMessage(sessionId:string,id:string): void { this.run('DELETE FROM queued_messages WHERE id=? AND session_id=?',id,sessionId);this.touch(sessionId); }
   insertMessage(input: { id?: string; sessionId: string; role: Message['role']; content: string; kind?: string | null; runId?: string; createdAt?: string; contextRefs?: Message['contextRefs'] }): Message {
     const id = input.id ?? newId('msg');
     const createdAt = input.createdAt ?? nowIso();
@@ -589,6 +642,15 @@ export class Store {
     const pending = this.pendingApprovals();
     const resolved = this.all(`SELECT * FROM approvals WHERE status <> 'pending' AND session_id IN (${VISIBLE_SESSIONS}) ORDER BY rowid DESC LIMIT ?`, resolvedLimit).reverse().map(mapApproval);
     return [...resolved, ...pending];
+  }
+  /** One session's share of `bootstrapApprovals`: every pending approval (never capped) plus its rows among the newest `resolvedLimit` resolved ones. */
+  sessionBootstrapApprovals(sessionId: string, resolvedLimit: number): Approval[] {
+    const recent = this.all(`SELECT id, session_id FROM approvals WHERE status <> 'pending' AND session_id IN (${VISIBLE_SESSIONS}) ORDER BY rowid DESC LIMIT ?`, resolvedLimit)
+      .filter((row) => row.session_id === sessionId).map((row) => row.id as string);
+    const resolved = recent.length
+      ? this.all(`SELECT * FROM approvals WHERE id IN (${recent.map(() => '?').join(',')}) ORDER BY rowid DESC`, ...recent).reverse().map(mapApproval)
+      : [];
+    return [...resolved, ...this.pendingApprovals(sessionId)];
   }
 
   // settings

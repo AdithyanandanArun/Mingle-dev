@@ -1,11 +1,12 @@
 import { create } from 'zustand';
-import type { Bootstrap, GroupSnapshot, Message, MessageContextRef, Project, ServerEvent, ClientEvent, Session, TeamSessionRef } from '@mingle/contracts';
+import { MAX_SCOPED_SESSIONS, type Bootstrap, type GroupSnapshot, type Message, type MessageContextRef, type Project, type ServerEvent, type ClientEvent, type Session, type TeamSessionRef } from '@mingle/contracts';
 import { api, errorMessage } from '../lib/api';
 import { terminalBus } from './terminalBus';
 import { resolveTab, useBrowserStore } from './browser';
 import { activeMembers, findGroupForSession, groupChildSessionIds } from '../lib/groups';
 import { dispatchTeamUpdate } from '../lib/team-live-updates';
-import { applyStreamDelta, findById, pendingOptimisticMessages, pruneStreams, reconcileBootstrap } from './bootstrapState';
+import { applySessionSnapshot, applyStreamDelta, findById, pendingOptimisticMessages, pruneStreams, reconcileBootstrap, validateSessionSnapshot } from './bootstrapState';
+import { createRefreshCoordinator, type ScopedOutcome } from './refreshCoordinator';
 
 export type View = 'workspace' | 'tasks' | 'activity' | 'map' | 'team-structure' | 'settings';
 export type SettingsSection = 'account' | 'general' | 'project' | 'agents' | 'team' | 'providers' | 'browser' | 'appearance';
@@ -44,6 +45,18 @@ export interface TerminalState {
   note: string | null;
 }
 
+/** Events a bootstrap carries; live appends are trimmed to the same window. */
+const EVENT_WINDOW = 500;
+/**
+ * The sessions a `state.changed` frame confines its change to, or null for a full change. A frame whose event names a
+ * different session than its scope, or that names too many, is not trusted to be narrow.
+ */
+function scopedSessionIds(ev: Extract<ServerEvent, { type: 'state.changed' }>): string[] | null {
+  const ids = ev.scope?.sessionIds;
+  if (!Array.isArray(ids) || ids.length === 0 || ids.length > MAX_SCOPED_SESSIONS || ids.some((id) => typeof id !== 'string' || !id)) return null;
+  if (ev.event && (!ev.event.sessionId || !ids.includes(ev.event.sessionId))) return null;
+  return ids;
+}
 /** Minimum spacing between published stream updates; React renders at most this often while text streams in. */
 const STREAM_PUBLISH_MS = 32;
 const LS = 'relay.ui.v2';
@@ -232,8 +245,6 @@ function resolveSelection(s: Pick<MingleState, 'boot' | 'activeProjectId' | 'ses
 
 let socket: WebSocket | null = null;
 let retryTimer: number | undefined;
-let inflight: Promise<void> | null = null;
-let dirty = false;
 let cancelScheduledRefresh: () => void = () => undefined;
 let toastSeq = 1;
 let pendingInput = '';
@@ -260,7 +271,35 @@ export const useMingle = create<MingleState>((set, get) => {
   let lastBootstrapStartedAt = Number.NEGATIVE_INFINITY;
   let savedProjectId: string | null = null;
   let projectSave = Promise.resolve();
-  const refreshScheduler = createRefreshScheduler(() => { void get().refreshNow(); }, () => lastBootstrapStartedAt);
+  /** Sessions archived in this window, so a response issued before the archive cannot bring them back. */
+  const recentlyArchived = new Map<string, number>();
+  const ARCHIVE_TOMBSTONE_MS = 30_000;
+  const withoutRecentlyArchived = (next: Bootstrap): Bootstrap => {
+    if (!recentlyArchived.size) return next;
+    const now = Date.now();
+    const present = new Set(next.sessions.map((session) => session.id));
+    for (const [id, at] of recentlyArchived) if (now - at > ARCHIVE_TOMBSTONE_MS || !present.has(id)) recentlyArchived.delete(id);
+    if (!recentlyArchived.size) return next;
+    const gone = (row: { sessionId: string }): boolean => recentlyArchived.has(row.sessionId);
+    return { ...next, sessions: next.sessions.filter((row) => !recentlyArchived.has(row.id)), messages: next.messages.filter((row) => !gone(row)),
+      runs: next.runs.filter((row) => !gone(row)), toolCalls: next.toolCalls.filter((row) => !gone(row)),
+      ...(next.queuedMessages ? { queuedMessages: next.queuedMessages.filter((row) => !gone(row)) } : {}) };
+  };
+  /** A scoped refresh may stand in for a bootstrap only for a known standalone session; everything shared reloads whole. */
+  const isScopedEligible = (id: string): boolean => {
+    const s = get();
+    if (!s.boot || !lastServerBoot || !findById(s.boot.sessions, id) || !findById(lastServerBoot.sessions, id)) return false;
+    const session = findById(s.boot.sessions, id)!;
+    if (session.parentSessionId || findGroupForSession(s.boot.groups, id)) return false;
+    if (Object.values(s.teamSessionsByProject).some((info) => info.teamSession?.sessionId === id)) return false;
+    return !Object.values(s.selectedTeamSessionByProject).includes(id);
+  };
+  const refreshCoordinator = createRefreshCoordinator({
+    full: () => fullRefresh(),
+    session: (id) => sessionRefresh(id),
+    eligible: isScopedEligible,
+  });
+  const refreshScheduler = createRefreshScheduler(() => { void refreshCoordinator.flush(); }, () => lastBootstrapStartedAt);
   cancelScheduledRefresh = refreshScheduler.cancel;
   const savePersisted = (): void => {
     const s = get();
@@ -297,6 +336,65 @@ export const useMingle = create<MingleState>((set, get) => {
     set(p);
     savePersisted();
   };
+
+  async function fullRefresh(): Promise<void> {
+    lastBootstrapStartedAt = Date.now();
+    try {
+      const next = withoutRecentlyArchived(await api.bootstrap());
+      flushStreams();
+      const s = get();
+      // One structural pass against the previous server payload replaces serializing and comparing the whole body.
+      const serverBoot = reconcileBootstrap(lastServerBoot, next);
+      if (lastServerBoot && serverBoot === lastServerBoot) {
+        if (s.bootLoading || s.bootError || s.staleError) set({ bootError: null, staleError: null, bootLoading: false });
+        return;
+      }
+      lastServerBoot = serverBoot;
+      const pendingOptimistic = pendingOptimisticMessages(s.boot?.messages, serverBoot.messages);
+      // Everything in `serverBoot` is already canonical, so this pass is mostly reference checks.
+      const boot = reconcileBootstrap(s.boot, pendingOptimistic.length
+        ? { ...serverBoot, messages: [...serverBoot.messages, ...pendingOptimistic] }
+        : serverBoot);
+      const sel = resolveSelection(s, boot);
+      const streams = pruneStreams(s.streams, boot);
+      const update: Partial<MingleState> = { boot, bootError: null, staleError: null, bootLoading: false, streams, ...sel };
+      // Publish only what differs so an equal payload (for example one the live events already applied) notifies nobody.
+      const changes = Object.fromEntries(Object.entries(update).filter(([key, value]) => s[key as keyof MingleState] !== value));
+      if (Object.keys(changes).length) set(changes);
+      savePersisted();
+    } catch (e) {
+      const msg = errorMessage(e);
+      if (get().boot) set({ staleError: msg, bootLoading: false });
+      else set({ bootError: msg, bootLoading: false });
+    }
+  }
+
+  /**
+   * Reloads one standalone session's slice. Throws (so the coordinator escalates) on any failure, including a snapshot that
+   * is not exactly the requested session's. The caller serializes requests, so this response is newer than anything applied.
+   */
+  async function sessionRefresh(id: string): Promise<ScopedOutcome> {
+    if (!get().boot) return 'needs-full';
+    if (!findById(get().boot!.sessions, id)) return 'discarded';
+    if (!isScopedEligible(id)) return 'needs-full';
+    lastBootstrapStartedAt = Date.now();
+    const snapshot = validateSessionSnapshot(await api.sessionSnapshot(id), id);
+    flushStreams();
+    const s = get();
+    // Archived or removed while the request was in flight: never bring it back. Became shared: only a full refresh is honest.
+    if (!s.boot || !findById(s.boot.sessions, id)) return 'discarded';
+    if (!isScopedEligible(id)) return 'needs-full';
+    const server = applySessionSnapshot(lastServerBoot!, snapshot);
+    if (!server) return 'needs-full';
+    lastServerBoot = server;
+    const kept = pendingOptimisticMessages(s.boot.messages, snapshot.messages).filter((message) => message.sessionId === id);
+    const boot = applySessionSnapshot(s.boot, snapshot, kept);
+    if (!boot) return 'discarded';
+    const update: Partial<MingleState> = { boot, bootError: null, staleError: null, bootLoading: false, streams: pruneStreams(s.streams, boot) };
+    const changes = Object.fromEntries(Object.entries(update).filter(([key, value]) => s[key as keyof MingleState] !== value));
+    if (Object.keys(changes).length) set(changes);
+    return 'applied';
+  }
 
   const scheduleRefresh = (): void => refreshScheduler.schedule();
 
@@ -360,8 +458,13 @@ export const useMingle = create<MingleState>((set, get) => {
         }
         const boot = get().boot;
         if (incoming && boot && !boot.events.some((e) => e.id === incoming.id)) {
-          set({ boot: { ...boot, events: [...boot.events, incoming] } });
+          // Scoped refreshes never reload the event list, so keep it to the window a bootstrap carries.
+          const events = [...boot.events, incoming];
+          set({ boot: { ...boot, events: events.length > EVENT_WINDOW ? events.slice(-EVENT_WINDOW) : events } });
         }
+        const sessionIds = scopedSessionIds(ev);
+        if (sessionIds) refreshCoordinator.requestSessions(sessionIds);
+        else refreshCoordinator.requestFull();
         scheduleRefresh();
         window.dispatchEvent(new Event('mingle:state-changed'));
         if (incoming) dispatchTeamUpdate(incoming);
@@ -371,7 +474,7 @@ export const useMingle = create<MingleState>((set, get) => {
         const existing = pendingStreams?.[ev.messageId] ?? get().streams[ev.messageId];
         const snapshot = findById(get().boot?.messages, ev.messageId)?.content ?? '';
         const entry = applyStreamDelta(existing, snapshot, ev);
-        if (!entry) { scheduleRefresh(); break; }
+        if (!entry) { refreshCoordinator.requestFull(); scheduleRefresh(); break; }
         (pendingStreams ??= {})[ev.messageId] = entry;
         publishStreams();
         break;
@@ -438,6 +541,8 @@ export const useMingle = create<MingleState>((set, get) => {
       // Deltas missed while disconnected would leave gaps, so rebuild from the server snapshot.
       discardPendingStreams();
       set({ connection: 'online', attempt: 0, nextRetryAt: null, streams: {} });
+      // Notifications missed while disconnected cannot be scoped: forget scoped failures and rebuild everything.
+      refreshCoordinator.reset();
       void get().refreshNow();
     };
     ws.onmessage = (msg) => {
@@ -549,45 +654,8 @@ export const useMingle = create<MingleState>((set, get) => {
     },
 
     refreshNow() {
-      if (inflight) {
-        dirty = true;
-        return inflight;
-      }
-      lastBootstrapStartedAt = Date.now();
-      inflight = (async () => {
-        do {
-          dirty = false;
-          try {
-            const next = await api.bootstrap();
-            flushStreams();
-            const s = get();
-            // One structural pass against the previous server payload replaces serializing and comparing the whole body.
-            const serverBoot = reconcileBootstrap(lastServerBoot, next);
-            if (lastServerBoot && serverBoot === lastServerBoot) {
-              if (s.bootLoading || s.bootError || s.staleError) set({ bootError: null, staleError: null, bootLoading: false });
-              continue;
-            }
-            lastServerBoot = serverBoot;
-            const pendingOptimistic = pendingOptimisticMessages(s.boot?.messages, serverBoot.messages);
-            // Everything in `serverBoot` is already canonical, so this pass is mostly reference checks.
-            const boot = reconcileBootstrap(s.boot, pendingOptimistic.length
-              ? { ...serverBoot, messages: [...serverBoot.messages, ...pendingOptimistic] }
-              : serverBoot);
-            const sel = resolveSelection(s, boot);
-            const streams = pruneStreams(s.streams, boot);
-            const update: Partial<MingleState> = { boot, bootError: null, staleError: null, bootLoading: false, streams, ...sel };
-            // Publish only what differs so an equal payload (for example one the live events already applied) notifies nobody.
-            const changes = Object.fromEntries(Object.entries(update).filter(([key, value]) => s[key as keyof MingleState] !== value));
-            if (Object.keys(changes).length) set(changes);
-            savePersisted();
-          } catch (e) {
-            const msg = errorMessage(e);
-            if (get().boot) set({ staleError: msg, bootLoading: false });
-            else set({ bootError: msg, bootLoading: false });
-          }
-        } while (dirty);
-      })().finally(() => { inflight = null; });
-      return inflight;
+      refreshCoordinator.requestFull();
+      return refreshCoordinator.flush();
     },
 
     reconnect() {
@@ -735,6 +803,7 @@ export const useMingle = create<MingleState>((set, get) => {
     applyArchivedSessions(sessionIds, groupId) {
       flushStreams();
       const ids = new Set(sessionIds);
+      for (const id of ids) recentlyArchived.set(id, Date.now());
       const terminalSessionId = get().terminal.sessionId;
       if (terminalSessionId && ids.has(terminalSessionId)) get().stopTerminal();
       set((s) => {

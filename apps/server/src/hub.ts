@@ -1,6 +1,6 @@
 import type { IncomingMessage } from 'node:http';
 import type { Duplex } from 'node:stream';
-import type { ServerEvent, WorkspaceEvent } from '@mingle/contracts';
+import type { ServerEvent, StateChangeScope, WorkspaceEvent } from '@mingle/contracts';
 import { WebSocketServer, type WebSocket } from 'ws';
 import type { Security } from './security.ts';
 import type { Logger } from './types.ts';
@@ -81,8 +81,9 @@ export class Hub {
     for (const socket of this.clients) if (socket.readyState === socket.OPEN) socket.send(payload);
   }
 
-  notify(event?: WorkspaceEvent): void {
-    this.broadcast(event ? { type: 'state.changed', event } : { type: 'state.changed' });
+  /** `scope` narrows what changed to specific sessions; without it clients must treat everything as changed. */
+  notify(event?: WorkspaceEvent, scope?: StateChangeScope): void {
+    this.broadcast({ type: 'state.changed', ...(event ? { event } : {}), ...(scope ? { scope } : {}) });
   }
 
   async close(): Promise<void> {

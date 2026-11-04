@@ -133,6 +133,8 @@ export const api = {
   accountPreferences: (signal?: AbortSignal) => json<SavedAccountPreferences | null>('/api/account/preferences', 'GET', undefined, signal),
   saveAccountPreferences: (preferences: AccountPreferences, expectedRevision: number | null) => json<SavedAccountPreferences>('/api/account/preferences', 'PUT', { preferences, expectedRevision }),
   bootstrap: (signal?: AbortSignal) => json<Bootstrap>('/api/bootstrap', 'GET', undefined, signal),
+  /** One standalone session's share of the bootstrap; unvalidated, callers check it against the session they asked for. */
+  sessionSnapshot: (id: string, signal?: AbortSignal) => json<unknown>(`/api/sessions/${encodeURIComponent(id)}/snapshot`, 'GET', undefined, signal),
   rememberProject: (projectId: string) => json<{ projectId: string }>('/api/workspace/selection', 'PUT', { projectId }),
   startSubagent: (sessionId: string, input: StartSubagent) => json<DelegatedSubagent>(`/api/sessions/${encodeURIComponent(sessionId)}/subagents`, 'POST', input),
   cancelSubagent: (id: string) => json<DelegatedSubagent>(`/api/subagents/${encodeURIComponent(id)}/cancel`, 'POST', {}),

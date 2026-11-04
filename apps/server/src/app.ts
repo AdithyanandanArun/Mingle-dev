@@ -45,6 +45,8 @@ import { createTeamOrchestration, type TeamOrchestrationDeviceSideFactory } from
 import { createDeviceSide } from './team-orchestration/device/index.ts';
 import { SessionResumeService } from './session-resume.ts';
 import { SessionWorkflowService } from './session-workflow/service.ts';
+import { sessionScopeOf } from './session-snapshot.ts';
+import { MAX_SCOPED_SESSIONS } from '@mingle/contracts';
 import { WORKFLOW_RESTART_MESSAGE, workflowOwnsRun } from './session-workflow/ownership.ts';
 import { DelegatedSubagentService } from './delegated-subagents.ts';
 import { SubagentMcpBridge } from './subagent-mcp.ts';
@@ -306,12 +308,29 @@ export function createApplication(options: ApplicationOptions): MingleApplicatio
   };
   hub.bind({ onMessage: (socket, raw) => terminals.handleMessage(socket, raw), onClose: (socket) => terminals.releaseSocket(socket) });
 
-  // Coalesce delta-free state notifications; events are forwarded immediately and carry their record.
+  // Coalesce delta-free state notifications; events are forwarded immediately and carry their record. A burst of
+  // session-confined touches announces just those sessions; any other touch widens the window to a full change.
   let pendingNotify: NodeJS.Timeout | null = null;
-  store.subscribe((event) => {
-    if (event) return hub.notify(event);
+  let pendingGlobal = false;
+  const pendingSessions = new Set<string>();
+  store.subscribe((event, sessionId) => {
+    if (event) return hub.notify(event, sessionScopeOf(event));
+    if (sessionId && !pendingGlobal) {
+      pendingSessions.add(sessionId);
+      if (pendingSessions.size > MAX_SCOPED_SESSIONS) { pendingGlobal = true; pendingSessions.clear(); }
+    } else {
+      pendingGlobal = true;
+      pendingSessions.clear();
+    }
     if (pendingNotify) return;
-    pendingNotify = setTimeout(() => { pendingNotify = null; hub.notify(); }, 60);
+    pendingNotify = setTimeout(() => {
+      pendingNotify = null;
+      const sessionIds = [...pendingSessions];
+      const scoped = !pendingGlobal && sessionIds.length > 0;
+      pendingGlobal = false;
+      pendingSessions.clear();
+      hub.notify(undefined, scoped ? { sessionIds } : undefined);
+    }, 60);
   });
 
   const dispatch = buildRouter(services);

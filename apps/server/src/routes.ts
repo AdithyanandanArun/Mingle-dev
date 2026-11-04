@@ -50,6 +50,7 @@ import type { ProjectMemoryService } from './project-memory/service.ts';
 import type { ProjectMemoryTeamSync } from './project-memory/sync.ts';
 import { registerProjectMemoryRoutes } from './project-memory/routes.ts';
 import type { SessionWorkflowService } from './session-workflow/service.ts';
+import { buildSessionSnapshot } from './session-snapshot.ts';
 
 export interface Services {
   distributed: DistributedWorkspaceService;
@@ -247,6 +248,9 @@ export function buildRouter(s: Services) {
     };
     return body;
   });
+
+  // Read-only slice of the bootstrap for one standalone session: no provider discovery, no other session's rows.
+  add('GET', '/api/sessions/:id/snapshot', (ctx) => buildSessionSnapshot(s, param(ctx, 'id')));
 
   add('PUT', '/api/workspace/selection', async (ctx) => {
     const { projectId } = await ctx.body(z.object({ projectId: z.string().regex(ID) }).strict());

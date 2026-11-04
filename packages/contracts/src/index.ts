@@ -9,6 +9,7 @@ import type { ContextCompactionResult } from './resilience';
 export * from './provider-config';
 export * from './provider-updates';
 export * from './session-workflow';
+export * from './session-snapshot';
 export type SessionStatus = 'idle' | 'running' | 'waiting' | 'interrupted' | 'error';
 export type TaskStatus = 'backlog' | 'ready' | 'running' | 'blocked' | 'review' | 'done';
 export interface Project { id: string; name: string; path: string; createdAt: string; isExample: boolean }
@@ -175,7 +176,7 @@ export const CloneProjectSchema = z.object({
   url: z.string().trim().min(1).max(2048), name: z.string().trim().min(1).max(100), parentPath: z.string().min(1).max(4096),
 }).strict();
 export type ServerEvent =
-  | { type: 'state.changed'; event?: WorkspaceEvent }
+  | { type: 'state.changed'; event?: WorkspaceEvent; scope?: import('./session-snapshot').StateChangeScope }
   | { type: 'browser.opened'; sessionId: string; tabId: string }
   | { type: 'session.delta'; sessionId: string; messageId: string; delta: string; offset?: number }
   | { type: 'terminal.ready'; terminalId: string }

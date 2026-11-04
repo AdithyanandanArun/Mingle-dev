@@ -885,7 +885,7 @@ export class SessionRuntime {
         case 'tool': {
           this.closeStream(run, null);
           this.store.insertMessage({ sessionId: run.sessionId, runId: run.id, role: 'tool', kind: 'tool', content: truncate(redactSecrets(`${event.name}${event.content ? `\n${event.content}` : ''}`), MAX_TOOL_CHARS) });
-          this.store.touch();
+          this.store.touch(run.sessionId);
           break;
         }
         case 'usage': {
@@ -894,13 +894,13 @@ export class SessionRuntime {
           const output = Math.max(0, Math.floor(event.outputTokens || 0));
           const cost = event.costUsd === null || event.costUsd === undefined ? run.baseCost : (run.baseCost ?? 0) + event.costUsd;
           this.store.updateSession(run.sessionId, { inputTokens: run.baseInput + input, outputTokens: run.baseOutput + output, costUsd: cost });
-          this.store.touch();
+          this.store.touch(run.sessionId);
           break;
         }
         case 'info':
           this.closeStream(run, null);
           this.store.insertMessage({ sessionId: run.sessionId, runId: run.id, role: 'system', kind: 'info', content: truncate(redactSecrets(event.content), MAX_TOOL_CHARS) });
-          this.store.touch();
+          this.store.touch(run.sessionId);
           break;
       }
     } catch (error) {
@@ -1032,7 +1032,7 @@ export class SessionRuntime {
     }
     if (typeof activity.durationMs === 'number' && Number.isFinite(activity.durationMs) && activity.durationMs >= 0) call.durationMs = Math.round(activity.durationMs);
     this.persistTool(buffer);
-    this.store.touch();
+    this.store.touch(run.sessionId);
   }
 
   private recordSubagentText(run: ActiveRun, parentId: string, messageId: string, text: string): void {
@@ -1053,7 +1053,7 @@ export class SessionRuntime {
     if (available <= 0) return;
     message.content += safeText.slice(0, available);
     this.persistTool(buffer);
-    this.store.touch();
+    this.store.touch(run.sessionId);
   }
 
   private persistTool(buffer: ToolBuffer): void {
@@ -1078,7 +1078,7 @@ export class SessionRuntime {
     if (!run.activityTimer) run.activityTimer = setTimeout(() => {
       run.activityTimer = null;
       for (const tool of run.tools.values()) if (tool.dirty) this.persistTool(tool);
-      this.store.touch();
+      this.store.touch(run.sessionId);
     }, this.flushIntervalMs);
   }
 
@@ -1114,7 +1114,7 @@ export class SessionRuntime {
     if (!run.stream) {
       const message = this.store.insertMessage({ sessionId: run.sessionId, runId: run.id, role: 'assistant', content: text, kind: 'streaming' });
       run.stream = { messageId: message.id, text, dirty: false };
-      this.store.touch();
+      this.store.touch(run.sessionId);
     } else {
       run.stream.text += text;
       run.stream.dirty = true;

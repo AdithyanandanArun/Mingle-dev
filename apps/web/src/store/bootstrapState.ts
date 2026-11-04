@@ -1,5 +1,5 @@
 import { mergeTextDelta } from '@mingle/contracts/stream';
-import type { Bootstrap, GroupSnapshot, Message } from '@mingle/contracts';
+import type { Bootstrap, GroupSnapshot, Message, SessionSnapshot } from '@mingle/contracts';
 
 /**
  * Hot-path helpers for the bootstrap store: structural comparison without serialization, identity-preserving
@@ -48,6 +48,7 @@ export function reconcileKeyed<T extends object>(
   prev: readonly T[] | undefined, next: T[], keyOf: (item: T) => string | number, merge: (previous: T, incoming: T) => T,
 ): T[] {
   if (!prev) return next;
+  if (prev === next) return next;
   let shift = 0;
   if (next.length && prev.length && keyOf(prev[0]) !== keyOf(next[0])) {
     const first = keyOf(next[0]);
@@ -223,4 +224,74 @@ export function pruneStreams<T extends StreamBuffer>(streams: Record<string, T>,
     out[id] = entry;
   }
   return changed ? out : streams;
+}
+
+/** Collections of a session snapshot, each with the field that ties a row to its session. */
+const SNAPSHOT_LISTS = [
+  ['messages', 'sessionId'], ['runs', 'sessionId'], ['toolCalls', 'sessionId'], ['queuedMessages', 'sessionId'], ['approvals', 'sessionId'],
+  ['plans', 'sessionId'], ['questions', 'sessionId'], ['workflows', 'sessionId'], ['delegatedSubagents', 'parentSessionId'],
+] as const;
+
+/**
+ * A snapshot is applied only if it is exactly what was asked for: every collection present and every row owned by the
+ * requested session. Anything else (a proxy answering for another endpoint, a partial body, a newer server shape) throws,
+ * and the caller falls back to a full bootstrap instead of merging something it cannot vouch for.
+ */
+export function validateSessionSnapshot(value: unknown, sessionId: string): SessionSnapshot {
+  const fail = (reason: string): never => { throw new Error(`Malformed session snapshot: ${reason}`); };
+  if (!value || typeof value !== 'object') return fail('not an object');
+  const snap = value as Record<string, unknown>;
+  if (snap.sessionId !== sessionId) fail('wrong session');
+  const session = snap.session as { id?: unknown } | null;
+  if (!session || typeof session !== 'object' || session.id !== sessionId) fail('session row');
+  for (const [key, owner] of SNAPSHOT_LISTS) {
+    const rows = snap[key];
+    if (!Array.isArray(rows)) fail(key);
+    for (const row of rows as Record<string, unknown>[]) {
+      if (!row || typeof row !== 'object' || row[owner] !== sessionId || (key !== 'delegatedSubagents' && key !== 'workflows' && typeof row.id !== 'string')) fail(`${key} row`);
+    }
+  }
+  return snap as unknown as SessionSnapshot;
+}
+
+/** Replace the rows `owned` selects with `incoming`, reusing unchanged references; the previous array when nothing changed. */
+function replaceOwned<T extends Keyed>(prev: readonly T[] | undefined, owned: (row: T) => boolean, incoming: T[], extra: readonly T[] = []): T[] | undefined {
+  if (!prev && !incoming.length && !extra.length) return prev as undefined;
+  const list = prev ?? [];
+  const before = list.filter(owned);
+  const after = reconcile(before, [...incoming, ...extra]);
+  if (after === before) return list as T[];
+  return [...list.filter((row) => !owned(row)), ...after];
+}
+
+/**
+ * Applies a session snapshot onto a bootstrap-shaped state: that session's rows are replaced, everything else keeps its
+ * identity. Returns null when the session is not in `boot`, so a late answer cannot resurrect an archived or removed
+ * session. `keepMessages` are this session's optimistic user messages the snapshot has not caught up with; they follow the
+ * snapshot's rows, the same order a full refresh gives them.
+ */
+export function applySessionSnapshot(boot: Bootstrap, snap: SessionSnapshot, keepMessages: readonly Message[] = []): Bootstrap | null {
+  const id = snap.sessionId;
+  const at = boot.sessions.findIndex((row) => row.id === id);
+  if (at < 0) return null;
+  const session = keepEqual(boot.sessions[at], snap.session);
+  const sessions = session === boot.sessions[at] ? boot.sessions : boot.sessions.map((row, index) => (index === at ? session : row));
+  const mine = <T extends { sessionId: string }>(row: T): boolean => row.sessionId === id;
+  const next: Bootstrap = {
+    ...boot, sessions,
+    messages: replaceOwned(boot.messages, mine, snap.messages, keepMessages) ?? boot.messages,
+    runs: replaceOwned(boot.runs, mine, snap.runs) ?? boot.runs,
+    toolCalls: replaceOwned(boot.toolCalls, mine, snap.toolCalls) ?? boot.toolCalls,
+    approvals: replaceOwned(boot.approvals, mine, snap.approvals) ?? boot.approvals,
+    plans: replaceOwned(boot.plans, mine, snap.plans) ?? boot.plans,
+    questions: replaceOwned(boot.questions, mine, snap.questions) ?? boot.questions,
+  };
+  const queued = replaceOwned(boot.queuedMessages, mine, snap.queuedMessages);
+  if (queued) next.queuedMessages = queued;
+  const workflows = replaceOwned(boot.workflows as Keyed[] | undefined, (row) => (row as unknown as { sessionId: string }).sessionId === id, snap.workflows as unknown as Keyed[]);
+  if (workflows) next.workflows = workflows as unknown as Bootstrap['workflows'];
+  const helpers = replaceOwned(boot.delegatedSubagents as Keyed[] | undefined, (row) => (row as unknown as { parentSessionId: string }).parentSessionId === id, snap.delegatedSubagents as unknown as Keyed[]);
+  if (helpers) next.delegatedSubagents = helpers as unknown as Bootstrap['delegatedSubagents'];
+  const unchanged = (Object.keys(next) as (keyof Bootstrap)[]).every((key) => next[key] === boot[key]);
+  return unchanged ? boot : next;
 }
