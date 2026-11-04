@@ -7,6 +7,7 @@ import { resolveExecutableCached } from '../discovery.js';
 import { shutdownChild, type ChildLike } from '../process.js';
 import { JsonRpcConnection, RpcError, RPC_METHOD_NOT_FOUND } from './rpc.js';
 import { parseCodexUsage } from './usage.js';
+import { HttpError } from '../../util.ts';
 
 const INIT_MS = 8_000;
 const RPC_MS = 10_000;
@@ -36,7 +37,11 @@ function resetRows(result: unknown): { count: number | null; known: boolean; cre
   if (!isRecord(result) || !isRecord(result.rateLimitResetCredits)) return { count: null, known: false, credits: [] };
   const credits = result.rateLimitResetCredits.credits;
   return { count: typeof result.rateLimitResetCredits.availableCount === 'number' && Number.isSafeInteger(result.rateLimitResetCredits.availableCount) && result.rateLimitResetCredits.availableCount >= 0 ? result.rateLimitResetCredits.availableCount : null,
-    known: Array.isArray(credits), credits: [] };
+    known: Array.isArray(credits), credits: Array.isArray(credits) ? credits.filter((row): row is Record<string, unknown> => isRecord(row) && typeof row.id === 'string').map((row) => ({
+      id: row.id as string, label: typeof row.title === 'string' ? row.title : 'Earned reset',
+      expiresAt: typeof row.expiresAt === 'number' && Number.isFinite(row.expiresAt) && Math.abs(row.expiresAt * 1000) <= 8.64e15 ? new Date(row.expiresAt * 1000).toISOString() : null,
+      grantedAt: typeof row.grantedAt === 'number' && Number.isFinite(row.grantedAt) && Math.abs(row.grantedAt * 1000) <= 8.64e15 ? new Date(row.grantedAt * 1000).toISOString() : null,
+    })) : [] };
 }
 function grantNotExpired(value: unknown): boolean {
   if (value === undefined || value === null) return true;
@@ -45,20 +50,23 @@ function grantNotExpired(value: unknown): boolean {
   return Number.isFinite(milliseconds) && Math.abs(milliseconds) <= 8.64e15 && milliseconds > Date.now();
 }
 interface Lease { providerExecutable: string; installationBinding: string; account: string; expires: number }
-interface Attempt { fingerprint: string; creditId?: string }
+interface Attempt { fingerprint: string; creditId?: string; token: string; lease: Lease; createdAt: number }
 
 /** Short-lived process-local account leases. No account identifiers or credentials leave this module. */
 export class CodexAccountUsage {
   private readonly leases = new Map<string, Lease>();
   private readonly attempts = new Map<string, Attempt>();
   private readonly inflight = new Map<string, Promise<ProviderResetResult>>();
+  private readonly inflightActions = new Map<string, string>();
+  private generation = 0;
   private activeRedemptionKey: string | null = null;
   private uncertainIdempotencyKey: string | null = null;
   constructor(private readonly connect: CodexAccountUsageConnect = connectCodex) {}
 
-  invalidate(): void { this.leases.clear(); }
+  invalidate(): void { this.generation++; this.leases.clear(); }
 
   async read(settings: AppSettings): Promise<ProviderAccountUsageSnapshot> {
+    const generation = this.generation;
     try {
       const conn = await this.connect(settings);
       let account: string | null = null;
@@ -72,86 +80,115 @@ export class CodexAccountUsage {
       if (!account) return { ...unsupported('Codex did not provide a stable account identity; native reset actions are disabled.'), usage };
       if (!cleanupOk) usage.notices = [...usage.notices, 'Codex app-server did not stop cleanly after the usage read.'].slice(0, 20);
       const grants = resetRows(result);
-      const mode = grants.count === null ? 'unavailable' : grants.count === 0 ? 'unavailable' : 'native';
-      if (mode === 'native') {
+      const rawCredits = isRecord(result) && isRecord(result.rateLimitResetCredits) && Array.isArray(result.rateLimitResetCredits.credits) ? result.rateLimitResetCredits.credits : [];
+      const eligibleCount = grants.known ? rawCredits.filter((row) => isRecord(row) && row.status === 'available' && row.resetType === 'codexRateLimits' && grantNotExpired(row.expiresAt)).length : grants.count;
+      const mode = eligibleCount === null || eligibleCount === 0 ? 'unavailable' : 'native';
+      if (mode === 'native' && generation === this.generation) {
         const token = randomUUID();
         this.rememberLease(token, { providerExecutable: settings.codexExecutable, installationBinding: conn.binding ?? settings.codexExecutable, account, expires: Date.now() + LEASE_MS });
         return { provider: 'codex', usage, reset: { mode, snapshotToken: token, externalUrl: null, reason: null } };
       }
-      return { provider: 'codex', usage, reset: { mode, snapshotToken: null, externalUrl: null,
-        reason: grants.count === 0 ? 'No earned resets are currently available.' : 'Codex did not report an authoritative available reset count.' } };
+      return { provider: 'codex', usage, reset: { mode: mode === 'native' ? 'unavailable' : mode, snapshotToken: null, externalUrl: null,
+        reason: generation !== this.generation ? 'Codex usage changed while this snapshot was being read. Refresh usage before resetting.'
+          : eligibleCount === 0 ? 'No eligible Codex rate-limit resets are currently available.' : 'Codex did not report an authoritative available reset count.' } };
     } catch {
       return unsupported('Codex account usage could not be read. Check Codex availability and sign-in, then retry.');
     }
   }
 
   redeem(settings: AppSettings, snapshotToken: string, input: RedeemProviderResetInput): Promise<ProviderResetResult> {
-    const active = this.inflight.get(input.idempotencyKey);
-    if (active) return active;
-    if (this.uncertainIdempotencyKey !== null && this.uncertainIdempotencyKey !== input.idempotencyKey) return Promise.resolve({ outcome: 'noCredit', snapshot: null, notice: 'A previous Codex reset result is still uncertain. Retry it with its original request key before starting another reset.' });
-    if (this.activeRedemptionKey !== null) return Promise.resolve({ outcome: 'noCredit', snapshot: null, notice: 'Another Codex reset action is still being confirmed. Retry this action with its original request key.' });
-    const lease = this.leases.get(snapshotToken);
-    const empty = (notice: string, outcome: ProviderResetResult['outcome'] = 'noCredit'): ProviderResetResult => ({ outcome, snapshot: null, notice });
-    if (!lease || lease.expires <= Date.now() || lease.providerExecutable !== settings.codexExecutable) return Promise.resolve(empty('This usage snapshot expired or Codex settings changed. Refresh usage before trying again.'));
-    const fingerprint = createHash('sha256').update(`${lease.account}:${snapshotToken}`).digest('hex');
+    const action = JSON.stringify([snapshotToken, input.creditId ?? null]);
     const existing = this.attempts.get(input.idempotencyKey);
-    if (existing && (existing.fingerprint !== fingerprint || existing.creditId !== input.creditId)) return Promise.resolve(empty('This reset request key was already used for a different selection.'));
+    if (existing && (existing.token !== snapshotToken || existing.creditId !== input.creditId)) {
+      return Promise.reject(new HttpError(409, 'This reset request key was already used for a different snapshot or selection.'));
+    }
+    const active = this.inflight.get(input.idempotencyKey);
+    if (active) return this.inflightActions.get(input.idempotencyKey) === action ? active : Promise.reject(new HttpError(409, 'This reset request key is already being used for a different snapshot or selection.'));
+    if (this.uncertainIdempotencyKey !== null && this.uncertainIdempotencyKey !== input.idempotencyKey) return Promise.reject(new HttpError(409, 'A previous Codex reset result is uncertain. Retry it with its original request key before starting another reset.'));
+    if (this.activeRedemptionKey !== null) return Promise.reject(new HttpError(409, 'Another Codex reset action is being confirmed. Retry it with its original request key.'));
+    const lease = existing?.lease ?? this.leases.get(snapshotToken);
+    if (!lease || (!existing && lease.expires <= Date.now()) || lease.providerExecutable !== settings.codexExecutable) return Promise.reject(new HttpError(409, 'This usage snapshot expired or Codex settings changed. Refresh usage before trying again.'));
+    const fingerprint = createHash('sha256').update(`${lease.account}:${snapshotToken}`).digest('hex');
+    const generation = this.generation;
     this.activeRedemptionKey = input.idempotencyKey;
-    const pending = this.redeemOnce(settings, lease, snapshotToken, input, fingerprint).finally(() => {
-      if (this.inflight.get(input.idempotencyKey) === pending) this.inflight.delete(input.idempotencyKey);
+    const pending = this.redeemOnce(settings, lease, snapshotToken, input, fingerprint, existing, generation).finally(() => {
+      if (this.inflight.get(input.idempotencyKey) === pending) { this.inflight.delete(input.idempotencyKey); this.inflightActions.delete(input.idempotencyKey); }
       if (this.activeRedemptionKey === input.idempotencyKey) this.activeRedemptionKey = null;
     });
     this.inflight.set(input.idempotencyKey, pending);
+    this.inflightActions.set(input.idempotencyKey, action);
     return pending;
   }
 
-  private async redeemOnce(settings: AppSettings, lease: Lease, token: string, input: RedeemProviderResetInput, fingerprint: string): Promise<ProviderResetResult> {
-    const empty = (notice: string, outcome: ProviderResetResult['outcome'] = 'noCredit'): ProviderResetResult => ({ outcome, snapshot: null, notice });
-    let retrySameKey = false;
+  private async redeemOnce(settings: AppSettings, lease: Lease, token: string, input: RedeemProviderResetInput, fingerprint: string, prior: Attempt | undefined, generation: number): Promise<ProviderResetResult> {
+    let dispatchStarted = false;
+    let confirmed: ProviderResetResult['outcome'] | null = null;
+    let cleanupFailed = false;
+    const ensureCurrent = (): void => {
+      if (generation !== this.generation) throw new HttpError(409, 'Codex settings or account usage changed before reset confirmation. Refresh usage and retry.');
+    };
     try {
       const conn = await this.connect(settings);
-      let confirmed: ProviderResetResult['outcome'] | null = null;
       try {
-        if ((conn.binding ?? settings.codexExecutable) !== lease.installationBinding) return empty('The Codex installation changed. Refresh usage before trying again.');
+        ensureCurrent();
+        if ((conn.binding ?? settings.codexExecutable) !== lease.installationBinding) throw new HttpError(409, 'The Codex installation changed. Refresh usage before trying again.');
         const account = accountFingerprint(await conn.request('account/read', { refreshToken: false }, RPC_MS));
-        if (!account || account !== lease.account) return empty('The active Codex account changed. Refresh usage before trying again.');
+        ensureCurrent();
+        if (!account || account !== lease.account) throw new HttpError(409, 'The active Codex account changed. Refresh usage before trying again.');
         const attempt = this.attempts.get(input.idempotencyKey);
         if (!attempt) {
           const current = await conn.request('account/rateLimits/read', null, RPC_MS);
+          ensureCurrent();
           const grants = resetRows(current);
-          if (grants.count === null || grants.count < 1) return empty('No earned reset is currently available.', 'noCredit');
+          if (!grants.known && (grants.count === null || grants.count < 1)) throw new HttpError(409, 'No earned reset is currently available. Refresh usage before trying again.');
           if (grants.known) {
             const raw = (current as { rateLimitResetCredits: { credits: unknown[] } }).rateLimitResetCredits.credits;
-            const available = raw.filter((row): row is Record<string, unknown> => isRecord(row) && row.status === 'available');
-            if (input.creditId ? !available.some((row) => row.id === input.creditId && grantNotExpired(row.expiresAt)) : available.length === 0) return empty('The selected earned reset is no longer available.', 'noCredit');
-          } else if (input.creditId) return empty('Codex no longer exposes reset details needed to validate that selection. Refresh usage and select an available reset.');
+            const available = raw.filter((row): row is Record<string, unknown> => isRecord(row) && row.status === 'available' && row.resetType === 'codexRateLimits' && grantNotExpired(row.expiresAt));
+            if (input.creditId ? !available.some((row) => row.id === input.creditId) : available.length === 0) throw new HttpError(409, 'The selected earned reset is no longer available. Refresh usage and choose an eligible reset.');
+          } else if (input.creditId) throw new HttpError(409, 'Codex no longer exposes reset details needed to validate that selection. Refresh usage and select an available reset.');
         }
-        if (!attempt) {
-          this.rememberAttempt(input.idempotencyKey, { fingerprint, ...(input.creditId ? { creditId: input.creditId } : {}) });
-        }
+        ensureCurrent();
+        if (!attempt) this.rememberAttempt(input.idempotencyKey, { fingerprint, token, lease, createdAt: Date.now(), ...(input.creditId ? { creditId: input.creditId } : {}) });
+        dispatchStarted = true;
         this.uncertainIdempotencyKey = input.idempotencyKey;
         const response = await conn.request('account/rateLimitResetCredit/consume', { idempotencyKey: input.idempotencyKey, ...(input.creditId ? { creditId: input.creditId } : {}) }, RPC_MS);
         const outcome = isRecord(response) && ['reset', 'alreadyRedeemed', 'nothingToReset', 'noCredit'].includes(String(response.outcome)) ? response.outcome as ProviderResetResult['outcome'] : null;
-        if (!outcome) { retrySameKey = true; return empty('Codex returned an unrecognized reset result. Retry with the same request key to safely resolve it.'); }
-        this.uncertainIdempotencyKey = null;
+        if (!outcome) throw new HttpError(502, 'Codex returned an unrecognized reset result. Retry with the same request key to safely resolve it.');
         confirmed = outcome;
       } catch (error) {
         if (error instanceof RpcError && error.code === RPC_METHOD_NOT_FOUND) {
           this.uncertainIdempotencyKey = null;
           this.attempts.delete(input.idempotencyKey);
-          return empty('This Codex app-server version does not expose the native earned reset action.');
+          throw new HttpError(501, 'This Codex app-server version does not expose the native earned reset action.');
         }
-        retrySameKey = true;
-        return empty('The reset result could not be confirmed. Retry this action using the same request key.', 'noCredit');
-      } finally { await conn.close(); }
-      if (!confirmed) return empty('Codex did not confirm the reset result.');
+        throw error;
+      } finally { try { cleanupFailed = !(await conn.close()); } catch { cleanupFailed = true; } }
+      if (!confirmed) throw new HttpError(502, 'Codex did not confirm the reset result.');
+      this.uncertainIdempotencyKey = null;
       // A confirmed action is retained even if the independent follow-up read fails.
       const snapshot = await this.read(settings);
       const fresh = snapshot.usage.status === 'unavailable' ? null : snapshot;
-      return { outcome: confirmed, snapshot: fresh, notice: fresh ? null : 'Codex confirmed the reset action, but a fresh usage read failed. Refresh usage to see current limits.' };
-    } catch {
-      return empty('The reset result could not be confirmed. Retry this action using the same request key.', 'noCredit');
-    } finally { if (!retrySameKey) this.leases.delete(token); }
+      return { outcome: confirmed, snapshot: fresh, notice: [!fresh ? 'Codex confirmed the reset action, but a fresh usage read failed. Refresh usage to see current limits.' : null, cleanupFailed ? 'Codex confirmed the reset action, but its app-server did not stop cleanly.' : null].filter(Boolean).join(' ') || null };
+    } catch (error) {
+      if (dispatchStarted) {
+        if (error instanceof HttpError && error.status === 501) {
+          this.uncertainIdempotencyKey = null;
+          this.attempts.delete(input.idempotencyKey);
+          throw error;
+        }
+        this.uncertainIdempotencyKey = input.idempotencyKey;
+        throw new HttpError(502, 'The reset result could not be confirmed. Retry this action using the same request key.');
+      } else {
+        if (prior) {
+          this.uncertainIdempotencyKey = input.idempotencyKey;
+          if (error instanceof HttpError) throw error;
+          throw new HttpError(502, 'The original reset result is still uncertain. Retry it with the same request key after Codex is available.');
+        }
+        this.attempts.delete(input.idempotencyKey);
+        if (this.uncertainIdempotencyKey === input.idempotencyKey) this.uncertainIdempotencyKey = null;
+      }
+      throw error;
+    } finally { if (confirmed || !dispatchStarted) this.leases.delete(token); }
   }
 
   private rememberLease(token: string, lease: Lease): void {
@@ -159,7 +196,10 @@ export class CodexAccountUsage {
     this.leases.set(token, lease);
   }
   private rememberAttempt(key: string, attempt: Attempt): void {
-    if (this.attempts.size >= MAX_ATTEMPTS) this.attempts.delete(this.attempts.keys().next().value!);
+    if (this.attempts.size >= MAX_ATTEMPTS) {
+      const removable = [...this.attempts].find(([candidate]) => candidate !== this.uncertainIdempotencyKey)?.[0];
+      if (removable) this.attempts.delete(removable);
+    }
     this.attempts.set(key, attempt);
   }
 }

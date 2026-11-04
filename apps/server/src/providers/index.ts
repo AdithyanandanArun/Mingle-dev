@@ -18,6 +18,7 @@ import { getOpencodeCatalog } from './opencode/catalog.js';
 import { getOpencodeUsage } from './opencode/usage.js';
 import { CodexAccountUsage } from './codex/account-usage.js';
 import { ProviderError } from './common.js';
+import { HttpError } from '../util.ts';
 
 export type { AdapterEvent, AgentAdapter, RunOptions } from '@mingle/contracts';
 export { CLAUDE_DEFAULT_MODEL, CODEX_DEFAULT_MODEL } from './detect.js';
@@ -80,7 +81,7 @@ export function getAccountUsage(provider: AccountUsageProvider, settings: AppSet
 
 export function redeemAccountUsageReset(provider: AccountUsageProvider, settings: AppSettings, snapshotToken: string, input: RedeemProviderResetInput): Promise<ProviderResetResult> {
   if (provider === 'codex') return codexAccountUsage.redeem(settings, snapshotToken, input);
-  return Promise.resolve({ outcome: 'noCredit', snapshot: null, notice: 'Claude reset actions are available only in Claude settings.' });
+  return Promise.reject(new HttpError(501, 'Claude reset actions are available only in Claude settings.'));
 }
 
 export function invalidateAccountUsage(): void { codexAccountUsage.invalidate(); }

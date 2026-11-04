@@ -1,6 +1,6 @@
 import type { AccountUsageProvider, AppSettings, Provider, ProviderAccountUsageSnapshot, ProviderCatalog, ProviderInfo, ProviderResetResult, ProviderUsage, RedeemProviderResetInput, Session } from '@mingle/contracts';
 import type { Logger, ProviderRuntime } from './types.ts';
-import { errorMessage, redactSecrets, truncate } from './util.ts';
+import { errorMessage, HttpError, redactSecrets, truncate } from './util.ts';
 import { providerExecutable, providerName } from './provider-config.ts';
 
 const BOOTSTRAP_WAIT_MS = 4000;
@@ -34,7 +34,7 @@ export class ProviderService {
   private readonly accountUsageInflight = new Map<AccountUsageProvider, Promise<ProviderAccountUsageSnapshot>>();
   private readonly accountUsageEpoch = new Map<AccountUsageProvider, number>();
   private readonly accountUsageMutations = new Map<AccountUsageProvider, Promise<void>>();
-  private readonly accountUsageResetInflight = new Map<AccountUsageProvider, { idempotencyKey: string; promise: Promise<ProviderResetResult> }>();
+  private readonly accountUsageResetInflight = new Map<AccountUsageProvider, { idempotencyKey: string; snapshotToken: string; creditId?: string; promise: Promise<ProviderResetResult> }>();
 
   constructor(private readonly providers: ProviderRuntime, private readonly getSettings: () => AppSettings, private readonly log: Logger,
     private readonly onChange: () => void = () => {}) {}
@@ -168,29 +168,36 @@ export class ProviderService {
 
   redeemAccountUsageReset(provider: AccountUsageProvider, snapshotToken: string, input: RedeemProviderResetInput): Promise<ProviderResetResult> {
     const active = this.accountUsageResetInflight.get(provider);
-    if (active) return active.idempotencyKey === input.idempotencyKey ? active.promise : Promise.resolve({ outcome: 'noCredit', snapshot: null,
-      notice: 'Another reset action is still being confirmed. Retry it with its original request key.' });
+    if (active) {
+      if (active.idempotencyKey !== input.idempotencyKey) return Promise.reject(new HttpError(409, 'Another reset action is still being confirmed. Retry it with its original request key.'));
+      if (active.snapshotToken !== snapshotToken || active.creditId !== input.creditId) return Promise.reject(new HttpError(409, 'This reset request key is already being used for a different snapshot or selection.'));
+      return active.promise;
+    }
+    if (provider !== 'codex') return Promise.reject(new HttpError(501, 'Native earned reset redemption is currently supported only for Codex.'));
     let finishMutation!: () => void;
     const mutation = new Promise<void>((resolve) => { finishMutation = resolve; });
     this.accountUsageMutations.set(provider, mutation);
     const pending = Promise.resolve().then(async (): Promise<ProviderResetResult> => {
       this.invalidateUsage(provider);
       try {
-        if (!this.providers.redeemAccountUsageReset) return { outcome: 'noCredit', snapshot: null, notice: 'This provider runtime does not expose native reset actions.' };
+        if (!this.providers.redeemAccountUsageReset) throw new HttpError(501, 'This provider runtime does not expose native reset actions.');
         const result = await this.providers.redeemAccountUsageReset(provider, this.getSettings(), snapshotToken, input);
+        if (!result || !['reset', 'alreadyRedeemed', 'nothingToReset', 'noCredit'].includes(result.outcome)) throw new HttpError(502, 'The provider returned an unrecognized reset result. Retry this action using the same request key.');
         this.invalidateUsage(provider);
         if (result.snapshot) this.accountUsageCache.set(provider, { receivedAt: Date.now(), expires: Date.now() + (result.snapshot.usage.status === 'unavailable' ? USAGE_REFRESH_MIN_MS : USAGE_CACHE_MS), value: result.snapshot });
         return result;
-      } catch {
+      } catch (error) {
         this.invalidateUsage(provider);
-        return { outcome: 'noCredit', snapshot: null, notice: 'The reset result could not be confirmed. Retry this action using the same request key.' };
+        if (error instanceof HttpError) throw error;
+        throw new HttpError(502, 'The reset result could not be confirmed. Retry this action using the same request key.');
       } finally {
         if (this.accountUsageMutations.get(provider) === mutation) this.accountUsageMutations.delete(provider);
         finishMutation();
       }
     });
-    this.accountUsageResetInflight.set(provider, { idempotencyKey: input.idempotencyKey, promise: pending });
-    void pending.then(() => { if (this.accountUsageResetInflight.get(provider)?.promise === pending) this.accountUsageResetInflight.delete(provider); });
+    this.accountUsageResetInflight.set(provider, { idempotencyKey: input.idempotencyKey, snapshotToken, creditId: input.creditId, promise: pending });
+    const clearInflight = (): void => { if (this.accountUsageResetInflight.get(provider)?.promise === pending) this.accountUsageResetInflight.delete(provider); };
+    void pending.then(clearInflight, clearInflight);
     return pending;
   }
 
