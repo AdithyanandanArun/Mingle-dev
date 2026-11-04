@@ -36,7 +36,8 @@ export interface RuntimeOptions {
   userInputTimeoutMs?: number;
 }
 
-interface ToolBuffer { call: ToolCall; output: string; dirty: boolean; tick: number | null }
+/** `written` is what the stored row last held: an unchanged record is neither rewritten nor given a new revision. */
+interface ToolBuffer { call: ToolCall; output: string; dirty: boolean; tick: number | null; written?: { signature: string; input: string; output: string } }
 
 const MAX_SUBAGENT_MESSAGES = 30;
 const MAX_SUBAGENT_TEXT_PER_MESSAGE = 8_000;
@@ -1057,9 +1058,17 @@ export class SessionRuntime {
   }
 
   private persistTool(buffer: ToolBuffer): void {
-    buffer.call.output = redactSecrets(buffer.output);
-    this.store.putToolCall(buffer.call);
+    const call = buffer.call;
+    call.output = redactSecrets(buffer.output);
     buffer.dirty = false;
+    const { revision: _revision, contentRevision: _contentRevision, ...fields } = call;
+    const signature = JSON.stringify(fields);
+    if (buffer.written?.signature === signature) return;
+    // Clients order versions of one call by `revision` and keep a fetched full copy while `contentRevision` is unchanged.
+    call.revision = (call.revision ?? 0) + 1;
+    if (buffer.written?.input !== call.input || buffer.written.output !== call.output) call.contentRevision = call.revision;
+    buffer.written = { signature, input: call.input, output: call.output };
+    this.store.putToolCall(call);
   }
 
   private appendToolOutput(run: ActiveRun, providerId: string, delta: string): void {

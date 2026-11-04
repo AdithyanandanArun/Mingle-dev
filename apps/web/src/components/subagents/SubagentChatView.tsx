@@ -5,6 +5,7 @@ import { api } from '../../lib/api';
 import { subagentStatusLabel, type SubagentRun } from '../../lib/subagents';
 import type { DisplayMessage } from '../../lib/conversation';
 import { cx } from '../../lib/format';
+import { reconcileToolCall, toolInputLabel, toolOutputLabel } from '../../lib/toolRecords';
 import { MessageRow } from '../ConversationParts';
 import { Markdown } from '../Markdown';
 import { AgentIdentity } from '../group/AgentIdentity';
@@ -21,17 +22,23 @@ function callPrompt(call: ToolCall): string {
   return '';
 }
 
+/** A fetched complete copy of a call and the live (possibly preview) one from the snapshot; versioned records are ordered by the server. */
+function blendCall(full: ToolCall | undefined, live: ToolCall): ToolCall {
+  if (!full) return live;
+  if (full.revision !== undefined && live.revision !== undefined) return reconcileToolCall(full, live);
+  return {
+    ...full, ...live,
+    input: full.input,
+    output: live.status === 'running' || full.status === 'running' ? live.output || full.output : full.output,
+    outputTruncated: full.outputTruncated,
+  };
+}
+
 function mergeCalls(details: ToolCall[], live: readonly ToolCall[], runId: string): ToolCall[] {
   const merged = new Map(details.filter((call) => call.runId === runId).map((call) => [call.id, call]));
   for (const current of live) {
     if (current.runId !== runId) continue;
-    const full = merged.get(current.id);
-    merged.set(current.id, full ? {
-      ...full, ...current,
-      input: full.input,
-      output: current.status === 'running' || full.status === 'running' ? current.output || full.output : full.output,
-      outputTruncated: full.outputTruncated,
-    } : current);
+    merged.set(current.id, blendCall(merged.get(current.id), current));
   }
   return [...merged.values()].sort((a, b) => a.startedAt.localeCompare(b.startedAt));
 }
@@ -60,8 +67,8 @@ function ToolDetail({ call, calls, path = new Set<string>() }: { call: ToolCall;
     <div className="run-tool__body">
       {call.command ? <div className="run-tool__field"><span>Command</span><pre>{call.command}</pre></div> : null}
       {call.cwd ? <div className="run-tool__field"><span>Working directory</span><pre>{call.cwd}</pre></div> : null}
-      {call.input ? <div className="run-tool__field"><span>Input</span><pre>{call.input}</pre></div> : null}
-      {call.output ? <div className="run-tool__field"><span>{call.outputTruncated ? 'Output tail' : 'Captured output'}</span><pre>{call.output}</pre></div> : null}
+      {call.input ? <div className="run-tool__field"><span>{toolInputLabel(call)}</span><pre>{call.input}</pre></div> : null}
+      {call.output ? <div className="run-tool__field"><span>{toolOutputLabel(call)}</span><pre>{call.output}</pre></div> : null}
       {children.length ? <div className="run-tool__children" aria-label="Nested tool calls">{children.map((child) => <ToolDetail key={child.id} call={child} calls={calls} path={seen} />)}</div> : null}
     </div>
   </details>;
@@ -106,15 +113,7 @@ export function SubagentChatView({
 
   const parentCall = useMemo(() => {
     if (!fullParent) return subagent.parentCall;
-    const liveParent = subagent.parentCall;
-    return {
-      ...fullParent,
-      ...liveParent,
-      input: fullParent.input,
-      output: liveParent.status === 'running' ? liveParent.output : fullParent.output,
-      outputTruncated: fullParent.outputTruncated,
-      subagentMessages: subagent.messages,
-    };
+    return { ...blendCall(fullParent, subagent.parentCall), subagentMessages: subagent.messages };
   }, [fullParent, subagent.parentCall, subagent.messages]);
   const allCalls = useMemo(() => mergeCalls(fullCalls, calls, subagent.runId), [fullCalls, calls, subagent.runId]);
   const prompt = callPrompt(parentCall) || subagent.prompt;

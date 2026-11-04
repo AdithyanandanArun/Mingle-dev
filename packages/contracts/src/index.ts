@@ -49,8 +49,17 @@ export interface RunChanges { summary: RunChangesSummary; diff: string; diffTrun
 export interface ToolCall {
   id: string; runId: string; sessionId: string; providerId: string; parentProviderId: string | null;
   name: string; category: ToolCategory; status: ToolStatus; summary: string; command: string | null;
-  input: string; output: string; outputTruncated?: boolean; cwd: string | null; exitCode: number | null; processId: string | null;
+  /** In a bootstrap or session snapshot `input`/`output` may be a bounded preview; see `preview`. */
+  input: string; output: string;
+  /** True when capture itself kept only the end of what the tool produced (the stored record is already clipped). Independent of `preview`. */
+  outputTruncated?: boolean; cwd: string | null; exitCode: number | null; processId: string | null;
   startedAt: string; finishedAt: string | null; durationMs: number | null;
+  /** Rises with every stored change to this record (any field). Orders versions of one call; 0 for records stored before revisions. */
+  revision?: number;
+  /** The `revision` at which `input` or `output` last changed. A fetched full copy stays current while this value is unchanged. */
+  contentRevision?: number;
+  /** Present only when `input` (first characters) and `output` (last characters) were shortened for transport; gives the stored lengths. Absent means the copy is complete. */
+  preview?: { inputChars: number; outputChars: number };
   /** Assistant text emitted by a provider-owned child agent; retained on its spawning call. */
   subagentMessages?: SubagentMessage[];
 }

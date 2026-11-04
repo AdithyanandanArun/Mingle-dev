@@ -13,8 +13,16 @@ const BOOTSTRAP_RUN_ORDER = `WHERE s.id IN (${VISIBLE_SESSIONS}) ORDER BY (r.sta
 const BOOTSTRAP_TOOL_ORDER = `ORDER BY (r.status = 'running') DESC, t.rowid DESC`;
 const BOOTSTRAP_PLAN_ORDER = "(p.status IN ('review', 'approved', 'executing')) DESC, p.rowid DESC";
 const BOOTSTRAP_QUESTION_ORDER = "(q.status = 'pending') DESC, q.rowid DESC";
+const TOOL_INPUT_HEAD = 4000;
 const TOOL_OUTPUT_TAIL = 2000;
-const trimToolCall = (call: ToolCall): ToolCall => ({ ...call, input: call.input.slice(0, 4000), output: call.output.slice(-TOOL_OUTPUT_TAIL), outputTruncated: Boolean(call.outputTruncated || call.output.length > TOOL_OUTPUT_TAIL) });
+/** Records stored before revisions existed have none; they are never rewritten, so 0 orders them consistently. */
+const withRevisions = (call: ToolCall): ToolCall => call.revision !== undefined && call.contentRevision !== undefined ? call : { ...call, revision: call.revision ?? 0, contentRevision: call.contentRevision ?? 0 };
+/** Bootstrap/snapshot copy: bounded input head and output tail. `preview` says so and reports the stored lengths; `outputTruncated` keeps meaning capture clipping. */
+const trimToolCall = (stored: ToolCall): ToolCall => {
+  const call = withRevisions(stored);
+  if (call.input.length <= TOOL_INPUT_HEAD && call.output.length <= TOOL_OUTPUT_TAIL) return call;
+  return { ...call, input: call.input.slice(0, TOOL_INPUT_HEAD), output: call.output.slice(-TOOL_OUTPUT_TAIL), preview: { inputChars: call.input.length, outputChars: call.output.length } };
+};
 
 export const DEFAULT_SETTINGS: AppSettings = {
   defaultProvider: 'codex', defaultCodexModel: 'gpt-6.1-sol', defaultClaudeModel: 'claude-sonnet-5-5', defaultAntigravityModel: 'default', defaultOpencodeModel: 'default', defaultEffort: 'high', defaultIsolated: true,
@@ -252,10 +260,10 @@ export class Store {
   }
   getToolCall(id: string): ToolCall | undefined {
     const row = this.get('SELECT data FROM tool_calls WHERE id = ?', id);
-    return row ? JSON.parse(row.data as string) as ToolCall : undefined;
+    return row ? withRevisions(JSON.parse(row.data as string) as ToolCall) : undefined;
   }
   listRunTools(runId: string, limit = 1000): ToolCall[] {
-    return this.all('SELECT data FROM tool_calls WHERE run_id = ? ORDER BY rowid ASC LIMIT ?', runId, limit).map((row) => JSON.parse(row.data as string) as ToolCall);
+    return this.all('SELECT data FROM tool_calls WHERE run_id = ? ORDER BY rowid ASC LIMIT ?', runId, limit).map((row) => withRevisions(JSON.parse(row.data as string) as ToolCall));
   }
   bootstrapToolCalls(runIds: string[], limit = 1000): ToolCall[] {
     if (!runIds.length) return [];
@@ -515,7 +523,7 @@ export class Store {
       const id = row.id as string;
       this.finishRun(id, 'interrupted', null, at);
       for (const tool of this.listRunTools(id, 100_000)) {
-        if (tool.status === 'running') this.putToolCall({ ...tool, status: 'interrupted', finishedAt: at, durationMs: null });
+        if (tool.status === 'running') this.putToolCall({ ...tool, status: 'interrupted', finishedAt: at, durationMs: null, revision: (tool.revision ?? 0) + 1 });
       }
     }
   }
