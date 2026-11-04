@@ -299,12 +299,12 @@ export function Composer({ session, progressState, helperRail, helperCount = 0 }
       const submittedAttachmentIds = attachments.map((item) => item.id);
       const submittedContextRefs = contextRefs;
       if (running) {
-        const response = await api.queueMessage(session.id,{content:draft.trim(),skills:messageSkills,attachmentIds:submittedAttachmentIds,contextRefs:submittedContextRefs,intent:planningMode?'plan':'normal',...(excludeProjectMemory?{memory:'exclude'}:{})});
+        const response = await api.queueMessage(session.id,{content:draft.trim(),skills:messageSkills,attachmentIds:submittedAttachmentIds,contextRefs:submittedContextRefs,intent:planningMode?'plan':'normal',...(sendNow?{queueOnly:true}:{}),...(excludeProjectMemory?{memory:'exclude'}:{})});
         // A steered message already reached the running turn; only a queued one can be sent next.
         if (response.steered) useMingle.getState().toast('success', 'Sent to the running agent');
         else {
           if (sendNow && response.queued) await api.sendQueuedNow(session.id, response.queued.id);
-          useMingle.getState().toast('success', sendNow ? 'Message sent next' : 'Message queued');
+          useMingle.getState().toast('success', sendNow ? (session.status === 'running' ? 'Active run interrupted; message will start after provider cleanup' : 'Queued message started') : 'Message queued for the next turn');
         }
       } else if (autonomousMode && canStartWorkflow && !workflowOpen) {
         if (messageSkills.length || /^\s*\//.test(draft)) throw new Error('Start an autonomous goal with a regular request. Use Chat for native commands and skills.');
@@ -518,7 +518,7 @@ export function Composer({ session, progressState, helperRail, helperCount = 0 }
   }, [activeSuggestion, pickerId, suggestion]);
   return (
     <div className="composer-wrap">
-      <QueuedMessages sessionId={session.id} steerable={steerable} items={queuedMessages} />
+      <QueuedMessages sessionId={session.id} active={session.status === 'running'} items={queuedMessages} />
       {providerFailureCopy ? <div className="composer__note is-error" role="alert">
         <span>{providerFailureCopy}</span>{' '}
         {recoveryKind === 'authentication' || recoveryKind === 'unavailable' ? <><button type="button" className="link-btn" onClick={() => useMingle.getState().openSettings({ section: 'providers' })}>Open Providers settings</button>{' '}</> : null}

@@ -28,10 +28,10 @@ const StreamAwareMessageRow = memo(function StreamAwareMessageRow({ m, tracked, 
 });
 
 const RunBlockView = memo(function RunBlockView({ block, onOpenSubagent }: { block: RunBlock; onOpenSubagent: (id: string) => void }) {
-  return <>
+  return <div data-run-id={block.run.id}>
     <MemoRunActivity run={block.run} initialCalls={block.calls} />
     <MemoSubagentLinks subagents={block.subagents} onOpen={onOpenSubagent} />
-  </>;
+  </div>;
 });
 
 const TranscriptEntry = memo(function TranscriptEntry({ row, provider, onAskAboutThis, onOpenSubagent, onGrow }: {

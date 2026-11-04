@@ -237,9 +237,9 @@ export const api = {
       throw error;
     }
   },
-  queueMessage: (id:string,input:{content:string;intent:'normal'|'plan';memory?:'exclude';skills?:string[];attachmentIds?:string[];contextRefs?:MessageContextRef[]}) => json<{accepted:boolean;queued?:import('@mingle/contracts').QueuedMessage;steered?:boolean}>(`/api/sessions/${encodeURIComponent(id)}/messages`,'POST',input),
+  queueMessage: (id:string,input:{content:string;intent:'normal'|'plan';memory?:'exclude';queueOnly?:boolean;skills?:string[];attachmentIds?:string[];contextRefs?:MessageContextRef[]}) => json<{accepted:boolean;queued?:import('@mingle/contracts').QueuedMessage;steered?:boolean}>(`/api/sessions/${encodeURIComponent(id)}/messages`,'POST',input),
   removeQueuedMessage: (id:string,messageId:string) => json<{ok:boolean}>(`/api/sessions/${encodeURIComponent(id)}/queue/${encodeURIComponent(messageId)}`,'DELETE'),
-  editQueuedMessage: (id:string,messageId:string,content:string) => json<import('@mingle/contracts').QueuedMessage>(`/api/sessions/${encodeURIComponent(id)}/queue/${encodeURIComponent(messageId)}`,'PATCH',{content}),
+  editQueuedMessage: (id:string,messageId:string,content:string,expectedContent?:string) => json<import('@mingle/contracts').QueuedMessage>(`/api/sessions/${encodeURIComponent(id)}/queue/${encodeURIComponent(messageId)}`,'PATCH',{content,...(expectedContent === undefined ? {} : {expectedContent})}),
   sendQueuedNow: (id:string,messageId:string) => json<{accepted:boolean}>(`/api/sessions/${encodeURIComponent(id)}/queue/${encodeURIComponent(messageId)}/send-now`,'POST',{}),
   retryMessage: (id: string, messageId: string) => json<{ accepted: boolean }>(
     `/api/sessions/${encodeURIComponent(id)}/messages/${encodeURIComponent(messageId)}/retry`, 'POST', {}),

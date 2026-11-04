@@ -22,6 +22,7 @@ import { api, errorMessage } from '../lib/api';
 import { useSessionHistory } from '../lib/sessionHistoryHooks';
 import { captureReaderAnchor, restoreReaderAnchor, type ReaderAnchor } from '../lib/readerAnchor';
 import { SessionHistoryControl } from './SessionHistoryControl';
+import { ConversationNavigation } from './ConversationNavigation';
 
 /** How long after prepending history the reader's row is kept in place while deferred rows settle to their real height. */
 const ANCHOR_SETTLE_MS = 800;
@@ -207,6 +208,7 @@ function SingleSessionPane() {
           onCancel={(item) => void api.cancelSubagent(item.id).then(() => useMingle.getState().refreshNow()).catch((error) => useMingle.getState().toast('error', errorMessage(error)))} />
       </> : <>
       <div className="chat__history">
+      <ConversationNavigation key={`${project.id}:${session.id}`} projectId={project.id} sessionId={session.id} messages={allMessages?.filter((message) => message.sessionId === session.id) ?? []} runs={runs} calls={sessionToolCalls} hasOlder={history.hasMore} onLoadOlder={loadOlderMessages} />
       <div
         className="chat__scroll" ref={scroller} onWheel={stopSettling} onTouchStart={stopSettling} onPointerDown={stopSettling} onKeyDown={stopSettling} role="log" aria-live="polite" aria-label={`Conversation with ${session.name}`}
         onScroll={(e) => {

@@ -67,6 +67,19 @@ describe('provider runs', () => {
     gate.resolve(); await waitFor(()=>t.fake.runs.length===3);
     expect(t.fake.runs.map((r:any)=>r.prompt)).toEqual(expect.arrayContaining(['second','third']));
   });
+  it('rejects a stale queued-message edit without replacing newer queued text', async () => {
+    const t = await boot(); const gate = deferred(); t.fake.script = async () => { await gate.promise; };
+    const sid = EXAMPLE_CONTRACT_SESSION_ID;
+    await t.api('POST', `/api/sessions/${sid}/messages`, { content: 'first' }); await waitFor(() => t.fake.runs.length === 1);
+    const queued = await t.api('POST', `/api/sessions/${sid}/messages`, { content: 'original queued text' });
+    const path = `/api/sessions/${sid}/queue/${queued.json.queued.id}`;
+    const current = await t.api('PATCH', path, { content: 'newer queued text', expectedContent: 'original queued text' });
+    expect(current.status).toBe(200);
+    const stale = await t.api('PATCH', path, { content: 'stale overwrite', expectedContent: 'original queued text' });
+    expect(stale.status).toBe(409);
+    expect(t.app.store.listQueuedMessages(sid)[0]?.content).toBe('newer queued text');
+    gate.resolve();
+  });
   it('resolves queued skills into the provider run options', async () => {
     const t = await boot(); const gate = deferred(); t.fake.script = async () => { await gate.promise; };
     t.fake.catalogSkills = [{ id: 'skill:review', name: 'review', description: 'Review changes', source: 'user', enabled: true, path: '/skills/review' }];
@@ -132,6 +145,15 @@ describe('provider runs', () => {
     const response = await t.api('POST', `/api/sessions/${sid}/messages`, { content: 'please focus on errors' });
     expect(response.status).toBe(202); expect(response.json).toMatchObject({ accepted: true, queued: { content: 'please focus on errors' } });
     expect((await messages(t, sid)).filter((message) => message.kind === 'steered')).toHaveLength(0);
+    gate.resolve(); await waitFor(() => t.fake.runs.length === 2);
+  });
+  it('queues next-turn delivery explicitly without asking a steerable provider to steer', async () => {
+    const t = await boot(); const gate = deferred(); t.fake.script = async () => { await gate.promise; }; t.fake.steerError = new Error('must not be attempted');
+    const sid = EXAMPLE_CONTRACT_SESSION_ID;
+    await t.api('POST', `/api/sessions/${sid}/messages`, { content: 'first' }); await waitFor(() => t.fake.runs.length === 1);
+    const response = await t.api('POST', `/api/sessions/${sid}/messages`, { content: 'next turn only', queueOnly: true });
+    expect(response.status).toBe(202); expect(response.json.queued.content).toBe('next turn only');
+    expect(t.fake.steerCalls).toBe(0);
     gate.resolve(); await waitFor(() => t.fake.runs.length === 2);
   });
   it('streams deltas durably, finalises messages and tracks usage', async () => {

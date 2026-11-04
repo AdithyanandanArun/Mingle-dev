@@ -119,7 +119,7 @@ function ToolDetail({ node, activeRun, onFull }: { node: ToolNode; activeRun: bo
   };
 
   return (
-    <details className={cx('run-tool', `run-tool--${row.category}`)} onToggle={onToggle}>
+    <details className={cx('run-tool', `run-tool--${row.category}`)} onToggle={onToggle} data-tool-call-id={row.id}>
       <summary className="run-tool__summary">
         <ChevronRight size={12} className="run-tool__chevron" aria-hidden="true" />
         {categoryIcon(row.category)}

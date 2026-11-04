@@ -86,7 +86,7 @@ export function RunReview({ block }: { block: RunBlock }) {
   const failure = evidence?.failure ?? null;
 
   return (
-    <section className={`run-review is-${run.status}`} aria-label="Review of this turn" data-run-id={run.id} tabIndex={-1}>
+    <section className={`run-review is-${run.status}`} aria-label="Review of this turn" data-run-review-id={run.id} data-run-id={run.id} tabIndex={-1}>
       <header className="run-review__head">
         <span className="run-review__title">Turn review</span>
         <span className="run-review__status">{turnStatusLabel(run.status)}</span>

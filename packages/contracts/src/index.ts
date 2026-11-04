@@ -213,6 +213,8 @@ export const UpdateSessionSchema = z.object({
 }).strict().refine((patch) => Object.keys(patch).length > 0, 'Supply a session setting to update');
 export const SendMessageSchema = z.object({
   content: z.string().trim().max(100_000).default(''), intent: z.enum(['normal', 'plan']).default('normal'), memory: z.enum(['exclude']).optional(), skills: z.array(z.string().min(1).max(4096)).max(20).optional(),
+  /** Persist for the next turn even if this provider currently accepts steering. */
+  queueOnly: z.boolean().optional(),
   attachmentIds: AttachmentIdsSchema.optional(),
   contextRefs: MessageContextRefsSchema.optional(),
 }).strict().refine((body) => body.content.length > 0 || (body.attachmentIds?.length ?? 0) > 0, { message: 'Write a message or attach a file', path: ['content'] });
