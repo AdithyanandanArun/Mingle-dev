@@ -662,14 +662,20 @@ export class SessionRuntime {
         ].filter(Boolean).join(' ')
         : undefined;
       const subagentInstructions=subagentMcp?'Mingle provides subagent tools for parallel self-contained tasks. Start them, continue your work, and finish your turn when ready; Mingle will resume you with each result automatically.':'';
-      const effectivePrompt = explicit ? prompt : [providerHandoffBlock, run.intent !== 'plan' ? groupContext?.instructions : undefined, run.context, prompt].filter(Boolean).join('\n\n');
+      let effectivePrompt = explicit ? prompt : [providerHandoffBlock, run.intent !== 'plan' ? groupContext?.instructions : undefined, run.context, prompt].filter(Boolean).join('\n\n');
       if (explicit && (providerHandoffBlock || progressInstructions || subagentInstructions || memoryContext)) run.context = [providerHandoffBlock, progressInstructions, subagentInstructions, memoryContext, run.context].filter(Boolean).join('\n\n');
       if (explicit && groupContext) run.context = [run.context, groupContext.instructions].filter(Boolean).join('\n\n');
       const stagedAttachments = this.attachmentService && run.attachmentOwnerId
         ? await this.attachmentService.stage(run.id, run.attachmentOwnerKind ?? 'message', run.attachmentOwnerId)
         : [];
       if (run.controller.signal.aborted) throw conflict('The run was interrupted before the provider started.');
-      const injectedContext = [explicit ? run.context : undefined, progressInstructions, subagentInstructions, explicit ? undefined : memoryContext].filter(Boolean).join('\n\n');
+      let injectedContext = [explicit ? run.context : undefined, progressInstructions, subagentInstructions, explicit ? undefined : memoryContext].filter(Boolean).join('\n\n');
+      if (run.workflow?.retryOfRunId && run.workflow.replayPrompt !== undefined && run.workflow.replayContext !== undefined) {
+        effectivePrompt = run.workflow.replayPrompt;
+        injectedContext = run.workflow.replayContext;
+      } else if (run.workflow && (run.workflow.kind === 'continue' || run.workflow.kind === 'verify') && !explicit && stagedAttachments.length === 0) {
+        this.workflowHooks?.recordReplayPrompt?.({ runId: run.id, prompt: effectivePrompt, context: injectedContext });
+      }
       const runOptions: RunOptions & DispatchAwareOptions = {
         session, prompt: effectivePrompt, intent: run.intent, ...(explicit ? { invocation: explicit } : {}), ...(injectedContext ? { context: injectedContext } : {}), attachments: stagedAttachments, teamMcp, progressMcp, subagentMcp, memoryMcp, providerTaskState: this.nativeTaskState(session), skills: run.skills, browserMcp, signal: run.controller.signal, settings,
         onEvent: (event) => this.handleEvent(run, capabilityTokens.length ? JSON.parse(scrubCapabilities(JSON.stringify(event))) as AdapterEvent : event),
@@ -1499,7 +1505,7 @@ export class SessionRuntime {
       try {
         const scrubCapabilities = (value: string) => run.capabilityTokens.reduce((text, token) => text.split(token).join('[redacted]'), value);
         const providerFailureRecord = this.makeProviderFailure(run, failure, scrubCapabilities);
-        failureInfo = { kind: providerFailureRecord.kind, providerCode: providerFailureRecord.providerCode, outcomeUnknown: providerFailureRecord.outcomeUnknown, dispatchState: providerFailureRecord.dispatchState, message: providerFailureRecord.message };
+        failureInfo = { kind: providerFailureRecord.kind, providerCode: providerFailureRecord.providerCode, outcomeUnknown: providerFailureRecord.outcomeUnknown, dispatchState: providerFailureRecord.dispatchState, message: providerFailureRecord.message, retryable: providerFailureRecord.retryable, safeToRetry: providerFailureRecord.safeToRetry, continuationSafety: providerFailureRecord.continuationSafety, retryAt: providerFailureRecord.retryAt };
         this.recovery?.recordFailure(run.sessionId, run.id, providerFailureRecord);
       } catch (error) {
         this.log('error', `Failed to persist provider failure for run ${run.id}: ${redactSecrets(errorMessage(error)).slice(0, 500)}`);

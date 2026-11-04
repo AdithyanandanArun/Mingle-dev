@@ -3,6 +3,7 @@ import type { QueuedMessage, Session, DelegatedSubagent, RunReviewGoalTurn } fro
 import type { GroupService } from '../groups/service.ts';
 import type { RecoveryService } from '../recovery/service.ts';
 import type { SessionRuntime, StartOptions } from '../runtime.ts';
+import type { ProviderFailure } from '@mingle/contracts';
 import type { Store } from '../store.ts';
 import type { TaskService } from '../tasks.ts';
 import type { Logger } from '../types.ts';
@@ -56,6 +57,7 @@ export class SessionWorkflowService {
   private readonly groups: Pick<GroupService, 'forSession'>;
   private readonly log: Logger;
   private readonly repo: WorkflowRepo;
+  private readonly recovery: RecoveryService | undefined;
   private readonly timers = new Map<string, NodeJS.Timeout>();
   /** Bumped by every control transition; a scheduled continuation carries the epoch it was created in. */
   private readonly fences = new Map<string, number>();
@@ -68,6 +70,7 @@ export class SessionWorkflowService {
     this.runtime = options.runtime;
     this.tasks = options.tasks;
     this.groups = options.groups;
+    this.recovery = options.recovery;
     this.log = options.log ?? (() => undefined);
     this.repo = new WorkflowRepo(options.store.db);
     this.recover();
@@ -249,6 +252,7 @@ export class SessionWorkflowService {
     });
     this.bump(wf.id);
     this.clearTimer(wf.id);
+    this.repo.cancelRetries(wf.id);
     this.pendingNext.delete(wf.id);
     if (runId) this.runtime.interrupt(wf.sessionId);
     return next;
@@ -259,7 +263,10 @@ export class SessionWorkflowService {
   private armTimer(wf: WorkflowRow): void {
     this.clearTimer(wf.id);
     if (this.closed || wf.state !== 'running') return;
-    const delay = Math.min(MAX_TIMER_MS, Math.max(0, Date.parse(wf.deadlineAt) - Date.now()));
+    const retry = this.repo.retryForWorkflow(wf.id);
+    const deadline = Date.parse(wf.deadlineAt);
+    const due = retry?.status === 'pending' ? Math.min(deadline, Date.parse(retry.retryAt)) : deadline;
+    const delay = Math.min(MAX_TIMER_MS, Math.max(0, due - Date.now()));
     const timer = setTimeout(() => this.onDeadline(wf.id), delay);
     timer.unref();
     this.timers.set(wf.id, timer);
@@ -275,6 +282,15 @@ export class SessionWorkflowService {
     this.timers.delete(id);
     const wf = this.repo.get(id);
     if (this.closed || !wf || wf.state !== 'running') return;
+    const retry = this.repo.retryForWorkflow(id);
+    if (retry?.status === 'pending' && Date.parse(retry.retryAt) <= Date.now() && Date.now() < Date.parse(wf.deadlineAt)) {
+      const next = this.pendingNext.get(id);
+      if (next && next !== 'await') {
+        const epoch = this.fences.get(id) ?? 0;
+        queueMicrotask(() => this.continueNow(id, epoch, next));
+      }
+      return;
+    }
     try {
       this.detach(wf, { state: 'paused', stopReason: 'limit', summary: `The ${wf.limits.maxElapsedMinutes}-minute time budget was reached.` }, 'paused', `Autonomous goal paused: the ${wf.limits.maxElapsedMinutes}-minute time budget was reached.`);
     } catch (error) { this.log('error', 'Could not pause a goal at its deadline', error); }
@@ -284,6 +300,14 @@ export class SessionWorkflowService {
 
   /** A goal left "running" by a crash or exit is paused: nothing is retried until a person inspects the partial work. */
   private recover(): void {
+    for (const retry of this.repo.pendingRetries()) {
+      const wf = this.repo.get(retry.workflowId);
+      this.repo.cancelRetries(retry.workflowId);
+      if (wf?.state === 'running' && !wf.currentRunId) {
+        try { this.pauseWith(wf, 'app-closed', 'Mingle was closed before a scheduled automatic retry started. Inspect the partial work, then resume manually.'); }
+        catch (error) { this.log('error', `Could not pause workflow ${wf.id} after closing a pending retry`, error); }
+      }
+    }
     for (const wf of this.repo.running()) {
       try {
         this.store.tx(() => {
@@ -313,6 +337,7 @@ export class SessionWorkflowService {
   private readonly hooks: SessionWorkflowHooks = {
     prepareStart: (sessionId, content, options) => this.prepareStart(sessionId, content, options),
     runBound: (info) => this.runBound(info),
+    recordReplayPrompt: (info) => this.repo.setReplayPrompt(info.runId, info.prompt, info.context),
     recordReport: (info) => this.recordReport(info),
     runEnded: (info) => this.runEnded(info),
     idle: (info) => this.idle(info),
@@ -327,6 +352,13 @@ export class SessionWorkflowService {
     }
     const wf = this.repo.open(sessionId);
     if (!wf || wf.state !== 'running' || wf.currentRunId) return options;
+    const retry = this.repo.retryForWorkflow(wf.id);
+    if (retry && !options.workflow) {
+      this.repo.cancelRetries(wf.id);
+      this.bump(wf.id);
+      this.pendingNext.delete(wf.id);
+      this.store.recordEvent({ projectId: wf.projectId, sessionId, type: 'session.workflow.retry-cancelled', summary: 'Pending automatic retry cancelled because new session work arrived.', payload: { workflowId: wf.id, state: 'running', reason: options.origin === 'queue' ? 'queued-input' : 'new-human-work' } });
+    }
     if (options.intent === 'plan' || options.executionPlanId || options.taskId || options.invocation) {
       throw conflict('Pause autonomous work before starting a different task, native command or read-only plan in this session.');
     }
@@ -348,6 +380,7 @@ export class SessionWorkflowService {
     const humanTurn = info.workflow.kind === 'human' || info.workflow.kind === 'queue';
     const written = this.persist(wf, { counters: { turns: wf.counters.turns + 1, stalls: humanTurn ? 0 : wf.counters.stalls }, currentRunId: info.runId });
     this.repo.insertRun({ runId: info.runId, workflowId: wf.id, sessionId: wf.sessionId, seq: written.counters.turns, kind: info.workflow.kind, startedAt: nowIso() });
+    if (info.workflow.retryOfRunId) this.repo.consumeRetry(info.workflow.retryOfRunId, info.runId);
     this.pendingNext.delete(wf.id);
     if (info.workflow.kind !== 'start' && info.workflow.kind !== 'resume') this.announce(written, 'turn', `Goal turn ${written.counters.turns} of ${written.limits.maxTurns} started (${info.workflow.kind}).`, false);
   }
@@ -375,7 +408,8 @@ export class SessionWorkflowService {
     const wf = this.repo.get(bound.workflowId);
     if (!wf) return;
     if (wf.currentRunId !== info.runId) { this.repo.setReportState(info.runId, 'discarded'); return; }
-    const verdict = this.evaluate(wf, bound, info);
+    const autoRetry = this.makeAutomaticRetry(wf, bound, info);
+    const verdict = autoRetry ? { state: 'running', reason: null, summary: 'Automatic retry pending.', stalls: wf.counters.stalls, next: bound.kind as Next, report: null } satisfies Verdict : this.evaluate(wf, bound, info);
     this.store.tx(() => {
       const terminal = verdict.state !== 'running';
       const written = this.persist(wf, {
@@ -384,6 +418,10 @@ export class SessionWorkflowService {
         ...(terminal && verdict.state === 'completed' ? { endedAt: nowIso() } : {}),
       });
       if (verdict.report) this.repo.setReportState(info.runId, verdict.report);
+      if (autoRetry) {
+        this.store.insertMessage({ sessionId: wf.sessionId, role: 'system', kind: 'info', content: 'Automatic retry pending for this generated workflow turn. It will use the same provider, model and workflow prompt.' });
+        this.store.recordEvent({ projectId: wf.projectId, sessionId: wf.sessionId, type: 'session.workflow.retry-pending', summary: 'Automatic retry pending for a safe, undispatched workflow turn.', payload: { workflowId: wf.id, originalRunId: info.runId, retryAt: this.repo.retryForWorkflow(wf.id)?.retryAt ?? null, state: 'running' } });
+      }
       if (verdict.state === 'completed') {
         this.announce(written, 'completed', `The agent reported the goal complete: ${verdict.summary} This is the agent's own report; Mingle has not independently verified it. The task is waiting in Review.`);
       } else if (verdict.state === 'paused') {
@@ -394,7 +432,29 @@ export class SessionWorkflowService {
       this.bump(wf.id);
       this.clearTimer(wf.id);
       this.pendingNext.delete(wf.id);
-    } else if (verdict.next) this.pendingNext.set(wf.id, verdict.next);
+    } else if (verdict.next) {
+      this.pendingNext.set(wf.id, verdict.next);
+      if (autoRetry) this.armTimer(this.repo.get(wf.id)!);
+    }
+  }
+
+  private makeAutomaticRetry(wf: WorkflowRow, run: WorkflowRunRow, info: RunEndInfo): boolean {
+    if (!this.recovery || info.outcome !== 'failed' || info.shutdown || run.kind !== 'continue' && run.kind !== 'verify') return false;
+    if (this.repo.isRetryRun(info.runId) || !run.prompt || run.context === null || info.toolCalls !== 0 || info.changedFiles !== 0) return false;
+    const b = info.boundary;
+    if (b.approvalsDenied || b.approvalsExpired || b.approvalsCancelled || b.questionsCancelled) return false;
+    const failure: ProviderFailure | null = this.recovery.failureForRun(info.runId);
+    if (!failure || failure.retryable !== true || failure.safeToRetry !== true || failure.dispatchState !== 'not-dispatched'
+      || failure.outcomeUnknown !== false || failure.continuationSafety !== 'safe'
+      || !['temporary_rate_limit', 'provider_unavailable'].includes(failure.kind) || failure.providerCode === 'refusal') return false;
+    const session = this.store.getSession(wf.sessionId);
+    if (failure.sessionId !== wf.sessionId || failure.provider !== wf.configuration.provider || !session?.providerSessionId) return false;
+    const retryAt = failure.retryAt ? Date.parse(failure.retryAt) : Date.now();
+    if (!Number.isFinite(retryAt) || retryAt < Date.now() - 1000 || retryAt > Date.now() + 86_400_000) return false;
+    if (wf.counters.turns >= wf.limits.maxTurns || Date.now() >= Date.parse(wf.deadlineAt) || retryAt >= Date.parse(wf.deadlineAt)) return false;
+    return this.repo.scheduleRetry({ originalRunId: run.runId, workflowId: wf.id, sessionId: wf.sessionId,
+      taskId: wf.taskId, conversationId: session.providerSessionId, kind: run.kind, prompt: run.prompt, context: run.context,
+      configJson: JSON.stringify(wf.configuration), retryAt: new Date(retryAt).toISOString(), status: 'pending', retryRunId: null });
   }
 
   private evaluate(wf: WorkflowRow, run: WorkflowRunRow, info: RunEndInfo): Verdict {
@@ -449,6 +509,11 @@ export class SessionWorkflowService {
       return;
     }
     const epoch = this.fences.get(wf.id) ?? 0;
+    const retry = this.repo.retryForWorkflow(wf.id);
+    if (retry?.status === 'pending') {
+      this.armTimer(wf);
+      return;
+    }
     queueMicrotask(() => this.continueNow(wf.id, epoch, next));
   }
 
@@ -463,6 +528,27 @@ export class SessionWorkflowService {
     if (wf.counters.turns >= wf.limits.maxTurns) { this.pauseWith(wf, 'limit', `The ${wf.limits.maxTurns}-turn budget was used.`); return; }
     if (Date.now() >= Date.parse(wf.deadlineAt)) { this.pauseWith(wf, 'limit', `The ${wf.limits.maxElapsedMinutes}-minute time budget was reached.`); return; }
     const turn = `${wf.counters.turns + 1} of ${wf.limits.maxTurns}`;
+    const retry = this.repo.retryForWorkflow(wf.id);
+    if (retry) {
+      const session = this.store.getSession(wf.sessionId);
+      let config: unknown;
+      try { config = JSON.parse(retry.configJson); } catch { config = null; }
+      if (retry.status !== 'pending' || !session || session.providerSessionId !== retry.conversationId || wf.taskId !== retry.taskId || JSON.stringify(pinned(session)) !== retry.configJson || JSON.stringify(wf.configuration) !== retry.configJson || !sameConfiguration(wf.configuration, pinned(session)) || this.groups.forSession(wf.sessionId)) {
+        this.pauseWith(wf, 'configuration-changed', 'Automatic retry paused because the saved session configuration changed. Review the run, then resume manually.');
+        return;
+      }
+      if (!config || !this.repo.claimRetry(retry.originalRunId)) return;
+      try {
+        this.runtime.start(wf.sessionId, retry.prompt, {
+          taskId: wf.taskId, workflow: { workflowId: wf.id, kind: retry.kind, retryOfRunId: retry.originalRunId, replayPrompt: retry.prompt, replayContext: retry.context },
+          userMessage: { content: retry.kind === 'verify' ? `Asking the agent to report the goal outcome (turn ${turn}).` : `Continuing toward the goal (turn ${turn}).`, kind: retry.kind === 'verify' ? 'workflow-verification' : 'workflow-continuation' },
+        });
+      } catch (error) {
+        this.repo.cancelRetries(wf.id);
+        this.pauseWith(wf, 'failure', `Automatic retry could not start: ${clean(errorMessage(error), 300)} Review the run and resume manually.`);
+      }
+      return;
+    }
     try {
       this.runtime.start(wf.sessionId, next === 'verify' ? verifyPrompt(wf) : continuePrompt(wf), {
         taskId: wf.taskId, workflow: { workflowId: wf.id, kind: next },

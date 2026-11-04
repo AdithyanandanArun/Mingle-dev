@@ -53,6 +53,143 @@ const idle = (h: Harness) => waitFor(() => !h.t.app.runtime.isActive(h.sessionId
 const prompts = (h: Harness) => h.t.fake.runs.map((r) => r.prompt);
 
 describe('autonomous single-session workflow', () => {
+  it('retries one eligible generated continuation once, consumes a budgeted turn, then accepts the retry outcome', async () => {
+    const h = await harness();
+    const failedAt = new Date().toISOString();
+    const retryAt = new Date(Date.now() + 80).toISOString();
+    h.scripts.push(
+      async (o, emit) => { emit({ type: 'session', providerSessionId: 'example-native-session' }); await tool(o, 'mingle_plan_update', plan('in_progress')); edit(h, 'before-retry.txt'); },
+      async () => { throw new Error('temporary provider failure'); },
+      async (o) => { await finish(o, 'complete', 'Completed on the bounded retry.'); },
+    );
+    const recovery = h.t.app.recovery as unknown as { failureForRun: (id: string) => unknown };
+    recovery.failureForRun = (id) => {
+      const run = h.t.app.store.getRun(id);
+      if (!run || run.status !== 'failed') return null;
+      return { id: 'failure_test', sessionId: h.sessionId, runId: id, actor: 'session', provider: 'claude', kind: 'temporary_rate_limit', retryable: true, safeToRetry: true, outcomeUnknown: false, dispatchState: 'not-dispatched', continuationSafety: 'safe', retryAt, message: 'Temporary rate limit.', occurredAt: failedAt };
+    };
+    h.service.start(h.sessionId, { goal: 'Retry the generated continuation once', limits: { maxTurns: 3, maxElapsedMinutes: 5, maxStalls: 2 } });
+    const done = await settled(h, (state) => state === 'completed' || state === 'paused');
+    expect(done).toMatchObject({ state: 'completed', counters: { turns: 3 } });
+    expect(h.runs()).toBe(3);
+    expect(prompts(h)[2]).toBe(prompts(h)[1]);
+    expect(h.t.fake.runs[2]?.context).toBe(h.t.fake.runs[1]?.context);
+    expect(h.t.fake.runs[2]?.session.providerSessionId).toBe(h.t.fake.runs[1]?.session.providerSessionId);
+    const ledger = h.t.app.store.db.prepare('SELECT status,retry_run_id FROM session_workflow_retries').get() as { status: string; retry_run_id: string };
+    expect(ledger.status).toBe('consumed');
+    expect(ledger.retry_run_id).toBeTruthy();
+  });
+
+  it('pauses after the one automatic retry fails and never schedules a third attempt', async () => {
+    const h = await harness();
+    h.scripts.push(
+      async (o, emit) => { emit({ type: 'session', providerSessionId: 'example-native-session' }); await tool(o, 'mingle_plan_update', plan('in_progress')); edit(h, 'before-retry.txt'); },
+      async () => { throw new Error('temporary provider failure'); },
+      async () => { throw new Error('temporary provider failure again'); },
+    );
+    const recovery = h.t.app.recovery as unknown as { failureForRun: (id: string) => unknown };
+    recovery.failureForRun = (id) => {
+      const run = h.t.app.store.getRun(id);
+      if (!run || run.status !== 'failed') return null;
+      return { id: `failure_${id}`, sessionId: h.sessionId, runId: id, actor: 'session', provider: 'claude', kind: 'temporary_rate_limit', retryable: true, safeToRetry: true, outcomeUnknown: false, dispatchState: 'not-dispatched', continuationSafety: 'safe', retryAt: new Date(Date.now() + 60).toISOString(), message: 'Temporary rate limit.', occurredAt: new Date().toISOString() };
+    };
+    h.service.start(h.sessionId, { goal: 'Retry at most once', limits: { maxTurns: 4, maxElapsedMinutes: 5, maxStalls: 2 } });
+    const paused = await settled(h, (state) => state === 'paused');
+    await idle(h);
+    expect(paused.state).toBe('paused');
+    expect(h.runs()).toBe(3);
+    const ledger = h.t.app.store.db.prepare('SELECT status,retry_run_id FROM session_workflow_retries').get() as { status: string; retry_run_id: string };
+    expect(ledger.status).toBe('consumed');
+    expect(ledger.retry_run_id).toBeTruthy();
+  });
+
+  it('fails closed on missing, unsafe and refusal retry evidence', async () => {
+    for (const override of [null, { safeToRetry: false }, { providerCode: 'refusal' }]) {
+      const h = await harness();
+      h.scripts.push(
+        async (o, emit) => { emit({ type: 'session', providerSessionId: 'example-native-session' }); await tool(o, 'mingle_plan_update', plan('in_progress')); edit(h, 'work.txt'); },
+        async () => { throw new Error('transient failure text is not proof'); },
+      );
+      const recovery = h.t.app.recovery as unknown as { failureForRun: (id: string) => unknown };
+      recovery.failureForRun = (id) => {
+        if (override === null) return null;
+        const run = h.t.app.store.getRun(id);
+        if (!run || run.status !== 'failed') return null;
+        return { id: 'failure_test', sessionId: h.sessionId, runId: id, actor: 'session', provider: 'claude', kind: 'temporary_rate_limit', retryable: true, safeToRetry: true, outcomeUnknown: false, dispatchState: 'not-dispatched', continuationSafety: 'safe', retryAt: new Date(Date.now() + 60_000).toISOString(), message: 'Transient.', occurredAt: new Date().toISOString(), ...override };
+      };
+      h.service.start(h.sessionId, { goal: 'Keep going', limits: { maxTurns: 5, maxElapsedMinutes: 5, maxStalls: 2 } });
+      const paused = await settled(h, (state) => state === 'paused');
+      await idle(h);
+      expect(paused.state).toBe('paused');
+      expect(h.runs()).toBe(2);
+      expect(h.t.app.store.db.prepare('SELECT COUNT(*) AS n FROM session_workflow_retries').get()).toEqual({ n: 0 });
+    }
+  });
+
+  it('cancels a pending retry when a person pauses before its timer fires', async () => {
+    const h = await harness();
+    h.scripts.push(
+      async (o, emit) => { emit({ type: 'session', providerSessionId: 'example-native-session' }); await tool(o, 'mingle_plan_update', plan('in_progress')); edit(h, 'work.txt'); },
+      async () => { throw new Error('temporary failure'); },
+    );
+    const recovery = h.t.app.recovery as unknown as { failureForRun: (id: string) => unknown };
+    recovery.failureForRun = (id) => {
+      const run = h.t.app.store.getRun(id);
+      if (!run || run.status !== 'failed') return null;
+      return { id: 'failure_test', sessionId: h.sessionId, runId: id, actor: 'session', provider: 'claude', kind: 'temporary_rate_limit', retryable: true, safeToRetry: true, outcomeUnknown: false, dispatchState: 'not-dispatched', continuationSafety: 'safe', retryAt: new Date(Date.now() + 60_000).toISOString(), message: 'Transient.', occurredAt: new Date().toISOString() };
+    };
+    h.service.start(h.sessionId, { goal: 'Keep going', limits: { maxTurns: 5, maxElapsedMinutes: 5, maxStalls: 2 } });
+    await waitFor(() => h.t.app.store.db.prepare("SELECT 1 FROM session_workflow_retries WHERE status='pending'").get(), 6000, 'pending retry');
+    const paused = h.service.pause(h.sessionId, h.service.get(h.sessionId)!.version);
+    expect(paused).toMatchObject({ state: 'paused', stopReason: 'user-pause' });
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    expect(h.runs()).toBe(2);
+    expect(h.t.app.store.db.prepare('SELECT status FROM session_workflow_retries').get()).toEqual({ status: 'cancelled' });
+  });
+
+  it('pauses a pending retry as app-closed on restart instead of dispatching it', async () => {
+    const h = await harness();
+    h.scripts.push(
+      async (o, emit) => { emit({ type: 'session', providerSessionId: 'example-native-session' }); await tool(o, 'mingle_plan_update', plan('in_progress')); edit(h, 'work.txt'); },
+      async () => { throw new Error('temporary failure'); },
+    );
+    const recovery = h.t.app.recovery as unknown as { failureForRun: (id: string) => unknown };
+    recovery.failureForRun = (id) => {
+      const run = h.t.app.store.getRun(id);
+      if (!run || run.status !== 'failed') return null;
+      return { id: 'failure_test', sessionId: h.sessionId, runId: id, actor: 'session', provider: 'claude', kind: 'temporary_rate_limit', retryable: true, safeToRetry: true, outcomeUnknown: false, dispatchState: 'not-dispatched', continuationSafety: 'safe', retryAt: new Date(Date.now() + 60_000).toISOString(), message: 'Transient.', occurredAt: new Date().toISOString() };
+    };
+    h.service.start(h.sessionId, { goal: 'Keep going', limits: { maxTurns: 5, maxElapsedMinutes: 5, maxStalls: 2 } });
+    await waitFor(() => h.t.app.store.db.prepare("SELECT 1 FROM session_workflow_retries WHERE status='pending'").get(), 6000, 'pending retry');
+    h.service.close();
+    const recovered = new SessionWorkflowService({ store: h.t.app.store, runtime: h.t.app.runtime, tasks: new TaskService(h.t.app.store), recovery: h.t.app.recovery, groups: h.t.app.groups });
+    expect(recovered.get(h.sessionId)).toMatchObject({ state: 'paused', stopReason: 'app-closed' });
+    expect(h.t.app.store.db.prepare('SELECT status FROM session_workflow_retries').get()).toEqual({ status: 'cancelled' });
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    expect(h.runs()).toBe(2);
+    recovered.close();
+  });
+
+  it('pauses at retry time if the session configuration changes while waiting', async () => {
+    const h = await harness();
+    h.scripts.push(
+      async (o, emit) => { emit({ type: 'session', providerSessionId: 'example-native-session' }); await tool(o, 'mingle_plan_update', plan('in_progress')); edit(h, 'work.txt'); },
+      async () => { throw new Error('temporary failure'); },
+    );
+    const recovery = h.t.app.recovery as unknown as { failureForRun: (id: string) => unknown };
+    recovery.failureForRun = (id) => {
+      const run = h.t.app.store.getRun(id);
+      if (!run || run.status !== 'failed') return null;
+      return { id: 'failure_test', sessionId: h.sessionId, runId: id, actor: 'session', provider: 'claude', kind: 'temporary_rate_limit', retryable: true, safeToRetry: true, outcomeUnknown: false, dispatchState: 'not-dispatched', continuationSafety: 'safe', retryAt: new Date(Date.now() + 500).toISOString(), message: 'Transient.', occurredAt: new Date().toISOString() };
+    };
+    h.service.start(h.sessionId, { goal: 'Keep going', limits: { maxTurns: 5, maxElapsedMinutes: 5, maxStalls: 2 } });
+    await waitFor(() => h.t.app.store.db.prepare("SELECT 1 FROM session_workflow_retries WHERE status='pending'").get(), 6000, 'pending retry');
+    h.t.app.store.updateSession(h.sessionId, { effort: 'low' });
+    expect(await settled(h, (state) => state === 'paused')).toMatchObject({ stopReason: 'configuration-changed' });
+    expect(h.runs()).toBe(2);
+    expect(h.t.app.store.db.prepare('SELECT status FROM session_workflow_retries').get()).toEqual({ status: 'cancelled' });
+  });
+
   it('runs three turns to an agent-reported completion without a spurious task per turn and leaves the goal task in Review', async () => {
     const h = await harness();
     h.scripts.push(

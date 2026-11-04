@@ -367,6 +367,7 @@ export function Composer({ session, progressState, helperRail, helperCount = 0 }
   const providerFailureCopy = currentFailure ? providerRecoveryCopy(currentFailure) : null;
   const recoveryKind = currentFailure ? providerRecoveryKind(currentFailure) : null;
   const retrySafetyProven = currentFailure ? isSafeUndispatchedTransientFailure(currentFailure) : false;
+  const automaticRetryPending = workflow?.state === 'running' && workflow.summary === 'Automatic retry pending.';
   const currentProvider = providers?.find((p) => p.id === session.provider);
   const modelData = (currentProvider?.models ?? []) as ProviderModel[];
   const currentModel = modelData.find((m) => m.id === session.model || m.aliases?.includes(session.model));
@@ -500,13 +501,15 @@ export function Composer({ session, progressState, helperRail, helperCount = 0 }
       <QueuedMessages sessionId={session.id} steerable={steerable} items={queuedMessages} />
       {providerFailureCopy ? <div className="composer__note is-error" role="alert">
         <span>{providerFailureCopy}</span>{' '}
-        {recoveryKind === 'authentication' || recoveryKind === 'unavailable' ? <button type="button" className="link-btn" onClick={() => useMingle.getState().openSettings({ section: 'providers' })}>Open Providers settings</button> : null}
-        {recoveryKind === 'quota' ? <button type="button" className="link-btn" onClick={openUsage}>Check provider usage</button> : null}
-        {recoveryKind === 'context' ? <button type="button" className="link-btn" onClick={startCompactionDraft}>Prepare /compact</button> : null}
-        <button type="button" className="link-btn" onClick={focusRunReview}>Review this run</button>
-        {pendingQuestion || pendingApproval ? <button type="button" className="link-btn" onClick={focusPendingBoundary}>Go to {pendingQuestion ? 'the question' : 'the approval'}</button> : null}
+        {recoveryKind === 'authentication' || recoveryKind === 'unavailable' ? <><button type="button" className="link-btn" onClick={() => useMingle.getState().openSettings({ section: 'providers' })}>Open Providers settings</button>{' '}</> : null}
+        {recoveryKind === 'quota' ? <><button type="button" className="link-btn" onClick={openUsage}>Check provider usage</button>{' '}</> : null}
+        {recoveryKind === 'context' ? <><button type="button" className="link-btn" onClick={startCompactionDraft}>Prepare /compact</button>{' '}</> : null}
+        <button type="button" className="link-btn" onClick={focusRunReview}>Review this run</button>{' '}
+        {pendingQuestion || pendingApproval ? <><button type="button" className="link-btn" onClick={focusPendingBoundary}>Go to {pendingQuestion ? 'the question' : 'the approval'}</button>{' '}</> : null}
         {workflow?.state === 'paused' ? <span> Use the goal controls above to review its pause reason and resume only within the shown limits.</span> : null}
-        {!retrySafetyProven ? <span> The stored evidence does not prove a safe retry. Inspect its run review and worktree before continuing; this turn will not be replayed automatically.</span> : <span> The provider recorded this request as undispatched. It still will not be replayed automatically.</span>}
+        {automaticRetryPending ? <span> An automatic retry is pending for this generated goal turn, within the same provider, model and goal budget.</span>
+          : !retrySafetyProven ? <span> The stored evidence does not prove a safe retry. Inspect its run review and worktree before continuing; this turn will not be replayed automatically.</span>
+            : <span> The provider recorded this request as undispatched. It will not be replayed automatically outside an eligible generated goal turn.</span>}
       </div> : null}
       {session.status === 'error' && !providerFailureCopy ? <div className="composer__note is-error" role="alert">
         <span>This turn failed without a matching classified recovery record. Review the run before continuing; Mingle will not retry it automatically.</span>

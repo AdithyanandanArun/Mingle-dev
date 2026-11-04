@@ -238,6 +238,7 @@
 .sendbtn--stop:hover { background: var(--err-soft); box-shadow: inset 0 0 0 1px var(--err); }
 .composer__note { margin-top: 8px; padding: 0 6px; font-size: var(--text-xs); color: var(--fg-2); }
 .composer__note.is-error { color: var(--err); }
+.composer__note .link-btn { margin-inline-start: 4px; }
 
 /* Markdown */
 .md > :first-child { margin-top: 0; } .md > :last-child { margin-bottom: 0; }

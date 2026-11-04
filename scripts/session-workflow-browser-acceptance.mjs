@@ -49,7 +49,7 @@ function freshWorld() {
   return {
     projects: ['a', 'b'].map((key) => ({ id: `example-project-${key}`, name: `Example project ${key.toUpperCase()}`, path: `/example/${key}`, isExample: false, createdAt: '2026-11-03T00:00:00.000Z' })),
     sessions: [session('s-a', 'example-project-a', 'Example session A', 'claude'), session('s-b', 'example-project-b', 'Example session B', 'codex')],
-    workflows: [], delegated: [], attachments: {}, log: [], notExposed: [], sockets: [], startError: null, hold: null, uploadCounter: 0,
+    workflows: [], delegated: [], attachments: {}, messages: [], runs: [], approvals: [], questions: [], failure: null, log: [], notExposed: [], sockets: [], startError: null, hold: null, uploadCounter: 0,
   };
 }
 const find = (sessionId) => world.workflows.find((item) => item.sessionId === sessionId);
@@ -67,9 +67,12 @@ async function handle(route, schemas) {
   const json = (payload, status = 200) => route.fulfill({ status, json: payload });
   const fail = (status, error) => json({ error }, status);
   let match;
-  if (path === '/api/bootstrap') return json({ projects: world.projects, sessions: world.sessions, messages: [], queuedMessages: [], tasks: [], events: [], approvals: [], plans: [], questions: [], providers, settings: {}, version: 'Example fixture', runs: [], toolCalls: [], workflows: world.workflows, delegatedSubagents: world.delegated });
+  if (path === '/api/bootstrap') return json({ projects: world.projects, sessions: world.sessions, messages: world.messages, queuedMessages: [], tasks: [], events: [], approvals: world.approvals, plans: [], questions: world.questions, providers, settings: {}, version: 'Example fixture', runs: world.runs, toolCalls: [], workflows: world.workflows, delegatedSubagents: world.delegated });
   if (path === '/api/workspace/selection') return json({ projectId: body?.projectId ?? null });
   if ((match = path.match(/^\/api\/sessions\/([^/]+)\/catalog$/))) return json({ commands: [], skills: [], warnings: [] });
+  if ((match = path.match(/^\/api\/sessions\/([^/]+)\/recovery$/))) return json({ checkpoint: null, failure: world.failure });
+  if ((match = path.match(/^\/api\/sessions\/([^/]+)\/usage$/))) return json({ provider: 'claude', fetchedAt: iso(Date.now()), status: 'available', plan: 'Example plan', windows: [], credits: null, resets: null, notices: [], session: { id: match[1], inputTokens: 0, outputTokens: 0, costUsd: null } });
+  if ((match = path.match(/^\/api\/runs\/([^/]+)\/review$/))) return json({ runId: match[1], sessionId: 's-a', status: 'failed', readAt: iso(Date.now()), tools: { total: 0, counts: {}, failed: 0, interrupted: 0, running: 0, nonZeroExit: 0 }, commands: { total: 0, items: [], truncated: false }, problems: { total: 0, items: [], truncated: false }, failure: world.failure ? { kind: world.failure.kind, message: world.failure.message, occurredAt: world.failure.occurredAt, outcomeUnknown: world.failure.outcomeUnknown } : null, goalTurn: null });
   if ((match = path.match(/^\/api\/sessions\/([^/]+)\/attachments$/))) {
     const sid = match[1];
     if (method === 'GET') return json(world.attachments[sid] ?? []);
@@ -775,6 +778,59 @@ try {
     assert.equal(await heading.getAttribute('aria-expanded'), 'false');
     await u.pause.click(); await u.label('Paused by you').waitFor();
   }));
+
+  await test('real Composer recovery actions separate provider setup from Mingle, open usage, inspect the matching run and state pending retry', async () => {
+    const stamp = iso(Date.now());
+    const baseSetup = (failure, workflowSummary = null, runModel = 'claude-example') => {
+      const target = world.sessions.find((item) => item.id === 's-a');
+      Object.assign(target, { status: 'error', error: 'Example provider failure.' });
+      world.failure = { id: 'example-failure', sessionId: 's-a', runId: 'example-failed-run', actor: 'session', provider: 'claude', kind: failure.kind, providerCode: failure.providerCode, retryable: failure.retryable ?? false, safeToRetry: failure.safeToRetry, outcomeUnknown: failure.outcomeUnknown ?? false, dispatchState: failure.dispatchState ?? 'unknown', continuationSafety: failure.continuationSafety ?? 'unknown', retryAt: null, message: failure.message ?? 'Example classified provider failure.', occurredAt: stamp };
+      world.runs = [{ id: 'example-failed-run', sessionId: 's-a', userMessageId: 'example-failed-message', provider: 'claude', model: runModel, status: 'failed', startedAt: stamp, finishedAt: stamp, durationMs: 10, toolCount: 0, toolCounts: {} }];
+      world.messages = [{ id: 'example-failed-message', sessionId: 's-a', role: 'user', content: 'Example request that failed.', createdAt: stamp, runId: 'example-failed-run' }];
+      if (workflowSummary) world.workflows = [workflow('s-a', { state: 'running', currentRunId: null, summary: workflowSummary })];
+    };
+    await run({ viewport: { width: 900, height: 844 }, setup() { baseSetup({ kind: 'authentication', message: 'Example authentication failure.' }); } }, async ({ page, shot }) => {
+      const note = page.locator('.composer__note').first();
+      await note.getByRole('button', { name: 'Open Providers settings' }).waitFor();
+      assert.match(await note.innerText(), /separate from your Mingle account/);
+      world.questions = [{ id: 'example-pending-question', sessionId: 's-a', runId: 'example-failed-run', provider: 'claude', tool: 'AskUserQuestion', questions: [{ id: 'example-choice', header: 'Next step', question: 'Should Mingle continue?', options: [{ label: 'Yes' }, { label: 'No' }], multiSelect: false, allowOther: false, secret: false }], status: 'pending', createdAt: stamp, resolvedAt: null }];
+      await page.evaluate(() => window.refreshExampleBootstrap());
+      await note.getByRole('button', { name: 'Go to the question' }).click();
+      assert.equal(await page.evaluate(() => document.activeElement?.closest('[data-question-id]')?.getAttribute('data-question-id')), 'example-pending-question');
+      await note.getByRole('button', { name: 'Open Providers settings' }).click();
+      await page.waitForFunction(() => window.getExampleSettingsState?.().view === 'settings' && window.getExampleSettingsState?.().section === 'providers');
+      await shot('15-auth-provider-settings');
+    });
+    await run({ viewport: { width: 390, height: 844 }, setup() { baseSetup({ kind: 'quota_exhausted', message: 'Example quota failure.' }); } }, async ({ page, shot }) => {
+      const note = page.locator('.composer__note').first();
+      world.approvals = [{ id: 'example-pending-approval', sessionId: 's-a', tool: 'Bash', description: 'Example approval request.', input: {}, status: 'pending', createdAt: stamp }];
+      await page.evaluate(() => window.refreshExampleBootstrap());
+      await note.getByRole('button', { name: 'Go to the approval' }).click();
+      assert.equal(await page.evaluate(() => document.activeElement?.closest('[data-approval-id]')?.getAttribute('data-approval-id')), 'example-pending-approval');
+      await note.getByRole('button', { name: 'Check provider usage' }).waitFor();
+      await note.getByRole('button', { name: 'Check provider usage' }).click();
+      await page.getByRole('dialog', { name: 'Usage' }).waitFor();
+      await page.getByRole('heading', { name: 'Usage' }).waitFor();
+      await page.getByRole('button', { name: 'Close usage' }).click();
+      await note.getByRole('button', { name: 'Review this run' }).click();
+      await page.locator('[data-run-id="example-failed-run"]').waitFor();
+      await shot('16-quota-usage-review-390');
+    });
+    await run({ viewport: { width: 900, height: 844 }, setup() { baseSetup({ kind: 'temporary_rate_limit', retryable: true, safeToRetry: true, dispatchState: 'not-dispatched', outcomeUnknown: false, continuationSafety: 'safe' }, 'Automatic retry pending.'); } }, async ({ page, shot }) => {
+      const note = page.locator('.composer__note').first();
+      await note.getByText(/automatic retry is pending for this generated goal turn/i).waitFor();
+      await note.getByRole('button', { name: 'Review this run' }).focus();
+      await page.keyboard.press('Enter');
+      assert.equal(await page.locator('[data-run-id="example-failed-run"]').count(), 1);
+      await shot('17-pending-retry-fenced-review-900');
+    });
+    await run({ viewport: { width: 900, height: 844 }, setup() { baseSetup({ kind: 'authentication', message: 'Stale Example failure.' }, null, 'wrong-model'); } }, async ({ page }) => {
+      const note = page.locator('.composer__note').first();
+      await note.getByText(/failed without a matching classified recovery record/i).waitFor();
+      assert.equal(await note.getByRole('button', { name: 'Open Providers settings' }).count(), 0);
+      await note.getByRole('button', { name: 'Review this run' }).waitFor();
+    });
+  });
 
   await test('boundary: only Example endpoints and mocked local sockets were used; no external hosts or run-control endpoints', () => {
     assert.ok(aggregate.sockets.every((url) => new URL(url).hostname === '127.0.0.1' && new URL(url).pathname === '/ws'));

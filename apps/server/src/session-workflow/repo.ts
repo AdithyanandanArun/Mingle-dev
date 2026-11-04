@@ -18,8 +18,14 @@ export interface WorkflowRow extends SessionWorkflow {
 
 export interface WorkflowRunRow {
   runId: string; workflowId: string; sessionId: string; seq: number; kind: WorkflowRunKind; startedAt: string;
+  prompt: string | null; context: string | null;
   report: WorkflowFinish | null; reportState: 'none' | 'pending' | 'applied' | 'discarded';
   outcome: 'completed' | 'failed' | 'interrupted' | null; endedAt: string | null;
+}
+
+export interface WorkflowRetryRow {
+  originalRunId: string; workflowId: string; sessionId: string; taskId: string; conversationId: string; kind: 'continue' | 'verify'; prompt: string; context: string;
+  configJson: string; retryAt: string; status: 'pending' | 'claimed' | 'consumed' | 'cancelled'; retryRunId: string | null;
 }
 
 const OPEN = "('running','paused')";
@@ -41,7 +47,7 @@ function workflowRow(row: Row): WorkflowRow {
 function runRow(row: Row): WorkflowRunRow {
   return {
     runId: String(row.run_id), workflowId: String(row.workflow_id), sessionId: String(row.session_id), seq: Number(row.seq), kind: row.kind as WorkflowRunKind,
-    startedAt: String(row.started_at), report: row.report_json ? json(row.report_json) : null, reportState: row.report_state as WorkflowRunRow['reportState'],
+    startedAt: String(row.started_at), prompt: (row.prompt as string | null) ?? null, context: (row.context as string | null) ?? null, report: row.report_json ? json(row.report_json) : null, reportState: row.report_state as WorkflowRunRow['reportState'],
     outcome: (row.outcome as WorkflowRunRow['outcome'] | null) ?? null, endedAt: (row.ended_at as string | null) ?? null,
   };
 }
@@ -72,9 +78,23 @@ export class WorkflowRepo {
       CREATE INDEX IF NOT EXISTS session_workflows_session ON session_workflows(session_id, created_at DESC);
       CREATE TABLE IF NOT EXISTS session_workflow_runs (
         run_id TEXT PRIMARY KEY, workflow_id TEXT NOT NULL, session_id TEXT NOT NULL, seq INTEGER NOT NULL, kind TEXT NOT NULL,
-        started_at TEXT NOT NULL, report_json TEXT, report_state TEXT NOT NULL DEFAULT 'none', outcome TEXT, ended_at TEXT
+        started_at TEXT NOT NULL, prompt TEXT, context TEXT, report_json TEXT, report_state TEXT NOT NULL DEFAULT 'none', outcome TEXT, ended_at TEXT
       );
       CREATE INDEX IF NOT EXISTS session_workflow_runs_workflow ON session_workflow_runs(workflow_id, seq);`);
+    db.exec(`CREATE TABLE IF NOT EXISTS session_workflow_retries (
+      original_run_id TEXT PRIMARY KEY, workflow_id TEXT NOT NULL, session_id TEXT NOT NULL, task_id TEXT NOT NULL, conversation_id TEXT NOT NULL,
+      kind TEXT NOT NULL CHECK(kind IN ('continue','verify')), prompt TEXT NOT NULL, config_json TEXT NOT NULL,
+      context TEXT NOT NULL, retry_at TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('pending','claimed','consumed','cancelled')),
+      retry_run_id TEXT
+    );
+      CREATE INDEX IF NOT EXISTS session_workflow_retries_pending ON session_workflow_retries(status,retry_at);`);
+    const runColumns = new Set((db.prepare('PRAGMA table_info(session_workflow_runs)').all() as Array<{ name: string }>).map((column) => column.name));
+    if (!runColumns.has('prompt')) db.exec('ALTER TABLE session_workflow_runs ADD COLUMN prompt TEXT');
+    if (!runColumns.has('context')) db.exec('ALTER TABLE session_workflow_runs ADD COLUMN context TEXT');
+    const retryColumns = new Set((db.prepare('PRAGMA table_info(session_workflow_retries)').all() as Array<{ name: string }>).map((column) => column.name));
+    if (!retryColumns.has('task_id')) db.exec("ALTER TABLE session_workflow_retries ADD COLUMN task_id TEXT NOT NULL DEFAULT ''");
+    if (!retryColumns.has('conversation_id')) db.exec("ALTER TABLE session_workflow_retries ADD COLUMN conversation_id TEXT NOT NULL DEFAULT ''");
+    if (!retryColumns.has('context')) db.exec("ALTER TABLE session_workflow_retries ADD COLUMN context TEXT NOT NULL DEFAULT ''");
   }
 
   private all(sql: string, ...params: SQLInputValue[]): Row[] { return this.db.prepare(sql).all(...params) as Row[]; }
@@ -127,6 +147,7 @@ export class WorkflowRepo {
     this.exec('INSERT INTO session_workflow_runs(run_id,workflow_id,session_id,seq,kind,started_at,report_state) VALUES(?,?,?,?,?,?,?)',
       row.runId, row.workflowId, row.sessionId, row.seq, row.kind, row.startedAt, 'none');
   }
+  setReplayPrompt(runId: string, prompt: string, context: string): void { this.exec('UPDATE session_workflow_runs SET prompt=?,context=? WHERE run_id=? AND ended_at IS NULL', prompt, context, runId); }
 
   run(runId: string): WorkflowRunRow | undefined {
     const row = this.one('SELECT * FROM session_workflow_runs WHERE run_id=?', runId);
@@ -152,4 +173,20 @@ export class WorkflowRepo {
   }
 
   ownsRun(runId: string): boolean { return Boolean(this.one('SELECT 1 AS found FROM session_workflow_runs WHERE run_id=?', runId)); }
+  isRetryRun(runId: string): boolean { return Boolean(this.one('SELECT 1 AS found FROM session_workflow_retries WHERE retry_run_id=?', runId)); }
+
+  scheduleRetry(row: WorkflowRetryRow): boolean {
+    return this.exec(`INSERT OR IGNORE INTO session_workflow_retries(original_run_id,workflow_id,session_id,task_id,conversation_id,kind,prompt,config_json,context,retry_at,status,retry_run_id)
+      VALUES(?,?,?,?,?,?,?,?,?,?,'pending',NULL)`, row.originalRunId, row.workflowId, row.sessionId, row.taskId, row.conversationId, row.kind, row.prompt, row.configJson, row.context, row.retryAt) === 1;
+  }
+  retryForWorkflow(workflowId: string): WorkflowRetryRow | undefined {
+    const row = this.one("SELECT * FROM session_workflow_retries WHERE workflow_id=? AND status IN ('pending','claimed') ORDER BY retry_at LIMIT 1", workflowId);
+    return row ? { originalRunId: String(row.original_run_id), workflowId: String(row.workflow_id), sessionId: String(row.session_id), taskId: String(row.task_id), conversationId: String(row.conversation_id), kind: row.kind as WorkflowRetryRow['kind'], prompt: String(row.prompt), context: String(row.context), configJson: String(row.config_json), retryAt: String(row.retry_at), status: row.status as WorkflowRetryRow['status'], retryRunId: (row.retry_run_id as string | null) ?? null } : undefined;
+  }
+  claimRetry(originalRunId: string): boolean { return this.exec("UPDATE session_workflow_retries SET status='claimed' WHERE original_run_id=? AND status='pending'", originalRunId) === 1; }
+  consumeRetry(originalRunId: string, retryRunId: string): void { this.exec("UPDATE session_workflow_retries SET status='consumed',retry_run_id=? WHERE original_run_id=? AND status='claimed'", retryRunId, originalRunId); }
+  cancelRetries(workflowId: string): void { this.exec("UPDATE session_workflow_retries SET status='cancelled' WHERE workflow_id=? AND status IN ('pending','claimed')", workflowId); }
+  pendingRetries(): WorkflowRetryRow[] {
+    return this.all("SELECT * FROM session_workflow_retries WHERE status IN ('pending','claimed') ORDER BY retry_at").map((row) => ({ originalRunId: String(row.original_run_id), workflowId: String(row.workflow_id), sessionId: String(row.session_id), taskId: String(row.task_id), conversationId: String(row.conversation_id), kind: row.kind as WorkflowRetryRow['kind'], prompt: String(row.prompt), context: String(row.context), configJson: String(row.config_json), retryAt: String(row.retry_at), status: row.status as WorkflowRetryRow['status'], retryRunId: (row.retry_run_id as string | null) ?? null }));
+  }
 }

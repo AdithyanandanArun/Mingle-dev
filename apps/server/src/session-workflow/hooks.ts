@@ -4,7 +4,7 @@ import type { ProviderFailure, QueuedMessage, WorkflowFinish } from '@mingle/con
 export type WorkflowRunKind = 'start' | 'continue' | 'verify' | 'resume' | 'human' | 'queue' | 'wakeup';
 
 /** Server-only run binding. No public request can supply one: it only travels through `StartOptions`. */
-export interface WorkflowRunBinding { workflowId: string; kind: WorkflowRunKind }
+export interface WorkflowRunBinding { workflowId: string; kind: WorkflowRunKind; retryOfRunId?: string; replayPrompt?: string; replayContext?: string }
 
 /** What happened at provider/user boundaries while one run was alive. */
 export interface RunBoundaryCounters {
@@ -28,7 +28,7 @@ export interface RunEndInfo {
   outcome: 'completed' | 'failed' | 'interrupted';
   /** Redacted failure text, when the run failed. */
   failure: string | null;
-  failureInfo: Pick<ProviderFailure, 'kind' | 'providerCode' | 'outcomeUnknown' | 'dispatchState' | 'message'> | null;
+  failureInfo: Pick<ProviderFailure, 'kind' | 'providerCode' | 'outcomeUnknown' | 'dispatchState' | 'message' | 'retryable' | 'safeToRetry' | 'continuationSafety' | 'retryAt'> | null;
   /** True when the run was interrupted because Mingle itself was closing. */
   shutdown: boolean;
   boundary: RunBoundaryCounters;
@@ -49,6 +49,8 @@ export interface SessionWorkflowHooks {
   prepareStart(sessionId: string, content: string, options: import('../runtime.ts').StartOptions): import('../runtime.ts').StartOptions;
   /** Called inside the same transaction that inserts the run row. Throwing rolls the whole start back. */
   runBound(info: { sessionId: string; runId: string; workflow: WorkflowRunBinding }): void;
+  /** Persists the exact provider prompt and injected context before dispatch. */
+  recordReplayPrompt?(info: { runId: string; prompt: string; context: string }): void;
   /** Records the agent's own report for a live, bound run. Throws when the binding is stale. */
   recordReport(info: { sessionId: string; runId: string; report: WorkflowFinish }): void;
   /** Synchronous, early: the run row and task are finalised; provider cleanup and queue handling have not happened yet. */
