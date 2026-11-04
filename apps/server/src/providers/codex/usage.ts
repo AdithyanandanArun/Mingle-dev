@@ -149,7 +149,7 @@ function parseResets(value: unknown, notices: string[]): ProviderUsage['resets']
   return { available, grants, detailsKnown, replenishesAt: null };
 }
 
-function parseUsage(result: unknown): ProviderUsage {
+export function parseCodexUsage(result: unknown): ProviderUsage {
   const usage = unavailable('Codex returned an invalid usage response.');
   const notices: string[] = [];
   if (!isRecord(result)) return usage;
@@ -210,7 +210,7 @@ export async function getCodexUsage(session: Session, settings: AppSettings): Pr
     }, INITIALIZE_TIMEOUT_MS);
     conn.notify('initialized', {});
     const result = await conn.request('account/rateLimits/read', null, USAGE_TIMEOUT_MS);
-    usage = parseUsage(result);
+    usage = parseCodexUsage(result);
   } catch {
     // Native RPC errors can contain account-specific service diagnostics; keep the UI notice generic.
     usage = unavailable('Codex usage could not be read. Confirm the existing Codex sign-in supports rate-limit reads, then retry.');

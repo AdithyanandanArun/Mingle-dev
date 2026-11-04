@@ -1,4 +1,5 @@
-import type { AgentAdapter, AppSettings, ConversationListOptions, ExternalConversationDetails, ExternalConversationList, Provider, ProviderCatalog, ProviderInfo, ProviderUsage, Session } from '@mingle/contracts';
+import { tmpdir } from 'node:os';
+import type { AccountUsageProvider, AgentAdapter, AppSettings, ConversationListOptions, ExternalConversationDetails, ExternalConversationList, Provider, ProviderAccountUsageSnapshot, ProviderCatalog, ProviderInfo, ProviderResetResult, ProviderUsage, RedeemProviderResetInput, Session } from '@mingle/contracts';
 import { createClaudeAdapter } from './claude/adapter.js';
 import { createCodexAdapter } from './codex/adapter.js';
 import { detectProviders as detect } from './detect.js';
@@ -15,11 +16,14 @@ import { authenticateAntigravity, probeAuthenticatedAntigravity } from './antigr
 import { createOpencodeAdapter } from './opencode/adapter.js';
 import { getOpencodeCatalog } from './opencode/catalog.js';
 import { getOpencodeUsage } from './opencode/usage.js';
+import { CodexAccountUsage } from './codex/account-usage.js';
 import { ProviderError } from './common.js';
 
 export type { AdapterEvent, AgentAdapter, RunOptions } from '@mingle/contracts';
 export { CLAUDE_DEFAULT_MODEL, CODEX_DEFAULT_MODEL } from './detect.js';
 export { ProviderError, isAbortError } from './common.js';
+
+const codexAccountUsage = new CodexAccountUsage();
 
 /** Returns the adapter for a provider. Adapters hold no state between runs. */
 export function createAdapter(provider: Provider): AgentAdapter {
@@ -62,6 +66,24 @@ export function getUsage(session: Session, settings: AppSettings): Promise<Provi
     case 'opencode': return getOpencodeUsage(session, settings);
   }
 }
+
+/** Read account limits without a stored session, project cwd, prompt or reset mutation. */
+export function getAccountUsage(provider: AccountUsageProvider, settings: AppSettings): Promise<ProviderAccountUsageSnapshot> {
+  if (provider === 'codex') return codexAccountUsage.read(settings);
+  const session = { id: 'account-usage', projectId: '', name: 'Account usage', provider: 'claude', model: settings.defaultClaudeModel,
+    effort: settings.defaultEffort, status: 'idle', policy: settings.defaultPolicy, isolated: false, worktreePath: tmpdir(), branch: null,
+    providerSessionId: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), error: null,
+    inputTokens: 0, outputTokens: 0, costUsd: null, pinned: false, unread: false } satisfies Session;
+  return getClaudeUsage(session, settings).then((usage) => ({ provider: 'claude', usage, reset: { mode: 'external', snapshotToken: null,
+    externalUrl: 'https://claude.ai/settings/usage', reason: 'Claude exposes usage limits but does not provide a native reset redemption action in Claude Code.' } }));
+}
+
+export function redeemAccountUsageReset(provider: AccountUsageProvider, settings: AppSettings, snapshotToken: string, input: RedeemProviderResetInput): Promise<ProviderResetResult> {
+  if (provider === 'codex') return codexAccountUsage.redeem(settings, snapshotToken, input);
+  return Promise.resolve({ outcome: 'noCredit', snapshot: null, notice: 'Claude reset actions are available only in Claude settings.' });
+}
+
+export function invalidateAccountUsage(): void { codexAccountUsage.invalidate(); }
 
 export function listConversations(provider: Provider, settings: AppSettings, options: ConversationListOptions): Promise<ExternalConversationList> {
   switch (provider) {

@@ -1,4 +1,4 @@
-import type { AppSettings, Provider, ProviderCatalog, ProviderInfo, ProviderUsage, Session } from '@mingle/contracts';
+import type { AccountUsageProvider, AppSettings, Provider, ProviderAccountUsageSnapshot, ProviderCatalog, ProviderInfo, ProviderResetResult, ProviderUsage, RedeemProviderResetInput, Session } from '@mingle/contracts';
 import type { Logger, ProviderRuntime } from './types.ts';
 import { errorMessage, redactSecrets, truncate } from './util.ts';
 import { providerExecutable, providerName } from './provider-config.ts';
@@ -25,10 +25,16 @@ export class ProviderService {
   private cache: ProviderInfo[] | null = null;
   private inflight: Promise<ProviderInfo[]> | null = null;
   private generation = 0;
+  private usageGeneration = 0;
   private readonly catalogs = new Map<string, { expires: number; value: ProviderCatalog }>();
   private readonly catalogInflight = new Map<string, Promise<ProviderCatalog>>();
   private readonly usageCache = new Map<string, { receivedAt: number; expires: number; value: ProviderUsage }>();
   private readonly usageInflight = new Map<string, Promise<ProviderUsage>>();
+  private readonly accountUsageCache = new Map<AccountUsageProvider, { receivedAt: number; expires: number; value: ProviderAccountUsageSnapshot }>();
+  private readonly accountUsageInflight = new Map<AccountUsageProvider, Promise<ProviderAccountUsageSnapshot>>();
+  private readonly accountUsageEpoch = new Map<AccountUsageProvider, number>();
+  private readonly accountUsageMutations = new Map<AccountUsageProvider, Promise<void>>();
+  private readonly accountUsageResetInflight = new Map<AccountUsageProvider, { idempotencyKey: string; promise: Promise<ProviderResetResult> }>();
 
   constructor(private readonly providers: ProviderRuntime, private readonly getSettings: () => AppSettings, private readonly log: Logger,
     private readonly onChange: () => void = () => {}) {}
@@ -61,19 +67,29 @@ export class ProviderService {
 
   /** Forces a fresh probe (after settings change or explicit refresh). */
   refresh(): Promise<ProviderInfo[]> {
+    this.providers.invalidateAccountUsage?.();
+    this.usageGeneration++;
     this.usageCache.clear();
+    this.accountUsageCache.clear();
+    this.accountUsageInflight.clear();
+    for (const provider of ['codex', 'claude'] as const) this.accountUsageEpoch.set(provider, (this.accountUsageEpoch.get(provider) ?? 0) + 1);
     this.catalogs.clear();
     this.catalogInflight.clear();
     return this.probe();
   }
 
   invalidate(): void {
+    this.providers.invalidateAccountUsage?.();
     this.cache = null;
     this.catalogs.clear();
     this.catalogInflight.clear();
     this.usageCache.clear();
     this.usageInflight.clear();
+    this.accountUsageCache.clear();
+    this.accountUsageInflight.clear();
+    for (const provider of ['codex', 'claude'] as const) this.accountUsageEpoch.set(provider, (this.accountUsageEpoch.get(provider) ?? 0) + 1);
     this.generation++;
+    this.usageGeneration++;
     this.inflight = null;
     void this.probe();
   }
@@ -102,6 +118,8 @@ export class ProviderService {
 
   /** Quota reporting never starts a model turn or redeems earned resets. */
   usage(session: Session, force = false): Promise<ProviderUsage> {
+    const mutation = session.provider === 'codex' || session.provider === 'claude' ? this.accountUsageMutations.get(session.provider) : undefined;
+    if (mutation) return mutation.then(() => this.usage(session, true));
     const settings = this.getSettings();
     const key = JSON.stringify([session.provider, session.model, session.worktreePath, providerExecutable(session.provider, settings)]);
     const now = Date.now();
@@ -112,11 +130,11 @@ export class ProviderService {
     const unavailable = (notice: string): ProviderUsage => ({ provider: session.provider, fetchedAt: new Date().toISOString(),
       status: 'unavailable', plan: null, windows: [], credits: null, resets: null, notices: [notice] });
     if (!this.providers.getUsage) return Promise.resolve(unavailable('This provider runtime does not expose account usage.'));
-    const generation = this.generation;
+    const generation = this.usageGeneration;
     const pending = Promise.resolve().then(() => this.providers.getUsage!(session, settings)).catch((error) =>
       unavailable(`Usage could not be read: ${truncate(redactSecrets(errorMessage(error)), 400)}`),
     ).then((value) => {
-      if (generation === this.generation) {
+      if (generation === this.usageGeneration) {
         if (this.usageCache.size >= 100) this.usageCache.delete(this.usageCache.keys().next().value!);
         const receivedAt = Date.now();
         this.usageCache.set(key, { receivedAt, expires: receivedAt + (value.status === 'unavailable' ? USAGE_REFRESH_MIN_MS : USAGE_CACHE_MS), value });
@@ -125,6 +143,67 @@ export class ProviderService {
     }).finally(() => { if (this.usageInflight.get(key) === pending) this.usageInflight.delete(key); });
     this.usageInflight.set(key, pending);
     return pending;
+  }
+
+  accountUsage(provider: AccountUsageProvider, force = false): Promise<ProviderAccountUsageSnapshot> {
+    const mutation = this.accountUsageMutations.get(provider);
+    if (mutation) return mutation.then(() => this.accountUsage(provider, true));
+    const now = Date.now();
+    const cached = this.accountUsageCache.get(provider);
+    if (cached && (cached.expires > now && !force || now - cached.receivedAt < USAGE_REFRESH_MIN_MS)) return Promise.resolve(cached.value);
+    const inflight = this.accountUsageInflight.get(provider);
+    if (inflight) return inflight;
+    const fallback: ProviderAccountUsageSnapshot = { provider, usage: { provider, fetchedAt: new Date().toISOString(), status: 'unavailable', plan: null, windows: [], credits: null, resets: null, notices: ['Account usage is unavailable from this provider runtime.'] },
+      reset: { mode: provider === 'claude' ? 'external' : 'unavailable', snapshotToken: null, externalUrl: provider === 'claude' ? 'https://claude.ai/settings/usage' : null, reason: 'Account usage is unavailable from this provider runtime.' } };
+    if (!this.providers.getAccountUsage) return Promise.resolve(fallback);
+    const epoch = this.accountUsageEpoch.get(provider) ?? 0;
+    const settings = this.getSettings();
+    const pending = Promise.resolve().then(() => this.providers.getAccountUsage!(provider, settings)).catch(() => fallback).then((value) => {
+      if ((this.accountUsageEpoch.get(provider) ?? 0) === epoch) this.accountUsageCache.set(provider, { receivedAt: Date.now(), expires: Date.now() + (value.usage.status === 'unavailable' ? USAGE_REFRESH_MIN_MS : USAGE_CACHE_MS), value });
+      return value;
+    }).finally(() => { if (this.accountUsageInflight.get(provider) === pending) this.accountUsageInflight.delete(provider); });
+    this.accountUsageInflight.set(provider, pending);
+    return pending;
+  }
+
+  redeemAccountUsageReset(provider: AccountUsageProvider, snapshotToken: string, input: RedeemProviderResetInput): Promise<ProviderResetResult> {
+    const active = this.accountUsageResetInflight.get(provider);
+    if (active) return active.idempotencyKey === input.idempotencyKey ? active.promise : Promise.resolve({ outcome: 'noCredit', snapshot: null,
+      notice: 'Another reset action is still being confirmed. Retry it with its original request key.' });
+    let finishMutation!: () => void;
+    const mutation = new Promise<void>((resolve) => { finishMutation = resolve; });
+    this.accountUsageMutations.set(provider, mutation);
+    const pending = Promise.resolve().then(async (): Promise<ProviderResetResult> => {
+      this.invalidateUsage(provider);
+      try {
+        if (!this.providers.redeemAccountUsageReset) return { outcome: 'noCredit', snapshot: null, notice: 'This provider runtime does not expose native reset actions.' };
+        const result = await this.providers.redeemAccountUsageReset(provider, this.getSettings(), snapshotToken, input);
+        this.invalidateUsage(provider);
+        if (result.snapshot) this.accountUsageCache.set(provider, { receivedAt: Date.now(), expires: Date.now() + (result.snapshot.usage.status === 'unavailable' ? USAGE_REFRESH_MIN_MS : USAGE_CACHE_MS), value: result.snapshot });
+        return result;
+      } catch {
+        this.invalidateUsage(provider);
+        return { outcome: 'noCredit', snapshot: null, notice: 'The reset result could not be confirmed. Retry this action using the same request key.' };
+      } finally {
+        if (this.accountUsageMutations.get(provider) === mutation) this.accountUsageMutations.delete(provider);
+        finishMutation();
+      }
+    });
+    this.accountUsageResetInflight.set(provider, { idempotencyKey: input.idempotencyKey, promise: pending });
+    void pending.then(() => { if (this.accountUsageResetInflight.get(provider)?.promise === pending) this.accountUsageResetInflight.delete(provider); });
+    return pending;
+  }
+
+  private invalidateUsage(provider: AccountUsageProvider): void {
+    this.usageGeneration++;
+    this.accountUsageEpoch.set(provider, (this.accountUsageEpoch.get(provider) ?? 0) + 1);
+    this.accountUsageCache.delete(provider);
+    this.accountUsageInflight.delete(provider);
+    for (const [key, cached] of this.usageCache) if (cached.value.provider === provider) this.usageCache.delete(key);
+    for (const [key] of this.usageInflight) {
+      // Session keys are JSON tuples whose first entry is the provider.
+      try { if (JSON.parse(key)[0] === provider) this.usageInflight.delete(key); } catch { /* ignore malformed internal key */ }
+    }
   }
 
   /** Discover commands and skills without submitting a model prompt. Cache briefly per session configuration. */

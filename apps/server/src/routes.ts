@@ -4,6 +4,7 @@ import {
   CreateGroupSchema, AddGroupAgentSchema, UpdateGroupSchema, SendGroupMessageSchema, RepositoryCommitSchema, RepositoryPushSchema, RepositoryBranchSchema, RepositoryPullRequestSchema, BrowserConnectSchema, BrowserSignInSchema, BrowserActionSchema, ApprovalDecisionSchema, ConversationIdSchema, ImportConversationSchema, ProviderSchema, CloneProjectSchema, NewProjectSchema, CreateProjectSchema, CreateSessionSchema, CreateTaskSchema, HandoffSchema, SendMessageSchema, UpdateProjectSchema, UpdateSessionSchema, UpdateSettingsSchema, UpdateTaskSchema, EditSessionPlanSchema, UserInputAnswersSchema, StartSubagentSchema,
   RecoveryActionRequestSchema, InitializeGitSchema,
   StartSessionWorkflowSchema, WorkflowControlSchema, ResumeSessionWorkflowSchema,
+  AccountUsageProviderSchema, RedeemProviderResetSchema,
 } from '@mingle/contracts';
 import { BrowserImportSchema } from '@mingle/contracts';
 import type { Bootstrap, Session, SessionUsage } from '@mingle/contracts';
@@ -554,6 +555,15 @@ export function buildRouter(s: Services) {
     const result: SessionUsage = { ...usage, session: { id: latest.id, inputTokens: latest.inputTokens, outputTokens: latest.outputTokens, costUsd: latest.costUsd } };
     return result;
   });
+  add('GET', '/api/providers/:provider/usage', (ctx) => {
+    const provider = parse(AccountUsageProviderSchema, param(ctx, 'provider'));
+    return s.providers.accountUsage(provider, ctx.url.searchParams.get('refresh') === 'true');
+  });
+  add('POST', '/api/providers/:provider/usage/reset', async (ctx) => {
+    const provider = parse(AccountUsageProviderSchema, param(ctx, 'provider'));
+    const input = await ctx.body(RedeemProviderResetSchema);
+    return s.providers.redeemAccountUsageReset(provider, input.snapshotToken, input);
+  });
   add('POST', '/api/sessions/:id/messages/:messageId/retry', async (ctx) => {
     await ctx.body(emptyBrowserBody);
     const id = param(ctx, 'id');
@@ -744,7 +754,7 @@ export function buildRouter(s: Services) {
       return updated;
     });
     if (before.antigravityExecutable !== next.antigravityExecutable) cancelAntigravityAuth(s.config.dataDir);
-    if (before.claudeExecutable !== next.claudeExecutable || before.codexExecutable !== next.codexExecutable || before.antigravityExecutable !== next.antigravityExecutable || before.opencodeExecutable !== next.opencodeExecutable) s.providers.invalidate();
+    if (before.claudeExecutable !== next.claudeExecutable || before.codexExecutable !== next.codexExecutable || before.antigravityExecutable !== next.antigravityExecutable || before.opencodeExecutable !== next.opencodeExecutable || before.defaultClaudeModel !== next.defaultClaudeModel) s.providers.invalidate();
     return next;
   });
   add('GET', '/api/providers', () => s.providers.list());
