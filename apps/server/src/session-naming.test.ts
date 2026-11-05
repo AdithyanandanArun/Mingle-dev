@@ -11,6 +11,12 @@ describe('session title derivation', () => {
     expect(deriveSessionName('/compact')).toBeUndefined();
     expect(deriveSessionName('[internal handoff] continue')).toBeUndefined();
     expect(deriveSessionName('   ')).toBeUndefined();
+    expect(deriveSessionName('Here is my key: sk-123456789012345678901234')).toBeUndefined();
+  });
+
+  it('ignores fenced code and strips terminal controls before choosing a title', () => {
+    expect(deriveSessionName('```ts\nconst secret = true;\n```\nImprove the settings page')).toBe('Improve the settings page');
+    expect(deriveSessionName('\u001b[31m\u001b[0mFix\u0007 the search panel')).toBe('Fix the search panel');
   });
 
   it('bounds titles by Unicode code points and recognizes only numeric placeholders', () => {

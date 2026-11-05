@@ -1,3 +1,5 @@
+import { redactSecrets } from './util.ts';
+
 /** A stable title derived locally from the first human request. This never calls a provider. */
 const MAX_TITLE = 64;
 
@@ -9,13 +11,31 @@ export function isAutomaticSessionPlaceholder(name: string): boolean {
 
 /** Return a useful, bounded title, or undefined when the input is not a human task. */
 export function deriveSessionName(content: string): string | undefined {
-  let text = content.normalize('NFKC').replace(/\r\n?/g, '\n').trim();
+  const scrubbed = redactSecrets(content);
+  // Never turn a credential-bearing request into durable session metadata.
+  if (scrubbed !== content) return undefined;
+  let text = content.normalize('NFKC')
+    .replace(/\u001b(?:\[[0-?]*[ -/]*[@-~]|\][^\u0007]*(?:\u0007|\u001b\\))/g, '')
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/g, '')
+    .replace(/\r\n?/g, '\n').trim();
   if (!text || INTERNAL_PREFIX.test(text)) return undefined;
   // Strip common metadata/context envelopes while retaining the user's actual request.
   text = text.replace(/^\s*(?:\[?(?:user request|task|prompt)\]?\s*:\s*)/i, '');
   if (!text.trim() || text.length > 20_000) return undefined;
-  const lines = text.split('\n').map((line) => line.trim()).filter(Boolean);
-  const meaningful = lines.find((line) => !/^```/.test(line) && !/^[-*_]{3,}$/.test(line) && !/^https?:\/\//i.test(line));
+  const lines: string[] = [];
+  let fence: '`' | '~' | null = null;
+  for (const rawLine of text.split('\n')) {
+    const line = rawLine.trim();
+    const fenceMarker = line.match(/^(`{3,}|~{3,})/);
+    if (fenceMarker) {
+      const marker = fenceMarker[1]![0] as '`' | '~';
+      if (fence === null) fence = marker;
+      else if (fence === marker) fence = null;
+      continue;
+    }
+    if (!fence && line) lines.push(line);
+  }
+  const meaningful = lines.find((line) => !/^[-*_]{3,}$/.test(line) && !/^https?:\/\//i.test(line));
   if (!meaningful || /^\s*\//.test(meaningful)) return undefined;
   let title = meaningful
     .replace(/^#{1,6}\s+/, '')
