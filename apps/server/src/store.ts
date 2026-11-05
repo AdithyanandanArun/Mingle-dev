@@ -223,7 +223,7 @@ export class Store {
     let renamed = 0;
     for (const candidate of candidates) {
       const id = candidate.id as string;
-      const request = this.get(`SELECT content FROM messages WHERE session_id = ? AND role = 'user' AND kind IS NULL ORDER BY seq LIMIT 1`, id);
+      const request = this.get(`SELECT content FROM messages WHERE session_id = ? AND role = 'user' AND (kind IS NULL OR kind IN ('workflow-start','task')) ORDER BY seq LIMIT 1`, id);
       if (!request) continue;
       const title = deriveSessionName(request.content as string);
       if (!title) continue;
@@ -235,7 +235,7 @@ export class Store {
 
   /** Automatically title an automatic session once, from the first eligible recorded human request. */
   nameSessionFromFirstRequest(sessionId: string, content: string, kind?: string | null): boolean {
-    if (kind || !content.trim()) return false;
+    if ((kind && kind !== 'workflow-start' && kind !== 'task') || !content.trim()) return false;
     const title = deriveSessionName(content);
     if (!title) return false;
     const changed = this.db.prepare("UPDATE sessions SET name = ? WHERE id = ? AND name_source = 'automatic' AND name GLOB 'Session [0-9]*'").run(title, sessionId);

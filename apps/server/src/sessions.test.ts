@@ -37,6 +37,15 @@ describe('session creation', () => {
     expect(t.app.store.backfillAutomaticSessionNames()).toEqual({ renamed: 0, examined: 0 });
   });
 
+  it('accepts human workflow starts and rejects generated workflow continuation text', async () => {
+    const t = await boot();
+    const s = await session(t);
+    t.app.store.db.prepare("UPDATE sessions SET name='Session 9', name_source='automatic' WHERE id=?").run(s.id);
+    expect(t.app.store.nameSessionFromFirstRequest(s.id, 'Build a small release dashboard', 'workflow-start')).toBe(true);
+    expect(t.app.store.nameSessionFromFirstRequest(s.id, 'Continuing toward the goal (turn 2).', 'workflow-continuation')).toBe(false);
+    expect(t.app.store.getSession(s.id)?.name).toBe('Build a small release dashboard');
+  });
+
   it('creates isolated worktrees and falls back to direct sessions for non-repo and unborn folders', async () => {
     const t = await boot({ exampleWorkspace: false });
     const repo = makeRepo();
