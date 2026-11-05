@@ -130,7 +130,8 @@ export class WorkspaceService {
       branch = info.branch;
     }
     return this.store.tx(() => {
-      const session = this.store.insertSession({ id, projectId: project.id, name, provider, model, effort, policy, serviceTier, isolated: effectiveIsolated, worktreePath, branch, parentSessionId: child.parentSessionId });
+      const session = this.store.insertSession({ id, projectId: project.id, name, provider, model, effort, policy, serviceTier, isolated: effectiveIsolated, worktreePath, branch, parentSessionId: child.parentSessionId,
+        nameSource: child.parentSessionId || input.name !== undefined ? 'manual' : 'automatic' });
       if (isolationNotice) session.isolationNotice = isolationNotice;
       this.store.db.prepare(`INSERT INTO session_worktree_bases(session_id,base_revision,created_at) VALUES(?,?,?)`)
         .run(id, worktreeBaseRevision, new Date().toISOString());
