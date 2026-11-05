@@ -47,13 +47,16 @@ export function ProviderUpdates({ noticeOnly = false }: { noticeOnly?: boolean }
   const restore = async (row: ProviderUpdateInfo) => {
     if (row.previousExecutable === undefined || busy !== null) return;
     setBusy(row.provider); setErrors({});
+    let restored = false;
     try {
       await api.updateSettings({ [executableSetting(row.provider)]: row.previousExecutable });
+      restored = true;
+      await useMingle.getState().refreshNow();
       await api.refreshProviders();
       await api.checkProviderUpdates(row.provider);
       await useMingle.getState().refreshNow();
       await load();
-    } catch (error) { setErrors((old) => ({ ...old, [row.provider]: errorMessage(error) })); }
+    } catch (error) { setErrors((old) => ({ ...old, [row.provider]: restored ? `Previous installation selected, but provider refresh failed: ${errorMessage(error)}` : errorMessage(error) })); }
     finally { setBusy(null); }
   };
   const available = rows.filter((row) => row.status === 'available' && !row.dismissed);
