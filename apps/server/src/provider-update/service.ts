@@ -91,9 +91,11 @@ export class ProviderUpdateService {
     this.managedRoot = resolve(options.managedRoot ?? join(homedir(), '.mingle', 'provider-clis'));
     this.installManagedPackage = options.installManagedPackage ?? (async (target, packageSpec) => {
       const npmCli = await this.npmCli();
-      const npmConfig = join(target, '.npmrc');
-      await writeFile(npmConfig, '', { mode: 0o600, flag: 'wx' });
-      await this.runFixed(process.execPath, [npmCli, 'install', '--prefix', target, '--userconfig', npmConfig, '--globalconfig', npmConfig, '--no-save', '--no-audit', '--no-fund', '--registry', 'https://registry.npmjs.org', packageSpec], target);
+      const userConfig = join(target, '.npm-userconfig');
+      const globalConfig = join(target, '.npm-globalconfig');
+      // npm rejects loading one file in multiple config layers. Keep all three private and distinct.
+      await Promise.all([userConfig, globalConfig, join(target, '.npmrc')].map((file) => writeFile(file, '', { mode: 0o600, flag: 'wx' })));
+      await this.runFixed(process.execPath, [npmCli, 'install', '--prefix', target, '--userconfig', userConfig, '--globalconfig', globalConfig, '--no-save', '--no-audit', '--no-fund', '--registry', 'https://registry.npmjs.org', packageSpec], target);
     });
     this.inspectInstall = options.inspectInstall ?? (async (provider, executable) => {
       const canonical = await realpath(executable);

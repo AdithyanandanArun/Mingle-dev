@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { spawn as nodeSpawn } from 'node:child_process';
 import { mkdtemp, mkdir, writeFile, chmod, rm, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { EventEmitter } from 'node:events';
@@ -348,6 +349,29 @@ describe('provider update bounds and cached state', () => {
     app.settings.codexExecutable = '';
     expect((await app.service.snapshot()).providers[0]).not.toHaveProperty('previousExecutable');
     await app.service.close();
+  });
+
+  it('resolves real npm configuration with distinct private layers without installing any package', async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), 'mingle-npm-config-'));
+    let npmResult = ''; let probes = 0;
+    const app = harness({ executable: '/usr/bin/codex', managedRoot: path.join(directory, 'managed'),
+      spawn: ((executable: string, args: string[], options: Parameters<typeof nodeSpawn>[2]) => {
+        // Replace install with a read-only config query; preserve every production config flag.
+        expect(executable).toBe(process.execPath);
+        expect(args[1]).toBe('install');
+        expect(args[args.indexOf('--userconfig') + 1]).not.toBe(args[args.indexOf('--globalconfig') + 1]);
+        probes++;
+        const child = nodeSpawn(executable, [args[0]!, 'config', 'get', 'registry', ...args.slice(2, -1)], options);
+        child.stdout?.on('data', (chunk) => { npmResult += chunk.toString(); });
+        return child;
+      }) as never });
+    try {
+      // No executable is installed by the probe; validation must leave the old selection alone.
+      expect(await app.service.update('codex', '1.0.0')).toMatchObject({ status: 'failed', message: expect.stringContaining('exact checked version') });
+      expect(probes).toBe(1);
+      expect(new URL(npmResult.trim()).href).toBe('https://registry.npmjs.org/');
+      expect(app.settings.codexExecutable).toBe('');
+    } finally { await app.service.close(); await rm(directory, { recursive: true, force: true }); }
   });
 
   it('rolls back executable selection when durable restoration metadata cannot be saved', async () => {
