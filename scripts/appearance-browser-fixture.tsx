@@ -45,7 +45,9 @@ async function mountFixture() {
   const [{ SettingsPage }, { useMingle }] = await Promise.all([
     import('../apps/web/src/components/Settings'), import('../apps/web/src/store/store'),
   ]);
-  useMingle.setState({ boot, bootLoading: false, bootError: null, staleError: null, view: 'settings', settingsSection: 'appearance', activeProjectId: null, settingsProjectId: null });
+  await useMingle.getState().refreshNow();
+  if (!useMingle.getState().boot) throw new Error('Example appearance bootstrap failed.');
+  useMingle.setState({ boot: useMingle.getState().boot, bootLoading: false, bootError: null, staleError: null, view: 'settings', settingsSection: 'appearance', activeProjectId: null, settingsProjectId: null });
   function Fixture() {
     const current = useMingle((state) => state.boot?.settings);
     useEffect(() => { if (current) applyAppearance(document.documentElement, current.theme, current.colorStyle); }, [current]);
