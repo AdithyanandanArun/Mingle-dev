@@ -170,7 +170,9 @@ export const ImportConversationSchema = z.object({ provider: ProviderSchema, con
 export interface AppSettings {
   defaultProvider: Provider; defaultCodexModel: string; defaultClaudeModel: string; defaultEffort: Effort; defaultIsolated: boolean;
   defaultAntigravityModel?: string; defaultOpencodeModel?: string;
-  defaultPolicy: Policy; defaultServiceTier?: string; theme: 'dark' | 'light'; claudeExecutable: string; codexExecutable: string;
+  defaultPolicy: Policy; defaultServiceTier?: string; theme: 'dark' | 'light';
+  /** Subtle color is the default; monochrome restores the original neutral presentation. */
+  colorStyle?: 'subtle' | 'monochrome'; claudeExecutable: string; codexExecutable: string;
   antigravityExecutable?: string; opencodeExecutable?: string;
   groupDefaults?: import('./groups').GroupDefaults;
   autoResumeOnRestart?: boolean;
@@ -243,6 +245,7 @@ export const UpdateSettingsSchema = z.object({
   defaultAntigravityModel: z.string().trim().min(1).max(150).optional(), defaultOpencodeModel: z.string().trim().min(1).max(150).optional(),
   defaultIsolated: z.boolean().optional(),
   defaultPolicy: PolicySchema.optional(), defaultServiceTier: ServiceTierSchema.optional(), theme: z.enum(['dark', 'light']).optional(),
+  colorStyle: z.enum(['subtle', 'monochrome']).optional(),
   claudeExecutable: z.string().max(4096).optional(), codexExecutable: z.string().max(4096).optional(),
   antigravityExecutable: z.string().max(4096).optional(), opencodeExecutable: z.string().max(4096).optional(),
   groupDefaults: z.lazy(() => GroupDefaultsSchema).optional(),
