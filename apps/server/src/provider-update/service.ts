@@ -91,9 +91,9 @@ export class ProviderUpdateService {
     this.managedRoot = resolve(options.managedRoot ?? join(homedir(), '.mingle', 'provider-clis'));
     this.installManagedPackage = options.installManagedPackage ?? (async (target, packageSpec) => {
       const npmCli = await this.npmCli();
-      const npmConfig = join(target, '.mingle-empty-npmrc');
+      const npmConfig = join(target, '.npmrc');
       await writeFile(npmConfig, '', { mode: 0o600, flag: 'wx' });
-      await this.runFixed(process.execPath, [npmCli, 'install', '--prefix', target, '--userconfig', npmConfig, '--globalconfig', npmConfig, '--no-save', '--no-audit', '--no-fund', '--registry', 'https://registry.npmjs.org', packageSpec]);
+      await this.runFixed(process.execPath, [npmCli, 'install', '--prefix', target, '--userconfig', npmConfig, '--globalconfig', npmConfig, '--no-save', '--no-audit', '--no-fund', '--registry', 'https://registry.npmjs.org', packageSpec], target);
     });
     this.inspectInstall = options.inspectInstall ?? (async (provider, executable) => {
       const canonical = await realpath(executable);
@@ -393,10 +393,10 @@ export class ProviderUpdateService {
     } catch { try { child.kill('SIGKILL'); } catch { /* already exited */ } }
   }
 
-  private runFixed(executable: string, args: string[]): Promise<string> {
+  private runFixed(executable: string, args: string[], cwd?: string): Promise<string> {
     if (this.closed) return Promise.reject(new Error('Mingle is shutting down.'));
     return new Promise((resolvePromise, reject) => {
-      const child = this.spawn(executable, args, { shell: false, windowsHide: true, detached: process.platform !== 'win32', env: { PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? '', USERPROFILE: process.env.USERPROFILE ?? '', TMP: process.env.TMP ?? '', TEMP: process.env.TEMP ?? '', SYSTEMROOT: process.env.SYSTEMROOT ?? '' }, stdio: ['ignore', 'pipe', 'pipe'] });
+      const child = this.spawn(executable, args, { cwd, shell: false, windowsHide: true, detached: process.platform !== 'win32', env: { PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? '', USERPROFILE: process.env.USERPROFILE ?? '', TMP: process.env.TMP ?? '', TEMP: process.env.TEMP ?? '', SYSTEMROOT: process.env.SYSTEMROOT ?? '' }, stdio: ['ignore', 'pipe', 'pipe'] });
       this.children.add(child);
       let output = ''; let settled = false; let timeoutError: Error | undefined;
       const timer = setTimeout(() => { timeoutError = new Error('Provider update exceeded the 5 minute time limit.'); this.killUpdater(child); }, PROCESS_TIMEOUT_MS); timer.unref();
