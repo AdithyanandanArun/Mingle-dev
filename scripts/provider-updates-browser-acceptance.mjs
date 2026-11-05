@@ -27,7 +27,7 @@ try {
   page.setDefaultTimeout(5000);
   const errors = []; page.on('pageerror', (error) => errors.push(error.message));
   const row = { provider: 'codex', installedVersion: '1.0.0', latestVersion: '1.1.0', source: 'Example public registry', checkedAt: '2026-11-02T00:00:00Z', status: 'available', channel: 'stable', method: 'native', message: 'Example newer release.', dismissed: false };
-  let rows = [row, { ...row, provider: 'claude', method: 'unsupported', message: 'A newer release is available.', instructions: 'Use the original package manager to update Claude Code.' }, { ...row, provider: 'antigravity', status: 'unknown', installedVersion: null, latestVersion: null, method: 'unsupported', message: 'Mingle manages this checksum-pinned runtime.' }];
+  let rows = [row, { ...row, provider: 'claude', method: 'unsupported', message: 'A newer release is available.', instructions: 'Use the original package manager to update Claude Code.' }, { ...row, provider: 'antigravity', status: 'unknown', installedVersion: null, latestVersion: null, source: null, checkedAt: null, method: 'unsupported', message: 'Mingle manages this checksum-pinned runtime.' }];
   let applies = 0, checks = 0, finishUpdate, rejectCheck = false, malformed = false;
   await page.route('**/api/**', async (route) => {
     const request = route.request(), path = new URL(request.url()).pathname;
@@ -46,6 +46,16 @@ try {
   await page.goto(url);
   await page.getByText('Codex 1.1.0 is available', { exact: true }).waitFor();
   assert.equal(applies, 0); assert.equal(checks, 0);
+  rows[0] = { ...row, status: 'error', latestVersion: null, method: 'unsupported', message: 'Could not check public version metadata: Public version source returned HTTP 406.' };
+  await page.evaluate(() => window.dispatchEvent(new Event('mingle:provider-updates-changed')));
+  const codexRow = page.locator('.provider-updates__row').filter({ hasText: 'Codex' });
+  await codexRow.getByText(/HTTP 406/).waitFor();
+  assert.equal(await codexRow.getByRole('button', { name: 'Update', exact: true }).count(), 0);
+  rows[0] = { ...row };
+  await codexRow.getByRole('button', { name: 'Re-check', exact: true }).click();
+  await codexRow.getByRole('button', { name: 'Update', exact: true }).waitFor();
+  assert.equal(await codexRow.getByText(/HTTP 406/).count(), 0);
+  assert.equal(checks, 1);
   await page.getByRole('button', { name: 'Update', exact: true }).click();
   await page.getByRole('button', { name: 'Updating…', exact: true }).waitFor();
   assert.equal(await page.getByRole('button', { name: 'Check again', exact: true }).isDisabled(), true);
@@ -63,7 +73,8 @@ try {
   assert.equal(await claudeRow.getByText('A newer release is available.', { exact: true }).count(), 1);
   await claudeRow.getByRole('button', { name: 'Copy instructions', exact: true }).waitFor();
   const antigravityRow = page.locator('.provider-updates__row').filter({ hasText: 'Antigravity' });
-  await antigravityRow.getByText('Mingle-managed runtime · checksum-pinned; updates are managed by Mingle.', { exact: true }).waitFor();
+  await antigravityRow.getByText('Managed by Mingle', { exact: true }).waitFor();
+  await antigravityRow.getByText('Mingle manages this checksum-pinned runtime.', { exact: true }).waitFor();
   await antigravityRow.getByText('Installed: unknown', { exact: true }).waitFor();
   assert.equal(await antigravityRow.getByText(/Latest stable:/).count(), 0);
   assert.equal(await antigravityRow.getByRole('button', { name: 'Re-check', exact: true }).count(), 0);
@@ -71,7 +82,7 @@ try {
   await page.getByRole('alert').filter({ hasText: 'Example offline check.' }).waitFor();
   rejectCheck = false; await page.getByRole('button', { name: 'Check again', exact: true }).click();
   await page.getByRole('alert').filter({ hasText: 'Example offline check.' }).waitFor({ state: 'hidden' });
-  assert.equal(checks, 2);
+  assert.equal(checks, 3);
   malformed = true; await page.evaluate(() => window.dispatchEvent(new Event('mingle:provider-updates-changed')));
   await page.getByRole('alert').filter({ hasText: 'Provider update status is unavailable.' }).waitFor();
   await page.getByRole('heading', { name: 'Provider CLI updates' }).waitFor();
@@ -81,5 +92,5 @@ try {
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
   await page.screenshot({ path: join(output, 'provider-updates-390px.png'), fullPage: true });
   assert.deepEqual(errors, []);
-  console.log(`15 provider update browser checks passed. Screenshots: ${output}`);
+  console.log(`Provider update browser acceptance passed (including HTTP 406 recovery and pinned/manual guidance). Screenshots: ${output}`);
 } finally { await browser?.close(); await server?.close(); }

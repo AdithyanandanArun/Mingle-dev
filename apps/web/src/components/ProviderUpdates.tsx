@@ -55,10 +55,9 @@ export function ProviderUpdates({ noticeOnly = false }: { noticeOnly?: boolean }
       {!rows.length ? <p className="provider-updates__muted">Checking cached provider update status…</p> : rows.map((row) => {
         const managedPinnedRuntime = row.provider === 'antigravity';
         const guidance = row.status === 'available' && row.method === 'unsupported' ? row.instructions?.trim() : undefined;
-        const showGuidanceSeparately = guidance && guidance !== row.message.trim();
+        const showGuidanceSeparately = guidance && !row.message.includes(guidance);
         return <article className="provider-updates__row" key={row.provider}>
-        <div className="provider-updates__copy"><div className="provider-updates__title"><strong>{names[row.provider] ?? row.provider}</strong><span>{row.status}</span></div>
-          {managedPinnedRuntime ? <p>Mingle-managed runtime · checksum-pinned; updates are managed by Mingle.</p> : null}
+        <div className="provider-updates__copy"><div className="provider-updates__title"><strong>{names[row.provider] ?? row.provider}</strong><span>{managedPinnedRuntime ? 'Managed by Mingle' : row.status}</span></div>
           <p>Installed: {row.installedVersion ?? 'unknown'}{!managedPinnedRuntime ? ` · Latest stable: ${row.latestVersion ?? 'unknown'}` : ''}</p>
           <p>{row.message}</p>
           {showGuidanceSeparately ? <p className="provider-updates__guidance">{guidance}</p> : null}
