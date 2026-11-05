@@ -363,6 +363,7 @@ export class SessionRuntime {
       const proxyContent = [groupContext?.instructions, options.context, prompt].filter(Boolean).join('\n\n');
       this.store.tx(() => {
         const userMessage = this.store.insertMessage({ sessionId, role: 'user', content: options.userMessage?.content ?? content, kind: options.userMessage?.kind ?? null, runId, contextRefs: options.contextRefs });
+        this.store.nameSessionFromFirstRequest(sessionId, userMessage.content, userMessage.kind);
         if (options.attachmentIds?.length) throw conflict('Proxy sessions do not accept host-local attachment IDs.');
         this.store.insertRun({ id: runId, sessionId, userMessageId: userMessage.id, provider: session.provider, model: session.model, startedAt: nowIso() });
         this.store.updateSession(sessionId, { status: 'running', error: null });
@@ -399,6 +400,7 @@ export class SessionRuntime {
     };
     this.store.tx(() => {
       const userMessage = this.store.insertMessage({ sessionId, role: 'user', content: options.userMessage?.content ?? content, kind: options.userMessage?.kind ?? null, runId: run.id, contextRefs: options.contextRefs });
+      this.store.nameSessionFromFirstRequest(sessionId, userMessage.content, userMessage.kind);
       run.attachmentOwnerId ??= userMessage.id;
       if (options.attachmentIds?.length) {
         if (!this.attachmentService) throw conflict('Attachments are unavailable in this Mingle session.');
