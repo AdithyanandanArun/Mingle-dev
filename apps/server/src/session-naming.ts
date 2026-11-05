@@ -1,7 +1,7 @@
 /** A stable title derived locally from the first human request. This never calls a provider. */
 const MAX_TITLE = 64;
 
-const INTERNAL_PREFIX = /^(?:\s*(?:\/|<\|?(?:system|assistant|user|developer)|\[?(?:internal|system|handoff|workflow|continuation)\b)/i;
+const INTERNAL_PREFIX = /^\s*(?:\/|<\|?(?:system|assistant|user|developer)|\[?(?:internal|system|handoff|workflow|continuation)\b)/i;
 
 export function isAutomaticSessionPlaceholder(name: string): boolean {
   return /^Session\s+\d+$/i.test(name.trim());
@@ -24,7 +24,7 @@ export function deriveSessionName(content: string): string | undefined {
     .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
     .replace(/[`*_~]/g, '')
     .replace(/\s+/g, ' ')
-    .replace(/^[\p{P}\p{S}\s]+|[\p{P}\s]+$/gu, '')
+    .replace(/^[\p{P}\s]+|[\p{P}\s]+$/gu, '')
     .trim();
   if (!title || /^\/(?:\w+)?$/.test(title) || /^\p{Extended_Pictographic}+$/u.test(title)) return undefined;
   if (/^(?:continue|go on|yes|ok|okay|thanks|thank you)[.!?]*$/i.test(title)) return undefined;
