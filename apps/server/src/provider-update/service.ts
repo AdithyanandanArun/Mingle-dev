@@ -29,6 +29,7 @@ export interface ProviderUpdateServiceOptions {
   now?: () => number;
   inspectInstall?: (provider: Provider, executable: string) => Promise<boolean>;
   managedRoot?: string;
+  installManagedPackage?: (target: string, packageSpec: string) => Promise<void>;
 }
 
 function empty(provider: Provider, diagnostic?: ProviderInfo): ProviderUpdateInfo {
@@ -77,6 +78,7 @@ export class ProviderUpdateService {
   private readonly jobs = new Set<Promise<unknown>>();
   private readonly inspectInstall: NonNullable<ProviderUpdateServiceOptions['inspectInstall']>;
   private readonly managedRoot: string;
+  private readonly installManagedPackage: NonNullable<ProviderUpdateServiceOptions['installManagedPackage']>;
   private readonly inflight = new Map<Provider, Promise<ProviderUpdateInfo>>();
   private readonly updating = new Map<Provider, ProviderUpdateInfo>();
   private readonly applying = new Set<Provider>();
@@ -86,6 +88,10 @@ export class ProviderUpdateService {
     this.spawn = options.spawn ?? nodeSpawn;
     this.now = options.now ?? Date.now;
     this.managedRoot = resolve(options.managedRoot ?? join(homedir(), '.mingle', 'provider-clis'));
+    this.installManagedPackage = options.installManagedPackage ?? (async (target, packageSpec) => {
+      const npmCli = await this.npmCli();
+      await this.runFixed(process.execPath, [npmCli, 'install', '--prefix', target, '--no-save', '--no-audit', '--no-fund', '--registry', 'https://registry.npmjs.org', packageSpec]);
+    });
     this.inspectInstall = options.inspectInstall ?? (async (provider, executable) => {
       const canonical = await realpath(executable);
       const info = await stat(canonical);
@@ -254,8 +260,7 @@ export class ProviderUpdateService {
     const providerRoot = await realpath(join(root, provider));
     if (!withinNativeInstallRoot(root, providerRoot)) throw new Error('Managed provider directory escapes its private root.');
     await mkdir(target, { recursive: false, mode: 0o700 });
-    const npmCli = await this.npmCli();
-    await this.runFixed(process.execPath, [npmCli, 'install', '--prefix', target, '--no-save', '--no-audit', '--no-fund', '--registry', 'https://registry.npmjs.org', `${pkg}@${version}`]);
+    await this.installManagedPackage(target, `${pkg}@${version}`);
     const executable = join(target, 'node_modules', '.bin', command);
     if (!await this.validateManaged(provider, version, executable, root)) throw new Error('The installed CLI did not report the exact checked version or escaped the managed directory.');
     return executable;
