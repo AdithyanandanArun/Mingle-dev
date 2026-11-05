@@ -12,6 +12,8 @@ describe('session title derivation', () => {
     expect(deriveSessionName('[internal handoff] continue')).toBeUndefined();
     expect(deriveSessionName('   ')).toBeUndefined();
     expect(deriveSessionName('Here is my key: sk-123456789012345678901234')).toBeUndefined();
+    expect(deriveSessionName('ｓｋ-123456789012345678901234')).toBeUndefined();
+    expect(deriveSessionName('s\u001b[31mk-123456789012345678901234')).toBeUndefined();
   });
 
   it('ignores fenced code and strips terminal controls before choosing a title', () => {

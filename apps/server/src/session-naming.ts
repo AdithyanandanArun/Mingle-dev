@@ -11,13 +11,12 @@ export function isAutomaticSessionPlaceholder(name: string): boolean {
 
 /** Return a useful, bounded title, or undefined when the input is not a human task. */
 export function deriveSessionName(content: string): string | undefined {
-  const scrubbed = redactSecrets(content);
-  // Never turn a credential-bearing request into durable session metadata.
-  if (scrubbed !== content) return undefined;
   let text = content.normalize('NFKC')
     .replace(/\u001b(?:\[[0-?]*[ -/]*[@-~]|\][^\u0007]*(?:\u0007|\u001b\\))/g, '')
     .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/g, '')
     .replace(/\r\n?/g, '\n').trim();
+  // Canonicalization can reveal an obfuscated credential; check both representations.
+  if (redactSecrets(content) !== content || redactSecrets(text) !== text) return undefined;
   if (!text || INTERNAL_PREFIX.test(text)) return undefined;
   // Strip common metadata/context envelopes while retaining the user's actual request.
   text = text.replace(/^\s*(?:\[?(?:user request|task|prompt)\]?\s*:\s*)/i, '');
