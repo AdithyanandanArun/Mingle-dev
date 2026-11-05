@@ -10,6 +10,33 @@ const session = async (t: TestApp, id = EXAMPLE_CONTRACT_SESSION_ID) => (await t
 const messages = async (t: TestApp, id = EXAMPLE_CONTRACT_SESSION_ID) => (await t.api('GET', `/api/sessions/${id}/messages`)).json as any[];
 
 describe('session creation', () => {
+  it('names generated sessions from the first request while preserving explicitly supplied generic names', async () => {
+    const { tmpDir } = await import('./test-utils.ts');
+    const t = await boot({ exampleWorkspace: false });
+    const project = (await t.api('POST', '/api/projects', { name: 'plain', path: tmpDir() })).json;
+    const generated = (await t.api('POST', '/api/sessions', { projectId: project.id })).json;
+    expect(generated.nameSource).toBe('automatic');
+    await t.api('POST', `/api/sessions/${generated.id}/messages`, { content: '## Repair the Unicode café menu\nPlease retain the existing layout.' });
+    expect(t.app.store.getSession(generated.id)).toMatchObject({ name: 'Repair the Unicode café menu', nameSource: 'automatic' });
+
+    const explicit = (await t.api('POST', '/api/sessions', { projectId: project.id, name: 'Session 1' })).json;
+    await t.api('POST', `/api/sessions/${explicit.id}/messages`, { content: 'Never replace my chosen title' });
+    expect(t.app.store.getSession(explicit.id)).toMatchObject({ name: 'Session 1', nameSource: 'manual' });
+  });
+
+  it('backfills eligible legacy placeholders without changing recency and protects a later rename', async () => {
+    const t = await boot();
+    const s = await session(t);
+    t.app.store.db.prepare("UPDATE sessions SET name='Session 8', name_source='legacy' WHERE id=?").run(s.id);
+    t.app.store.insertMessage({ sessionId: s.id, role: 'user', content: 'Add keyboard shortcuts for the editor' });
+    const before = t.app.store.getSession(s.id)!.updatedAt;
+    expect(t.app.store.backfillAutomaticSessionNames()).toEqual({ renamed: 1, examined: 1 });
+    expect(t.app.store.getSession(s.id)).toMatchObject({ name: 'Add keyboard shortcuts for the editor', nameSource: 'automatic', updatedAt: before });
+    t.app.store.updateSession(s.id, { name: 'Session 1' });
+    expect(t.app.store.getSession(s.id)).toMatchObject({ name: 'Session 1', nameSource: 'manual' });
+    expect(t.app.store.backfillAutomaticSessionNames()).toEqual({ renamed: 0, examined: 0 });
+  });
+
   it('creates isolated worktrees and falls back to direct sessions for non-repo and unborn folders', async () => {
     const t = await boot({ exampleWorkspace: false });
     const repo = makeRepo();
