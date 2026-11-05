@@ -128,10 +128,20 @@ export class ProviderUpdateService {
 
   private cachedRow(persisted: ProviderUpdateInfo, diagnostic?: ProviderInfo): ProviderUpdateInfo {
     const row = { ...this.recompare(persisted, diagnostic), installedVersion: diagnostic?.version ?? null };
-    if (persisted.installedVersion === diagnostic?.version && persisted.method !== 'unsupported') return row;
-    const managed = Boolean(process.platform !== 'win32' && persisted.method === 'unsupported' && NPM_SOURCES[persisted.provider] && diagnostic?.version && diagnostic.executable
+    const sameInstall = persisted.installedVersion === diagnostic?.version && persisted.checkedExecutable === diagnostic?.executable;
+    const configured = providerExecutable(persisted.provider, this.store.getSettings());
+    if (sameInstall && persisted.method === 'native' && methodFor(persisted.provider, diagnostic?.executable ?? null, diagnostic?.version ?? null, configured) === 'native') return { ...row, method: 'native' };
+    const activeManaged = Boolean(persisted.method === 'managed' && persisted.managedExecutable && diagnostic?.executable
+      && resolve(persisted.managedExecutable) === resolve(diagnostic.executable));
+    if (activeManaged) return { ...row, method: 'managed', managedExecutable: persisted.managedExecutable,
+      ...(persisted.previousExecutable !== undefined ? { previousExecutable: persisted.previousExecutable } : {}),
+      installationDescription: this.installationDescription(persisted.provider) };
+    const managed = Boolean(process.platform !== 'win32' && NPM_SOURCES[persisted.provider] && diagnostic?.version && diagnostic.executable
       && !diagnostic.version.includes('-') && !diagnostic.version.includes('+'));
-    return { ...row, method: managed ? 'managed' : 'unsupported', ...(managed ? { installationDescription: this.installationDescription(persisted.provider) } : {}) };
+    const withoutStaleLineage = { ...row };
+    delete withoutStaleLineage.managedExecutable;
+    delete withoutStaleLineage.previousExecutable;
+    return { ...withoutStaleLineage, method: managed ? 'managed' : 'unsupported', ...(managed ? { installationDescription: this.installationDescription(persisted.provider) } : {}) };
   }
 
   private recompare(info: ProviderUpdateInfo, diagnostic?: ProviderInfo): ProviderUpdateInfo {
@@ -201,13 +211,16 @@ export class ProviderUpdateService {
       if (!latest) throw new Error('Public metadata did not contain a stable release version.');
       const comparison = compareVersions(diagnostic.version, latest);
       const candidate = methodFor(provider, diagnostic.executable, diagnostic.version, providerExecutable(provider, this.store.getSettings()));
-      const method = candidate === 'native' && diagnostic.executable && await this.inspectInstall(provider, diagnostic.executable).catch(() => false) ? 'native' : process.platform === 'win32' ? 'unsupported' : 'managed';
+      const stableInstalled = !diagnostic.version.includes('-') && !diagnostic.version.includes('+');
+      const method = !stableInstalled ? 'unsupported' : candidate === 'native' && diagnostic.executable && await this.inspectInstall(provider, diagnostic.executable).catch(() => false) ? 'native' : process.platform === 'win32' ? 'unsupported' : 'managed';
       const prior = (this.store.getProviderUpdateChecks() as Record<string, ProviderUpdateInfo>)[provider];
       const priorPath = prior?.managedExecutable ? resolve(prior.managedExecutable) : null;
       const currentPath = diagnostic.executable ? resolve(diagnostic.executable) : null;
       const previousExecutable = priorPath && currentPath === priorPath ? prior.previousExecutable : undefined;
+      const managedExecutable = previousExecutable !== undefined ? prior?.managedExecutable : undefined;
       return { provider, installedVersion: diagnostic.version, checkedExecutable: diagnostic.executable, instructions: this.instructions(provider), latestVersion: latest, source: registry.label, checkedAt: new Date(this.now()).toISOString(),
         status: comparison === null ? 'unknown' : comparison < 0 ? 'available' : comparison === 0 ? 'current' : 'unknown', channel: 'stable', method,
+        ...(managedExecutable ? { managedExecutable } : {}),
         ...(previousExecutable !== undefined ? { previousExecutable } : {}),
         ...(method === 'managed' ? { installationDescription: this.installationDescription(provider) } : {}),
         message: (comparison === null ? 'Versions could not be compared reliably.' : comparison > 0 ? 'Installed version is newer than the public stable tag; channel status is unknown.' : comparison < 0 ? 'A newer stable version is available.' : 'Installed version matches the public stable version.') };

@@ -26,7 +26,9 @@ function harness(options: { provider?: Provider; version?: string; executable?: 
   const fetcher = options.fetch ?? (async () => new Response(JSON.stringify({ version: '1.1.0' }), { status: 200 }));
   const service = new ProviderUpdateService(store as never, providers as never, runtime as never, { fetch: fetcher, spawn: options.spawn as never, now: () => 1_800_000_000_000, inspectInstall: async () => true,
     managedRoot: options.managedRoot, installManagedPackage: options.installManagedPackage });
-  return { service, store, providers, runtime, release, data, settings, setInstalled: (version: string) => { current = diagnostic(version, options.executable, options.provider); } };
+  return { service, store, providers, runtime, release, data, settings,
+    setInstalled: (version: string) => { current = diagnostic(version, options.executable, options.provider); },
+    setDiagnostic: (version: string, executable: string) => { current = diagnostic(version, executable, options.provider); } };
 }
 
 describe('ProviderUpdateService', () => {
@@ -80,6 +82,20 @@ describe('ProviderUpdateService', () => {
     await app.service.checkAll();
     expect(fetcher).toHaveBeenCalledTimes(3);
     expect((await app.service.snapshot()).providers[0]).toMatchObject({ installedVersion: '1.1.0', checkedExecutable: '/example/other/codex', latestVersion: '1.2.0' });
+    await app.service.close();
+  });
+
+  it('recomputes a cached native action when the executable changes at the same version', async () => {
+    const app = harness();
+    await app.service.checkOne('codex');
+    app.providers.list.mockResolvedValue([diagnostic('1.0.0', '/other/bin/codex')]);
+    expect((await app.service.snapshot()).providers[0]).toMatchObject({ method: 'managed', checkedExecutable: '/home/test/.local/bin/codex' });
+    await app.service.close();
+  });
+
+  it('does not offer managed updates for installed prerelease versions', async () => {
+    const app = harness({ version: '1.0.0-beta.1' });
+    expect(await app.service.checkOne('codex')).toMatchObject({ method: 'unsupported', status: 'unknown' });
     await app.service.close();
   });
 
@@ -282,6 +298,37 @@ describe('provider update bounds and cached state', () => {
       expect(await app.service.update('codex', '1.0.0')).toMatchObject({ status: 'updated', installedVersion: '1.1.0' });
       expect(attempts).toBe(2);
       expect(app.settings.codexExecutable).toContain(`${path.sep}1.1.0${path.sep}`);
+      await app.service.close();
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+
+  it('preserves the original restore path across rechecks and a second managed upgrade', async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), 'mingle-provider-update-'));
+    let latest = '1.1.0';
+    try {
+      const app = harness({ executable: '/usr/bin/codex', managedRoot: path.join(directory, 'managed'),
+        fetch: async () => new Response(JSON.stringify({ version: latest })),
+        installManagedPackage: async (target, spec) => {
+          const version = spec.slice(spec.lastIndexOf('@') + 1);
+          const bin = path.join(target, 'node_modules', '.bin');
+          await mkdir(bin, { recursive: true });
+          const executable = path.join(bin, 'codex');
+          await writeFile(executable, `#!/usr/bin/env node\nconsole.log("${version}")\n`, { mode: 0o700 });
+          await chmod(executable, 0o700);
+        } });
+      const first = await app.service.update('codex', '1.0.0');
+      app.setDiagnostic('1.1.0', first.managedExecutable!);
+      latest = '1.2.0';
+      expect(await app.service.checkOne('codex', true)).toMatchObject({ managedExecutable: first.managedExecutable, previousExecutable: '' });
+      const second = await app.service.update('codex', '1.1.0');
+      expect(second).toMatchObject({ status: 'updated', previousExecutable: '' });
+      app.setDiagnostic('1.2.0', second.managedExecutable!);
+      latest = '1.3.0';
+      expect(await app.service.checkOne('codex', true)).toMatchObject({ managedExecutable: second.managedExecutable, previousExecutable: '' });
+      app.settings.codexExecutable = '';
+      app.setDiagnostic('1.0.0', '/usr/bin/codex');
+      expect((await app.service.snapshot()).providers[0]).not.toHaveProperty('previousExecutable');
+      expect((await app.service.snapshot()).providers[0]).not.toHaveProperty('managedExecutable');
       await app.service.close();
     } finally { await rm(directory, { recursive: true, force: true }); }
   });
