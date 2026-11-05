@@ -28,7 +28,7 @@ try {
   const errors = []; page.on('pageerror', (error) => errors.push(error.message));
   const row = { provider: 'codex', installedVersion: '1.0.0', latestVersion: '1.1.0', source: 'Example public registry', checkedAt: '2026-11-02T00:00:00Z', status: 'available', channel: 'stable', method: 'native', message: 'Example newer release.', dismissed: false };
   let rows = [row, { ...row, provider: 'claude', method: 'unsupported', message: 'A newer release is available.', instructions: 'Use the original package manager to update Claude Code.' }, { ...row, provider: 'antigravity', status: 'unknown', installedVersion: null, latestVersion: null, source: null, checkedAt: null, method: 'unsupported', message: 'Mingle manages this checksum-pinned runtime.' }];
-  let applies = 0, checks = 0, finishUpdate, rejectCheck = false, malformed = false, managedProvider = null, failApply = false;
+  let applies = 0, checks = 0, finishUpdate, rejectCheck = false, malformed = false, managedProvider = null, failApply = false, failRestore = false, failRefresh = false;
   const unexpected = [], settingWrites = [];
   const bootstrap = { projects: [], sessions: [], messages: [], queuedMessages: [], tasks: [], events: [], approvals: [], plans: [], questions: [], providers: [], settings: { theme: 'dark', colorStyle: 'subtle' }, runs: [], toolCalls: [], groups: [], workflows: [] };
   await page.route('**/api/**', async (route) => {
@@ -36,11 +36,12 @@ try {
     if (path === '/api/bootstrap') return route.fulfill({ json: bootstrap });
     if (path === '/api/settings' && request.method() === 'PATCH') {
       const body = request.postDataJSON(); settingWrites.push(body);
+      if (failRestore) return route.fulfill({ status: 409, json: { error: 'Example restore blocked by active turn.' } });
       assert.deepEqual(body, { [`${managedProvider}Executable`]: '' });
       rows = rows.map((r) => r.provider === managedProvider ? { ...row, provider: managedProvider, method: 'managed' } : r);
       return route.fulfill({ json: { ...bootstrap.settings, ...body } });
     }
-    if (path === '/api/providers/refresh') return route.fulfill({ json: [] });
+    if (path === '/api/providers/refresh') return failRefresh ? route.fulfill({ status: 503, json: { error: 'Example catalog offline.' } }) : route.fulfill({ json: [] });
     if (path.endsWith('/updates/apply') && managedProvider) {
       applies++; assert.deepEqual(request.postDataJSON(), { provider: managedProvider, expectedVersion: '1.0.0' });
       if (failApply) return route.fulfill({ status: 409, json: { error: 'Example provider is busy.' } });
@@ -116,12 +117,25 @@ try {
     assert.equal(await page.getByRole('button', { name: 'Check again', exact: true }).isDisabled(), true);
     finishUpdate();
     await managedRow.getByRole('button', { name: 'Use previous installation', exact: true }).waitFor();
+    if (provider === 'codex') {
+      failRestore = true;
+      await managedRow.getByRole('button', { name: 'Use previous installation', exact: true }).click();
+      await managedRow.getByRole('alert').filter({ hasText: 'Example restore blocked by active turn.' }).waitFor();
+      assert.equal(await managedRow.getByRole('button', { name: 'Use previous installation', exact: true }).count(), 1);
+      failRestore = false;
+    }
+    failRefresh = provider === 'claude';
     await managedRow.getByRole('button', { name: 'Use previous installation', exact: true }).click();
+    if (failRefresh) {
+      await managedRow.getByRole('alert').filter({ hasText: 'Previous installation selected, but provider refresh failed: Example catalog offline.' }).waitFor();
+      failRefresh = false;
+      await page.evaluate(() => window.dispatchEvent(new Event('mingle:provider-updates-changed')));
+    }
     await managedRow.getByRole('button', { name: 'Update in Mingle', exact: true }).waitFor();
     assert.deepEqual(settingWrites.at(-1), { [`${provider}Executable`]: '' });
     assert.equal(await managedRow.getByRole('button', { name: 'Use previous installation', exact: true }).count(), 0);
   }
-  assert.equal(applies, 7); assert.equal(settingWrites.length, 3);
+  assert.equal(applies, 7); assert.equal(settingWrites.length, 4);
   malformed = true; await page.evaluate(() => window.dispatchEvent(new Event('mingle:provider-updates-changed')));
   await page.getByRole('alert').filter({ hasText: 'Provider update status is unavailable.' }).waitFor();
   await page.getByRole('heading', { name: 'Provider CLI updates' }).waitFor();
