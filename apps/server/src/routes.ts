@@ -751,14 +751,24 @@ export function buildRouter(s: Services) {
         resolveRunConfig(info, configuration, { effort: true, policy: true, serviceTier: true });
       }
     }
-    const next = s.store.tx(() => {
-      const updated = s.store.updateSettings(patch);
-      s.store.recordEvent({ type: 'settings.updated', summary: 'Settings updated', payload: { fields: Object.keys(patch) } });
-      return updated;
-    });
-    if (before.antigravityExecutable !== next.antigravityExecutable) cancelAntigravityAuth(s.config.dataDir);
-    if (before.claudeExecutable !== next.claudeExecutable || before.codexExecutable !== next.codexExecutable || before.antigravityExecutable !== next.antigravityExecutable || before.opencodeExecutable !== next.opencodeExecutable || before.defaultClaudeModel !== next.defaultClaudeModel) s.providers.invalidate();
-    return next;
+    const releases: (() => void)[] = [];
+    try {
+      for (const provider of ['codex', 'claude', 'opencode', 'antigravity'] as const) {
+        const key = `${provider}Executable` as const;
+        if (patch[key] === undefined || patch[key] === before[key]) continue;
+        const release = s.runtime.reserveProviderMaintenance(provider);
+        if (!release) throw conflict(`${provider} is busy. Wait for its turn or update to finish before changing its executable.`);
+        releases.push(release);
+      }
+      const next = s.store.tx(() => {
+        const updated = s.store.updateSettings(patch);
+        s.store.recordEvent({ type: 'settings.updated', summary: 'Settings updated', payload: { fields: Object.keys(patch) } });
+        return updated;
+      });
+      if (before.antigravityExecutable !== next.antigravityExecutable) cancelAntigravityAuth(s.config.dataDir);
+      if (before.claudeExecutable !== next.claudeExecutable || before.codexExecutable !== next.codexExecutable || before.antigravityExecutable !== next.antigravityExecutable || before.opencodeExecutable !== next.opencodeExecutable || before.defaultClaudeModel !== next.defaultClaudeModel) s.providers.invalidate();
+      return next;
+    } finally { for (const release of releases.reverse()) release(); }
   });
   add('GET', '/api/providers', () => s.providers.list());
   add('GET', '/api/providers/updates', () => s.providerUpdates.snapshot());
