@@ -246,6 +246,10 @@ export class ProviderUpdateService {
     const target = resolve(this.managedRoot, provider, version);
     await mkdir(this.managedRoot, { recursive: true, mode: 0o700 });
     const root = await realpath(this.managedRoot);
+    const rootInfo = await stat(root);
+    if (!rootInfo.isDirectory() || (process.getuid && rootInfo.uid !== process.getuid()) || (rootInfo.mode & 0o022) !== 0) {
+      throw new Error('Managed install root must be an OS-user-owned directory that other users cannot modify.');
+    }
     if (!withinNativeInstallRoot(root, target)) throw new Error('Managed install path escapes its private root.');
     try {
       const existing = await realpath(target);
@@ -259,6 +263,10 @@ export class ProviderUpdateService {
     await mkdir(join(root, provider), { recursive: true, mode: 0o700 });
     const providerRoot = await realpath(join(root, provider));
     if (!withinNativeInstallRoot(root, providerRoot)) throw new Error('Managed provider directory escapes its private root.');
+    const providerInfo = await stat(providerRoot);
+    if (!providerInfo.isDirectory() || (process.getuid && providerInfo.uid !== process.getuid()) || (providerInfo.mode & 0o022) !== 0) {
+      throw new Error('Managed provider directory must be owned by the current OS user.');
+    }
     await mkdir(target, { recursive: false, mode: 0o700 });
     await this.installManagedPackage(target, `${pkg}@${version}`);
     const executable = join(target, 'node_modules', '.bin', command);

@@ -1,4 +1,6 @@
 import path from 'node:path';
+import { mkdtemp, mkdir, writeFile, chmod, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import { describe, expect, it, vi } from 'vitest';
@@ -8,11 +10,13 @@ import { ProviderUpdateService, withinNativeInstallRoot } from './service.ts';
 const diagnostic = (version = '1.0.0', executable = '/home/test/.local/bin/codex', provider: Provider = 'codex'): ProviderInfo => ({
   id: provider, name: provider, available: true, version, executable, reason: null, models: [],
 });
-function harness(options: { provider?: Provider; version?: string; executable?: string; fetch?: typeof fetch; spawn?: (...args: never[]) => never; reserve?: () => (() => void) | null } = {}) {
+function harness(options: { provider?: Provider; version?: string; executable?: string; fetch?: typeof fetch; spawn?: (...args: never[]) => never; reserve?: () => (() => void) | null; managedRoot?: string; installManagedPackage?: (target: string, spec: string) => Promise<void> } = {}) {
   const data: Record<string, unknown> = {};
+  const settings: Record<string, unknown> = { codexExecutable: '', claudeExecutable: '', opencodeExecutable: '' };
   const store = {
     getProviderUpdateChecks: () => ({ ...data }), saveProviderUpdateCheck: (provider: string, value: unknown) => { data[provider] = value; },
-    providerUpdateDismissed: () => false, recordEvent: vi.fn(), dismissProviderUpdate: vi.fn(), touch: vi.fn(), getSettings: () => ({ codexExecutable: '' }),
+    providerUpdateDismissed: () => false, recordEvent: vi.fn(), dismissProviderUpdate: vi.fn(), touch: vi.fn(), getSettings: () => ({ ...settings }),
+    updateSettings: (patch: Record<string, unknown>) => Object.assign(settings, patch),
   };
   let current = diagnostic(options.version, options.executable, options.provider);
   const providers = { list: vi.fn(async () => [current]), refresh: vi.fn(async () => [current]) };
@@ -20,8 +24,9 @@ function harness(options: { provider?: Provider; version?: string; executable?: 
   const reserve = vi.fn(options.reserve ?? (() => release));
   const runtime = { reserveProviderMaintenance: reserve };
   const fetcher = options.fetch ?? (async () => new Response(JSON.stringify({ version: '1.1.0' }), { status: 200 }));
-  const service = new ProviderUpdateService(store as never, providers as never, runtime as never, { fetch: fetcher, spawn: options.spawn as never, now: () => 1_800_000_000_000, inspectInstall: async () => true });
-  return { service, store, providers, runtime, release, data, setInstalled: (version: string) => { current = diagnostic(version, options.executable, options.provider); } };
+  const service = new ProviderUpdateService(store as never, providers as never, runtime as never, { fetch: fetcher, spawn: options.spawn as never, now: () => 1_800_000_000_000, inspectInstall: async () => true,
+    managedRoot: options.managedRoot, installManagedPackage: options.installManagedPackage });
+  return { service, store, providers, runtime, release, data, settings, setInstalled: (version: string) => { current = diagnostic(version, options.executable, options.provider); } };
 }
 
 describe('ProviderUpdateService', () => {
@@ -203,6 +208,27 @@ describe('provider update bounds and cached state', () => {
     expect((await app.service.snapshot()).providers[0]!.status).toBe('failed');
     expect(app.release).toHaveBeenCalledOnce();
   });
+
+  it.each([['codex', 'codex', '@openai/codex'], ['claude', 'claude', '@anthropic-ai/claude-code'], ['opencode', 'opencode', 'opencode-ai']] as const)(
+    'installs and validates an exact %s package in a disposable managed directory', async (provider, command, packageName) => {
+      const directory = await mkdtemp(path.join(tmpdir(), 'mingle-provider-update-'));
+      try {
+        const app = harness({ provider, executable: `/usr/bin/${provider}`, managedRoot: path.join(directory, 'managed'), installManagedPackage: async (target, spec) => {
+          expect(spec).toBe(`${packageName}@1.1.0`);
+          const bin = path.join(target, 'node_modules', '.bin');
+          await mkdir(bin, { recursive: true });
+          const executable = path.join(bin, command);
+          await writeFile(executable, '#!/usr/bin/env node\nconsole.log("1.1.0")\n', { mode: 0o700 });
+          await chmod(executable, 0o700);
+        } });
+        const result = await app.service.update(provider, '1.0.0');
+        expect(result).toMatchObject({ status: 'updated', installedVersion: '1.1.0', method: 'managed', previousExecutable: '' });
+        expect(app.settings[`${provider}Executable`]).toBe(result.managedExecutable);
+        expect(app.release).toHaveBeenCalledOnce();
+        await app.service.close();
+      } finally { await rm(directory, { recursive: true, force: true }); }
+    },
+  );
 });
 
  it('recognizes Windows native roots while rejecting siblings and other drives', () => {
