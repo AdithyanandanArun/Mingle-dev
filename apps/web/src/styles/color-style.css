@@ -20,3 +20,25 @@
   --codex: #7dbfa8;
   --claude: #d9a084;
 }
+
+:root[data-color-style='subtle'][data-theme='light'] {
+  --bg-app: #f6f8fb;
+  --bg-sidebar: #edf2f7;
+  --bg-panel: #f9fbfd;
+  --bg-surface: #ffffff;
+  --bg-raised: #ffffff;
+  --bg-inset: #eaf0f6;
+  --bg-message: #eaf1f8;
+  --bg-active: rgba(53, 102, 168, 0.09);
+  --accent: #3566a8;
+  --accent-strong: #24538e;
+  --accent-dim: #4c6f9c;
+  --accent-soft: rgba(53, 102, 168, 0.075);
+  --accent-line: rgba(53, 102, 168, 0.32);
+  --blue-line: var(--accent-line);
+  --fg-on-accent: #ffffff;
+  --info: #3566a8;
+  --info-soft: var(--accent-soft);
+  --codex: #287459;
+  --claude: #965b3c;
+}
