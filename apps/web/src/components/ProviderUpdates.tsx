@@ -5,6 +5,7 @@ import { api, errorMessage } from '../lib/api';
 import { PROVIDER_NAMES } from '../lib/providers';
 import { Button } from './ui';
 import { copyText } from '../lib/clipboard';
+import { executableSetting } from './ProviderExecutableSetting';
 import { useMingle } from '../store/store';
 
 const names = PROVIDER_NAMES as Record<string, string>;
@@ -43,6 +44,18 @@ export function ProviderUpdates({ noticeOnly = false }: { noticeOnly?: boolean }
     } catch (error) { setErrors((old) => ({ ...old, [row.provider]: errorMessage(error) })); }
     finally { setBusy(null); await load(); await useMingle.getState().refreshNow(); }
   };
+  const restore = async (row: ProviderUpdateInfo) => {
+    if (row.previousExecutable === undefined || busy !== null) return;
+    setBusy(row.provider); setErrors({});
+    try {
+      await api.updateSettings({ [executableSetting(row.provider)]: row.previousExecutable });
+      await api.refreshProviders();
+      await api.checkProviderUpdates(row.provider);
+      await useMingle.getState().refreshNow();
+      await load();
+    } catch (error) { setErrors((old) => ({ ...old, [row.provider]: errorMessage(error) })); }
+    finally { setBusy(null); }
+  };
   const available = rows.filter((row) => row.status === 'available' && !row.dismissed);
   return <>
     {available.map((row) => <aside className="provider-update-notice" role="status" key={row.provider}>
@@ -71,6 +84,7 @@ export function ProviderUpdates({ noticeOnly = false }: { noticeOnly?: boolean }
         <div className="provider-updates__actions">
           {row.status === 'available' && (row.method === 'native' || row.method === 'managed') ? <Button disabled={busy !== null} onClick={() => void update(row)}>{busy === row.provider ? 'Updating…' : row.method === 'managed' ? 'Update in Mingle' : 'Update'}</Button> : null}
           {row.status === 'available' && row.method === 'unsupported' ? <Button variant="secondary" onClick={() => void copyText(row.instructions ?? row.message).catch((error) => setErrors((old) => ({ ...old, [row.provider]: errorMessage(error) })))}><Copy size={13} /> Copy instructions</Button> : null}
+          {row.managedExecutable && row.previousExecutable !== undefined ? <Button variant="secondary" disabled={busy !== null || row.status === 'updating'} onClick={() => void restore(row)}>Use previous installation</Button> : null}
           {!managedPinnedRuntime && row.status !== 'updating' && row.status !== 'available' ? <Button variant="secondary" disabled={busy !== null} onClick={() => void refresh(row.provider)}><RefreshCw size={13} /> Re-check</Button> : null}
           {row.status === 'available' && row.latestVersion && !row.dismissed ? <Button variant="secondary" onClick={() => void dismiss(row)}><Check size={13} /> Dismiss</Button> : null}
         </div>
