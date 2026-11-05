@@ -1,0 +1,22 @@
+/* Restrained color is opt-in at the root; monochrome keeps tokens.css exactly as before. */
+:root[data-color-style='subtle']:not([data-theme='light']) {
+  --bg-app: #0e1218;
+  --bg-sidebar: #111820;
+  --bg-panel: #151c25;
+  --bg-surface: #1a222d;
+  --bg-raised: #222c38;
+  --bg-inset: #0d1219;
+  --bg-message: #1b2632;
+  --bg-active: rgba(143, 184, 244, 0.10);
+  --accent: #9ebcf4;
+  --accent-strong: #bad1ff;
+  --accent-dim: #87a6cf;
+  --accent-soft: rgba(143, 184, 244, 0.10);
+  --accent-line: rgba(143, 184, 244, 0.35);
+  --blue-line: var(--accent-line);
+  --fg-on-accent: #102038;
+  --info: #9ebcf4;
+  --info-soft: var(--accent-soft);
+  --codex: #7dbfa8;
+  --claude: #d9a084;
+}
