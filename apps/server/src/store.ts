@@ -53,7 +53,7 @@ export interface SessionResumeEntry {
 const mapProject = (r: Row): Project => ({ id: r.id as string, name: r.name as string, path: r.path as string, createdAt: r.created_at as string, isExample: r.is_example === 1 });
 const mapSession = (r: Row): Session => ({
   id: r.id as string, projectId: r.project_id as string, name: r.name as string, provider: r.provider as Provider, model: r.model as string,
-  nameSource: (r.name_source as 'automatic' | 'manual' | null) ?? undefined,
+  nameSource: r.name_source === 'automatic' || r.name_source === 'manual' ? r.name_source : undefined,
   effort: r.effort as Session['effort'], status: r.status as SessionStatus, policy: r.policy as Policy, serviceTier: (r.service_tier as string) ?? 'standard', isolated: r.isolated === 1,
   worktreePath: r.worktree_path as string, branch: (r.branch as string | null) ?? null, providerSessionId: (r.provider_session_id as string | null) ?? null,
   handoffFromProvider: (r.handoff_from_provider as Provider | null) ?? null, handoffFromModel: (r.handoff_from_model as string | null) ?? null,
@@ -215,7 +215,7 @@ export class Store {
   backfillAutomaticSessionNames(limit = 100): { renamed: number; examined: number } {
     const boundedLimit = Math.max(1, Math.min(500, Math.floor(limit)));
     const candidates = this.all(`SELECT s.id, s.name FROM sessions s
-      WHERE s.archived_at IS NULL AND s.parent_session_id IS NULL AND s.name_source = 'manual'
+      WHERE s.archived_at IS NULL AND s.parent_session_id IS NULL AND s.name_source = 'legacy'
         AND s.name GLOB 'Session [0-9]*'
         AND NOT EXISTS (SELECT 1 FROM group_members gm WHERE gm.session_id = s.id)
         AND NOT EXISTS (SELECT 1 FROM events e WHERE e.session_id = s.id AND e.type = 'session.renamed')
@@ -227,7 +227,7 @@ export class Store {
       if (!request) continue;
       const title = deriveSessionName(request.content as string);
       if (!title) continue;
-      const changed = this.db.prepare("UPDATE sessions SET name = ?, name_source = 'automatic' WHERE id = ? AND name_source = 'manual' AND name = ?").run(title, id, candidate.name as string);
+      const changed = this.db.prepare("UPDATE sessions SET name = ?, name_source = 'automatic' WHERE id = ? AND name_source = 'legacy' AND name = ?").run(title, id, candidate.name as string);
       if (Number(changed.changes) === 1) renamed++;
     }
     return { renamed, examined: candidates.length };
