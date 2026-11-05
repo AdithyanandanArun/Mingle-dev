@@ -16,6 +16,8 @@ export type SessionStatus = 'idle' | 'running' | 'waiting' | 'interrupted' | 'er
 export type TaskStatus = 'backlog' | 'ready' | 'running' | 'blocked' | 'review' | 'done';
 export interface Project { id: string; name: string; path: string; createdAt: string; isExample: boolean }
 export interface Session {
+  /** Automatic titles may be assigned from a human request; manual names always win. */
+  nameSource?: 'automatic' | 'manual';
   id: string; projectId: string; name: string; provider: Provider; model: string; effort: Effort;
   status: SessionStatus; policy: Policy; serviceTier?: string; isolated: boolean; worktreePath: string; branch: string | null;
   /** True while the active native provider turn accepts steering input. */
