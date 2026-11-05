@@ -179,6 +179,13 @@ export function SettingsPage({ onReplayOnboarding }: { onReplayOnboarding: () =>
         <SettingRow title="Theme" description="Choose a dark or light workspace." htmlFor="st-theme">
           <SelectMenu id="st-theme" label="Theme" value={settings.theme} disabled={disabled} options={[{ value: 'dark', label: 'Dark' }, { value: 'light', label: 'Light' }]} onChange={(value) => void update({ theme: value as AppSettings['theme'] }, 'theme')} />
         </SettingRow>
+        <SettingRow title="Color style" description="Quiet blue, teal and warm status accents. Monochrome restores the original neutral colors instantly." htmlFor="st-color-style">
+          <SelectMenu id="st-color-style" label="Color style" value={settings.colorStyle ?? 'subtle'} disabled={disabled}
+            options={[{ value: 'subtle', label: 'Subtle color' }, { value: 'monochrome', label: 'Monochrome' }]}
+            onChange={(value) => void update({ colorStyle: value as AppSettings['colorStyle'] }, 'colorStyle')} />
+          {(settings.colorStyle ?? 'subtle') !== 'monochrome' ? <Button variant="secondary" size="sm" disabled={disabled}
+            onClick={() => void update({ colorStyle: 'monochrome' }, 'colorStyle')}>Restore monochrome</Button> : null}
+        </SettingRow>
       </div> : null}
       <footer className="settings-page__foot">Mingle {boot.version}<span>Local workspace</span></footer>
     </div>
