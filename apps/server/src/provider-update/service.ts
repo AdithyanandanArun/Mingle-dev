@@ -14,6 +14,7 @@ const CACHE_MS = 12 * 60 * 60_000;
 const REQUEST_TIMEOUT_MS = 4_000;
 const PROCESS_TIMEOUT_MS = 5 * 60_000;
 const MAX_BODY = 64 * 1024;
+const PINNED_RUNTIME_MESSAGE = 'Antigravity is managed by Mingle at a checksum-pinned ACP version. Update Mingle to change that approved runtime.';
 const NPM_SOURCES: Partial<Record<Provider, { package: string; label: string }>> = {
   claude: { package: '@anthropic-ai/claude-code', label: 'npm registry (@anthropic-ai/claude-code, latest channel)' },
   codex: { package: '@openai/codex', label: 'npm registry (@openai/codex)' },
@@ -32,7 +33,7 @@ export interface ProviderUpdateServiceOptions {
 function empty(provider: Provider, diagnostic?: ProviderInfo): ProviderUpdateInfo {
   const installedVersion = diagnostic?.version ?? null;
   return { provider, installedVersion, latestVersion: null, source: null, checkedAt: null, status: 'unknown', channel: 'unknown', method: 'unsupported',
-    message: diagnostic?.executable ? 'A verified public version source or safe update method is unavailable for this installation.' : 'Provider CLI is not detected.' };
+    message: provider === 'antigravity' ? PINNED_RUNTIME_MESSAGE : diagnostic?.executable ? 'A verified public version source or safe update method is unavailable for this installation.' : 'Provider CLI is not detected.' };
 }
 function compareVersions(a: string, b: string): number | null {
   const parse = (value: string) => value.trim().replace(/^v/i, '').split('.').map((part) => /^\d+$/.test(part) ? Number(part) : NaN);
@@ -109,6 +110,8 @@ export class ProviderUpdateService {
   }
 
   private recompare(info: ProviderUpdateInfo, diagnostic?: ProviderInfo): ProviderUpdateInfo {
+    // A pinned runtime has no public CLI release comparison, even when diagnostics have no version.
+    if (info.provider === 'antigravity') return { ...empty(info.provider, diagnostic), checkedAt: info.checkedAt };
     if (!diagnostic?.version) return { ...info, status: 'unknown', method: 'unsupported', message: 'Installed CLI version is unknown; no comparison is available.' };
     if (info.status === 'error' || !info.latestVersion || (['failed', 'updated'].includes(info.status) && info.installedVersion === diagnostic.version)) return info;
     const comparison = compareVersions(diagnostic.version, info.latestVersion);
@@ -137,7 +140,8 @@ export class ProviderUpdateService {
     if (this.closed) return empty(diagnostic.id, diagnostic);
     const provider = diagnostic.id;
     const previous = (this.store.getProviderUpdateChecks() as Record<string, ProviderUpdateInfo>)[provider];
-    if (!force && previous?.checkedAt && this.now() - Date.parse(previous.checkedAt) < CACHE_MS) return { ...this.recompare(previous, diagnostic), installedVersion: diagnostic.version };
+    if (!force && previous?.status !== 'error' && previous?.checkedAt && previous.installedVersion === diagnostic.version
+      && (!NPM_SOURCES[provider] || previous.checkedExecutable === diagnostic.executable) && this.now() - Date.parse(previous.checkedAt) < CACHE_MS) return { ...this.recompare(previous, diagnostic), installedVersion: diagnostic.version };
     const pending = this.inflight.get(provider);
     if (pending) return pending;
     const operation = this.fetchLatest(diagnostic).then((result) => {
@@ -154,14 +158,15 @@ export class ProviderUpdateService {
     const provider = diagnostic.id;
     const base = empty(provider, diagnostic);
     const registry = NPM_SOURCES[provider];
-    if (!registry) return { ...base, checkedAt: new Date(this.now()).toISOString(), message: provider === 'claude'
-      ? 'Claude Code update channel and installer are user-managed; Mingle cannot verify a public stable version safely.'
-      : provider === 'antigravity' ? 'Antigravity is managed by Mingle at a pinned ACP version. Update Mingle to change that approved runtime.' : base.message };
+    if (!registry) return { ...base, checkedAt: new Date(this.now()).toISOString() };
     if (!diagnostic.version) return { ...base, checkedAt: new Date(this.now()).toISOString(), source: registry.label, message: 'Installed CLI version is unknown; no update comparison was made.' };
     const timeout = AbortSignal.any([AbortSignal.timeout(REQUEST_TIMEOUT_MS), this.lifecycle.signal]);
     try {
-      const response = await this.fetcher(`https://registry.npmjs.org/${encodeURIComponent(registry.package)}/latest`, { headers: { accept: 'application/vnd.npm.install-v1+json' }, signal: timeout });
-      if (!response.ok) throw new Error(`Public version source returned HTTP ${response.status}.`);
+      const response = await this.fetcher(`https://registry.npmjs.org/${encodeURIComponent(registry.package)}/latest`, { headers: { accept: 'application/json' }, signal: timeout });
+      if (!response.ok) {
+        await response.body?.cancel().catch(() => {});
+        throw new Error(`Public version source returned HTTP ${response.status}.`);
+      }
       const reader = response.body?.getReader();
       if (!reader) throw new Error('Public version response had no body.');
       const chunks: Uint8Array[] = []; let total = 0;

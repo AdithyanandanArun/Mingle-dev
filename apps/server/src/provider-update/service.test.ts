@@ -2,26 +2,26 @@ import path from 'node:path';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import { describe, expect, it, vi } from 'vitest';
-import type { ProviderInfo } from '@mingle/contracts';
+import type { Provider, ProviderInfo } from '@mingle/contracts';
 import { ProviderUpdateService, withinNativeInstallRoot } from './service.ts';
 
-const diagnostic = (version = '1.0.0', executable = '/home/test/.local/bin/codex'): ProviderInfo => ({
-  id: 'codex', name: 'Codex', available: true, version, executable, reason: null, models: [],
+const diagnostic = (version = '1.0.0', executable = '/home/test/.local/bin/codex', provider: Provider = 'codex'): ProviderInfo => ({
+  id: provider, name: provider, available: true, version, executable, reason: null, models: [],
 });
-function harness(options: { version?: string; executable?: string; fetch?: typeof fetch; spawn?: (...args: never[]) => never; reserve?: () => (() => void) | null } = {}) {
+function harness(options: { provider?: Provider; version?: string; executable?: string; fetch?: typeof fetch; spawn?: (...args: never[]) => never; reserve?: () => (() => void) | null } = {}) {
   const data: Record<string, unknown> = {};
   const store = {
     getProviderUpdateChecks: () => ({ ...data }), saveProviderUpdateCheck: (provider: string, value: unknown) => { data[provider] = value; },
     providerUpdateDismissed: () => false, recordEvent: vi.fn(), dismissProviderUpdate: vi.fn(), touch: vi.fn(), getSettings: () => ({ codexExecutable: '' }),
   };
-  let current = diagnostic(options.version, options.executable);
+  let current = diagnostic(options.version, options.executable, options.provider);
   const providers = { list: vi.fn(async () => [current]), refresh: vi.fn(async () => [current]) };
   const release = vi.fn();
   const reserve = vi.fn(options.reserve ?? (() => release));
   const runtime = { reserveProviderMaintenance: reserve };
   const fetcher = options.fetch ?? (async () => new Response(JSON.stringify({ version: '1.1.0' }), { status: 200 }));
   const service = new ProviderUpdateService(store as never, providers as never, runtime as never, { fetch: fetcher, spawn: options.spawn as never, now: () => 1_800_000_000_000, inspectInstall: async () => true });
-  return { service, store, providers, runtime, release, data, setInstalled: (version: string) => { current = diagnostic(version, options.executable); } };
+  return { service, store, providers, runtime, release, data, setInstalled: (version: string) => { current = diagnostic(version, options.executable, options.provider); } };
 }
 
 describe('ProviderUpdateService', () => {
@@ -33,6 +33,74 @@ describe('ProviderUpdateService', () => {
     const second = harness();
     (second.store.getProviderUpdateChecks as unknown as () => unknown) = () => app.data;
     expect((await second.service.snapshot()).providers[0]).toMatchObject({ status: 'available', latestVersion: '1.1.0' });
+  });
+
+  it.each([
+    ['codex', '@openai/codex'], ['claude', '@anthropic-ai/claude-code'], ['opencode', 'opencode-ai'],
+  ] as const)('requests supported JSON from the %s latest-version endpoint', async (provider, packageName) => {
+    // /latest rejects the install-v1 packument media type with HTTP 406.
+    const fetcher = vi.fn(async (_url: unknown, options?: RequestInit) => new Response(JSON.stringify({ version: '1.1.0' }), {
+      status: new Headers(options?.headers).get('accept') === 'application/json' ? 200 : 406,
+    }));
+    const app = harness({ provider, fetch: fetcher });
+    expect(await app.service.checkOne(provider)).toMatchObject({ status: 'available', latestVersion: '1.1.0' });
+    expect(String(fetcher.mock.calls[0]![0])).toBe(`https://registry.npmjs.org/${encodeURIComponent(packageName)}/latest`);
+    expect(fetcher.mock.calls[0]![1]?.headers).toEqual({ accept: 'application/json' });
+    await app.service.close();
+  });
+
+  it('retries a persisted failed check at startup without waiting for the success cache to expire', async () => {
+    const old = harness({ fetch: async () => new Response('', { status: 406 }) });
+    expect(await old.service.checkOne('codex')).toMatchObject({ status: 'error', latestVersion: null });
+    await old.service.close();
+    const fetcher = vi.fn(async () => new Response(JSON.stringify({ version: '1.1.0' })));
+    const restarted = harness({ fetch: fetcher });
+    Object.assign(restarted.data, old.data);
+    await restarted.service.snapshot();
+    expect(fetcher).not.toHaveBeenCalled(); // reading state never retries network requests
+    await restarted.service.checkAll();
+    expect((await restarted.service.snapshot()).providers[0]).toMatchObject({ status: 'available', latestVersion: '1.1.0' });
+    await restarted.service.checkAll(); await restarted.service.snapshot();
+    expect(fetcher).toHaveBeenCalledOnce(); // successful checks retain their normal cache
+    await restarted.service.close();
+  });
+
+  it('checks again when the installed version or executable changes inside the cache window', async () => {
+    const fetcher = vi.fn(async () => new Response(JSON.stringify({ version: '1.2.0' })));
+    const app = harness({ fetch: fetcher });
+    await app.service.checkOne('codex');
+    app.setInstalled('1.1.0');
+    await app.service.checkAll();
+    app.providers.list.mockResolvedValue([diagnostic('1.1.0', '/example/other/codex')]);
+    await app.service.checkAll();
+    expect(fetcher).toHaveBeenCalledTimes(3);
+    expect((await app.service.snapshot()).providers[0]).toMatchObject({ installedVersion: '1.1.0', checkedExecutable: '/example/other/codex', latestVersion: '1.2.0' });
+    await app.service.close();
+  });
+
+  it('an explicit recheck recovers after an HTTP error and refreshes a cached successful check', async () => {
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(new Response('', { status: 406 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ version: '1.1.0' })))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ version: '1.2.0' })));
+    const app = harness({ fetch: fetcher });
+    expect((await app.service.checkOne('codex')).status).toBe('error');
+    expect(await app.service.checkOne('codex', true)).toMatchObject({ status: 'available', latestVersion: '1.1.0' });
+    expect(await app.service.checkOne('codex', true)).toMatchObject({ status: 'available', latestVersion: '1.2.0' });
+    expect(fetcher).toHaveBeenCalledTimes(3);
+    await app.service.close();
+  });
+
+  it('keeps Antigravity pinned-runtime guidance with unknown installed version and makes no registry request', async () => {
+    const fetcher = vi.fn();
+    const app = harness({ provider: 'antigravity', fetch: fetcher });
+    const noVersion = { ...diagnostic('1.0.0', '/example/antigravity', 'antigravity'), version: null };
+    app.providers.list.mockResolvedValue([noVersion] as never);
+    for (const row of [(await app.service.snapshot()).providers[2], await app.service.checkOne('antigravity'), (await app.service.snapshot()).providers[2]]) {
+      expect(row).toMatchObject({ status: 'unknown', installedVersion: null, latestVersion: null, method: 'unsupported', message: expect.stringContaining('checksum-pinned') });
+    }
+    expect(fetcher).not.toHaveBeenCalled();
+    await app.service.close();
   });
 
   it('reports partial public metadata and offline errors without claiming current', async () => {
