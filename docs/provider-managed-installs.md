@@ -6,4 +6,4 @@ Managed installs never replace the existing CLI. Mingle validates that the versi
 
 The install uses Node's discovered `npm-cli.js` with a fixed argument list, the public npm registry, and an exact package version. It does not use a shell, global package installation, elevated privileges, or provider authentication files. Updates hold the provider maintenance lease through installation and preference activation, so active turns and compaction block the operation.
 
-The managed action is supported on Linux, macOS, and Windows when a usable Node/npm CLI is available. On Windows Mingle invokes `npm-cli.js` through the current Node executable rather than executing the `npm.cmd` shim. Provider packages may have platform-specific availability; install errors remain visible and do not switch the active executable.
+The managed action is supported on Linux and macOS when a usable Node/npm CLI is available. Windows managed installs are currently withheld because npm's generated `.cmd` launchers cannot be invoked safely without a shell. Provider packages may have platform-specific availability; install errors remain visible and do not switch the active executable.

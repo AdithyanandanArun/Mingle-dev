@@ -1,5 +1,5 @@
 import path from 'node:path';
-import { mkdtemp, mkdir, writeFile, chmod, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, chmod, rm, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
@@ -19,7 +19,7 @@ function harness(options: { provider?: Provider; version?: string; executable?: 
     updateSettings: (patch: Record<string, unknown>) => Object.assign(settings, patch),
   };
   let current = diagnostic(options.version, options.executable, options.provider);
-  const providers = { list: vi.fn(async () => [current]), refresh: vi.fn(async () => [current]) };
+  const providers = { list: vi.fn(async () => [current]), refresh: vi.fn(async () => [current]), invalidate: vi.fn() };
   const release = vi.fn();
   const reserve = vi.fn(options.reserve ?? (() => release));
   const runtime = { reserveProviderMaintenance: reserve };
@@ -224,11 +224,67 @@ describe('provider update bounds and cached state', () => {
         const result = await app.service.update(provider, '1.0.0');
         expect(result).toMatchObject({ status: 'updated', installedVersion: '1.1.0', method: 'managed', previousExecutable: '' });
         expect(app.settings[`${provider}Executable`]).toBe(result.managedExecutable);
+        expect(app.providers.invalidate).toHaveBeenCalledOnce();
         expect(app.release).toHaveBeenCalledOnce();
         await app.service.close();
       } finally { await rm(directory, { recursive: true, force: true }); }
     },
   );
+
+  it('keeps the current executable selected when the staged CLI reports a different version', async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), 'mingle-provider-update-'));
+    try {
+      const app = harness({ executable: '/usr/bin/codex', managedRoot: path.join(directory, 'managed'), installManagedPackage: async (target) => {
+        const bin = path.join(target, 'node_modules', '.bin');
+        await mkdir(bin, { recursive: true });
+        const executable = path.join(bin, 'codex');
+        await writeFile(executable, '#!/usr/bin/env node\nconsole.log("1.0.9")\n', { mode: 0o700 });
+        await chmod(executable, 0o700);
+      } });
+      expect(await app.service.update('codex', '1.0.0')).toMatchObject({ status: 'failed', message: expect.stringContaining('exact checked version') });
+      expect(app.settings.codexExecutable).toBe('');
+      expect(app.release).toHaveBeenCalledOnce();
+      await app.service.close();
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+
+  it('rejects a staged executable symlink that resolves outside the managed root', async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), 'mingle-provider-update-'));
+    try {
+      const outside = path.join(directory, 'outside');
+      await writeFile(outside, '#!/usr/bin/env node\nconsole.log("1.1.0")\n', { mode: 0o700 });
+      await chmod(outside, 0o700);
+      const app = harness({ executable: '/usr/bin/codex', managedRoot: path.join(directory, 'managed'), installManagedPackage: async (target) => {
+        const bin = path.join(target, 'node_modules', '.bin');
+        await mkdir(bin, { recursive: true });
+        await symlink(outside, path.join(bin, 'codex'));
+      } });
+      expect(await app.service.update('codex', '1.0.0')).toMatchObject({ status: 'failed' });
+      expect(app.settings.codexExecutable).toBe('');
+      await app.service.close();
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+
+  it('cleans failed staging directories so a later explicit install can retry', async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), 'mingle-provider-update-'));
+    let attempts = 0;
+    try {
+      const app = harness({ executable: '/usr/bin/codex', managedRoot: path.join(directory, 'managed'), installManagedPackage: async (target) => {
+        attempts++;
+        if (attempts === 1) throw new Error('registry offline');
+        const bin = path.join(target, 'node_modules', '.bin');
+        await mkdir(bin, { recursive: true });
+        const executable = path.join(bin, 'codex');
+        await writeFile(executable, '#!/usr/bin/env node\nconsole.log("1.1.0")\n', { mode: 0o700 });
+        await chmod(executable, 0o700);
+      } });
+      expect(await app.service.update('codex', '1.0.0')).toMatchObject({ status: 'failed', message: expect.stringContaining('registry offline') });
+      expect(await app.service.update('codex', '1.0.0')).toMatchObject({ status: 'updated', installedVersion: '1.1.0' });
+      expect(attempts).toBe(2);
+      expect(app.settings.codexExecutable).toContain(`${path.sep}1.1.0${path.sep}`);
+      await app.service.close();
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
 });
 
  it('recognizes Windows native roots while rejecting siblings and other drives', () => {
