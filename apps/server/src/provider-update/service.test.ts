@@ -167,13 +167,19 @@ describe('provider update bounds and cached state', () => {
     }
   });
 
-  it('never runs an updater for system-managed or custom executables', async () => {
+  it('offers an isolated managed action for system-managed executables without invoking them', async () => {
     const spawn = vi.fn();
     const app = harness({ executable: '/usr/bin/codex', spawn: spawn as never });
     const check = await app.service.checkOne('codex');
-    expect(check).toMatchObject({ status: 'available', method: 'unsupported', instructions: expect.stringContaining('package manager') });
-    await expect(app.service.update('codex', '1.0.0')).rejects.toThrow();
+    expect(check).toMatchObject({ status: 'available', method: 'managed', installationDescription: expect.stringContaining('@openai/codex') });
     expect(spawn).not.toHaveBeenCalled();
+  });
+
+  it('recomputes an actionable managed method for old cached unsupported rows', async () => {
+    const app = harness({ executable: '/usr/bin/codex' });
+    app.data.codex = { provider: 'codex', installedVersion: '1.0.0', checkedExecutable: '/usr/bin/codex', latestVersion: '1.1.0',
+      source: 'npm registry', checkedAt: new Date(1_800_000_000_000).toISOString(), status: 'available', channel: 'stable', method: 'unsupported', message: 'old cached row' };
+    expect((await app.service.snapshot()).providers[0]).toMatchObject({ method: 'managed', installationDescription: expect.stringContaining('@openai/codex') });
   });
 
   it('does not claim success when the updater exits zero without changing the configured CLI', async () => {

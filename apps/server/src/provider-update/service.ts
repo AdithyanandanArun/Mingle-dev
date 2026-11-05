@@ -119,8 +119,8 @@ export class ProviderUpdateService {
 
   private cachedRow(persisted: ProviderUpdateInfo, diagnostic?: ProviderInfo): ProviderUpdateInfo {
     const row = { ...this.recompare(persisted, diagnostic), installedVersion: diagnostic?.version ?? null };
-    if (persisted.installedVersion === diagnostic?.version) return row;
-    const managed = Boolean(NPM_SOURCES[persisted.provider] && diagnostic?.version && diagnostic.executable
+    if (persisted.installedVersion === diagnostic?.version && persisted.method !== 'unsupported') return row;
+    const managed = Boolean(persisted.method === 'unsupported' && NPM_SOURCES[persisted.provider] && diagnostic?.version && diagnostic.executable
       && !diagnostic.version.includes('-') && !diagnostic.version.includes('+'));
     return { ...row, method: managed ? 'managed' : 'unsupported', ...(managed ? { installationDescription: this.installationDescription(persisted.provider) } : {}) };
   }
@@ -201,7 +201,7 @@ export class ProviderUpdateService {
         status: comparison === null ? 'unknown' : comparison < 0 ? 'available' : comparison === 0 ? 'current' : 'unknown', channel: 'stable', method,
         ...(previousExecutable !== undefined ? { previousExecutable } : {}),
         ...(method === 'managed' ? { installationDescription: this.installationDescription(provider) } : {}),
-        message: (method === 'unsupported' ? this.instructions(provider) + ' ' : '') + (comparison === null ? 'Versions could not be compared reliably.' : comparison > 0 ? 'Installed version is newer than the public stable tag; channel status is unknown.' : comparison < 0 ? 'A newer stable version is available.' : 'Installed version matches the public stable version.') };
+        message: (comparison === null ? 'Versions could not be compared reliably.' : comparison > 0 ? 'Installed version is newer than the public stable tag; channel status is unknown.' : comparison < 0 ? 'A newer stable version is available.' : 'Installed version matches the public stable version.') };
     } catch (error) {
       return { ...base, checkedAt: new Date(this.now()).toISOString(), source: registry.label, status: 'error', message: `Could not check public version metadata: ${redactSecrets(errorMessage(error)).slice(0, 300)}` };
     }
