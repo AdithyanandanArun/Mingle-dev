@@ -402,6 +402,8 @@ export function createApplication(options: ApplicationOptions): MingleApplicatio
           // Retire starter data from older versions without deleting its files or history.
           for (const project of store.listProjects()) if (project.isExample) store.removeProject(project.id);
         }
+        // Only legacy automatic placeholders are eligible; manual names and conversation IDs stay intact.
+        store.backfillAutomaticSessionNames();
         intelligence.start();
         attachments.start();
         distributed.start();
