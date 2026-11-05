@@ -6,6 +6,8 @@ import { PassThrough } from 'node:stream';
 import { describe, expect, it, vi } from 'vitest';
 import type { Provider, ProviderInfo } from '@mingle/contracts';
 import { ProviderUpdateService, withinNativeInstallRoot } from './service.ts';
+import { openDatabase } from '../db.ts';
+import { Store } from '../store.ts';
 
 const diagnostic = (version = '1.0.0', executable = '/home/test/.local/bin/codex', provider: Provider = 'codex'): ProviderInfo => ({
   id: provider, name: provider, available: true, version, executable, reason: null, models: [],
@@ -14,6 +16,7 @@ function harness(options: { provider?: Provider; version?: string; executable?: 
   const data: Record<string, unknown> = {};
   const settings: Record<string, unknown> = { codexExecutable: '', claudeExecutable: '', opencodeExecutable: '' };
   const store = {
+    tx: <T>(fn: () => T): T => fn(),
     getProviderUpdateChecks: () => ({ ...data }), saveProviderUpdateCheck: (provider: string, value: unknown) => { data[provider] = value; },
     providerUpdateDismissed: () => false, recordEvent: vi.fn(), dismissProviderUpdate: vi.fn(), touch: vi.fn(), getSettings: () => ({ ...settings }),
     updateSettings: (patch: Record<string, unknown>) => Object.assign(settings, patch),
@@ -331,6 +334,46 @@ describe('provider update bounds and cached state', () => {
       expect((await app.service.snapshot()).providers[0]).not.toHaveProperty('managedExecutable');
       await app.service.close();
     } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+
+  it('retains restoration when public checks fail or the selected managed executable is missing', async () => {
+    const app = harness({ executable: '/example/managed/codex', fetch: async () => { throw new Error('Example offline'); } });
+    app.settings.codexExecutable = '/example/managed/codex';
+    app.data.codex = { provider: 'codex', installedVersion: '1.0.0', managedExecutable: '/example/managed/codex', previousExecutable: '', method: 'managed' };
+    expect(await app.service.checkOne('codex', true)).toMatchObject({ status: 'error', managedExecutable: '/example/managed/codex', previousExecutable: '' });
+    expect((await app.service.snapshot()).providers[0]).toMatchObject({ managedExecutable: '/example/managed/codex', previousExecutable: '' });
+    app.providers.list.mockResolvedValue([{ ...diagnostic(), version: null, executable: null }]);
+    expect(await app.service.checkOne('codex', true)).toMatchObject({ status: 'unknown', managedExecutable: '/example/managed/codex', previousExecutable: '' });
+    expect((await app.service.snapshot()).providers[0]).toMatchObject({ managedExecutable: '/example/managed/codex', previousExecutable: '' });
+    app.settings.codexExecutable = '';
+    expect((await app.service.snapshot()).providers[0]).not.toHaveProperty('previousExecutable');
+    await app.service.close();
+  });
+
+  it('rolls back executable selection when durable restoration metadata cannot be saved', async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), 'mingle-managed-transaction-'));
+    const db = openDatabase(path.join(directory, 'test.sqlite'));
+    const store = new Store(db);
+    const app = harness({ executable: '/usr/bin/codex' });
+    const service = new ProviderUpdateService(store, app.providers as never, app.runtime as never, {
+      managedRoot: path.join(directory, 'managed'),
+      fetch: async () => new Response(JSON.stringify({ version: '1.1.0' })),
+      installManagedPackage: async (target) => {
+        const bin = path.join(target, 'node_modules', '.bin');
+        await mkdir(bin, { recursive: true });
+        await writeFile(path.join(bin, 'codex'), '#!/usr/bin/env node\nconsole.log("1.1.0")\n', { mode: 0o700 });
+      },
+    });
+    try {
+      const originalSave = store.saveProviderUpdateCheck.bind(store);
+      vi.spyOn(store, 'saveProviderUpdateCheck').mockImplementation((provider, data) => {
+        if ((data as { status: string }).status === 'updated') throw new Error('Example durable save failure');
+        originalSave(provider, data);
+      });
+      expect(await service.update('codex', '1.0.0')).toMatchObject({ status: 'failed', message: expect.stringContaining('Example durable save failure') });
+      expect(store.getSettings().codexExecutable).toBe('');
+      expect(store.getProviderUpdateChecks().codex).toMatchObject({ status: 'failed' });
+    } finally { await service.close(); await app.service.close(); db.close(); await rm(directory, { recursive: true, force: true }); }
   });
 
   it('does not activate a validated install after shutdown begins', async () => {

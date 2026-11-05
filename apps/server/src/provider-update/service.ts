@@ -131,10 +131,8 @@ export class ProviderUpdateService {
     const sameInstall = persisted.installedVersion === diagnostic?.version && persisted.checkedExecutable === diagnostic?.executable;
     const configured = providerExecutable(persisted.provider, this.store.getSettings());
     if (sameInstall && persisted.method === 'native' && methodFor(persisted.provider, diagnostic?.executable ?? null, diagnostic?.version ?? null, configured) === 'native') return { ...row, method: 'native' };
-    const activeManaged = Boolean(persisted.method === 'managed' && persisted.managedExecutable && diagnostic?.executable
-      && resolve(persisted.managedExecutable) === resolve(diagnostic.executable));
-    if (activeManaged) return { ...row, method: 'managed', managedExecutable: persisted.managedExecutable,
-      ...(persisted.previousExecutable !== undefined ? { previousExecutable: persisted.previousExecutable } : {}),
+    const lineage = this.managedLineage(diagnostic);
+    if (lineage.managedExecutable) return { ...row, ...lineage, method: process.platform === 'win32' ? 'unsupported' : 'managed',
       installationDescription: this.installationDescription(persisted.provider) };
     const managed = Boolean(process.platform !== 'win32' && NPM_SOURCES[persisted.provider] && diagnostic?.version && diagnostic.executable
       && !diagnostic.version.includes('-') && !diagnostic.version.includes('+'));
@@ -189,9 +187,20 @@ export class ProviderUpdateService {
     return operation;
   }
 
+  /** Restoration belongs to the saved selection, even if discovery or public metadata is unavailable. */
+  private managedLineage(diagnostic?: ProviderInfo): Pick<ProviderUpdateInfo, 'managedExecutable' | 'previousExecutable'> {
+    if (!diagnostic) return {};
+    const prior = (this.store.getProviderUpdateChecks() as Record<string, ProviderUpdateInfo>)[diagnostic.id];
+    const configured = providerExecutable(diagnostic.id, this.store.getSettings());
+    if (!prior?.managedExecutable || prior.previousExecutable === undefined || !configured
+      || resolve(configured) !== resolve(prior.managedExecutable)) return {};
+    return { managedExecutable: prior.managedExecutable, previousExecutable: prior.previousExecutable };
+  }
+
   private async fetchLatest(diagnostic: ProviderInfo): Promise<ProviderUpdateInfo> {
     const provider = diagnostic.id;
-    const base = empty(provider, diagnostic);
+    const lineage = this.managedLineage(diagnostic);
+    const base = { ...empty(provider, diagnostic), ...lineage };
     const registry = NPM_SOURCES[provider];
     if (!registry) return { ...base, checkedAt: new Date(this.now()).toISOString() };
     if (!diagnostic.version) return { ...base, checkedAt: new Date(this.now()).toISOString(), source: registry.label, message: 'Installed CLI version is unknown; no update comparison was made.' };
@@ -212,16 +221,10 @@ export class ProviderUpdateService {
       const comparison = compareVersions(diagnostic.version, latest);
       const candidate = methodFor(provider, diagnostic.executable, diagnostic.version, providerExecutable(provider, this.store.getSettings()));
       const stableInstalled = !diagnostic.version.includes('-') && !diagnostic.version.includes('+');
-      const method = !stableInstalled ? 'unsupported' : candidate === 'native' && diagnostic.executable && await this.inspectInstall(provider, diagnostic.executable).catch(() => false) ? 'native' : process.platform === 'win32' ? 'unsupported' : 'managed';
-      const prior = (this.store.getProviderUpdateChecks() as Record<string, ProviderUpdateInfo>)[provider];
-      const priorPath = prior?.managedExecutable ? resolve(prior.managedExecutable) : null;
-      const currentPath = diagnostic.executable ? resolve(diagnostic.executable) : null;
-      const previousExecutable = priorPath && currentPath === priorPath ? prior.previousExecutable : undefined;
-      const managedExecutable = previousExecutable !== undefined ? prior?.managedExecutable : undefined;
+      const method = !stableInstalled || !diagnostic.executable ? 'unsupported' : candidate === 'native' && diagnostic.executable && await this.inspectInstall(provider, diagnostic.executable).catch(() => false) ? 'native' : process.platform === 'win32' ? 'unsupported' : 'managed';
       return { provider, installedVersion: diagnostic.version, checkedExecutable: diagnostic.executable, instructions: this.instructions(provider), latestVersion: latest, source: registry.label, checkedAt: new Date(this.now()).toISOString(),
         status: comparison === null ? 'unknown' : comparison < 0 ? 'available' : comparison === 0 ? 'current' : 'unknown', channel: 'stable', method,
-        ...(managedExecutable ? { managedExecutable } : {}),
-        ...(previousExecutable !== undefined ? { previousExecutable } : {}),
+        ...lineage,
         ...(method === 'managed' ? { installationDescription: this.installationDescription(provider) } : {}),
         message: (comparison === null ? 'Versions could not be compared reliably.' : comparison > 0 ? 'Installed version is newer than the public stable tag; channel status is unknown.' : comparison < 0 ? 'A newer stable version is available.' : 'Installed version matches the public stable version.') };
     } catch (error) {
@@ -375,10 +378,14 @@ export class ProviderUpdateService {
         const executableKey = provider === 'claude' ? 'claudeExecutable' : provider === 'codex' ? 'codexExecutable' : 'opencodeExecutable';
         const preference = configuredPreference || '';
         const previousExecutable = typeof latest.previousExecutable === 'string' ? latest.previousExecutable : preference;
-        this.store.updateSettings({ [executableKey]: managed } as never);
-        this.providers.invalidate();
         state = { ...latest, status: 'updated', installedVersion: latest.latestVersion, managedExecutable: managed, previousExecutable,
           message: `Installed ${provider} ${latest.latestVersion} in Mingle's managed directory and selected it.` };
+        this.store.tx(() => {
+          this.store.updateSettings({ [executableKey]: managed } as never);
+          this.store.saveProviderUpdateCheck(provider, { ...state, checkedAt: new Date(this.now()).toISOString() });
+        });
+        this.providers.invalidate();
+        return state;
       } else if (!after || resolve(after.executable ?? '') !== configured || !after.version || compareVersions(after.version, diagnostic.version) !== 1) {
         state = { ...latest, status: 'failed', installedVersion: after?.version ?? null, message: 'The update command finished, but the configured executable did not report a newer version. No update is claimed.' };
       } else {
