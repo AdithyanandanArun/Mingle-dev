@@ -457,7 +457,7 @@ const MIGRATIONS: (string | ((db: DatabaseSync) => void))[] = [
       addColumn(db, 'queued_messages', 'kind', "ALTER TABLE queued_messages ADD COLUMN kind TEXT CHECK (kind IS NULL OR kind = 'subagent-result')");
       addColumn(db, 'queued_messages', 'subagent_id', 'ALTER TABLE queued_messages ADD COLUMN subagent_id TEXT');
     },
-    (db) => addColumn(db, 'sessions', 'name_source', "ALTER TABLE sessions ADD COLUMN name_source TEXT NOT NULL DEFAULT 'legacy' CHECK (name_source IN ('automatic','manual','legacy'))"),
+    (db) => addColumn(db, 'sessions', 'name_source', "ALTER TABLE sessions ADD COLUMN name_source TEXT NOT NULL DEFAULT 'legacy' CHECK (name_source IN ('automatic','manual','legacy','pending'))"),
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;

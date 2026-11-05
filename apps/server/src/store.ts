@@ -53,7 +53,7 @@ export interface SessionResumeEntry {
 const mapProject = (r: Row): Project => ({ id: r.id as string, name: r.name as string, path: r.path as string, createdAt: r.created_at as string, isExample: r.is_example === 1 });
 const mapSession = (r: Row): Session => ({
   id: r.id as string, projectId: r.project_id as string, name: r.name as string, provider: r.provider as Provider, model: r.model as string,
-  nameSource: r.name_source === 'automatic' || r.name_source === 'manual' ? r.name_source : undefined,
+  nameSource: r.name_source === 'manual' ? 'manual' : r.name_source === 'automatic' || r.name_source === 'pending' ? 'automatic' : undefined,
   effort: r.effort as Session['effort'], status: r.status as SessionStatus, policy: r.policy as Policy, serviceTier: (r.service_tier as string) ?? 'standard', isolated: r.isolated === 1,
   worktreePath: r.worktree_path as string, branch: (r.branch as string | null) ?? null, providerSessionId: (r.provider_session_id as string | null) ?? null,
   handoffFromProvider: (r.handoff_from_provider as Provider | null) ?? null, handoffFromModel: (r.handoff_from_model as string | null) ?? null,
@@ -175,7 +175,8 @@ export class Store {
     this.run(
       `INSERT INTO sessions(id, project_id, name, provider, model, effort, status, policy, isolated, worktree_path, branch, created_at, updated_at, service_tier, parent_session_id, name_source)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      id, input.projectId, input.name, input.provider, input.model, input.effort, input.status ?? 'idle', input.policy, input.isolated ? 1 : 0, input.worktreePath, input.branch, now, now, input.serviceTier ?? 'standard', input.parentSessionId ?? null, input.nameSource ?? 'manual',
+      id, input.projectId, input.name, input.provider, input.model, input.effort, input.status ?? 'idle', input.policy, input.isolated ? 1 : 0, input.worktreePath, input.branch, now, now, input.serviceTier ?? 'standard', input.parentSessionId ?? null,
+      input.parentSessionId ? 'manual' : input.nameSource === 'automatic' ? 'pending' : 'manual',
     );
     return this.getSession(id)!;
   }
@@ -225,7 +226,11 @@ export class Store {
       const id = candidate.id as string;
       const requests = this.all(`SELECT content FROM messages WHERE session_id = ? AND role = 'user' AND (kind IS NULL OR kind IN ('workflow-start','task')) ORDER BY seq LIMIT 20`, id);
       const title = requests.map((request) => deriveSessionName(request.content as string)).find((value): value is string => value !== undefined);
-      if (!title) continue;
+      if (!title) {
+        // Release unusable legacy rows from the bounded backlog; a later first request can still title pending rows.
+        this.db.prepare("UPDATE sessions SET name_source = 'pending' WHERE id = ? AND name_source = 'legacy'").run(id);
+        continue;
+      }
       const changed = this.db.prepare("UPDATE sessions SET name = ?, name_source = 'automatic' WHERE id = ? AND name_source = 'legacy' AND name = ?").run(title, id, candidate.name as string);
       if (Number(changed.changes) === 1) renamed++;
     }
@@ -237,7 +242,9 @@ export class Store {
     if ((kind && kind !== 'workflow-start' && kind !== 'task') || !content.trim()) return false;
     const title = deriveSessionName(content);
     if (!title) return false;
-    const changed = this.db.prepare("UPDATE sessions SET name = ? WHERE id = ? AND name_source = 'automatic' AND name GLOB 'Session [0-9]*'").run(title, sessionId);
+    const changed = this.db.prepare(`UPDATE sessions SET name = ?, name_source = 'automatic'
+      WHERE id = ? AND name_source = 'pending' AND parent_session_id IS NULL
+        AND NOT EXISTS (SELECT 1 FROM group_members gm WHERE gm.session_id = sessions.id)`).run(title, sessionId);
     if (Number(changed.changes) === 1) { this.touch(sessionId); return true; }
     return false;
   }
