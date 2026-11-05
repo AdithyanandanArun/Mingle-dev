@@ -145,6 +145,16 @@ describe('ProviderUpdateService', () => {
     const app = harness({ reserve: () => null });
     await expect(app.service.update('codex', '1.0.0')).rejects.toMatchObject({ status: 409 });
   });
+
+  it('serializes duplicate apply requests before their diagnostics finish', async () => {
+    const app = harness({ reserve: () => null });
+    let releaseDiagnostics!: (value: ProviderInfo[]) => void;
+    app.providers.list.mockImplementationOnce(() => new Promise((resolve) => { releaseDiagnostics = resolve; }));
+    const first = app.service.update('codex', '1.0.0');
+    await expect(app.service.update('codex', '1.0.0')).rejects.toMatchObject({ status: 409 });
+    releaseDiagnostics([diagnostic()]);
+    await expect(first).rejects.toMatchObject({ status: 409 });
+  });
 });
 
 describe('provider update bounds and cached state', () => {
