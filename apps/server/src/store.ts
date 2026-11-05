@@ -223,9 +223,8 @@ export class Store {
     let renamed = 0;
     for (const candidate of candidates) {
       const id = candidate.id as string;
-      const request = this.get(`SELECT content FROM messages WHERE session_id = ? AND role = 'user' AND (kind IS NULL OR kind IN ('workflow-start','task')) ORDER BY seq LIMIT 1`, id);
-      if (!request) continue;
-      const title = deriveSessionName(request.content as string);
+      const requests = this.all(`SELECT content FROM messages WHERE session_id = ? AND role = 'user' AND (kind IS NULL OR kind IN ('workflow-start','task')) ORDER BY seq LIMIT 20`, id);
+      const title = requests.map((request) => deriveSessionName(request.content as string)).find((value): value is string => value !== undefined);
       if (!title) continue;
       const changed = this.db.prepare("UPDATE sessions SET name = ?, name_source = 'automatic' WHERE id = ? AND name_source = 'legacy' AND name = ?").run(title, id, candidate.name as string);
       if (Number(changed.changes) === 1) renamed++;

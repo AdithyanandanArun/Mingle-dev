@@ -28,6 +28,7 @@ describe('session creation', () => {
     const t = await boot();
     const s = await session(t);
     t.app.store.db.prepare("UPDATE sessions SET name='Session 8', name_source='legacy' WHERE id=?").run(s.id);
+    t.app.store.insertMessage({ sessionId: s.id, role: 'user', content: '/compact' });
     t.app.store.insertMessage({ sessionId: s.id, role: 'user', content: 'Add keyboard shortcuts for the editor' });
     const before = t.app.store.getSession(s.id)!.updatedAt;
     expect(t.app.store.backfillAutomaticSessionNames()).toEqual({ renamed: 1, examined: 1 });
