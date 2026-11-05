@@ -41,10 +41,27 @@ describe('session creation', () => {
   it('accepts human workflow starts and rejects generated workflow continuation text', async () => {
     const t = await boot();
     const s = await session(t);
-    t.app.store.db.prepare("UPDATE sessions SET name='Session 9', name_source='automatic' WHERE id=?").run(s.id);
+    t.app.store.db.prepare("UPDATE sessions SET name='Session 9', name_source='pending' WHERE id=?").run(s.id);
     expect(t.app.store.nameSessionFromFirstRequest(s.id, 'Build a small release dashboard', 'workflow-start')).toBe(true);
     expect(t.app.store.nameSessionFromFirstRequest(s.id, 'Continuing toward the goal (turn 2).', 'workflow-continuation')).toBe(false);
     expect(t.app.store.getSession(s.id)?.name).toBe('Build a small release dashboard');
+  });
+
+  it('claims placeholder-looking automatic titles once and keeps empty legacy rows eligible for a later first request', async () => {
+    const t = await boot();
+    const s = await session(t);
+    t.app.store.db.prepare("UPDATE sessions SET name='Session 4', name_source='pending' WHERE id=?").run(s.id);
+    expect(t.app.store.nameSessionFromFirstRequest(s.id, 'Session 7')).toBe(true);
+    expect(t.app.store.nameSessionFromFirstRequest(s.id, 'Now implement a different task')).toBe(false);
+    expect(t.app.store.getSession(s.id)).toMatchObject({ name: 'Session 7', nameSource: 'automatic' });
+
+    const otherId = 'ses_legacy_empty_test';
+    const projectId = t.app.store.getSession(s.id)!.projectId;
+    t.app.store.db.prepare("INSERT INTO sessions(id, project_id, name, provider, model, effort, status, policy, isolated, worktree_path, branch, created_at, updated_at, name_source) VALUES(?,?,?,'codex','gpt-6.1-sol','high','idle','supervised',0,'/tmp',NULL,datetime('now'),datetime('now'),'legacy')")
+      .run(otherId, projectId, 'Session 20');
+    expect(t.app.store.backfillAutomaticSessionNames()).toMatchObject({ renamed: 0, examined: 1 });
+    expect(t.app.store.db.prepare('SELECT name_source FROM sessions WHERE id=?').get(otherId)).toMatchObject({ name_source: 'pending' });
+    expect(t.app.store.nameSessionFromFirstRequest(otherId, 'Investigate the crash reporter')).toBe(true);
   });
 
   it('creates isolated worktrees and falls back to direct sessions for non-repo and unborn folders', async () => {
