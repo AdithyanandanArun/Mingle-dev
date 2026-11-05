@@ -13,7 +13,13 @@ export interface ProviderUpdateInfo {
   checkedAt: string | null;
   status: ProviderUpdateStatus;
   channel: 'stable' | 'prerelease' | 'unknown';
-  method: 'native' | 'unsupported';
+  method: 'native' | 'managed' | 'unsupported';
+  /** Describes the explicit update action, including an isolated managed installation. */
+  installationDescription?: string;
+  /** Server-selected, validated managed CLI; clients cannot choose install paths. */
+  managedExecutable?: string;
+  /** Saved executable preference before the first managed install; empty restores automatic discovery. */
+  previousExecutable?: string;
   message: string;
   dismissed?: boolean;
   progress?: string;
