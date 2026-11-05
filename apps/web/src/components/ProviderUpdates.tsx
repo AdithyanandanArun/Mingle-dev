@@ -52,20 +52,28 @@ export function ProviderUpdates({ noticeOnly = false }: { noticeOnly?: boolean }
     {!noticeOnly ? <section className="provider-updates" aria-label="Provider CLI updates">
       <header><div><h2>Provider CLI updates</h2><p>Checks use public release metadata. Updates only run after you choose Update.</p></div><Button variant="secondary" disabled={busy !== null} onClick={() => void refresh()}><RefreshCw size={14} /> Check again</Button></header>
       {errors.load ? <p className="provider-updates__error" role="alert">{errors.load}</p> : null}
-      {!rows.length ? <p className="provider-updates__muted">Checking cached provider update status…</p> : rows.map((row) => <article className="provider-updates__row" key={row.provider}>
+      {!rows.length ? <p className="provider-updates__muted">Checking cached provider update status…</p> : rows.map((row) => {
+        const managedPinnedRuntime = row.provider === 'antigravity';
+        const guidance = row.status === 'available' && row.method === 'unsupported' ? row.instructions?.trim() : undefined;
+        const showGuidanceSeparately = guidance && guidance !== row.message.trim();
+        return <article className="provider-updates__row" key={row.provider}>
         <div className="provider-updates__copy"><div className="provider-updates__title"><strong>{names[row.provider] ?? row.provider}</strong><span>{row.status}</span></div>
-          <p>Installed: {row.installedVersion ?? 'unknown'} · Latest stable: {row.latestVersion ?? 'unknown'}</p>
-          <p>{row.message}</p>{row.source ? <small>Source: {row.source}{row.checkedAt ? ` · checked ${new Date(row.checkedAt).toLocaleString()}` : ''}</small> : null}
+          {managedPinnedRuntime ? <p>Mingle-managed runtime · checksum-pinned; updates are managed by Mingle.</p> : null}
+          <p>Installed: {row.installedVersion ?? 'unknown'}{!managedPinnedRuntime ? ` · Latest stable: ${row.latestVersion ?? 'unknown'}` : ''}</p>
+          <p>{row.message}</p>
+          {showGuidanceSeparately ? <p className="provider-updates__guidance">{guidance}</p> : null}
+          {row.source ? <small>Source: {row.source}{row.checkedAt ? ` · checked ${new Date(row.checkedAt).toLocaleString()}` : ''}</small> : null}
           {errors[row.provider] ? <p className="provider-updates__error" role="alert">{errors[row.provider]}</p> : null}
 
         </div>
         <div className="provider-updates__actions">
           {row.status === 'available' && row.method === 'native' ? <Button disabled={busy !== null} onClick={() => void update(row)}>{busy === row.provider ? 'Updating…' : 'Update'}</Button> : null}
           {row.status === 'available' && row.method === 'unsupported' ? <Button variant="secondary" onClick={() => void copyText(row.instructions ?? row.message).catch((error) => setErrors((old) => ({ ...old, [row.provider]: errorMessage(error) })))}><Copy size={13} /> Copy instructions</Button> : null}
-          {row.status !== 'updating' && row.status !== 'available' ? <Button variant="secondary" disabled={busy !== null} onClick={() => void refresh(row.provider)}><RefreshCw size={13} /> Re-check</Button> : null}
+          {!managedPinnedRuntime && row.status !== 'updating' && row.status !== 'available' ? <Button variant="secondary" disabled={busy !== null} onClick={() => void refresh(row.provider)}><RefreshCw size={13} /> Re-check</Button> : null}
           {row.status === 'available' && row.latestVersion && !row.dismissed ? <Button variant="secondary" onClick={() => void dismiss(row)}><Check size={13} /> Dismiss</Button> : null}
         </div>
-      </article>)}
+      </article>;
+      })}
     </section> : null}
   </>;
 }
