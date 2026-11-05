@@ -214,7 +214,7 @@ export function createApplication(options: ApplicationOptions): MingleApplicatio
       return skills as import('@mingle/contracts').ProviderSkill[];
     };
   });
-  const providerUpdates = new ProviderUpdateService(store, providers, runtime);
+  const providerUpdates = new ProviderUpdateService(store, providers, runtime, { managedRoot: path.join(config.dataDir, 'provider-clis') });
   runtime.setProgressMcp(progressMcp);
   runtime.setProjectMemory(projectMemory, memoryMcp);
   const terminals = new TerminalManager(store, hub, log, options.terminal);
