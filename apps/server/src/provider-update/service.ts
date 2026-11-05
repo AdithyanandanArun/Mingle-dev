@@ -1,6 +1,6 @@
 import { spawn as nodeSpawn } from 'node:child_process';
 import path, { basename, join, resolve } from 'node:path';
-import { realpath, stat } from 'node:fs/promises';
+import { realpath, stat, mkdir } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { conflict } from '../util.ts';
 import type { Provider, ProviderInfo, ProviderUpdateInfo, ProviderUpdatesSnapshot } from '@mingle/contracts';
@@ -28,6 +28,7 @@ export interface ProviderUpdateServiceOptions {
   spawn?: SpawnLike;
   now?: () => number;
   inspectInstall?: (provider: Provider, executable: string) => Promise<boolean>;
+  managedRoot?: string;
 }
 
 function empty(provider: Provider, diagnostic?: ProviderInfo): ProviderUpdateInfo {
@@ -55,6 +56,10 @@ function methodFor(provider: Provider, executable: string | null, version: strin
   return 'unsupported';
 }
 
+function packageExecutable(provider: Provider): string | null {
+  return provider === 'claude' ? 'claude' : provider === 'codex' ? 'codex' : provider === 'opencode' ? 'opencode' : null;
+}
+
 /** Uses the host platform's separators and drive rules; never accepts sibling-prefix paths. */
 export function withinNativeInstallRoot(root: string, executable: string, paths: Pick<typeof path, 'relative' | 'isAbsolute' | 'sep'> = path): boolean {
   const relative = paths.relative(root, executable);
@@ -71,13 +76,16 @@ export class ProviderUpdateService {
   private readonly children = new Set<ReturnType<SpawnLike>>();
   private readonly jobs = new Set<Promise<unknown>>();
   private readonly inspectInstall: NonNullable<ProviderUpdateServiceOptions['inspectInstall']>;
+  private readonly managedRoot: string;
   private readonly inflight = new Map<Provider, Promise<ProviderUpdateInfo>>();
   private readonly updating = new Map<Provider, ProviderUpdateInfo>();
+  private readonly applying = new Set<Provider>();
   constructor(private readonly store: Store, private readonly providers: ProviderService, private readonly runtime: SessionRuntime,
     options: ProviderUpdateServiceOptions = {}) {
     this.fetcher = options.fetch ?? fetch;
     this.spawn = options.spawn ?? nodeSpawn;
     this.now = options.now ?? Date.now;
+    this.managedRoot = resolve(options.managedRoot ?? join(homedir(), '.mingle', 'provider-clis'));
     this.inspectInstall = options.inspectInstall ?? (async (provider, executable) => {
       const canonical = await realpath(executable);
       const info = await stat(canonical);
@@ -102,11 +110,19 @@ export class ProviderUpdateService {
         ? { ...persisted, installedVersion: diagnostic?.version ?? null, status: 'checking', message: 'Checking public release metadata…' }
         : { ...empty(provider, diagnostic), status: 'checking', source: NPM_SOURCES[provider]?.label ?? null, message: 'Checking public release metadata…' };
       if (persisted?.checkedAt && this.now() - Date.parse(persisted.checkedAt) < CACHE_MS) {
-        return { ...this.recompare(persisted, diagnostic), installedVersion: diagnostic?.version ?? null, method: persisted.installedVersion === diagnostic?.version ? persisted.method : 'unsupported' };
+        return this.cachedRow(persisted, diagnostic);
       }
-      return persisted ? { ...this.recompare(persisted, diagnostic), installedVersion: diagnostic?.version ?? null, method: persisted.installedVersion === diagnostic?.version ? persisted.method : 'unsupported' } : empty(provider, diagnostic);
+      return persisted ? this.cachedRow(persisted, diagnostic) : empty(provider, diagnostic);
     }));
     return { providers: rows.map((row) => ({ ...row, dismissed: Boolean(row.latestVersion && this.isDismissed(row.provider, row.latestVersion)) })) };
+  }
+
+  private cachedRow(persisted: ProviderUpdateInfo, diagnostic?: ProviderInfo): ProviderUpdateInfo {
+    const row = { ...this.recompare(persisted, diagnostic), installedVersion: diagnostic?.version ?? null };
+    if (persisted.installedVersion === diagnostic?.version) return row;
+    const managed = Boolean(NPM_SOURCES[persisted.provider] && diagnostic?.version && diagnostic.executable
+      && !diagnostic.version.includes('-') && !diagnostic.version.includes('+'));
+    return { ...row, method: managed ? 'managed' : 'unsupported', ...(managed ? { installationDescription: this.installationDescription(persisted.provider) } : {}) };
   }
 
   private recompare(info: ProviderUpdateInfo, diagnostic?: ProviderInfo): ProviderUpdateInfo {
@@ -176,13 +192,83 @@ export class ProviderUpdateService {
       if (!latest) throw new Error('Public metadata did not contain a stable release version.');
       const comparison = compareVersions(diagnostic.version, latest);
       const candidate = methodFor(provider, diagnostic.executable, diagnostic.version, providerExecutable(provider, this.store.getSettings()));
-      const method = candidate === 'native' && diagnostic.executable && await this.inspectInstall(provider, diagnostic.executable).catch(() => false) ? 'native' : 'unsupported';
+      const method = candidate === 'native' && diagnostic.executable && await this.inspectInstall(provider, diagnostic.executable).catch(() => false) ? 'native' : 'managed';
+      const prior = (this.store.getProviderUpdateChecks() as Record<string, ProviderUpdateInfo>)[provider];
+      const priorPath = prior?.managedExecutable ? resolve(prior.managedExecutable) : null;
+      const currentPath = diagnostic.executable ? resolve(diagnostic.executable) : null;
+      const previousExecutable = priorPath && currentPath === priorPath ? prior.previousExecutable : undefined;
       return { provider, installedVersion: diagnostic.version, checkedExecutable: diagnostic.executable, instructions: this.instructions(provider), latestVersion: latest, source: registry.label, checkedAt: new Date(this.now()).toISOString(),
         status: comparison === null ? 'unknown' : comparison < 0 ? 'available' : comparison === 0 ? 'current' : 'unknown', channel: 'stable', method,
+        ...(previousExecutable !== undefined ? { previousExecutable } : {}),
+        ...(method === 'managed' ? { installationDescription: this.installationDescription(provider) } : {}),
         message: (method === 'unsupported' ? this.instructions(provider) + ' ' : '') + (comparison === null ? 'Versions could not be compared reliably.' : comparison > 0 ? 'Installed version is newer than the public stable tag; channel status is unknown.' : comparison < 0 ? 'A newer stable version is available.' : 'Installed version matches the public stable version.') };
     } catch (error) {
       return { ...base, checkedAt: new Date(this.now()).toISOString(), source: registry.label, status: 'error', message: `Could not check public version metadata: ${redactSecrets(errorMessage(error)).slice(0, 300)}` };
     }
+  }
+
+  private installationDescription(provider: Provider): string {
+    const pkg = NPM_SOURCES[provider]?.package;
+    return pkg ? `Install ${pkg} at the checked version in Mingle's user-local versioned directory; this leaves the existing installation in place.` : '';
+  }
+
+  private async npmCli(): Promise<string> {
+    const candidates: string[] = [];
+    for (const directory of (process.env.PATH ?? '').split(path.delimiter)) {
+      if (!directory) continue;
+      const npm = join(directory, process.platform === 'win32' ? 'npm.cmd' : 'npm');
+      try {
+        const canonical = await realpath(npm);
+        if (canonical.endsWith(`${path.sep}npm-cli.js`)) candidates.push(canonical);
+        const base = path.dirname(canonical);
+        candidates.push(join(base, '..', 'lib', 'node_modules', 'npm', 'bin', 'npm-cli.js'));
+        candidates.push(join(base, '..', 'share', 'nodejs', 'npm', 'bin', 'npm-cli.js'));
+      } catch { /* keep searching PATH */ }
+    }
+    for (const candidate of candidates) {
+      try { const info = await stat(candidate); if (info.isFile()) return await realpath(candidate); } catch { /* try next */ }
+    }
+    throw new Error('A usable Node npm-cli.js was not found on PATH.');
+  }
+
+  private async managedExecutable(provider: Provider, version: string): Promise<string> {
+    const command = packageExecutable(provider);
+    const pkg = NPM_SOURCES[provider]?.package;
+    if (!command || !pkg || !/^\d+\.\d+\.\d+$/.test(version)) throw new Error('No verified managed package is available.');
+    const target = resolve(this.managedRoot, provider, version);
+    await mkdir(this.managedRoot, { recursive: true, mode: 0o700 });
+    const root = await realpath(this.managedRoot);
+    if (!withinNativeInstallRoot(root, target)) throw new Error('Managed install path escapes its private root.');
+    try {
+      const existing = await realpath(target);
+      if (!withinNativeInstallRoot(root, existing)) throw new Error('Existing managed install path escapes its private root.');
+      const executable = join(existing, 'node_modules', '.bin', command);
+      if (await this.validateManaged(provider, version, executable, root)) return executable;
+      throw new Error('The existing versioned managed install failed validation; it was left untouched.');
+    } catch (error) {
+      if (!(error instanceof Error) || !('code' in error && error.code === 'ENOENT')) throw error;
+    }
+    await mkdir(join(root, provider), { recursive: true, mode: 0o700 });
+    const providerRoot = await realpath(join(root, provider));
+    if (!withinNativeInstallRoot(root, providerRoot)) throw new Error('Managed provider directory escapes its private root.');
+    await mkdir(target, { recursive: false, mode: 0o700 });
+    const npmCli = await this.npmCli();
+    await this.runFixed(process.execPath, [npmCli, 'install', '--prefix', target, '--no-save', '--no-audit', '--no-fund', '--registry', 'https://registry.npmjs.org', `${pkg}@${version}`]);
+    const executable = join(target, 'node_modules', '.bin', command);
+    if (!await this.validateManaged(provider, version, executable, root)) throw new Error('The installed CLI did not report the exact checked version or escaped the managed directory.');
+    return executable;
+  }
+
+  private async validateManaged(provider: Provider, version: string, executable: string, root: string): Promise<boolean> {
+    try {
+      const canonicalRoot = await realpath(root);
+      const canonicalExecutable = await realpath(executable);
+      if (!withinNativeInstallRoot(canonicalRoot, canonicalExecutable)) return false;
+      const info = await stat(canonicalExecutable);
+      if (!info.isFile() || (process.getuid && info.uid !== process.getuid())) return false;
+      const output = await this.runFixed(executable, ['--version']);
+      return output.split(/[^A-Za-z0-9.+-]+/).some((token) => token.replace(/^v/i, '') === version);
+    } catch { return false; }
   }
 
   private changed(): void {
@@ -204,8 +290,10 @@ export class ProviderUpdateService {
 
   update(provider: Provider, expectedVersion: string | null): Promise<ProviderUpdateInfo> {
     if (this.closed) return Promise.reject(conflict('Mingle is shutting down.'));
+    if (this.applying.has(provider)) return Promise.reject(conflict('A provider update is already in progress.'));
+    this.applying.add(provider);
     const job = this.performUpdate(provider, expectedVersion);
-    this.jobs.add(job); void job.finally(() => this.jobs.delete(job)).catch(() => {}); return job;
+    this.jobs.add(job); void job.finally(() => { this.jobs.delete(job); this.applying.delete(provider); }).catch(() => {}); return job;
   }
 
   dismiss(provider: Provider, version: string): void { this.store.dismissProviderUpdate(provider, version); this.changed(); }
@@ -215,29 +303,40 @@ export class ProviderUpdateService {
     const latest = (await this.checkOne(provider, false));
     const diagnostic = (await this.providers.refresh()).find((row) => row.id === provider);
     if (!diagnostic?.executable || !diagnostic.version || diagnostic.version !== expectedVersion) throw new Error('Provider executable or installed version changed. Refresh provider diagnostics and retry.');
-    if (diagnostic.executable !== latest.checkedExecutable || methodFor(provider, diagnostic.executable, diagnostic.version, providerExecutable(provider, this.store.getSettings())) !== 'native') throw new Error('Provider installation changed or requires its package manager. Check again before updating.');
-    if (latest.status !== 'available' || !latest.latestVersion || latest.method !== 'native') throw new Error(latest.message || 'This installation cannot be updated safely from Mingle.');
+    if (diagnostic.executable !== latest.checkedExecutable) throw new Error('Provider installation changed. Check again before updating.');
+    if (latest.status !== 'available' || !latest.latestVersion || !['native', 'managed'].includes(latest.method)) throw new Error(latest.message || 'This installation cannot be updated safely from Mingle.');
     const configuredPreference = providerExecutable(provider, this.store.getSettings());
     const configured = resolve(configuredPreference || diagnostic.executable);
     if (resolve(diagnostic.executable) !== configured) throw new Error('The configured executable changed since the update check. Refresh diagnostics and retry.');
     const release = this.runtime.reserveProviderMaintenance(provider);
     if (!release) throw conflict('Provider is busy. Wait for its active turn or cleanup to finish.');
     const args = provider === 'claude' || provider === 'codex' ? ['update'] : provider === 'opencode' ? ['upgrade'] : null;
-    if (!args) { release(); throw new Error('No supported update command is available for this provider.'); }
-    let state: ProviderUpdateInfo = { ...latest, status: 'updating', message: 'Updating the configured provider CLI.', progress: 'Starting approved provider update command…' };
+    if (latest.method === 'native' && !args) { release(); throw new Error('No supported update command is available for this provider.'); }
+    let state: ProviderUpdateInfo = { ...latest, status: 'updating', message: 'Updating the provider CLI.', progress: latest.method === 'managed' ? 'Preparing a private versioned installation…' : 'Starting approved provider update command…' };
     this.updating.set(provider, state); this.changed();
     try {
       if (this.closed) throw new Error('Mingle is shutting down.');
-      if (!await this.inspectInstall(provider, diagnostic.executable)) throw new Error(this.instructions(provider));
-      if (provider === 'codex') {
+      if (latest.method === 'native' && !await this.inspectInstall(provider, diagnostic.executable)) throw new Error(this.instructions(provider));
+      if (latest.method === 'native' && provider === 'codex') {
         const help = await this.runFixed(diagnostic.executable, ['--help']);
         if (!/^\s*update(?:\s|$)/m.test(help)) throw new Error('This Codex CLI does not advertise native update support. ' + this.instructions(provider));
       }
       if (providerExecutable(provider, this.store.getSettings()) !== configuredPreference) throw new Error('The configured provider changed during the update check.');
-      await this.runFixed(diagnostic.executable, args);
+      let managed: string | null = null;
+      if (latest.method === 'managed') managed = await this.managedExecutable(provider, latest.latestVersion!);
+      else await this.runFixed(diagnostic.executable, args!);
       const refreshed = await this.providers.refresh();
       const after = refreshed.find((row) => row.id === provider);
-      if (!after || resolve(after.executable ?? '') !== configured || !after.version || compareVersions(after.version, diagnostic.version) !== 1) {
+      if (latest.method === 'managed') {
+        if (!managed || !await this.validateManaged(provider, latest.latestVersion!, managed, this.managedRoot)) throw new Error('Managed CLI validation failed; the existing provider preference is unchanged.');
+        if (providerExecutable(provider, this.store.getSettings()) !== configuredPreference) throw new Error('The configured provider changed during installation.');
+        const executableKey = provider === 'claude' ? 'claudeExecutable' : provider === 'codex' ? 'codexExecutable' : 'opencodeExecutable';
+        const preference = configuredPreference || '';
+        const previousExecutable = typeof latest.previousExecutable === 'string' ? latest.previousExecutable : preference;
+        this.store.updateSettings({ [executableKey]: managed } as never);
+        state = { ...latest, status: 'updated', installedVersion: latest.latestVersion, managedExecutable: managed, previousExecutable,
+          message: `Installed ${provider} ${latest.latestVersion} in Mingle's managed directory and selected it.` };
+      } else if (!after || resolve(after.executable ?? '') !== configured || !after.version || compareVersions(after.version, diagnostic.version) !== 1) {
         state = { ...latest, status: 'failed', installedVersion: after?.version ?? null, message: 'The update command finished, but the configured executable did not report a newer version. No update is claimed.' };
       } else {
         state = { ...latest, status: 'updated', installedVersion: after.version, message: `Updated from ${diagnostic.version} to ${after.version}.` };
