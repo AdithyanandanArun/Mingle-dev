@@ -221,6 +221,8 @@ export class ProviderUpdateService {
         const canonical = await realpath(npm);
         if (canonical.endsWith(`${path.sep}npm-cli.js`)) candidates.push(canonical);
         const base = path.dirname(canonical);
+        candidates.push(join(base, 'node_modules', 'npm', 'bin', 'npm-cli.js'));
+        candidates.push(join(base, '..', 'node_modules', 'npm', 'bin', 'npm-cli.js'));
         candidates.push(join(base, '..', 'lib', 'node_modules', 'npm', 'bin', 'npm-cli.js'));
         candidates.push(join(base, '..', 'share', 'nodejs', 'npm', 'bin', 'npm-cli.js'));
       } catch { /* keep searching PATH */ }
