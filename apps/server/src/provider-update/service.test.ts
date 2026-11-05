@@ -285,6 +285,31 @@ describe('provider update bounds and cached state', () => {
       await app.service.close();
     } finally { await rm(directory, { recursive: true, force: true }); }
   });
+
+  it('does not activate a validated install after shutdown begins', async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), 'mingle-provider-update-'));
+    let finishRefresh!: (rows: ProviderInfo[]) => void;
+    let refreshStarted!: () => void;
+    const started = new Promise<void>((resolve) => { refreshStarted = resolve; });
+    try {
+      const app = harness({ executable: '/usr/bin/codex', managedRoot: path.join(directory, 'managed'), installManagedPackage: async (target) => {
+        const bin = path.join(target, 'node_modules', '.bin');
+        await mkdir(bin, { recursive: true });
+        const executable = path.join(bin, 'codex');
+        await writeFile(executable, '#!/usr/bin/env node\nconsole.log("1.1.0")\n', { mode: 0o700 });
+        await chmod(executable, 0o700);
+      } });
+      app.providers.refresh.mockImplementationOnce(async () => [diagnostic('1.0.0', '/usr/bin/codex')])
+        .mockImplementationOnce(() => new Promise((resolve) => { finishRefresh = resolve; refreshStarted(); }));
+      const update = app.service.update('codex', '1.0.0');
+      await started;
+      const closing = app.service.close();
+      finishRefresh([diagnostic()]);
+      expect(await update).toMatchObject({ status: 'failed' });
+      await closing;
+      expect(app.settings.codexExecutable).toBe('');
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
 });
 
  it('recognizes Windows native roots while rejecting siblings and other drives', () => {

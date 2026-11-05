@@ -357,6 +357,7 @@ export class ProviderUpdateService {
       const after = refreshed.find((row) => row.id === provider);
       if (latest.method === 'managed') {
         if (!managed || !await this.validateManaged(provider, latest.latestVersion!, managed, this.managedRoot)) throw new Error('Managed CLI validation failed; the existing provider preference is unchanged.');
+        if (this.closed) throw new Error('Mingle is shutting down; the existing provider preference is unchanged.');
         if (providerExecutable(provider, this.store.getSettings()) !== configuredPreference) throw new Error('The configured provider changed during installation.');
         const executableKey = provider === 'claude' ? 'claudeExecutable' : provider === 'codex' ? 'codexExecutable' : 'opencodeExecutable';
         const preference = configuredPreference || '';
