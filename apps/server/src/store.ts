@@ -4,6 +4,7 @@ import { RUN_REVIEW_COMMAND_LIMIT, RUN_REVIEW_PROBLEM_LIMIT } from '@mingle/cont
 import { SCHEMA_VERSION } from './db.ts';
 import { newId, nowIso, redactSecrets } from './util.ts';
 import { AttachmentRepo } from './attachments/repo.ts';
+import { deriveSessionName, isAutomaticSessionPlaceholder } from './session-naming.ts';
 
 type Row = Record<string, unknown>;
 const RUN_FIELDS = 'id, session_id, user_message_id, provider, model, status, started_at, finished_at, duration_ms, changes_summary';
@@ -31,12 +32,12 @@ export const DEFAULT_SETTINGS: AppSettings = {
   defaultProvider: 'codex', defaultCodexModel: 'gpt-6.1-sol', defaultClaudeModel: 'claude-sonnet-5-5', defaultAntigravityModel: 'default', defaultOpencodeModel: 'default', defaultEffort: 'high', defaultIsolated: true,
   defaultPolicy: 'supervised', defaultServiceTier: 'standard', theme: 'dark', claudeExecutable: '', codexExecutable: '', antigravityExecutable: '', opencodeExecutable: '',
   groupDefaults: { maxParallel: 2, maxTurns: 80, maxHops: 6, autonomy: { mode: 'balanced' } },
-  autoCompactPercent: null, autoResumeOnRestart: true, onboardingCompletedVersion: undefined, browserAgentEnabled: true, browserExecutable: '', browserDefaultMode: 'embedded', browserExistingSourceId: '', browserCdpEndpoint: '',
+  autoCompactPercent: null, autoResumeOnRestart: true, onboardingCompletedVersion: undefined, colorStyle: 'subtle', browserAgentEnabled: true, browserExecutable: '', browserDefaultMode: 'embedded', browserExistingSourceId: '', browserCdpEndpoint: '',
 };
 
 export interface NewSession {
   id?: string; projectId: string; name: string; provider: Provider; model: string; effort: Session['effort']; policy: Policy; isolated: boolean;
-  worktreePath: string; branch: string | null; status?: SessionStatus; serviceTier?: string; parentSessionId?: string | null;
+  worktreePath: string; branch: string | null; status?: SessionStatus; serviceTier?: string; parentSessionId?: string | null; nameSource?: 'automatic' | 'manual';
 }
 
 export interface NewTask { id?: string; projectId: string; title: string; description: string; acceptanceCriteria: string; sessionId: string | null; dependsOn: string[]; status: TaskStatus }
@@ -52,6 +53,7 @@ export interface SessionResumeEntry {
 const mapProject = (r: Row): Project => ({ id: r.id as string, name: r.name as string, path: r.path as string, createdAt: r.created_at as string, isExample: r.is_example === 1 });
 const mapSession = (r: Row): Session => ({
   id: r.id as string, projectId: r.project_id as string, name: r.name as string, provider: r.provider as Provider, model: r.model as string,
+  nameSource: (r.name_source as 'automatic' | 'manual' | null) ?? undefined,
   effort: r.effort as Session['effort'], status: r.status as SessionStatus, policy: r.policy as Policy, serviceTier: (r.service_tier as string) ?? 'standard', isolated: r.isolated === 1,
   worktreePath: r.worktree_path as string, branch: (r.branch as string | null) ?? null, providerSessionId: (r.provider_session_id as string | null) ?? null,
   handoffFromProvider: (r.handoff_from_provider as Provider | null) ?? null, handoffFromModel: (r.handoff_from_model as string | null) ?? null,
@@ -171,9 +173,9 @@ export class Store {
     const now = nowIso();
     const id = input.id ?? newId('ses');
     this.run(
-      `INSERT INTO sessions(id, project_id, name, provider, model, effort, status, policy, isolated, worktree_path, branch, created_at, updated_at, service_tier, parent_session_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      id, input.projectId, input.name, input.provider, input.model, input.effort, input.status ?? 'idle', input.policy, input.isolated ? 1 : 0, input.worktreePath, input.branch, now, now, input.serviceTier ?? 'standard', input.parentSessionId ?? null,
+      `INSERT INTO sessions(id, project_id, name, provider, model, effort, status, policy, isolated, worktree_path, branch, created_at, updated_at, service_tier, parent_session_id, name_source)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      id, input.projectId, input.name, input.provider, input.model, input.effort, input.status ?? 'idle', input.policy, input.isolated ? 1 : 0, input.worktreePath, input.branch, now, now, input.serviceTier ?? 'standard', input.parentSessionId ?? null, input.nameSource ?? 'manual',
     );
     return this.getSession(id)!;
   }
@@ -198,6 +200,7 @@ export class Store {
     const activityChanged = Object.entries(patch).some(([key, value]) => value !== undefined && key !== 'pinned' && key !== 'unread');
     const sets: string[] = activityChanged ? ['updated_at = ?'] : [];
     const params: SQLInputValue[] = activityChanged ? [nowIso()] : [];
+    if (patch.name !== undefined) { sets.push('name_source = ?'); params.push('manual'); }
     for (const [key, value] of Object.entries(patch)) {
       const column = columns[key];
       if (!column || value === undefined) continue;
@@ -206,6 +209,38 @@ export class Store {
     }
     if (sets.length) this.run(`UPDATE sessions SET ${sets.join(', ')} WHERE id = ?`, ...params, id);
     return this.getSession(id, true)!;
+  }
+
+  /** Claims only clearly eligible legacy root placeholders and names them from their earliest recorded human request. */
+  backfillAutomaticSessionNames(limit = 100): { renamed: number; examined: number } {
+    const boundedLimit = Math.max(1, Math.min(500, Math.floor(limit)));
+    const candidates = this.all(`SELECT s.id, s.name FROM sessions s
+      WHERE s.archived_at IS NULL AND s.parent_session_id IS NULL AND s.name_source = 'manual'
+        AND s.name GLOB 'Session [0-9]*'
+        AND NOT EXISTS (SELECT 1 FROM group_members gm WHERE gm.session_id = s.id)
+        AND NOT EXISTS (SELECT 1 FROM events e WHERE e.session_id = s.id AND e.type = 'session.renamed')
+      ORDER BY s.created_at, s.rowid LIMIT ?`, boundedLimit).filter((row) => isAutomaticSessionPlaceholder(row.name as string));
+    let renamed = 0;
+    for (const candidate of candidates) {
+      const id = candidate.id as string;
+      const request = this.get(`SELECT content FROM messages WHERE session_id = ? AND role = 'user' AND kind IS NULL ORDER BY seq LIMIT 1`, id);
+      if (!request) continue;
+      const title = deriveSessionName(request.content as string);
+      if (!title) continue;
+      const changed = this.db.prepare("UPDATE sessions SET name = ?, name_source = 'automatic' WHERE id = ? AND name_source = 'manual' AND name = ?").run(title, id, candidate.name as string);
+      if (Number(changed.changes) === 1) renamed++;
+    }
+    return { renamed, examined: candidates.length };
+  }
+
+  /** Automatically title an automatic session once, from the first eligible recorded human request. */
+  nameSessionFromFirstRequest(sessionId: string, content: string, kind?: string | null): boolean {
+    if (kind || !content.trim()) return false;
+    const title = deriveSessionName(content);
+    if (!title) return false;
+    const changed = this.db.prepare("UPDATE sessions SET name = ? WHERE id = ? AND name_source = 'automatic' AND name GLOB 'Session [0-9]*'").run(title, sessionId);
+    if (Number(changed.changes) === 1) { this.touch(sessionId); return true; }
+    return false;
   }
   archiveSession(id: string): void {
     this.run('UPDATE sessions SET archived_at = ?, updated_at = ? WHERE id = ?', nowIso(), nowIso(), id);
