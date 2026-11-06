@@ -1,6 +1,7 @@
 import { useEffect } from 'react';
 import { applyAppearance } from '../apps/web/src/lib/appearance';
 import { createRoot } from 'react-dom/client';
+import { Button } from '../apps/web/src/components/ui';
 import type { AppSettings, Bootstrap, ProviderInfo } from '@mingle/contracts';
 import '../apps/web/src/styles/tokens.css';
 import '../apps/web/src/styles/color-style.css';
@@ -55,6 +56,13 @@ async function mountFixture() {
       <aside className="sidebar" aria-label="Example workspace sidebar"><div className="sidebar__brand"><span className="brand-name">Mingle</span></div><button className="sitem is-active">Example session</button></aside>
       <main className="main">
         <header className="header header--settings"><div className="crumbs"><span className="crumbs__current">Settings</span></div><span className="small muted">Example appearance workspace · no provider calls</span></header>
+        <section aria-label="Example controls" style={{ display: 'flex', flexWrap: 'wrap', gap: 8, padding: '12px 20px', borderBottom: '1px solid var(--line)' }}>
+          <Button variant="primary">Example primary</Button>
+          <Button variant="secondary">Example secondary</Button>
+          <Button variant="danger">Example destructive</Button>
+          <Button variant="primary" disabled>Example disabled</Button>
+          <button className="sendbtn" aria-label="Example send">↑</button>
+        </section>
         <div className="main__body"><SettingsPage onReplayOnboarding={() => {}} /></div>
       </main>
     </div>;

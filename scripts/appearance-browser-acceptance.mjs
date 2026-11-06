@@ -51,13 +51,34 @@ try {
       && getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() === accent, { theme, colorStyle, accent });
   };
   const choose = async (label, option) => { await page.getByRole('combobox', { name: label, exact: true }).click(); await page.getByRole('option', { name: option, exact: true }).click(); };
+  const surfaces = () => page.evaluate(() => Object.fromEntries([
+    '--bg-app', '--bg-sidebar', '--bg-panel', '--bg-surface', '--bg-raised', '--bg-inset', '--bg-message', '--bg-active',
+  ].map((key) => [key, getComputedStyle(document.documentElement).getPropertyValue(key).trim()])));
+  const controlColor = (name, property = 'backgroundColor') => page.getByRole('button', { name, exact: true }).evaluate((element, property) => getComputedStyle(element)[property], property);
+  const expectControl = (name, property, value) => page.waitForFunction(({ name, property, value }) => {
+    const button = [...document.querySelectorAll('button')].find((element) => (element.getAttribute('aria-label') ?? element.textContent?.trim()) === name);
+    return button && getComputedStyle(button)[property] === value;
+  }, { name, property, value });
   await page.goto(url);
   await page.getByText('Example appearance workspace · no provider calls', { exact: true }).waitFor();
   await expectStyle('dark', 'subtle', '#9ebcf4');
+  const darkSurfaces = await surfaces();
+  assert.equal(darkSurfaces['--bg-app'], '#0e0e0e');
+  assert.equal(darkSurfaces['--bg-sidebar'], '#121212');
+  await expectControl('Example primary', 'backgroundColor', 'rgb(158, 188, 244)');
+  await expectControl('Example send', 'backgroundColor', 'rgb(158, 188, 244)');
+  await expectControl('Example secondary', 'color', 'rgb(158, 188, 244)');
+  await expectControl('Example secondary', 'backgroundColor', 'rgb(28, 28, 28)');
+  const danger = await controlColor('Example destructive', 'color');
+  assert.equal(await page.getByRole('button', { name: 'Example disabled', exact: true }).isDisabled(), true);
   assert.equal(writes.length, 0, 'opening Appearance never writes a preference');
   await page.screenshot({ path: join(output, 'subtle-dark.png'), fullPage: true });
   await page.getByRole('button', { name: 'Restore monochrome', exact: true }).click();
   await expectStyle('dark', 'monochrome', '#f0f0f0');
+  assert.deepEqual(await surfaces(), darkSurfaces, 'dark surfaces are identical with colored or monochrome controls');
+  await expectControl('Example primary', 'backgroundColor', 'rgb(240, 240, 240)');
+  await expectControl('Example secondary', 'color', 'rgb(240, 240, 240)');
+  assert.equal(await controlColor('Example destructive', 'color'), danger);
   assert.equal((await style()).bg, '#0e0e0e', 'monochrome restores the exact old surface');
   assert.deepEqual(writes.at(-1), { colorStyle: 'monochrome' });
   await page.reload();
@@ -65,8 +86,15 @@ try {
   await choose('Theme', 'Light');
   await expectStyle('light', 'monochrome', '#242424');
   assert.equal((await style()).bg, '#f8f8f8');
+  const lightSurfaces = await surfaces();
   await choose('Color style', 'Subtle color');
   await expectStyle('light', 'subtle', '#3566a8');
+  assert.deepEqual(await surfaces(), lightSurfaces, 'light surfaces are identical with colored or monochrome controls');
+  assert.equal(lightSurfaces['--bg-sidebar'], '#f0f0f0');
+  await expectControl('Example primary', 'backgroundColor', 'rgb(53, 102, 168)');
+  await expectControl('Example send', 'backgroundColor', 'rgb(53, 102, 168)');
+  await expectControl('Example secondary', 'color', 'rgb(53, 102, 168)');
+  await expectControl('Example secondary', 'backgroundColor', 'rgb(255, 255, 255)');
   await page.screenshot({ path: join(output, 'subtle-light.png'), fullPage: true });
   // Keyboard-only change returns to monochrome and preserves the independently selected light theme.
   await page.getByRole('combobox', { name: 'Color style', exact: true }).focus();

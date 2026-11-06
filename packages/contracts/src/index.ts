@@ -171,7 +171,7 @@ export interface AppSettings {
   defaultProvider: Provider; defaultCodexModel: string; defaultClaudeModel: string; defaultEffort: Effort; defaultIsolated: boolean;
   defaultAntigravityModel?: string; defaultOpencodeModel?: string;
   defaultPolicy: Policy; defaultServiceTier?: string; theme: 'dark' | 'light';
-  /** Subtle color is the default; monochrome restores the original neutral presentation. */
+  /** Subtle control accents are the default; workspace surfaces stay neutral in either mode. */
   colorStyle?: 'subtle' | 'monochrome'; claudeExecutable: string; codexExecutable: string;
   antigravityExecutable?: string; opencodeExecutable?: string;
   groupDefaults?: import('./groups').GroupDefaults;
