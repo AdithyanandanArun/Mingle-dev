@@ -1,0 +1,68 @@
+pkgname=mingle-dev
+pkgver=0.1.3
+pkgrel=1
+pkgdesc='Stable Mingle desktop workspace for independent coding-agent sessions (official binary)'
+provides=('mingle')
+conflicts=('mingle' 'mingle-bin' 'relay-workspace-bin')
+arch=('x86_64')
+url='https://github.com/AdithyanandanArun/Mingle-dev'
+license=('MIT')
+depends=(
+  'alsa-lib'
+  'at-spi2-core'
+  'cairo'
+  'dbus'
+  'expat'
+  'libatomic'
+  'libgcc'
+  'libstdc++'
+  'glib2'
+  'glibc'
+  'git'
+  'gtk3'
+  'libcups'
+  'libdrm'
+  'libx11'
+  'libxcb'
+  'libxcomposite'
+  'libxdamage'
+  'libxext'
+  'libxfixes'
+  'libxkbcommon'
+  'libxrandr'
+  'mesa'
+  'nspr'
+  'nss'
+  'pango'
+  'systemd-libs'
+  'xdg-utils'
+)
+optdepends=('github-cli: GitHub repository and pull-request integration')
+options=('!strip' '!debug')
+
+_archive="mingle-${pkgver}-linux-x64.tar.gz"
+source=("https://github.com/AdithyanandanArun/Mingle-dev/releases/download/v${pkgver}/${_archive}")
+sha256sums=('9c202092ae25a27abc85f453418a9345f7cef8094ccc0118c1df0ee781c5c4c4')
+
+package() {
+  local _release="${srcdir}/mingle-${pkgver}-linux-x64"
+  local _app="${pkgdir}/opt/mingle"
+
+  install -d "${_app}"
+  cp -a "${_release}/." "${_app}/"
+  chown -R root:root "${_app}"
+
+  # Electron's Chromium sandbox requires setuid root; package extraction is root-owned.
+  install -o root -g root -m 4755 "${_release}/chrome-sandbox" "${_app}/chrome-sandbox"
+
+  # Keep in sync with packaging/linux-launcher.sh: clear variables that make Electron run as Node.
+  install -d "${pkgdir}/usr/bin"
+  printf '%s\n' '#!/bin/sh' 'unset ELECTRON_RUN_AS_NODE NODE_OPTIONS NODE_PATH' 'exec /opt/mingle/mingle "$@"' > "${pkgdir}/usr/bin/mingle"
+  chmod 755 "${pkgdir}/usr/bin/mingle"
+  install -Dm644 "${_release}/mingle.desktop" "${pkgdir}/usr/share/applications/mingle.desktop"
+  install -Dm644 "${_release}/mingle.svg" "${pkgdir}/usr/share/icons/hicolor/scalable/apps/mingle.svg"
+
+  install -d "${pkgdir}/usr/share/licenses/${pkgname}"
+  cp -a "${_release}/resources/licenses/." "${pkgdir}/usr/share/licenses/${pkgname}/"
+  chown -R root:root "${pkgdir}/usr/share/licenses/${pkgname}"
+}
