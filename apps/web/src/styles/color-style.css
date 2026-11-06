@@ -1,13 +1,5 @@
-/* Restrained color is opt-in at the root; monochrome keeps tokens.css exactly as before. */
+/* Color belongs to actions, focus and status. All workspace surfaces stay in tokens.css. */
 :root[data-color-style='subtle']:not([data-theme='light']) {
-  --bg-app: #0e1218;
-  --bg-sidebar: #111820;
-  --bg-panel: #151c25;
-  --bg-surface: #1a222d;
-  --bg-raised: #222c38;
-  --bg-inset: #0d1219;
-  --bg-message: #1b2632;
-  --bg-active: rgba(143, 184, 244, 0.10);
   --accent: #9ebcf4;
   --accent-strong: #bad1ff;
   --accent-dim: #87a6cf;
@@ -22,14 +14,6 @@
 }
 
 :root[data-color-style='subtle'][data-theme='light'] {
-  --bg-app: #f6f8fb;
-  --bg-sidebar: #edf2f7;
-  --bg-panel: #f9fbfd;
-  --bg-surface: #ffffff;
-  --bg-raised: #ffffff;
-  --bg-inset: #eaf0f6;
-  --bg-message: #eaf1f8;
-  --bg-active: rgba(53, 102, 168, 0.09);
   --accent: #3566a8;
   --accent-strong: #24538e;
   --accent-dim: #4c6f9c;
@@ -41,4 +25,19 @@
   --info-soft: var(--accent-soft);
   --codex: #287459;
   --claude: #965b3c;
+}
+
+:root[data-color-style='subtle'] .btn--secondary {
+  color: var(--accent);
+  border-color: var(--accent-line);
+}
+:root[data-color-style='subtle'] .btn--secondary:hover:not(:disabled) {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+}
+:root[data-color-style='subtle'] .settings-page__tabs button[aria-current='page'] {
+  color: var(--accent);
+}
+:root[data-color-style='subtle'] .settings-page__tabs button[aria-current='page']::after {
+  background: var(--accent);
 }
