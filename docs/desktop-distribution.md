@@ -27,7 +27,7 @@ sudo pacman -U ./release/mingle-bin-0.1.2-1-x86_64.pkg.tar.zst
 
 The command above assumes the current Linux archive and SHA-256 sidecar are already in `release/`; `pnpm package:arch` also builds that archive. `pacman -U` installs a local package file and resolves its declared runtime dependencies. For an already published binary, download the `.pkg.tar.zst` and its checksum from GitHub, verify the checksum, and install with `pacman -U`.
 
-The package is **not currently registered on the AUR**, so `yay -S mingle-bin` is not available yet. That command applies only after an AUR package entry is published.
+The package is **not currently registered on the AUR**. A stable `mingle-dev` recipe and generated `.SRCINFO` are prepared in [`packaging/aur/mingle-dev`](../packaging/aur/mingle-dev/); see the [AUR publication instructions](../packaging/aur/README.md). Once published, `yay -S mingle-dev` installs the stable release and `yay -Syu` updates it. It has no startup self-updater. The existing GitHub Arch asset remains named `mingle-bin`; these packages conflict because they own the same application files. Preparation alone does not make either name available through yay.
 
 ## Runtime requirements
 
