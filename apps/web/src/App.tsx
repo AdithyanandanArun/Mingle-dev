@@ -12,7 +12,6 @@ import { SettingsPage } from './components/Settings';
 import { Palette, ShortcutsDialog } from './components/Palette';
 import { Boundary, DialogMotionContext, Spinner } from './components/ui';
 import { cx } from './lib/format';
-import { applyAppearance } from './lib/appearance';
 import { useRetainedPresence } from './lib/motion';
 import { AddAgentDialog } from './components/group/AddAgentDialog';
 import { GroupModeDialog, MemberSettingsDialog } from './components/group/GroupDialogs';
@@ -105,7 +104,6 @@ export function App() {
   const boot = useMingle((s) => s.boot);
   const view = useMingle((s) => s.view);
   const theme = useMingle((s) => s.boot?.settings.theme ?? 'dark');
-  const colorStyle = useMingle((s) => s.boot?.settings.colorStyle ?? 'subtle');
   const sidebarOpen = useMingle((s) => s.sidebarOpen);
   const activeProjectId = useMingle((s) => s.activeProjectId);
   const previousView = useRef(view);
@@ -175,7 +173,7 @@ export function App() {
   useEffect(() => {
     if (joinSuspended && view !== 'settings') setJoinSuspended(false);
   }, [joinSuspended, view]);
-  useEffect(() => { applyAppearance(document.documentElement, theme, colorStyle); }, [theme, colorStyle]);
+  useEffect(() => { document.documentElement.dataset.theme = theme; }, [theme]);
   useEffect(() => {
     if (view === 'settings') document.getElementById('settings-title')?.focus({ preventScroll: true });
     else if (previousView.current === 'settings') {
