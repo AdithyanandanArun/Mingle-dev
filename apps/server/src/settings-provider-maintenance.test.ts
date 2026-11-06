@@ -16,11 +16,22 @@ describe('provider executable settings maintenance', () => {
       const refused = await t.api('PATCH', '/api/settings', { codexExecutable: '/example/previous/codex', theme: 'light' });
       expect(refused.status).toBe(409);
       expect(t.app.store.getSettings()).toMatchObject({ codexExecutable: before, theme: 'dark' });
-      expect((await t.api('PATCH', '/api/settings', { colorStyle: 'monochrome' })).status).toBe(200);
-      expect(t.app.store.getSettings().colorStyle).toBe('monochrome');
+      expect((await t.api('PATCH', '/api/settings', { theme: 'light' })).status).toBe(200);
+      expect(t.app.store.getSettings().theme).toBe('light');
     } finally { gate.resolve(); }
     await waitFor(() => !t.app.runtime.isActive(EXAMPLE_CONTRACT_SESSION_ID));
     expect((await t.api('PATCH', '/api/settings', { codexExecutable: '' })).status).toBe(200);
+  });
+
+  it('ignores the removed color preference in old databases and requests', async () => {
+    const t = await boot();
+    t.app.store.db.prepare('INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)').run('colorStyle', JSON.stringify('subtle'));
+    expect((await t.api('GET', '/api/settings')).json).not.toHaveProperty('colorStyle');
+    const saved = await t.api('PATCH', '/api/settings', { theme: 'light', colorStyle: 'subtle' });
+    expect(saved.status).toBe(200);
+    expect(saved.json.theme).toBe('light');
+    expect(saved.json).not.toHaveProperty('colorStyle');
+    expect((await t.api('GET', '/api/bootstrap')).json.settings).not.toHaveProperty('colorStyle');
   });
 
   it('atomically refuses a multi-provider change and releases earlier reservations', async () => {

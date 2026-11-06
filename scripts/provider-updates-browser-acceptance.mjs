@@ -30,7 +30,7 @@ try {
   let rows = [row, { ...row, provider: 'claude', method: 'unsupported', message: 'A newer release is available.', instructions: 'Use the original package manager to update Claude Code.' }, { ...row, provider: 'antigravity', status: 'unknown', installedVersion: null, latestVersion: null, source: null, checkedAt: null, method: 'unsupported', message: 'Mingle manages this checksum-pinned runtime.' }];
   let applies = 0, checks = 0, finishUpdate, rejectCheck = false, malformed = false, managedProvider = null, failApply = false, failRestore = false, failRefresh = false;
   const unexpected = [], settingWrites = [];
-  const bootstrap = { projects: [], sessions: [], messages: [], queuedMessages: [], tasks: [], events: [], approvals: [], plans: [], questions: [], providers: [], settings: { theme: 'dark', colorStyle: 'subtle' }, runs: [], toolCalls: [], groups: [], workflows: [] };
+  const bootstrap = { projects: [], sessions: [], messages: [], queuedMessages: [], tasks: [], events: [], approvals: [], plans: [], questions: [], providers: [], settings: { theme: 'dark' }, runs: [], toolCalls: [], groups: [], workflows: [] };
   await page.route('**/api/**', async (route) => {
     const request = route.request(), path = new URL(request.url()).pathname;
     if (path === '/api/bootstrap') return route.fulfill({ json: bootstrap });

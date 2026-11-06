@@ -1,5 +1,7 @@
 # CLI updates, session titles and appearance acceptance
 
+Historical 0.1.3 validation record. The color-style experiment described below was subsequently removed; `scripts/appearance-browser-acceptance.mjs` now checks only the original monochrome themes and verifies that legacy color preferences have no effect.
+
 Reviewed locally on Linux on 2026-11-06. This covers the source changes after `351284d`, not a new desktop release or an upgrade of this computer's provider CLIs.
 
 ## Behavior checked

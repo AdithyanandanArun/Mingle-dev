@@ -1,10 +1,8 @@
 import { useEffect } from 'react';
-import { applyAppearance } from '../apps/web/src/lib/appearance';
 import { createRoot } from 'react-dom/client';
 import { Button } from '../apps/web/src/components/ui';
 import type { AppSettings, Bootstrap, ProviderInfo } from '@mingle/contracts';
 import '../apps/web/src/styles/tokens.css';
-import '../apps/web/src/styles/color-style.css';
 import '../apps/web/src/styles/base.css';
 import '../apps/web/src/styles/ui.css';
 import '../apps/web/src/styles/app.css';
@@ -51,7 +49,7 @@ async function mountFixture() {
   useMingle.setState({ boot: useMingle.getState().boot, bootLoading: false, bootError: null, staleError: null, view: 'settings', settingsSection: 'appearance', activeProjectId: null, settingsProjectId: null });
   function Fixture() {
     const current = useMingle((state) => state.boot?.settings);
-    useEffect(() => { if (current) applyAppearance(document.documentElement, current.theme, current.colorStyle); }, [current]);
+    useEffect(() => { if (current) document.documentElement.dataset.theme = current.theme; }, [current?.theme]);
     return <div className="app">
       <aside className="sidebar" aria-label="Example workspace sidebar"><div className="sidebar__brand"><span className="brand-name">Mingle</span></div><button className="sitem is-active">Example session</button></aside>
       <main className="main">
