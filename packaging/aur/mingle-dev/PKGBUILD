@@ -51,6 +51,8 @@ package() {
   install -d "${_app}"
   cp -a "${_release}/." "${_app}/"
   chown -R root:root "${_app}"
+  # Source archives may be built under a private umask; installed files must be readable.
+  chmod -R u=rwX,go=rX "${_app}"
 
   # Electron's Chromium sandbox requires setuid root; package extraction is root-owned.
   install -o root -g root -m 4755 "${_release}/chrome-sandbox" "${_app}/chrome-sandbox"
@@ -65,4 +67,5 @@ package() {
   install -d "${pkgdir}/usr/share/licenses/${pkgname}"
   cp -a "${_release}/resources/licenses/." "${pkgdir}/usr/share/licenses/${pkgname}/"
   chown -R root:root "${pkgdir}/usr/share/licenses/${pkgname}"
+  chmod -R u=rwX,go=rX "${pkgdir}/usr/share/licenses/${pkgname}"
 }
