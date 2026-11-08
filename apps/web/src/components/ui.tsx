@@ -163,19 +163,25 @@ export function Segmented<T extends string>({ value, onChange, options, label }:
   value: T; onChange: (v: T) => void; label: string;
   options: { value: T; label: ReactNode; title?: string; disabled?: boolean }[];
 }) {
+  const buttons = useRef<Array<HTMLButtonElement | null>>([]);
+  const enabled = options.map((option, index) => option.disabled ? -1 : index).filter((index) => index >= 0);
+  const selected = options.findIndex((option) => option.value === value && !option.disabled);
+  const tabStop = selected >= 0 ? selected : enabled[0] ?? -1;
   const onKey = (e: ReactKeyboardEvent<HTMLDivElement>) => {
-    if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') return;
-    const enabled = options.filter((o) => !o.disabled);
-    const i = enabled.findIndex((o) => o.value === value);
-    const next = enabled[(i + (e.key === 'ArrowRight' ? 1 : enabled.length - 1)) % enabled.length];
-    if (next) onChange(next.value);
+    if (!['ArrowRight', 'ArrowLeft', 'Home', 'End'].includes(e.key) || !enabled.length) return;
+    const current = enabled.indexOf(options.findIndex((option) => option.value === value));
+    const target = e.key === 'Home' ? enabled[0]!
+      : e.key === 'End' ? enabled.at(-1)!
+        : enabled[(Math.max(0, current) + (e.key === 'ArrowRight' ? 1 : -1) + enabled.length) % enabled.length]!;
+    onChange(options[target]!.value);
+    buttons.current[target]?.focus();
     e.preventDefault();
   };
   return (
     <div className="seg" role="radiogroup" aria-label={label} onKeyDown={onKey}>
       {options.map((o) => (
         <button
-          key={o.value} type="button" role="radio" aria-checked={o.value === value} tabIndex={o.value === value ? 0 : -1}
+          key={o.value} ref={(element) => { buttons.current[options.indexOf(o)] = element; }} type="button" role="radio" aria-checked={o.value === value} tabIndex={options.indexOf(o) === tabStop ? 0 : -1}
           className={cx('seg__item', o.value === value && 'is-on')} title={o.title} disabled={o.disabled} onClick={() => onChange(o.value)}
         >
           {o.label}
