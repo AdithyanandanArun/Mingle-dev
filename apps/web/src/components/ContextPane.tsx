@@ -43,6 +43,8 @@ export function ContextPane() {
     const i = TABS.findIndex((t) => t.id === tab);
     if (e.key === 'ArrowRight') setContextTab(TABS[(i + 1) % TABS.length]!.id);
     else if (e.key === 'ArrowLeft') setContextTab(TABS[(i + TABS.length - 1) % TABS.length]!.id);
+    else if (e.key === 'Home') setContextTab(TABS[0]!.id);
+    else if (e.key === 'End') setContextTab(TABS[TABS.length - 1]!.id);
     else return;
     e.preventDefault();
     window.requestAnimationFrame(() => listRef.current?.querySelector<HTMLElement>('[aria-selected="true"]')?.focus());
