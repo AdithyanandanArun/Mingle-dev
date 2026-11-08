@@ -68,19 +68,22 @@ interface BtnProps extends ButtonHTMLAttributes<HTMLButtonElement> {
   why?: string;
 }
 export function Button({ variant = 'secondary', size = 'md', busy, why, className, children, disabled, title, type = 'button', ...rest }: BtnProps) {
+  const whyId = useId();
   const isDisabled = Boolean(disabled || busy);
+  const describedBy = [rest['aria-describedby'], why && isDisabled ? whyId : undefined].filter(Boolean).join(' ') || undefined;
   return (
     <button
       type={type}
       className={cx('btn', `btn--${variant}`, `btn--${size}`, className)}
       disabled={isDisabled}
       title={isDisabled && why ? why : title}
-      aria-describedby={undefined}
       {...rest}
+      aria-busy={busy || undefined}
+      aria-describedby={describedBy}
     >
       {busy ? <Loader2 className="spin" size={14} aria-hidden="true" /> : null}
       {children}
-      {isDisabled && why ? <span className="sr-only"> (unavailable: {why})</span> : null}
+      {isDisabled && why ? <span id={whyId} className="sr-only"> (unavailable: {why})</span> : null}
     </button>
   );
 }
