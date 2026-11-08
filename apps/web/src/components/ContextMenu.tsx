@@ -28,6 +28,7 @@ export function ContextMenu({ x, y, items, onClose, returnFocus, open = true, cl
   const [submenuPoint, setSubmenuPoint] = useState<Point | null>(null);
   const [activeIndex, setActiveIndex] = useState(() => enabledIndices(items)[0] ?? -1);
   const [activeChildIndex, setActiveChildIndex] = useState(-1);
+  const typeahead = useRef({ text: '', at: 0 });
 
   const close = (restoreFocus: boolean): void => {
     onClose();
@@ -178,6 +179,17 @@ export function ContextMenu({ x, y, items, onClose, returnFocus, open = true, cl
       event.preventDefault();
       if (inSubmenu && submenuIndex !== null) activateChild(submenuIndex, activeChildIndex);
       else if (activeIndex >= 0) activateMain(activeIndex);
+      return;
+    }
+    if (event.key.length === 1 && !event.metaKey && !event.ctrlKey && !event.altKey) {
+      const now = Date.now();
+      const character = event.key.toLocaleLowerCase();
+      const previous = now - typeahead.current.at < 700 ? typeahead.current.text : '';
+      const text = previous.length > 0 && [...previous].every((part) => part === character) ? character : previous + character;
+      typeahead.current = { text, at: now };
+      const ordered = enabled.slice(enabled.indexOf(currentIndex) + 1).concat(enabled.slice(0, enabled.indexOf(currentIndex) + 1));
+      const match = ordered.find((index) => !isSeparator(currentItems[index]!) && currentItems[index]!.label.toLocaleLowerCase().startsWith(text));
+      if (match !== undefined) { event.preventDefault(); focusAt(match); }
     }
   };
 
