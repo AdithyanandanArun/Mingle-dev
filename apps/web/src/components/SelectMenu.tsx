@@ -7,9 +7,9 @@ import { usePresence } from '../lib/motion';
 export interface SelectOption { value: string; label: string; group?: string; description?: string; badge?: string; disabled?: boolean }
 
 /** A compact choice control with a shared popover, keyboard navigation and viewport-aware placement. */
-export function SelectMenu({ id, label, value, onChange, options, disabled, className, placement = 'bottom', title, triggerRef, displayValue, openRequest, selectedValues }: {
+export function SelectMenu({ id, label, value, onChange, options, disabled, readOnly, className, placement = 'bottom', title, triggerRef, displayValue, openRequest, selectedValues }: {
   id?: string; label: string; value: string; onChange: (value: string) => void; options: SelectOption[];
-  disabled?: boolean; className?: string; placement?: 'top' | 'bottom'; title?: string; triggerRef?: Ref<HTMLButtonElement>;
+  disabled?: boolean; readOnly?: boolean; className?: string; placement?: 'top' | 'bottom'; title?: string; triggerRef?: Ref<HTMLButtonElement>;
   displayValue?: string; openRequest?: number; selectedValues?: string[];
 }) {
   const listId = useId();
@@ -85,7 +85,7 @@ export function SelectMenu({ id, label, value, onChange, options, disabled, clas
     if (!option || option.disabled) return;
     setOpen(false);
     anchor.current?.focus();
-    if (option.value !== value) onChange(option.value);
+    if (!readOnly && option.value !== value) onChange(option.value);
   };
   const keyDown = (event: KeyboardEvent<HTMLButtonElement>) => {
     if (event.key === 'Tab') { setOpen(false); return; }
@@ -110,7 +110,7 @@ export function SelectMenu({ id, label, value, onChange, options, disabled, clas
   };
 
   return <>
-    <button id={id} ref={(element) => { anchor.current = element; if (typeof triggerRef === 'function') triggerRef(element); else if (triggerRef) triggerRef.current = element; }} type="button" role="combobox" aria-label={label} aria-haspopup="listbox"
+    <button id={id} ref={(element) => { anchor.current = element; if (typeof triggerRef === 'function') triggerRef(element); else if (triggerRef) triggerRef.current = element; }} type="button" role="combobox" aria-label={label} aria-valuetext={displayValue ?? selected?.label ?? value} aria-readonly={readOnly || undefined} aria-haspopup="listbox"
       aria-expanded={effectiveOpen} aria-controls={effectiveOpen ? listId : undefined}
       aria-activedescendant={effectiveOpen ? `${listId}-${active}` : undefined}
       className={cx('select-menu__trigger', className)} disabled={disabled} title={title}
