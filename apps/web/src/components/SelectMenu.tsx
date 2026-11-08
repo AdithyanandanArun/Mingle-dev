@@ -35,19 +35,33 @@ export function SelectMenu({ id, label, value, onChange, options, disabled, read
 
   useLayoutEffect(() => {
     if (!effectiveOpen || !anchor.current || !popup.current) return;
-    const rect = anchor.current.getBoundingClientRect();
-    const width = Math.min(Math.max(224, rect.width), window.innerWidth - 24);
-    popup.current.style.width = `${width}px`;
-    const above = Math.max(40, rect.top - 20);
-    const below = Math.max(40, window.innerHeight - rect.bottom - 20);
-    const preferTop = placement === 'top';
-    const useTop = preferTop ? above >= Math.min(240, below) : below < Math.min(240, above);
-    const maxHeight = Math.min(340, useTop ? above : below);
-    const height = Math.min(popup.current.scrollHeight + 2, maxHeight);
-    setPosition({
-      width, maxHeight, left: Math.max(12, Math.min(rect.left, window.innerWidth - width - 12)),
-      top: useTop ? Math.max(12, rect.top - height - 8) : rect.bottom + 8,
-    });
+    const measure = () => {
+      if (!anchor.current || !popup.current) return;
+      const rect = anchor.current.getBoundingClientRect();
+      const width = Math.max(1, Math.min(Math.max(224, rect.width), window.innerWidth - 24));
+      popup.current.style.width = `${width}px`;
+      const above = Math.max(40, rect.top - 20);
+      const below = Math.max(40, window.innerHeight - rect.bottom - 20);
+      const preferTop = placement === 'top';
+      const useTop = preferTop ? above >= Math.min(240, below) : below < Math.min(240, above);
+      const maxHeight = Math.min(340, useTop ? above : below);
+      const height = Math.min(popup.current.scrollHeight + 2, maxHeight);
+      setPosition({
+        width, maxHeight, left: Math.max(12, Math.min(rect.left, window.innerWidth - width - 12)),
+        top: useTop ? Math.max(12, rect.top - height - 8) : rect.bottom + 8,
+      });
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(anchor.current);
+    observer.observe(popup.current);
+    window.addEventListener('resize', measure);
+    window.addEventListener('scroll', measure, true);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener('resize', measure);
+      window.removeEventListener('scroll', measure, true);
+    };
   }, [effectiveOpen, placement, options.length]);
 
   useEffect(() => {
@@ -55,15 +69,9 @@ export function SelectMenu({ id, label, value, onChange, options, disabled, read
     const outside = (event: PointerEvent) => {
       if (!anchor.current?.contains(event.target as Node) && !popup.current?.contains(event.target as Node)) setOpen(false);
     };
-    const resize = () => setOpen(false);
-    const scroll = (event: Event) => { if (!popup.current?.contains(event.target as Node)) setOpen(false); };
     document.addEventListener('pointerdown', outside);
-    window.addEventListener('resize', resize);
-    window.addEventListener('scroll', scroll, true);
     return () => {
       document.removeEventListener('pointerdown', outside);
-      window.removeEventListener('resize', resize);
-      window.removeEventListener('scroll', scroll, true);
     };
   }, [effectiveOpen]);
 
