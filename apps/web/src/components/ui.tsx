@@ -194,13 +194,14 @@ export function Segmented<T extends string>({ value, onChange, options, label }:
 export function Switch({ checked, onChange, label, description, id }: { checked: boolean; onChange: (v: boolean) => void; label: string; description?: ReactNode; id?: string }) {
   const auto = useId();
   const sid = id ?? auto;
+  const descriptionId = `${sid}-description`;
   return (
     <div className="switch-row">
       <div>
         <label htmlFor={sid} className="switch-row__label">{label}</label>
-        {description ? <p className="field__hint">{description}</p> : null}
+        {description ? <p id={descriptionId} className="field__hint">{description}</p> : null}
       </div>
-      <button id={sid} type="button" role="switch" aria-checked={checked} className={cx('switch', checked && 'is-on')} onClick={() => onChange(!checked)}>
+      <button id={sid} type="button" role="switch" aria-label={label} aria-describedby={description ? descriptionId : undefined} aria-checked={checked} className={cx('switch', checked && 'is-on')} onClick={() => onChange(!checked)}>
         <i />
       </button>
     </div>
