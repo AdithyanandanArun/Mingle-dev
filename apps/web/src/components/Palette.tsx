@@ -106,7 +106,7 @@ export function Palette() {
           <Kbd>Esc</Kbd>
         </div>
         <div className="palette__list" id="palette-list" role="listbox" ref={listRef} aria-label="Commands">
-          {results.length === 0 ? <p className="palette__empty">No matching commands.</p> : null}
+          {results.length === 0 ? <p className="palette__empty" role="status" aria-live="polite">No matching commands.</p> : null}
           {results.map((c, i) => {
             const showGroup = c.group !== lastGroup && !query;
             lastGroup = c.group;
