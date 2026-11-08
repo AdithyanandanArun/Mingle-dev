@@ -122,6 +122,16 @@
 .modal--palette .modal__body { padding: 0; }
 .modal__foot { display: flex; justify-content: flex-end; align-items: center; gap: 8px; padding: 16px 24px; border-top: 1px solid var(--line-soft); background: transparent; }
 
+@media (max-width: 520px) {
+  .scrim { padding: 8px; }
+  .modal { width: 100%; max-height: min(92dvh, 860px); border-radius: 10px; }
+  .modal__head { padding: 17px 16px 14px; gap: 10px; }
+  .modal__body { padding: 17px 16px; }
+  .modal__foot { flex-wrap: wrap; padding: 12px 16px; }
+  .modal__foot > .btn { min-height: 36px; }
+  .modal--sheet { max-height: none; border-radius: 0; }
+}
+
 /* Menu */
 .menu { position: fixed; z-index: 120; padding: 5px; max-height: 340px; overflow: auto; background: var(--bg-raised); border: 1px solid var(--line-strong); border-radius: 11px; box-shadow: var(--shadow-pop); animation: pop-in var(--motion-overlay) var(--ease-out) both; transform-origin: top left; }
 .menu.is-closing { animation: pop-out var(--motion-overlay) var(--ease-out) both; pointer-events: none; }
