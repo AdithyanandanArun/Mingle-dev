@@ -77,8 +77,15 @@ export function Palette() {
   useEffect(() => { listRef.current?.querySelector('[aria-selected="true"]')?.scrollIntoView({ block: 'nearest' }); }, [index, results]);
 
   const onKey = (e: React.KeyboardEvent) => {
-    if (e.key === 'ArrowDown') { setIndex((i) => Math.min(results.length - 1, i + 1)); e.preventDefault(); }
-    else if (e.key === 'ArrowUp') { setIndex((i) => Math.max(0, i - 1)); e.preventDefault(); }
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      const direction = e.key === 'ArrowDown' ? 1 : -1;
+      let next = index;
+      for (let step = 0; step < results.length; step += 1) {
+        next = (next + direction + results.length) % results.length;
+        if (!results[next]!.disabled) { setIndex(next); break; }
+      }
+      e.preventDefault();
+    }
     else if (e.key === 'Enter') {
       const c = results[index];
       if (c && !c.disabled) { e.preventDefault(); c.run(); }
