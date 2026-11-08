@@ -87,6 +87,7 @@ export function Palette() {
       e.preventDefault();
     }
     else if (e.key === 'Enter') {
+      if (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) return;
       const c = results[index];
       if (c && !c.disabled) { e.preventDefault(); c.run(); }
     }
