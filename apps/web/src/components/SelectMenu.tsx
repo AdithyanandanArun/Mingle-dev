@@ -103,9 +103,14 @@ export function SelectMenu({ id, label, value, onChange, options, disabled, read
     }
     if (event.key.length === 1 && !event.metaKey && !event.ctrlKey && !event.altKey) {
       const now = Date.now();
-      typeahead.current = { text: (now - typeahead.current.at < 700 ? typeahead.current.text : '') + event.key.toLowerCase(), at: now };
-      const index = options.findIndex((option) => !option.disabled && option.label.toLowerCase().startsWith(typeahead.current.text));
-      if (index >= 0) { event.preventDefault(); if (!effectiveOpen) show(); setActive(index); }
+      const previous = now - typeahead.current.at < 700 ? typeahead.current.text : '';
+      const text = previous.length > 0 && [...previous].every((character) => character === event.key.toLowerCase())
+        ? event.key.toLowerCase() : previous + event.key.toLowerCase();
+      typeahead.current = { text, at: now };
+      const start = enabled.indexOf(active);
+      const ordered = enabled.slice(start + 1).concat(enabled.slice(0, start + 1));
+      const index = ordered.find((optionIndex) => options[optionIndex]!.label.toLowerCase().startsWith(text));
+      if (index !== undefined) { event.preventDefault(); if (!effectiveOpen) show(); setActive(index); }
     }
   };
 
