@@ -268,11 +268,12 @@ export function Modal({ title, description, onClose, children, footer, variant =
     }
     if (e.key !== 'Tab' || !ref.current) return;
     const items = Array.from(ref.current.querySelectorAll<HTMLElement>(FOCUSABLE)).filter((el) => el.offsetParent !== null);
-    if (items.length === 0) return;
+    if (items.length === 0) { e.preventDefault(); ref.current.focus(); return; }
     const first = items[0]!;
     const last = items[items.length - 1]!;
-    if (e.shiftKey && document.activeElement === first) { last.focus(); e.preventDefault(); }
-    else if (!e.shiftKey && document.activeElement === last) { first.focus(); e.preventDefault(); }
+    const active = document.activeElement;
+    if (!ref.current.contains(active) || (e.shiftKey && active === first)) { (e.shiftKey ? last : first).focus(); e.preventDefault(); }
+    else if (!e.shiftKey && active === last) { first.focus(); e.preventDefault(); }
   };
 
   return createPortal(
