@@ -88,18 +88,24 @@ export function Button({ variant = 'secondary', size = 'md', busy, why, classNam
   );
 }
 
-export function IconButton({ label, children, active, why, className, disabled, ...rest }: Omit<BtnProps, 'variant' | 'size'> & { label: string; active?: boolean }) {
+export function IconButton({ label, children, active, why, busy, className, disabled, ...rest }: Omit<BtnProps, 'variant' | 'size'> & { label: string; active?: boolean }) {
+  const whyId = useId();
+  const isDisabled = Boolean(disabled || busy);
   return (
     <button
       type="button"
       className={cx('ibtn', active && 'is-active', className)}
-      aria-label={label}
-      title={disabled && why ? `${label} — ${why}` : label}
+      aria-label={busy ? `${label} (busy)` : label}
+      aria-busy={busy || undefined}
+      aria-describedby={[rest['aria-describedby'], isDisabled && why ? whyId : undefined].filter(Boolean).join(' ') || undefined}
+      title={isDisabled && why ? `${label} — ${why}` : label}
       aria-pressed={active}
-      disabled={disabled}
+      disabled={isDisabled}
       {...rest}
     >
+      {busy ? <Loader2 className="spin" size={14} aria-hidden="true" /> : null}
       {children}
+      {isDisabled && why ? <span id={whyId} className="sr-only"> (unavailable: {why})</span> : null}
     </button>
   );
 }
