@@ -2,7 +2,7 @@ import { useEffect, useRef } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
-import { RotateCw, Square, X } from 'lucide-react';
+import { Eraser, RotateCw, Square, X } from 'lucide-react';
 import { useMingle } from '../store/store';
 import { terminalBus } from '../store/terminalBus';
 import { Button, IconButton } from './ui';
@@ -109,6 +109,7 @@ export default function TerminalPanel({ active }: { active: boolean }) {
         <span className="term__label" title={label}>{label || 'not started'}</span>
         <span className="spacer" />
         <ScopeSwitch compact />
+        <IconButton label="Clear terminal output" title="Clear local output without stopping the shell" onClick={() => { terminalBus.clear(); term.current?.focus(); }}><Eraser size={14} /></IconButton>
         <IconButton label="Restart terminal in current scope" onClick={restart} disabled={connection !== 'online' || !hasProject} why={connection !== 'online' ? 'Disconnected' : 'No project'}><RotateCw size={14} /></IconButton>
         <IconButton label="Stop terminal" onClick={() => useMingle.getState().stopTerminal()} disabled={dead} why="Not running"><Square size={13} /></IconButton>
         <IconButton label="Hide terminal" onClick={() => useMingle.getState().toggleTerminal(false)}><X size={15} /></IconButton>

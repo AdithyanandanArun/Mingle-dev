@@ -9,6 +9,11 @@ export const terminalBus = {
     if (buffer.length > MAX_BUFFER) buffer = buffer.slice(buffer.length - MAX_BUFFER);
     sinks.forEach((s) => s(data));
   },
+  /** Clear local scrollback without resetting terminal modes or sending input to the shell. */
+  clear(): void {
+    buffer = '';
+    sinks.forEach((sink) => sink('\x1b[2J\x1b[3J\x1b[H'));
+  },
   reset(): void {
     buffer = '';
     sinks.forEach((s) => s(null));
