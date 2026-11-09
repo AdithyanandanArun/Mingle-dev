@@ -64,7 +64,7 @@ export function Header() {
       <div className="header__primary">
         <IconButton label="Open sidebar" className="header__burger" onClick={() => setSidebarOpen(true)}><MenuIcon size={16} /></IconButton>
         <div className="header__title">
-          <div className="crumbs" aria-label="Current view">
+          <div className="crumbs" aria-label="Current view" aria-live="polite">
             <span className="crumbs__project" title={project?.name}>{project?.name ?? 'No project'}</span>
             <span className="crumbs__sep" aria-hidden="true">/</span>
             <span className="crumbs__current" title={session ? [session.name, session.branch].filter(Boolean).join(' · ') : activeTeamSession ? remoteTeamSession.title : undefined}>{view === 'workspace' ? session?.name ?? (activeTeamSession ? remoteTeamSession.title : 'Workspace') : TITLES[view]}</span>
