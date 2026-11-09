@@ -4,7 +4,7 @@ import { RefreshCw, Save, FileWarning } from 'lucide-react';
 import './monacoSetup';
 import { useMingle } from '../store/store';
 import { isDirty, useEditor } from '../store/editor';
-import { Button, EmptyState, IconButton, MOD, Spinner, isMac } from './ui';
+import { Button, EmptyState, IconButton, InlineError, MOD, Spinner, isMac } from './ui';
 
 export default function EditorPane({ tabKey }: { tabKey: string }) {
   const tab = useEditor((s) => s.tabs.find((t) => t.key === tabKey));
@@ -37,6 +37,7 @@ export default function EditorPane({ tabKey }: { tabKey: string }) {
           <Save size={13} /> Save <span className="kbdline">{isMac ? `${MOD}S` : `${MOD}+S`}</span>
         </Button>
       </div>
+      {tab.saveError ? <div className="editor__save-error"><InlineError onRetry={() => void useEditor.getState().save(tab.key)}>Could not save {tab.path}: {tab.saveError}. Your changes are still in the editor.</InlineError></div> : null}
       <div className="editor__body">
         {tab.status === 'loading' ? <div className="editor__state"><Spinner label="Loading file" /></div> : null}
         {tab.status === 'error' ? (

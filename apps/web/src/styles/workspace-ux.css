@@ -7,3 +7,5 @@
 .codeblock__wrap[aria-pressed="true"] { background: var(--bg-active); color: var(--fg-0); }
 .codeblock.is-wrapped pre { white-space: pre-wrap; overflow-wrap: anywhere; }
 .codeblock pre:focus-visible { outline: 2px solid var(--fg-2); outline-offset: -3px; }
+
+.editor__save-error { padding: 8px 12px; flex: none; }

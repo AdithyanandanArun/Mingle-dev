@@ -15,6 +15,7 @@ export interface EditorTab {
   status: 'loading' | 'ready' | 'error';
   error: string | null;
   saving: boolean;
+  saveError?: string | null;
 }
 
 interface EditorState {
@@ -79,14 +80,14 @@ export const useEditor = create<EditorState>((set, get) => {
       const tab = get().tabs.find((t) => t.key === key);
       if (!tab || tab.status !== 'ready' || tab.saving) return false;
       const content = tab.draft;
-      update(key, { saving: true });
+      update(key, { saving: true, saveError: null });
       try {
         await api.writeFile(tab.projectId, tab.path, content, tab.sessionId);
-        update(key, { saving: false, original: content });
+        update(key, { saving: false, original: content, saveError: null });
         useMingle.getState().toast('success', `Saved ${tab.path}`);
         return true;
       } catch (e) {
-        update(key, { saving: false });
+        update(key, { saving: false, saveError: errorMessage(e) });
         useMingle.getState().toast('error', `Could not save ${tab.path}: ${errorMessage(e)}`);
         return false;
       }
