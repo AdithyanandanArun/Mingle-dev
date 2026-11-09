@@ -32,7 +32,7 @@ export default function EditorPane({ tabKey }: { tabKey: string }) {
         <span className="chip">{tab.sessionId ? (sessionName ? `${sessionName} scope` : 'session scope') : 'project scope'}</span>
         <span className="chip chip--mono">{tab.language}</span>
         <span className="spacer" />
-        <IconButton label="Reload from disk" onClick={() => void useEditor.getState().reload(tab.key)} disabled={tab.status === 'loading'} why="Loading"><RefreshCw size={14} /></IconButton>
+        <IconButton label="Reload from disk" onClick={() => void useEditor.getState().reload(tab.key)} disabled={tab.status === 'loading' || tab.saving} why={tab.saving ? 'Wait for the save to finish' : 'Loading'}><RefreshCw size={14} /></IconButton>
         <Button size="sm" variant="primary" busy={tab.saving} disabled={!dirty || tab.status !== 'ready'} why={tab.status !== 'ready' ? 'File is not loaded' : 'No unsaved changes'} onClick={() => void useEditor.getState().save(tab.key)}>
           <Save size={13} /> Save <span className="kbdline">{isMac ? `${MOD}S` : `${MOD}+S`}</span>
         </Button>
