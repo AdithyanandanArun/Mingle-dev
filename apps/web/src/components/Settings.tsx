@@ -119,8 +119,19 @@ export function SettingsPage({ onReplayOnboarding }: { onReplayOnboarding: () =>
   return <div className="settings-page" aria-labelledby="settings-title">
     <div className="settings-page__inner">
       <header className="settings-page__head"><div><h1 id="settings-title" tabIndex={-1}>Settings</h1><p>Account, projects, models and appearance.</p></div><span className="settings-page__save" role="status">{status}</span></header>
-      <nav className="settings-page__tabs" aria-label="Settings sections">
-        {CATEGORIES.filter((item) => item.id !== 'project' || project).map((item) => <button type="button" key={item.id} aria-current={category === item.id ? 'page' : undefined} onClick={() => setCategory(item.id)}>{item.name}</button>)}
+      <nav className="settings-page__tabs" aria-label="Settings sections" onKeyDown={(event) => {
+        if (!['ArrowRight', 'ArrowLeft', 'Home', 'End'].includes(event.key)) return;
+        const tabs = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>('button'));
+        const current = tabs.indexOf(document.activeElement as HTMLButtonElement);
+        const next = event.key === 'Home' ? 0 : event.key === 'End' ? tabs.length - 1 : (current + (event.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length;
+        const target = tabs[next];
+        if (!target) return;
+        event.preventDefault();
+        target.focus();
+        const section = target.dataset.section as SettingsSection | undefined;
+        if (section) setCategory(section);
+      }}>
+        {CATEGORIES.filter((item) => item.id !== 'project' || project).map((item) => <button type="button" key={item.id} data-section={item.id} aria-current={category === item.id ? 'page' : undefined} onClick={() => setCategory(item.id)}>{item.name}</button>)}
       </nav>
       {error ? <InlineError>{error}</InlineError> : null}
       {category === 'account' ? <AccountSettings settings={settings} /> : null}
