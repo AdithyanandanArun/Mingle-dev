@@ -23,6 +23,7 @@ import './styles/automation.css';
 import './styles/groups.css';
 import './styles/attachments.css';
 import './styles/polish.css';
+import './styles/workspace-ux.css';
 import { App } from './App';
 import { Boundary } from './components/ui';
 

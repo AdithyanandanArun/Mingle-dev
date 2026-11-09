@@ -1,0 +1,2 @@
+/* Everyday workspace controls use the existing neutral theme tokens. */
+.codeblock__error { padding: 10px 12px; margin: 0; color: var(--fg-1); background: var(--bg-surface); font-size: var(--text-xs); overflow-wrap: anywhere; }
