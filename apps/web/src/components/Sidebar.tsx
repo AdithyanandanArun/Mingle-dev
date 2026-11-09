@@ -56,6 +56,12 @@ export function Sidebar() {
   const remoteTeamSession = teamInfo && !teamInfo.hostIsThisDevice ? teamInfo.teamSession : null;
   const connectionLabel = connection === 'online' ? 'Connected' : connection === 'connecting' ? 'Connecting' : 'Disconnected';
 
+  useEffect(() => {
+    if (!activeSessionId || !sidebarOpen) return;
+    const row = Array.from(document.querySelectorAll<HTMLElement>('.sitem-row')).find((element) => element.dataset.sessionId === activeSessionId);
+    row?.scrollIntoView({ block: 'nearest' });
+  }, [activeSessionId, sidebarOpen]);
+
   const target = sessions.find((session) => session.id === retainedMenu?.sessionId);
   const targetGroup = target ? findGroupForSession(boot?.groups, target.id) : undefined;
   useEffect(() => { if (menuOpen && retainedMenu && !target) setMenuOpen(false); }, [menuOpen, retainedMenu, target]);
