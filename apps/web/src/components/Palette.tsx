@@ -73,7 +73,11 @@ export function Palette() {
       .map((r) => r.c);
   }, [commands, query]);
 
-  useEffect(() => setIndex(0), [query]);
+  useEffect(() => {
+    setIndex((current) => results[current] && !results[current]!.disabled
+      ? current
+      : Math.max(0, results.findIndex((command) => !command.disabled)));
+  }, [query, results]);
   useEffect(() => { listRef.current?.querySelector('[aria-selected="true"]')?.scrollIntoView({ block: 'nearest' }); }, [index, results]);
 
   const onKey = (e: React.KeyboardEvent) => {
