@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type KeyboardEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import { ChevronRight, File as FileIcon, Folder, FolderOpen, RefreshCw } from 'lucide-react';
 import type { FileEntry } from '@mingle/contracts';
 import { api, errorMessage } from '../../lib/api';
@@ -14,6 +14,7 @@ function Tree({ projectId, sessionId, active }: { projectId: string; sessionId: 
   const [dirs, setDirs] = useState<Record<string, Dir>>({});
   const [open, setOpen] = useState<Set<string>>(() => new Set(['']));
   const rootRef = useRef<HTMLDivElement>(null);
+  const [focusPath, setFocusPath] = useState<string | null>(null);
   const rev = useActiveSession()?.updatedAt;
   const editorTabs = useEditor((s) => s.tabs);
   const centerTab = useMingle((s) => s.centerTab);
@@ -49,11 +50,42 @@ function Tree({ projectId, sessionId, active }: { projectId: string; sessionId: 
     });
   };
 
+  const visiblePaths = useMemo(() => {
+    const paths: string[] = [];
+    const visit = (dir: string) => {
+      for (const entry of dirs[dir]?.entries ?? []) {
+        paths.push(entry.path);
+        if (entry.type === 'directory' && open.has(entry.path)) visit(entry.path);
+      }
+    };
+    visit('');
+    return paths;
+  }, [dirs, open]);
+  const rovingPath = focusPath && visiblePaths.includes(focusPath) ? focusPath
+    : currentKey && visiblePaths.includes(currentKey.path) ? currentKey.path : visiblePaths[0];
+  const focus = (path: string | undefined) => {
+    if (!path) return;
+    setFocusPath(path);
+    rootRef.current?.querySelector<HTMLElement>(`[data-file-path="${CSS.escape(path)}"]`)?.focus();
+  };
   const onKey = (e: KeyboardEvent<HTMLDivElement>) => {
-    const rows = Array.from(rootRef.current?.querySelectorAll<HTMLElement>('[role="treeitem"]') ?? []);
-    const i = rows.indexOf(document.activeElement as HTMLElement);
-    if (e.key === 'ArrowDown') { rows[Math.min(rows.length - 1, i + 1)]?.focus(); e.preventDefault(); }
-    else if (e.key === 'ArrowUp') { rows[Math.max(0, i - 1)]?.focus(); e.preventDefault(); }
+    const target = (e.target as HTMLElement).closest<HTMLElement>('[role="treeitem"]');
+    if (!target || e.altKey || e.ctrlKey || e.metaKey) return;
+    const path = target.dataset.filePath!;
+    const i = visiblePaths.indexOf(path);
+    if (i < 0) return;
+    if (e.key === 'ArrowDown') focus(visiblePaths[Math.min(visiblePaths.length - 1, i + 1)]);
+    else if (e.key === 'ArrowUp') focus(visiblePaths[Math.max(0, i - 1)]);
+    else if (e.key === 'Home') focus(visiblePaths[0]);
+    else if (e.key === 'End') focus(visiblePaths[visiblePaths.length - 1]);
+    else if (e.key === 'ArrowRight') {
+      if (target.getAttribute('aria-expanded') === 'false') toggle(path);
+      else if (target.getAttribute('aria-expanded') === 'true' && visiblePaths[i + 1]?.startsWith(`${path}/`)) focus(visiblePaths[i + 1]);
+    } else if (e.key === 'ArrowLeft') {
+      if (target.getAttribute('aria-expanded') === 'true') toggle(path);
+      else if (path.includes('/')) focus(path.slice(0, path.lastIndexOf('/')));
+    } else return;
+    e.preventDefault();
   };
 
   const renderDir = (dir: string, depth: number) => {
@@ -62,13 +94,13 @@ function Tree({ projectId, sessionId, active }: { projectId: string; sessionId: 
     if (d.status === 'error') return <div style={{ paddingLeft: 12 + depth * 14 }}><InlineError onRetry={() => void load(dir)}>{d.error}</InlineError></div>;
     return (
       <>
-        {d.entries.map((entry) => {
+        {d.entries.map((entry, index) => {
           const isDir = entry.type === 'directory';
           const expanded = isDir && open.has(entry.path);
           return (
             <div key={entry.path} role="none">
               <button
-                type="button" role="treeitem" aria-expanded={isDir ? expanded : undefined} aria-selected={currentKey?.path === entry.path && currentKey.sessionId === sessionId}
+                type="button" role="treeitem" data-file-path={entry.path} tabIndex={rovingPath === entry.path ? 0 : -1} onFocus={() => setFocusPath(entry.path)} aria-level={depth + 1} aria-posinset={index + 1} aria-setsize={d.entries.length} aria-expanded={isDir ? expanded : undefined} aria-selected={currentKey?.path === entry.path && currentKey.sessionId === sessionId}
                 className={cx('trow', currentKey?.path === entry.path && currentKey.sessionId === sessionId && 'is-active')}
                 style={{ paddingLeft: 8 + depth * 14 }} title={entry.path}
                 onClick={() => {
