@@ -9,3 +9,7 @@
 .codeblock pre:focus-visible { outline: 2px solid var(--fg-2); outline-offset: -3px; }
 
 .editor__save-error { padding: 8px 12px; flex: none; }
+
+.queued-message--editing { flex-wrap: wrap; }
+.queued-message--editing textarea { flex: 1 0 100%; min-width: 0; min-height: 90px; resize: vertical; padding: 9px 11px; color: var(--fg-0); background: var(--bg-inset); border: 1px solid var(--line); border-radius: var(--radius-sm); font: inherit; line-height: 1.5; }
+.queued-message--editing > small { color: var(--fg-2); font-size: var(--text-2xs); }

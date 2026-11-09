@@ -19,6 +19,9 @@ export function QueuedMessages({ sessionId, items: queuedItems, active = false }
   const [error, setError] = useState('');
   const [conflict, setConflict] = useState<{ id: string; latest: string } | null>(null);
   const originalContent = useRef<string | null>(null);
+  const editor = useRef<HTMLTextAreaElement>(null);
+  const section = useRef<HTMLElement>(null);
+  useEffect(() => { if (editing) editor.current?.focus(); }, [editing]);
   const inFlight = useRef(false);
   const actionGeneration = useRef(0);
   const mountedSession = useRef(sessionId);
@@ -95,28 +98,40 @@ export function QueuedMessages({ sessionId, items: queuedItems, active = false }
   };
 
   const cancelEdit = () => {
+    const id = editing;
+    setError('');
     setEditing(null);
     setText('');
     originalContent.current = null;
     setConflict(null);
+    requestAnimationFrame(() => { if (id) section.current?.querySelector<HTMLButtonElement>(`[data-queue-id="${CSS.escape(id)}"] button[aria-label="Edit queued message"]`)?.focus(); });
+  };
+  const saveEdit = (item: QueuedMessage) => {
+    if (!text.trim() || busy) return;
+    void act(item.id, () => api.editQueuedMessage(sessionId, item.id, text, originalContent.current ?? item.content),
+      () => { setEditing(null); originalContent.current = null; setConflict(null); });
   };
 
   if (!items.length) return null;
 
   return (
-    <section aria-label="Queued messages" className="queued-messages">
+    <section ref={section} aria-label="Queued messages" className="queued-messages">
       <h3>Queued messages · always sent next</h3>
       <p className="queued-messages__note">These messages do not steer the current response. Edit or remove them before they are sent.</p>
       {items.map((item) => {
         const isEditing = editing === item.id;
         const isBusy = busy === item.id;
         return (
-          <article key={item.id} className="queued-message">
+          <article key={item.id} data-queue-id={item.id} aria-busy={isBusy || undefined} className={`queued-message${isEditing ? ' queued-message--editing' : ''}`}>
             <span className="queued-message__state">
               Queued · sends after the current run{item.memory === 'exclude' ? ' · Project memory excluded for this turn' : ''}
             </span>
             {isEditing ? (
-              <textarea aria-label="Edit queued message" value={text} maxLength={100_000} disabled={isBusy} onChange={(event) => setText(event.target.value)} />
+              <textarea ref={editor} aria-label="Edit queued message" aria-describedby={`queue-hint-${item.id}`} value={text} maxLength={100_000} disabled={isBusy} onChange={(event) => setText(event.target.value)} onKeyDown={(event) => {
+                if (event.nativeEvent.isComposing || busy) return;
+                if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); cancelEdit(); }
+                else if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) { event.preventDefault(); saveEdit(item); }
+              }} />
             ) : (
               <p title={item.content}>
                 {item.content || 'Attachment message'}
@@ -129,18 +144,15 @@ export function QueuedMessages({ sessionId, items: queuedItems, active = false }
               <>
                 <Button
                   disabled={Boolean(busy) || !text.trim()}
-                  onClick={() => void act(
-                    item.id,
-                    () => api.editQueuedMessage(sessionId, item.id, text, originalContent.current ?? item.content),
-                    () => { setEditing(null); originalContent.current = null; setConflict(null); },
-                  )}
+                  onClick={() => saveEdit(item)}
                 >{isBusy ? 'Saving…' : 'Save'}</Button>
                 <Button variant="secondary" disabled={Boolean(busy)} onClick={cancelEdit}>Cancel</Button>
+                <small id={`queue-hint-${item.id}`}>Ctrl/⌘+Enter to save · Escape to cancel</small>
                 {conflict?.id === item.id ? (
                   <div className="queued-message__conflict" role="status">
                     <strong>Latest queued text from the server</strong>
                     <p>{conflict.latest}</p>
-                    <Button variant="secondary" disabled={Boolean(busy)} onClick={() => setText(conflict.latest)}>Use latest text</Button>
+                    <Button variant="secondary" disabled={Boolean(busy)} onClick={() => { originalContent.current = conflict.latest; setText(conflict.latest); setConflict(null); setError(''); editor.current?.focus(); }}>Use latest text</Button>
                   </div>
                 ) : null}
               </>
