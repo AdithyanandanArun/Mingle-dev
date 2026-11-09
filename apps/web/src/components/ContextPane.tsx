@@ -40,7 +40,6 @@ export function ContextPane() {
   };
 
   const onKey = (e: React.KeyboardEvent) => {
-    if (e.key === 'Escape') { e.preventDefault(); close(); return; }
     const i = TABS.findIndex((t) => t.id === tab);
     if (e.key === 'ArrowRight') setContextTab(TABS[(i + 1) % TABS.length]!.id);
     else if (e.key === 'ArrowLeft') setContextTab(TABS[(i + TABS.length - 1) % TABS.length]!.id);
@@ -52,7 +51,7 @@ export function ContextPane() {
   };
 
   return (
-    <aside className={cx('context', open && 'is-open')} aria-label="Context" aria-hidden={!open} inert={!open}>
+    <aside className={cx('context', open && 'is-open')} aria-label="Context" aria-hidden={!open} inert={!open} onKeyDown={(e) => { if (e.key === 'Escape') { e.preventDefault(); close(); } }}>
       <div className="context__content">
       <div className="context__tabs" role="tablist" aria-label="Context sections" ref={listRef} onKeyDown={onKey}>
         {TABS.map(({ id, label, icon: Icon }) => (
