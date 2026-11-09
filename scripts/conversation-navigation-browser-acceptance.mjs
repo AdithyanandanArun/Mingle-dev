@@ -82,7 +82,7 @@ try {
   await search.fill('Example newest');
   await page.evaluate(() => { for (let i = 0; i < 30; i++) localStorage.setItem(`mingle:conversation-bookmarks:old-project-${i}:old-session`, '[]'); });
   await page.getByRole('button', { name: 'Bookmark message example-message-3' }).click();
-  assert.match(await page.getByRole('status').innerText(), /Bookmark saved/);
+  assert.match(await page.getByRole('status').filter({ hasText: 'Bookmark saved on this device.' }).innerText(), /Bookmark saved/);
   const savedBookmark = await page.evaluate(() => localStorage.getItem('mingle:conversation-bookmarks:example-project:example-session'));
   assert.ok(savedBookmark && !savedBookmark.includes('secret-value-must-not-persist') && !savedBookmark.includes('[redacted]') && savedBookmark.includes('example-message-3'), 'bookmark storage keeps only its stable message ID and timestamp');
   assert.ok(await page.evaluate(() => Array.from({ length: localStorage.length }, (_, i) => localStorage.key(i)).filter((item) => item?.startsWith('mingle:conversation-bookmarks:')).length <= 24), 'the browser bookmark index bounds total per-session keys');

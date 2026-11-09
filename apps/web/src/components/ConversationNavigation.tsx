@@ -57,6 +57,7 @@ export function ConversationNavigation({ projectId, sessionId, messages, runs, c
   const trigger = useRef<HTMLButtonElement>(null);
   const search = useRef<HTMLInputElement>(null);
   const section = useRef<HTMLElement>(null);
+  const navigation = useRef(0);
   const [activeResult, setActiveResult] = useState(-1);
   const { results, totalMatches } = useMemo(() => {
     const q = query.trim().toLocaleLowerCase();
@@ -67,7 +68,8 @@ export function ConversationNavigation({ projectId, sessionId, messages, runs, c
     setOpen(false); setQuery(''); setNotice(''); setActiveResult(-1);
     setBookmarks(readBookmarks(projectId, sessionId));
   }, [projectId, sessionId]);
-  useEffect(() => { setActiveResult(-1); }, [query, sessionId]);
+  useEffect(() => { navigation.current++; setActiveResult(-1); }, [query, sessionId]);
+  useEffect(() => () => { navigation.current++; }, []);
   useEffect(() => {
     if (!open) return;
     const frame = requestAnimationFrame(() => search.current?.focus({ preventScroll: true }));
@@ -84,6 +86,7 @@ export function ConversationNavigation({ projectId, sessionId, messages, runs, c
     return () => window.removeEventListener('keydown', find);
   }, []);
   const jump = async (messageId: string, runId?: string, callId?: string, review = false, changes = false) => {
+    const generation = ++navigation.current;
     const selector = callId ? `[data-tool-call-id="${CSS.escape(callId)}"]` : runId ? changes ? `[data-run-changes-id="${CSS.escape(runId)}"]` : review ? `[data-run-review-id="${CSS.escape(runId)}"]` : `[data-run-id="${CSS.escape(runId)}"]` : `[data-message-id="${CSS.escape(messageId)}"]`;
     let target = document.querySelector<HTMLElement>(selector);
     if (!target && runId && review) target = document.querySelector<HTMLElement>(`[data-run-id="${CSS.escape(runId)}"]`);
@@ -94,6 +97,7 @@ export function ConversationNavigation({ projectId, sessionId, messages, runs, c
       parent = parent.parentElement;
     }
     await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+    if (generation !== navigation.current) return;
     if (!target.isConnected) { setNotice('This message is not loaded. Load older messages to find it.'); return; }
     target.scrollIntoView({ block: 'center' });
     if (!target.hasAttribute('tabindex')) target.tabIndex = -1;
@@ -118,14 +122,14 @@ export function ConversationNavigation({ projectId, sessionId, messages, runs, c
     }).slice(0, 100);
   }, [messages, open, runs, calls]);
   return <section ref={section} className="conversation-nav" aria-label="Conversation navigation">
-    <button ref={trigger} type="button" className="btn btn--secondary btn--sm" aria-keyshortcuts="Control+f Meta+f" aria-controls={`conversation-nav-${sessionId}`} aria-expanded={open} onClick={() => { setOpen(!open); setNotice(''); }}><Search size={13} /> Find & bookmarks</button>
-    {open ? <div id={`conversation-nav-${sessionId}`} className="conversation-nav__panel" onKeyDown={(event) => { if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); setOpen(false); trigger.current?.focus(); } }}>
-      <div className="conversation-nav__heading"><strong>Conversation navigation</strong><button type="button" aria-label="Close conversation navigation" onClick={() => { setOpen(false); trigger.current?.focus(); }}><X size={14} /></button></div>
+    <button ref={trigger} type="button" className="btn btn--secondary btn--sm" aria-keyshortcuts="Control+f Meta+f" aria-controls={`conversation-nav-${sessionId}`} aria-expanded={open} onClick={() => { navigation.current++; setOpen(!open); setNotice(''); }}><Search size={13} /> Find & bookmarks</button>
+    {open ? <div id={`conversation-nav-${sessionId}`} className="conversation-nav__panel" onKeyDown={(event) => { if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); navigation.current++; setOpen(false); trigger.current?.focus(); } }}>
+      <div className="conversation-nav__heading"><strong>Conversation navigation</strong><button type="button" aria-label="Close conversation navigation" onClick={() => { navigation.current++; setOpen(false); trigger.current?.focus(); }}><X size={14} /></button></div>
       <label className="sr-only" htmlFor={`conversation-search-${sessionId}`}>Search loaded messages</label>
       <input ref={search} id={`conversation-search-${sessionId}`} type="search" maxLength={200} value={query} placeholder="Search loaded messages" onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => {
         if (event.key !== 'Enter' || event.nativeEvent.isComposing || !results.length) return;
         event.preventDefault();
-        const next = (activeResult + (event.shiftKey ? -1 : 1) + results.length) % results.length;
+        const next = activeResult < 0 ? event.shiftKey ? results.length - 1 : 0 : (activeResult + (event.shiftKey ? -1 : 1) + results.length) % results.length;
         const message = results[next]!; setActiveResult(next);
         void jump(message.id).then(() => search.current?.focus({ preventScroll: true }));
       }} />

@@ -77,8 +77,19 @@ export function ContextMenu({ x, y, items, onClose, returnFocus, open = true, cl
 
   // Hidden controls cannot receive focus until their measured position has rendered.
   useLayoutEffect(() => {
-    if (open && rootPoint && activeIndex >= 0) mainButtons.current[activeIndex]?.focus();
-  }, [open, rootPoint]);
+    if (!open || closing || !rootPoint || activeIndex < 0) return;
+    let frame = 0;
+    let attempts = 0;
+    const focusVisible = () => {
+      const item = mainButtons.current[activeIndex];
+      if (!item?.isConnected) return;
+      // Chromium can retain inherited visibility for a frame after the portal is positioned.
+      if (getComputedStyle(item).visibility !== 'visible' && ++attempts < 4) { frame = requestAnimationFrame(focusVisible); return; }
+      item.focus({ preventScroll: true });
+    };
+    frame = requestAnimationFrame(focusVisible);
+    return () => cancelAnimationFrame(frame);
+  }, [open, closing, rootPoint]);
 
   useLayoutEffect(() => {
     if (submenuIndex === null || !submenu.current) return;

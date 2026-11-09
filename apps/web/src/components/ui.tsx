@@ -78,7 +78,7 @@ export function Button({ variant = 'secondary', size = 'md', busy, why, classNam
       disabled={isDisabled}
       title={isDisabled && why ? why : title}
       {...rest}
-      aria-busy={busy || undefined}
+      aria-busy={busy || rest['aria-busy'] || undefined}
       aria-describedby={describedBy}
     >
       {busy ? <Loader2 className="spin" size={14} aria-hidden="true" /> : null}
@@ -88,20 +88,20 @@ export function Button({ variant = 'secondary', size = 'md', busy, why, classNam
   );
 }
 
-export function IconButton({ label, children, active, why, busy, className, disabled, ...rest }: Omit<BtnProps, 'variant' | 'size'> & { label: string; active?: boolean }) {
+export function IconButton({ label, children, active, why, busy, className, disabled, title, ...rest }: Omit<BtnProps, 'variant' | 'size'> & { label: string; active?: boolean }) {
   const whyId = useId();
   const isDisabled = Boolean(disabled || busy);
   return (
     <button
       type="button"
       className={cx('ibtn', active && 'is-active', className)}
-      aria-label={busy ? `${label} (busy)` : label}
-      aria-busy={busy || undefined}
+      {...rest}
+      aria-label={rest['aria-label'] ?? (busy ? `${label} (busy)` : label)}
+      aria-busy={busy || rest['aria-busy'] || undefined}
       aria-describedby={[rest['aria-describedby'], isDisabled && why ? whyId : undefined].filter(Boolean).join(' ') || undefined}
-      title={isDisabled && why ? `${label} — ${why}` : label}
+      title={title ?? (isDisabled && why ? `${label} — ${why}` : label)}
       aria-pressed={active}
       disabled={isDisabled}
-      {...rest}
     >
       {busy ? <Loader2 className="spin" size={14} aria-hidden="true" /> : null}
       {children}
@@ -210,6 +210,7 @@ export function Switch({ checked, onChange, label, description, id }: { checked:
 
 /* ——— Modal / sheet ——— */
 const FOCUSABLE = 'a[href],button:not([disabled]),input:not([disabled]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])';
+const visibleFocusable = (root: HTMLElement) => Array.from(root.querySelectorAll<HTMLElement>(FOCUSABLE)).filter((el) => el.getClientRects().length > 0 && getComputedStyle(el).visibility !== 'hidden' && !el.closest('[hidden], [inert]'));
 export const DialogMotionContext = createContext(false);
 
 export function Modal({ title, description, onClose, children, footer, variant = 'dialog', width, labelledBy }: {
@@ -229,8 +230,9 @@ export function Modal({ title, description, onClose, children, footer, variant =
     focusRestored.current = false;
     const root = ref.current;
     if (root) {
-      const auto = root.querySelector<HTMLElement>('[data-autofocus]');
-      (auto ?? root.querySelector<HTMLElement>(FOCUSABLE) ?? root).focus({ preventScroll: true });
+      const items = visibleFocusable(root);
+      const auto = items.find((item) => item.hasAttribute('data-autofocus'));
+      (auto ?? items[0] ?? root).focus({ preventScroll: true });
     }
     return () => {
       if (focusRestored.current) return;
@@ -254,8 +256,9 @@ export function Modal({ title, description, onClose, children, footer, variant =
     wasClosing.current = false;
     focusRestored.current = false;
     const root = ref.current;
-    const auto = root?.querySelector<HTMLElement>('[data-autofocus]');
-    (auto ?? root?.querySelector<HTMLElement>(FOCUSABLE) ?? root)?.focus({ preventScroll: true });
+    const items = root ? visibleFocusable(root) : [];
+    const auto = items.find((item) => item.hasAttribute('data-autofocus'));
+    (auto ?? items[0] ?? root)?.focus({ preventScroll: true });
   }, [closing]);
 
   const onKeyDown = (e: ReactKeyboardEvent<HTMLDivElement>) => {
@@ -267,7 +270,7 @@ export function Modal({ title, description, onClose, children, footer, variant =
       return;
     }
     if (e.key !== 'Tab' || !ref.current) return;
-    const items = Array.from(ref.current.querySelectorAll<HTMLElement>(FOCUSABLE)).filter((el) => el.offsetParent !== null);
+    const items = visibleFocusable(ref.current);
     if (items.length === 0) { e.preventDefault(); ref.current.focus(); return; }
     const first = items[0]!;
     const last = items[items.length - 1]!;
