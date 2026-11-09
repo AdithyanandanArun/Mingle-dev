@@ -20,15 +20,26 @@ function Tree({ projectId, sessionId, active }: { projectId: string; sessionId: 
   const centerTab = useMingle((s) => s.centerTab);
   const currentKey = editorTabs.find((t) => t.key === centerTab);
 
+  const pending = useRef(new Map<string, number>());
+  const sequence = useRef(0);
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; pending.current.clear(); };
+  }, []);
   const load = useCallback(async (dir: string) => {
+    const request = ++sequence.current;
+    pending.current.set(dir, request);
     setDirs((d) => ({ ...d, [dir]: { status: 'loading', entries: d[dir]?.entries ?? [] } }));
     try {
       const entries = await api.listFiles(projectId, dir, sessionId);
+      if (!mounted.current || pending.current.get(dir) !== request) return;
       entries.sort((a, b) => (a.type === b.type ? a.name.localeCompare(b.name) : a.type === 'directory' ? -1 : 1));
       setDirs((d) => ({ ...d, [dir]: { status: 'ready', entries } }));
     } catch (e) {
-      setDirs((d) => ({ ...d, [dir]: { status: 'error', entries: [], error: errorMessage(e) } }));
-    }
+      if (!mounted.current || pending.current.get(dir) !== request) return;
+      setDirs((d) => ({ ...d, [dir]: { status: 'error', entries: d[dir]?.entries ?? [], error: errorMessage(e) } }));
+    } finally { if (pending.current.get(dir) === request) pending.current.delete(dir); }
   }, [projectId, sessionId]);
 
   useEffect(() => { void load(''); }, [load]);
@@ -91,16 +102,16 @@ function Tree({ projectId, sessionId, active }: { projectId: string; sessionId: 
   const renderDir = (dir: string, depth: number) => {
     const d = dirs[dir];
     if (!d) return null;
-    if (d.status === 'error') return <div style={{ paddingLeft: 12 + depth * 14 }}><InlineError onRetry={() => void load(dir)}>{d.error}</InlineError></div>;
     return (
       <>
+        {d.status === 'error' ? <div style={{ paddingLeft: 12 + depth * 14 }}><InlineError onRetry={() => void load(dir)}>{d.error}</InlineError></div> : null}
         {d.entries.map((entry, index) => {
           const isDir = entry.type === 'directory';
           const expanded = isDir && open.has(entry.path);
           return (
             <div key={entry.path} role="none">
               <button
-                type="button" role="treeitem" data-file-path={entry.path} tabIndex={rovingPath === entry.path ? 0 : -1} onFocus={() => setFocusPath(entry.path)} aria-level={depth + 1} aria-posinset={index + 1} aria-setsize={d.entries.length} aria-expanded={isDir ? expanded : undefined} aria-selected={currentKey?.path === entry.path && currentKey.sessionId === sessionId}
+                type="button" role="treeitem" data-file-path={entry.path} tabIndex={rovingPath === entry.path ? 0 : -1} onFocus={() => setFocusPath(entry.path)} aria-busy={isDir && dirs[entry.path]?.status === 'loading' || undefined} aria-level={depth + 1} aria-posinset={index + 1} aria-setsize={d.entries.length} aria-expanded={isDir ? expanded : undefined} aria-selected={currentKey?.path === entry.path && currentKey.sessionId === sessionId}
                 className={cx('trow', currentKey?.path === entry.path && currentKey.sessionId === sessionId && 'is-active')}
                 style={{ paddingLeft: 8 + depth * 14 }} title={entry.path}
                 onClick={() => {
@@ -121,7 +132,7 @@ function Tree({ projectId, sessionId, active }: { projectId: string; sessionId: 
             </div>
           );
         })}
-        {d.status === 'ready' && d.entries.length === 0 && dir === '' ? <p className="muted small pane-pad">This folder is empty.</p> : null}
+        {d.status === 'ready' && d.entries.length === 0 ? <p className="muted small pane-pad" role="status">This folder is empty.</p> : null}
       </>
     );
   };
