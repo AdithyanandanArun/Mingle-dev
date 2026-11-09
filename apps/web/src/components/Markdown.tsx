@@ -1,10 +1,11 @@
 import { memo, useEffect, useRef, useState, type ComponentProps, type ReactNode } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { Check, Copy } from 'lucide-react';
+import { Check, Copy, WrapText } from 'lucide-react';
 import { copyText } from '../lib/clipboard';
 
-function CodeBlock({ children }: { children: ReactNode }) {
+function CodeBlock({ children, language }: { children: ReactNode; language?: string }) {
+  const [wrapped, setWrapped] = useState(false);
   const [copied, setCopied] = useState(false);
   const [copying, setCopying] = useState(false);
   const [copyError, setCopyError] = useState('');
@@ -29,13 +30,17 @@ function CodeBlock({ children }: { children: ReactNode }) {
     } finally { if (alive.current) setCopying(false); }
   };
   return (
-    <div className="codeblock">
+    <div className={`codeblock${wrapped ? ' is-wrapped' : ''}`}>
+      <div className="codeblock__toolbar">
+        <span>{language || 'Code'}</span>
+        <button type="button" className="codeblock__wrap" aria-label="Wrap code lines" aria-pressed={wrapped} onClick={() => setWrapped(!wrapped)}><WrapText size={12} aria-hidden="true" /> Wrap</button>
       <button type="button" className="codeblock__copy" aria-label="Copy code" aria-busy={copying || undefined} disabled={copying} onClick={() => void copy()}>
         {copied ? <Check size={12} aria-hidden="true" /> : <Copy size={12} aria-hidden="true" />} {copied ? 'Copied' : copying ? 'Copying…' : 'Copy'}
       </button>
+      </div>
       {copied ? <span className="sr-only" role="status">Code copied to clipboard</span> : null}
       {copyError ? <p className="codeblock__error" role="alert">{copyError}</p> : null}
-      <pre><code>{children}</code></pre>
+      <pre tabIndex={0} aria-label={language ? `${language} code` : 'Code block'}><code>{children}</code></pre>
     </div>
   );
 }
@@ -50,7 +55,7 @@ export const Markdown = memo(function Markdown({ text }: { text: string }) {
           pre: ({ children }) => <>{children}</>,
           code: ({ className, children, ...rest }: ComponentProps<'code'>) => {
             const isBlock = /language-/.test(className ?? '') || (typeof children === 'string' && children.includes('\n'));
-            return isBlock ? <CodeBlock>{children}</CodeBlock> : <code className="md__inline" {...rest}>{children}</code>;
+            return isBlock ? <CodeBlock language={className?.match(/language-([^\s]+)/)?.[1]}>{children}</CodeBlock> : <code className="md__inline" {...rest}>{children}</code>;
           },
           table: ({ children }) => <div className="md__table"><table>{children}</table></div>,
         }}

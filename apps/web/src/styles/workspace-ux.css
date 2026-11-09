@@ -1,2 +1,9 @@
 /* Everyday workspace controls use the existing neutral theme tokens. */
 .codeblock__error { padding: 10px 12px; margin: 0; color: var(--fg-1); background: var(--bg-surface); font-size: var(--text-xs); overflow-wrap: anywhere; }
+
+.codeblock__toolbar { display: flex; align-items: center; gap: 8px; padding: 6px 8px 6px 14px; border-bottom: 1px solid var(--line-soft); color: var(--fg-2); font-size: var(--text-2xs); }
+.codeblock__toolbar > span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.codeblock__toolbar .codeblock__copy, .codeblock__wrap { position: static; display: inline-flex; align-items: center; gap: 5px; flex: none; opacity: 1; height: 26px; padding: 0 8px; background: var(--bg-surface); border: 1px solid var(--line); border-radius: 6px; color: var(--fg-1); font-size: var(--text-2xs); }
+.codeblock__wrap[aria-pressed="true"] { background: var(--bg-active); color: var(--fg-0); }
+.codeblock.is-wrapped pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+.codeblock pre:focus-visible { outline: 2px solid var(--fg-2); outline-offset: -3px; }
