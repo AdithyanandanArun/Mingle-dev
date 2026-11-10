@@ -186,7 +186,7 @@ export function SettingsPage({ onReplayOnboarding }: { onReplayOnboarding: () =>
         <div className="settings-page__login"><p>Sign in on this machine with <code>claude auth login</code> or <code>codex login</code>, then re-check. Antigravity sign-in opens its native Google browser flow. OpenCode uses its own provider logins (<code>opencode providers login</code>) and lists the models it exposes; Mingle never reads its credential files.</p><p>Claude uses its existing login. An <code>ANTHROPIC_API_KEY</code> in the server environment takes precedence and uses API billing. Provider credentials stay with each provider.</p></div>
       </div> : null}
       {category === 'appearance' ? <div className="settings-page__section">
-        <div className="settings-page__section-head"><h2>Appearance</h2><p>Simple surfaces, readable text and quiet controls.</p></div>
+        <div className="settings-page__section-head"><h2>Appearance</h2><p>Monochrome surfaces, readable text and quiet controls.</p></div>
         <SettingRow title="Theme" description="Choose a dark or light workspace." htmlFor="st-theme">
           <SelectMenu id="st-theme" label="Theme" value={settings.theme} disabled={disabled} options={[{ value: 'dark', label: 'Dark' }, { value: 'light', label: 'Light' }]} onChange={(value) => void update({ theme: value as AppSettings['theme'] }, 'theme')} />
         </SettingRow>
