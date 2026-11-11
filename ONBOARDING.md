@@ -53,6 +53,10 @@ Use **Add agent** for local Cowork or orchestrated groups. Review each member's 
 
 An explicit `ANTHROPIC_API_KEY` in the runtime environment takes precedence over Claude's saved login and uses API billing. Mingle does not automatically load `.env`; [the example configuration](.env.example) documents variables to export through your shell or launcher. Keep actual credentials outside source control.
 
+## Linux window title bar
+
+On Linux desktop, **Settings → Appearance → System title bar** controls the extra bar above Mingle. Keep **Show (default)** when you use its window controls. Choose **Hide** if your window manager already handles moving, resizing and closing windows, then quit and reopen Mingle. You can choose Show again to restore it. The choice applies only to this device and is absent in browser clients and on other platforms.
+
 ## Accounts and team collaboration
 
 Open **Settings → Account → Continue with Google** for a Mingle identity and explicit preference sync. This is separate from provider authentication. The configured Google app is In production with basic identity scopes; no tester allowlist is needed.
