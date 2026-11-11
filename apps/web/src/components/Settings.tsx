@@ -18,6 +18,7 @@ import { RemoveProjectButton } from './RemoveProjectDialog';
 import { TeamWorkspace } from './distributed/TeamWorkspace';
 import { ProviderUpdates } from './ProviderUpdates';
 import { UsageSettings } from './UsageSettings';
+import { WindowDecorationSetting } from './WindowDecorationSetting';
 
 const CATEGORIES: { id: SettingsSection; name: string }[] = [
   { id: 'general', name: 'General' }, { id: 'account', name: 'Account' }, { id: 'team', name: 'Team workspace' }, { id: 'project', name: 'Project' }, { id: 'agents', name: 'Agents' }, { id: 'providers', name: 'Providers' }, { id: 'usage', name: 'Usage' }, { id: 'browser', name: 'Browser' }, { id: 'appearance', name: 'Appearance' },
@@ -190,6 +191,7 @@ export function SettingsPage({ onReplayOnboarding }: { onReplayOnboarding: () =>
         <SettingRow title="Theme" description="Choose a dark or light workspace." htmlFor="st-theme">
           <SelectMenu id="st-theme" label="Theme" value={settings.theme} disabled={disabled} options={[{ value: 'dark', label: 'Dark' }, { value: 'light', label: 'Light' }]} onChange={(value) => void update({ theme: value as AppSettings['theme'] }, 'theme')} />
         </SettingRow>
+        <WindowDecorationSetting />
       </div> : null}
       <footer className="settings-page__foot">Mingle {boot.version}<span>Local workspace</span></footer>
     </div>
