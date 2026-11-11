@@ -22,6 +22,8 @@ jobs:
         run: node --test apps/desktop/account-storage/*.test.mjs apps/desktop/shell-environment.test.mjs
       - name: Check embedded browser relay and isolation
         run: node --test apps/desktop/embedded-browser/*.test.mjs
+      - name: Check Linux window decoration preferences and IPC
+        run: node --test apps/desktop/window-decoration*.test.mjs
       - run: pnpm typecheck
       # Multi-app acceptance starts real Git, SQLite and encrypted transport fixtures.
       # Run files serially on the shared runner, matching the verified local suite.

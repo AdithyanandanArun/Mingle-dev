@@ -9,9 +9,10 @@ const preloadSource = readFileSync(join(__dirname, 'browser-preload.cjs'), 'utf8
 function loadPreload() {
   const ipcListeners = new Map();
   const exposed = new Map();
+  const invocations = [];
   const ipcRenderer = {
     on(channel, listener) { ipcListeners.set(channel, listener); },
-    invoke() { return Promise.resolve(false); },
+    invoke(...args) { invocations.push(args); return Promise.resolve(false); },
   };
   const contextBridge = { exposeInMainWorld(name, value) { exposed.set(name, value); } };
   const sandboxBuffer = {
@@ -26,6 +27,7 @@ function loadPreload() {
   }, { filename: 'browser-preload.cjs' });
   return {
     exposed,
+    invocations,
     emit: (token) => ipcListeners.get('mingle.project-invitation')({}, token),
   };
 }
@@ -57,6 +59,22 @@ test('sandboxed preload queues valid invitations with a Buffer shim lacking base
   const laterReceived = [];
   api.onInvitation(value => laterReceived.push(value));
   assert.deepEqual(laterReceived, [queuedAfterUnsubscribe]);
+});
+
+test('title bar bridge exposes only fixed preference calls and rejects arbitrary values', async () => {
+  const { exposed, invocations } = loadPreload();
+  const api = exposed.get('mingleWindowDecoration');
+  assert.equal(Object.isFrozen(api), true);
+  assert.deepEqual(Object.keys(api), ['getState', 'setTitleBar']);
+  await api.getState();
+  await api.setTitleBar('hidden');
+  await api.setTitleBar('system');
+  for (const invalid of [null, undefined, true, {}, 'native', 'mingle.credential-store.restart']) {
+    await assert.rejects(api.setTitleBar(invalid), /Invalid title bar/);
+  }
+  assert.deepEqual(invocations, [
+    ['mingle.window-decoration.state'], ['mingle.window-decoration.set', 'hidden'], ['mingle.window-decoration.set', 'system'],
+  ]);
 });
 
 test('preload invitation queue is bounded to unique pending tokens', () => {

@@ -11,6 +11,8 @@ import { configureCredentialStoreStartup, verifyCredentialStore, saveUserCredent
 import { createProjectInvitationDispatcher, focusProjectInvitationWindow, isProjectInvitationWorkspaceUrl } from './project-invitation.mjs';
 import { createEmbeddedBrowserHost, hideOwnedEmbeddedView } from './embedded-browser/host.mjs';
 import { readLoginPath } from './shell-environment.mjs';
+import { createWindowDecorationPreference } from './window-decoration.mjs';
+import { registerWindowDecorationIpc } from './window-decoration-ipc.mjs';
 
 const root = app.isPackaged ? join(process.resourcesPath, 'workspace') : fileURLToPath(new URL('../../', import.meta.url));
 const serverRoot = join(root, 'apps/server');
@@ -30,6 +32,7 @@ const credentialStoreStartup = configureCredentialStoreStartup({ app, safeStorag
 mkdirSync(userData, { recursive: true, mode: 0o700 });
 app.setPath('userData', userData);
 app.setPath('sessionData', userData);
+const windowDecoration = createWindowDecorationPreference({ userData });
 const runtimeNodeOverride = process.env.MINGLE_NODE_EXECUTABLE !== undefined ? process.env.MINGLE_NODE_EXECUTABLE : process.env.RELAY_NODE_EXECUTABLE;
 const runtimeNode = app.isPackaged ? join(process.resourcesPath, 'runtime/bin', process.platform === 'win32' ? 'node.exe' : 'node') : runtimeNodeOverride?.trim() || 'node';
 if (process.platform === 'linux') {
@@ -98,6 +101,11 @@ function isWorkspaceFrame(event) {
   return isProjectInvitationWorkspaceUrl(event.senderFrame.url, workspaceUrl);
 }
 
+registerWindowDecorationIpc({
+  ipcMain, preference: windowDecoration,
+  isAllowed: event => isLiveWindow(mainWindow) && event.sender === uiContents(mainWindow) && isWorkspaceFrame(event),
+});
+
 function openExternalWebTarget(target, origin) {
   try {
     const parsed = new URL(target);
@@ -157,6 +165,7 @@ ipcMain.handle('mingle.browser.open-popout', async (event, sessionId) => {
   const origin = new URL(workspaceUrl).origin;
   const window = new BrowserWindow({
     parent: mainWindow, title: 'Mingle Browser', width: 1120, height: 780, minWidth: 560, minHeight: 420,
+    ...windowDecoration.windowOptions(),
     backgroundColor: '#111111', autoHideMenuBar: true,
     webPreferences: { nodeIntegration: false, contextIsolation: true, sandbox: true, webSecurity: true },
   });
@@ -312,6 +321,7 @@ async function openWorkspace() {
   catch (error) { throw new Error(`${error.message}\n${startupErrors}`); }
   const window = new BrowserWindow({
     title: 'Mingle', icon: app.isPackaged ? join(root, 'apps/web/dist/mingle-icon.png') : join(root, 'apps/web/public/mingle-icon.png'),
+    ...windowDecoration.windowOptions(),
     width: 1540, height: 1000, minWidth: 900, minHeight: 620,
     backgroundColor: '#0a0a0a', autoHideMenuBar: true,
     webPreferences: { nodeIntegration: false, contextIsolation: true, sandbox: true, webSecurity: true },

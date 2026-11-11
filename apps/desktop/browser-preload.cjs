@@ -9,6 +9,13 @@ const projectInvitationListeners = new Set();
 const pendingProjectInvitations = [];
 const pendingProjectInvitationTokens = new Set();
 
+contextBridge.exposeInMainWorld('mingleWindowDecoration', Object.freeze({
+  getState: () => ipcRenderer.invoke('mingle.window-decoration.state'),
+  setTitleBar: value => value === 'system' || value === 'hidden'
+    ? ipcRenderer.invoke('mingle.window-decoration.set', value)
+    : Promise.reject(new Error('Invalid title bar choice.')),
+}));
+
 // The main process enforces canonical base64url bytes. Sandboxed Electron preload Buffer shims
 // do not necessarily implement Node's base64url encoding, so this boundary checks its safe shape.
 function isProjectInvitationToken(token) {
