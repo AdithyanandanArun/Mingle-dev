@@ -18,14 +18,14 @@ function readPreference(path, supported) {
   } catch { return 'system'; }
 }
 
-export function createWindowDecorationPreference({ userData, platform = process.platform }) {
+export function createWindowDecorationPreference({ userData, platform = process.platform, forceSystemTitleBar = false }) {
   if (typeof userData !== 'string' || userData.length === 0) throw new TypeError('userData must be a non-empty path');
   const supported = platform === 'linux';
   const path = join(userData, FILE_NAME);
   let titleBar = 'system';
   let activeTitleBar = 'system';
   titleBar = readPreference(path, supported);
-  activeTitleBar = supported ? titleBar : 'system';
+  activeTitleBar = supported ? (forceSystemTitleBar ? 'system' : titleBar) : 'system';
   function getState() {
     return { supported, titleBar, activeTitleBar, restartRequired: titleBar !== activeTitleBar };
   }

@@ -57,6 +57,8 @@ An explicit `ANTHROPIC_API_KEY` in the runtime environment takes precedence over
 
 On Linux desktop, **Settings → Appearance → System title bar** controls the extra bar above Mingle. Keep **Show (default)** when you use its window controls. Choose **Hide** if your window manager already handles moving, resizing and closing windows, then quit and reopen Mingle. You can choose Show again to restore it. The choice applies only to this device and is absent in browser clients and on other platforms.
 
+If hiding the bar leaves you without usable window controls, fully quit Mingle, then launch it from a terminal with `mingle --system-title-bar`. The flag temporarily restores the system title bar for that launch, even when Hide is saved. A second launch while Mingle is already running only focuses the existing process, so quit it first. Open **Settings → Appearance** and select **Show** to make the recovery permanent; the flag does not silently reset your saved preference.
+
 ## Accounts and team collaboration
 
 Open **Settings → Account → Continue with Google** for a Mingle identity and explicit preference sync. This is separate from provider authentication. The configured Google app is In production with basic identity scopes; no tester allowlist is needed.

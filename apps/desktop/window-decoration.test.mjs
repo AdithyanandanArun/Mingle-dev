@@ -35,6 +35,30 @@ test('persists requested setting, keeps active value until restart', async () =>
   } finally { await rm(userData, { recursive: true, force: true }); }
 });
 
+test('system title bar recovery override preserves the saved hidden choice', async () => {
+  const userData = await tempDir();
+  try {
+    const file = join(userData, 'window-decoration.json');
+    const normal = createWindowDecorationPreference({ userData, platform: 'linux' });
+    await normal.setTitleBar('hidden');
+    const before = await readFile(file, 'utf8');
+    const recovery = createWindowDecorationPreference({ userData, platform: 'linux', forceSystemTitleBar: true });
+    assert.deepEqual(recovery.getState(), { supported: true, titleBar: 'hidden', activeTitleBar: 'system', restartRequired: true });
+    assert.deepEqual(recovery.windowOptions(), { frame: true });
+    assert.equal(await readFile(file, 'utf8'), before);
+    assert.deepEqual(await recovery.setTitleBar('system'), { supported: true, titleBar: 'system', activeTitleBar: 'system', restartRequired: false });
+  } finally { await rm(userData, { recursive: true, force: true }); }
+});
+
+test('recovery override has no effect outside Linux', async () => {
+  const userData = await tempDir();
+  try {
+    const pref = createWindowDecorationPreference({ userData, platform: 'darwin', forceSystemTitleBar: true });
+    assert.deepEqual(pref.getState(), { supported: false, titleBar: 'system', activeTitleBar: 'system', restartRequired: false });
+    assert.deepEqual(pref.windowOptions(), {});
+  } finally { await rm(userData, { recursive: true, force: true }); }
+});
+
 test('tolerates malformed and oversized files, validates input and preserves state on failed save', async () => {
   const userData = await tempDir();
   try {

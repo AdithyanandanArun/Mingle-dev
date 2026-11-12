@@ -7,6 +7,7 @@ Source verification on 2026-11-11. This change makes the system title bar option
 - Appearance shows **System title bar → Show (default) / Hide** only in the Linux desktop main workspace. Desktop environments that need the native controls keep them by default. Hiding is intended for window managers that already provide movement, resizing and closing.
 - The setting is device-local, saved atomically in Electron user-data as `window-decoration.json` with private file permissions. It is separate from SQLite and account preference sync. Missing, malformed and oversized files fall back to the system bar.
 - The main window and Mingle browser popouts use the startup choice. A saved change asks the user to quit and reopen; it never restarts running sessions automatically. Selecting Show restores the frame on the next launch.
+- Launching `mingle --system-title-bar` after fully quitting temporarily forces the system frame on Linux while retaining the saved choice. The user can select Show in Settings to save the recovery. Launching a second instance only focuses the existing process.
 - Fixed IPC calls accept only `system` and `hidden`. The main process checks the main workspace sender, top-level frame and workspace URL. Guest frames and unrelated windows cannot read or change the preference. Filesystem errors return a generic save failure.
 - The packager includes both new runtime modules; CI includes the preference and IPC tests.
 

@@ -32,7 +32,7 @@ const credentialStoreStartup = configureCredentialStoreStartup({ app, safeStorag
 mkdirSync(userData, { recursive: true, mode: 0o700 });
 app.setPath('userData', userData);
 app.setPath('sessionData', userData);
-const windowDecoration = createWindowDecorationPreference({ userData });
+const windowDecoration = createWindowDecorationPreference({ userData, forceSystemTitleBar: process.argv.includes('--system-title-bar') });
 const runtimeNodeOverride = process.env.MINGLE_NODE_EXECUTABLE !== undefined ? process.env.MINGLE_NODE_EXECUTABLE : process.env.RELAY_NODE_EXECUTABLE;
 const runtimeNode = app.isPackaged ? join(process.resourcesPath, 'runtime/bin', process.platform === 'win32' ? 'node.exe' : 'node') : runtimeNodeOverride?.trim() || 'node';
 if (process.platform === 'linux') {
