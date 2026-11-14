@@ -247,7 +247,11 @@ class AntigravityRun {
       if (this.expectedEffort && effort !== undefined && effort !== this.expectedEffort) this.fail('Antigravity changed the selected reasoning effort during the run.', 'effort_substitution');
       if (mode !== undefined && mode !== this.expectedMode) this.fail('Antigravity changed the selected permission mode during the run. Mingle stopped the turn.', 'permission_mode_changed');
     } else if (kind === 'current_mode_update' && update.currentModeId !== this.expectedMode) this.fail('Antigravity changed the selected permission mode during the run. Mingle stopped the turn.', 'permission_mode_changed');
-    // Thoughts are provider-private. usage_update.used is context size, not input/output token usage.
+    else if (kind === 'usage_update') {
+      const used = update.used; const size = update.size;
+      if (typeof used === 'number' && Number.isSafeInteger(used) && used >= 0 && (size === undefined || (typeof size === 'number' && Number.isSafeInteger(size) && size > 0)))
+        this.emit({ type: 'context.usage', usedTokens: used, contextWindow: typeof size === 'number' ? size : null, estimated: false, source: 'antigravity' });
+    }
   }
 
   private tool(update: Record<string, unknown>): void {
