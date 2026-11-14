@@ -210,7 +210,7 @@ export class Store {
     if (!session) throw new Error('Session not found');
     if (!usage || !Number.isSafeInteger(usage.usedTokens) || usage.usedTokens < 0 ||
       (usage.contextWindow !== null && (!Number.isSafeInteger(usage.contextWindow) || usage.contextWindow <= 0)) ||
-      typeof usage.estimated !== 'boolean' || !usage.source.trim() || usage.source.length > 100 || !Number.isFinite(Date.parse(usage.updatedAt)) ||
+      typeof usage.estimated !== 'boolean' || typeof usage.source !== 'string' || !usage.source.trim() || usage.source.length > 100 || !Number.isFinite(Date.parse(usage.updatedAt)) ||
       usage.provider !== session.provider || usage.model !== session.model || usage.providerSessionId !== session.providerSessionId) return session;
     this.run(`INSERT INTO session_context_usage(session_id,provider,model,provider_session_id,used_tokens,context_window,estimated,source,updated_at)
       VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(session_id) DO UPDATE SET provider=excluded.provider,model=excluded.model,
@@ -220,7 +220,15 @@ export class Store {
     this.touch(sessionId);
     return this.getSession(sessionId, true)!;
   }
+  clearContextUsage(sessionId: string): void {
+    this.run('DELETE FROM session_context_usage WHERE session_id = ?', sessionId);
+    this.touch(sessionId);
+  }
   updateSession(id: string, patch: Partial<Pick<Session, 'name' | 'provider' | 'model' | 'effort' | 'policy' | 'serviceTier' | 'status' | 'error' | 'providerSessionId' | 'handoffFromProvider' | 'handoffFromModel' | 'handoffPendingAt' | 'inputTokens' | 'outputTokens' | 'costUsd' | 'pinned' | 'unread' | 'branch'>>): Session {
+    if (patch.provider !== undefined || patch.model !== undefined || patch.providerSessionId !== undefined) {
+      const before = this.getSession(id, true);
+      if (before && (['provider', 'model', 'providerSessionId'] as const).some(key => patch[key] !== undefined && patch[key] !== before[key])) this.clearContextUsage(id);
+    }
     const columns: Record<string, string> = { branch: 'branch', name: 'name', provider: 'provider', model: 'model', effort: 'effort', policy: 'policy', serviceTier: 'service_tier', status: 'status', error: 'error', providerSessionId: 'provider_session_id', handoffFromProvider: 'handoff_from_provider', handoffFromModel: 'handoff_from_model', handoffPendingAt: 'handoff_pending_at', inputTokens: 'input_tokens', outputTokens: 'output_tokens', costUsd: 'cost_usd', pinned: 'pinned', unread: 'unread' };
     // Organizing a session does not count as conversation activity or change its recency.
     const activityChanged = Object.entries(patch).some(([key, value]) => value !== undefined && key !== 'pinned' && key !== 'unread');
