@@ -1409,6 +1409,7 @@ export class SessionRuntime {
       result = this.compactionResult(session, 'failed', startedAt, checkpointId, 'The provider could not compact this conversation.', detail);
     }
 
+    if (result.status === 'completed') this.store.clearContextUsage(session.id);
     if (!lock.cleanupPending) await this.captureCheckpoint(session.id, `After manual context compaction (${result.status})`);
     const finishedAt = result.finishedAt;
     try {
