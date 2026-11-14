@@ -11,7 +11,7 @@ import {
   type ApprovalPrompt, type FileChangeSummary,
 } from './mapping.js';
 import {
-  autoCompactPercent, describeCodexCompaction, planCodexCompaction, rememberReportedWindow, reportedContextWindow, verifyCodexWindow,
+  autoCompactPercent, codexContextUsage, describeCodexCompaction, planCodexCompaction, rememberReportedWindow, reportedContextWindow, verifyCodexWindow,
   type CodexCompactionPlan,
 } from '../compaction.js';
 import { parseCodexModels, validateCodexEffort } from './capabilities.js';
@@ -456,6 +456,7 @@ class CodexRun {
       case 'thread/tokenUsage/updated':
         this.usage.update(params.tokenUsage);
         this.checkReportedWindow(params.tokenUsage);
+        { const context = codexContextUsage(params.tokenUsage); if (context) this.emit({ type: 'context.usage', ...context, estimated: true, source: 'codex' }); }
         break;
       case 'error': {
         const message = describeTurnError(params.error, 'Codex reported an error');
