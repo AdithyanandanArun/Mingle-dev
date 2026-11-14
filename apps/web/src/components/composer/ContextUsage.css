@@ -1,0 +1,24 @@
+.context-usage { display: grid; place-items: center; flex: none; width: 28px; height: 28px; padding: 0; border: 0; border-radius: 50%; background: transparent; color: var(--fg-2); cursor: pointer; }
+.context-usage:hover, .context-usage[aria-expanded='true'] { background: var(--bg-hover); color: var(--fg-0); }
+.context-usage:focus-visible { outline: 2px solid var(--accent-line); outline-offset: 2px; }
+.context-usage--warning, .context-usage--warning:hover { color: var(--warn); }
+.context-usage--danger, .context-usage--danger:hover { color: var(--err); }
+.context-usage circle { fill: none; stroke-width: 2; }
+.context-usage__track { stroke: var(--line-strong); }
+.context-usage__arc { stroke: currentColor; transition: stroke-dashoffset 220ms var(--ease-out), stroke 160ms; }
+.context-usage.is-compacting svg { animation: context-spin 1.2s linear infinite; }
+.context-details { position: fixed; z-index: 180; box-sizing: border-box; padding: 14px; overflow: auto; border: 1px solid var(--line-strong); border-radius: 12px; background: var(--bg-raised); color: var(--fg-1); box-shadow: var(--shadow-pop); font-size: 12px; line-height: 1.5; animation: context-details-in 160ms var(--ease-out) both; }
+.context-details strong { color: var(--fg-0); font-size: 13px; }
+.context-details p { margin: 7px 0; overflow-wrap: anywhere; }
+.context-details button { display: block; width: 100%; padding: 7px 10px; margin-top: 10px; border: 1px solid var(--line); border-radius: 7px; background: var(--bg-surface); color: var(--fg-0); font: inherit; cursor: pointer; }
+.context-details button:hover:not(:disabled) { background: var(--bg-hover); }
+.context-details button:disabled { opacity: .5; cursor: not-allowed; }
+.context-details button:focus-visible { outline: 2px solid var(--accent-line); outline-offset: 2px; }
+.context-details [role='alert'] { color: var(--err); }
+.context-details.is-closing { pointer-events: none; animation: context-details-out 160ms var(--ease-out) both; }
+.composer__mode-label:empty { display: none; }
+.composer__mode-label { color: var(--fg-2); font-size: 10px; white-space: nowrap; }
+@keyframes context-details-in { from { opacity: 0; transform: translateY(4px) scale(.98); } to { opacity: 1; transform: none; } }
+@keyframes context-details-out { to { opacity: 0; transform: translateY(3px) scale(.98); } }
+@keyframes context-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .context-usage__arc { transition: none; } .context-usage.is-compacting svg, .context-details, .context-details.is-closing { animation: none; } }
