@@ -5,6 +5,14 @@ const session = { id: 's', provider: 'codex', model: 'm', providerSessionId: 'na
 const reading = (usedTokens: number, contextWindow: number | null = 1000) => contextReading({ ...session,
   contextUsage: { provider: 'codex', model: 'm', providerSessionId: 'native', usedTokens, contextWindow, estimated: false, source: 'example', updatedAt: '2026-11-15T00:00:00Z' } });
 describe('context thresholds', () => {
+  it('disables native compaction until the selected conversation is available', () => {
+    expect(compactBlocker(null, false)).toContain('Select one');
+    expect(compactBlocker({ ...session, providerSessionId: null }, false)).toContain('Start a conversation');
+    expect(compactBlocker({ ...session, status: 'running' }, false)).toContain('Wait');
+    expect(compactBlocker({ ...session, provider: 'antigravity' }, false)).toContain('does not support');
+    expect(compactBlocker(session, true, 'Offline')).toBe('Offline');
+    expect(compactBlocker(session, false)).toBeNull();
+  });
   it('changes color strictly above the requested thresholds', () => {
     expect(contextTone(70)).toBe('neutral'); expect(contextTone(70.01)).toBe('warning');
     expect(contextTone(90)).toBe('warning'); expect(contextTone(90.01)).toBe('danger');
