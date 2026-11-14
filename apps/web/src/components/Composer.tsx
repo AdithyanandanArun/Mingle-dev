@@ -6,6 +6,8 @@ import { api, errorMessage, type ApiProviderFailure, type ProviderCatalog, type 
 import { MOD, PROVIDER_NAME, Badge } from './ui';
 import { cx } from '../lib/format';
 import { SelectMenu } from './SelectMenu';
+import { inferComposerIntent } from '../lib/composerIntent';
+import { ContextUsage } from './composer/ContextUsage';
 import { ModelPicker } from './ModelPicker';
 import { Popover } from './git/Popover';
 import { UsagePanel } from './UsagePanel';
@@ -78,15 +80,13 @@ export function Composer({ session, progressState, helperCount = 0 }: { session:
   const ref = useRef<HTMLTextAreaElement>(null);
   const compactController = useRef<{ controller: AbortController; targetSessionId: string; operationId: string } | null>(null);
   const [sending, setSending] = useState(false);
-  const [planningMode, setPlanningMode] = useState(false);
-  const [autonomousMode, setAutonomousMode] = useState(false);
+  const inferredIntent = inferComposerIntent(draft);
+  const planningMode = inferredIntent.intent === 'plan';
+  const autonomousMode = inferredIntent.intent === 'autonomous';
   const [workflowLimits, setWorkflowLimits] = useState<WorkflowLimits>({ maxTurns: 8, maxElapsedMinutes: 240, maxStalls: 2 });
   const workflow = useMingle((state) => state.boot?.workflows?.find((item) => item.sessionId === session.id));
   const workflowRunning = workflow?.state === 'running';
   const workflowOpen = workflowRunning || workflow?.state === 'paused';
-  useEffect(() => {
-    if (workflow?.state === 'paused' || workflow?.state === 'stopped') setAutonomousMode(false);
-  }, [workflow?.id, workflow?.state]);
   const canStartWorkflow = !session.parentSessionId && !session.id.startsWith('proxy_');
   const [compactStatus, setCompactStatus] = useState<{ status: 'running' | 'completed' | 'unsupported' | 'failed'; message?: string } | null>(null);
   const [updating, setUpdating] = useState(false);
@@ -186,7 +186,7 @@ export function Composer({ session, progressState, helperCount = 0 }: { session:
     el.style.height = '0px';
     el.style.height = `${Math.min(el.scrollHeight, 260)}px`;
   }, [draft, session.id]);
-  useEffect(() => { setError(null); setCompactStatus(null); setPlanningMode(false); setAutonomousMode(false); }, [session.id]);
+  useEffect(() => { setError(null); setCompactStatus(null); }, [session.id]);
   useEffect(() => {
     if (session.status !== 'error' || !session.error) {
       setProviderFailure(null);
@@ -322,12 +322,13 @@ export function Composer({ session, progressState, helperCount = 0 }: { session:
       if (session.provider === 'claude' && messageSkills.length > 1) {
         throw new Error('Claude accepts one selected skill per message. Remove the extra skill reference.');
       }
-      if (planningMode && (messageSkills.length || /^\s*\//.test(draft))) throw new Error('Native plan mode accepts a regular planning prompt, not provider commands or skills.');
+      const inferred = inferComposerIntent(draft);
+      if (inferred.intent === 'plan' && (messageSkills.length || /^\s*\//.test(inferred.content))) throw new Error('Native plan mode accepts a regular planning prompt, not provider commands or skills.');
       const submittedDraft = draft;
       const submittedAttachmentIds = attachments.map((item) => item.id);
       const submittedContextRefs = contextRefs;
       if (running) {
-        const response = await api.queueMessage(session.id,{content:draft.trim(),skills:messageSkills,attachmentIds:submittedAttachmentIds,contextRefs:submittedContextRefs,intent:planningMode?'plan':'normal',...(queueForNext?{queueOnly:true}:{}),...(excludeProjectMemory?{memory:'exclude'}:{})});
+        const response = await api.queueMessage(session.id,{content:inferred.content.trim(),skills:messageSkills,attachmentIds:submittedAttachmentIds,contextRefs:submittedContextRefs,intent:planningMode?'plan':'normal',...(queueForNext?{queueOnly:true}:{}),...(excludeProjectMemory?{memory:'exclude'}:{})});
         // A steered message already reached the running turn; only a queued one can be sent next.
         if (response.steered) useMingle.getState().toast('success', 'Sent to the running agent');
         else {
@@ -335,8 +336,8 @@ export function Composer({ session, progressState, helperCount = 0 }: { session:
         }
       } else if (autonomousMode && canStartWorkflow && !workflowOpen) {
         if (messageSkills.length || /^\s*\//.test(draft)) throw new Error('Start an autonomous goal with a regular request. Use Chat for native commands and skills.');
-        await api.startSessionWorkflow(session.id, { goal: draft.trim(), limits: workflowLimits, attachmentIds: submittedAttachmentIds, contextRefs: submittedContextRefs, ...(excludeProjectMemory?{memory:'exclude'}:{}) });
-      } else await api.sendMessage(session.id, draft.trim(), messageSkills, submittedAttachmentIds, submittedContextRefs, planningMode ? 'plan' : 'normal', excludeProjectMemory ? 'exclude' : undefined);
+        await api.startSessionWorkflow(session.id, { goal: inferred.content.trim(), limits: workflowLimits, attachmentIds: submittedAttachmentIds, contextRefs: submittedContextRefs, ...(excludeProjectMemory?{memory:'exclude'}:{}) });
+      } else await api.sendMessage(session.id, inferred.content.trim(), messageSkills, submittedAttachmentIds, submittedContextRefs, planningMode ? 'plan' : 'normal', excludeProjectMemory ? 'exclude' : undefined);
       if (useMingle.getState().drafts[session.id] === submittedDraft) {
         useMingle.getState().setDraft(session.id, '');
         try { clearDraftIfMatches(session.id, submittedDraft); } catch { /* The send succeeded; memory state is authoritative. */ }
@@ -345,7 +346,6 @@ export function Composer({ session, progressState, helperCount = 0 }: { session:
       attachmentDraft.sent(submittedAttachmentIds);
       setSelectedSkills([]);
       setMemoryExclusion({ sessionId: session.id, enabled: false });
-      setPlanningMode(false);
       await useMingle.getState().refreshNow();
     } catch (e) {
       setError(errorMessage(e));
@@ -635,14 +635,7 @@ export function Composer({ session, progressState, helperCount = 0 }: { session:
         {focused && trigger.startsWith('$') && !suggestions.length && !catalogError ? <div className="composer-picker-empty" role="status">{!catalog ? 'Loading skills…' : catalog.skills.some((item) => item.enabled) ? 'No matching skills.' : 'No skills are available for this provider and session.'}</div> : null}
         <div className="composer__bar">
           <div className="composer__controls" aria-busy={updating}>
-            <SelectMenu label="Conversation mode" className="composer__select composer__mode" placement="top"
-              value={workflowRunning || (autonomousMode && !workflowOpen) ? 'autonomous' : planningMode ? 'plan' : 'chat'} disabled={disabled || workflowRunning}
-              options={[
-                { value: 'chat', label: 'Chat', description: 'Send a request or follow-up in this conversation.' },
-                { value: 'plan', label: 'Plan', description: 'Ask for a native read-only plan.' },
-                ...(canStartWorkflow ? [{ value: 'autonomous', label: 'Autonomous', description: workflowOpen ? 'Resume or stop the existing goal above first.' : running ? 'Finish the active turn before starting a goal.' : 'Work toward a goal across turns within a budget.', disabled: Boolean(workflowOpen || running) }] : []),
-              ]}
-              onChange={(value) => { setPlanningMode(value === 'plan'); setAutonomousMode(value === 'autonomous'); if (value === 'plan') setSelectedSkills([]); setError(null); }} />
+            <span className="composer__mode-label" aria-live="polite">{workflowRunning ? 'Workflow running' : planningMode ? 'Plan · read-only' : autonomousMode ? 'Autonomous workflow' : ''}</span>
             {session.handoffFromProvider ? <Badge tone="info" title="No extra model call; context is included with your next message.">Handoff pending from {PROVIDER_NAME[session.handoffFromProvider]}</Badge> : null}
             <ModelPicker triggerRef={modelControl} openRequest={modelOpenRequest} className="composer__model-picker" label="Model"
               value={{ provider: session.provider, model: selectedModelId }} providers={providers ?? []}
@@ -657,6 +650,7 @@ export function Composer({ session, progressState, helperCount = 0 }: { session:
               title={`Advanced settings · ${combinedDisplay}${autonomousMode && !workflowOpen ? ` · up to ${workflowLimits.maxTurns} turns` : ''}`} onClick={() => setAdvancedOpen(value => !value)}><SlidersHorizontal size={14} /></button>
           </div>
           <div className="composer__send">
+            <ContextUsage session={session} disabled={disabled} disabledReason={blocker ?? undefined} />
             <button type="button" className="composer__context-button" onClick={() => openFilePicker()} disabled={!project || disabled} aria-label="Add workspace file context" title="Add a file from this worktree, or type @/path"><FilePlus2 size={15} /></button>
             <AttachmentDrafts scope={{ kind: 'session', id: session.id }} busy={attachmentDraft.busy} onFiles={attachmentDraft.addFiles} disabled={sending || updating || Boolean(blocker)} />
             {compactStatus?.status === 'running' ? (
