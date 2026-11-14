@@ -646,13 +646,15 @@ export class SessionRuntime {
         ? run.teamMcpConnection
         : run.intent !== 'plan' && groupContext ? this.teamMcp?.create(run.id, session, run.controller.signal, groupContext) : undefined;
       if (teamMcp) capabilityTokens.push(teamMcp.token);
-      const progressMcp = run.intent !== 'plan' ? this.progressMcp?.create({
+      const progressMcp = this.progressMcp?.create({
         runId: run.id, session, signal: run.controller.signal,
         isLive: () => this.isRunLive(run.sessionId, run.id),
         setStatus: (status) => this.setProgressStatus(run, status),
         updatePlan: (plan) => this.updateProgressPlan(run, plan),
+        requestUserInput: (request) => this.requestUserInput(run, request),
+        readOnly: run.intent === 'plan',
         ...(run.workflow ? { finishWorkflow: (report: WorkflowFinish) => this.recordWorkflowReport(run, report) } : {}),
-      }) : undefined;
+      });
       if (progressMcp) capabilityTokens.push(progressMcp.token);
       const subagentMcp = run.intent !== 'plan' && !session.parentSessionId && !this.groups?.forSession(session.id)
         ? this.subagentMcp?.create({runId:run.id,session,signal:run.controller.signal,live:()=>this.isRunLive(run.sessionId,run.id)}) : undefined;
@@ -669,7 +671,8 @@ export class SessionRuntime {
       const explicit = run.invocation;
       const providerHandoffBlock = await this.providerHandoffBlock(run, session);
       const progressInstructions = progressMcp
-        ? ['Mingle provides mingle_status_set for the live composer status and mingle_plan_update for a replaceable checklist. Keep them current during multi-step work, updating status as you make progress.',
+        ? [run.intent === 'plan' ? '' : 'Mingle provides mingle_status_set for the live composer status and mingle_plan_update for a replaceable checklist. Keep them current during multi-step work, updating status as you make progress.',
+          'Use mingle_request_user_input to ask focused clarifying questions whenever additional context is needed. Questions work in ordinary conversations as well as planning; do not switch modes just to ask.',
           run.workflow ? 'This turn belongs to a bounded Mingle goal. When the goal is finished, blocked, or needs a person, call mingle_workflow_finish once with outcome complete, blocked or needs_human and a short honest summary; ending a turn alone does not mean the goal is done.' : '',
         ].filter(Boolean).join(' ')
         : undefined;
