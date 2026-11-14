@@ -572,7 +572,7 @@ describe('autonomous single-session workflow', () => {
     await idle(h);
     h.t.app.runtime.start(h.sessionId, 'plain chat message', {});
     await waitFor(() => seen.length === 1, 5000, 'tool listing');
-    expect(seen[0]).toEqual(['mingle_status_set', 'mingle_plan_update']);
+    expect(seen[0]).toEqual(['mingle_status_set', 'mingle_plan_update', 'mingle_request_user_input']);
     expect(ordinary).toBeDefined();
     expect(h.service.get(h.sessionId)!.state).toBe('completed');
   });
