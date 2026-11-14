@@ -122,8 +122,8 @@ describe('built-in progress MCP', () => {
     t.fake.script = async (options) => { planningRun.resolve(options); };
     expect((await t.api('POST', `/api/sessions/${EXAMPLE_CONTRACT_SESSION_ID}/messages`, { content: 'Prepare a read-only plan.', intent: 'plan' })).status).toBe(202);
     const planOptions = await planningRun.promise;
-    expect(planOptions.progressMcp).toBeUndefined();
-    expect(planOptions.context).toBeUndefined();
+    expect(planOptions.progressMcp).toBeDefined();
+    expect(planOptions.context).toContain('mingle_request_user_input');
     expect(planOptions.prompt).not.toContain('mingle_status_set');
   });
 });
