@@ -63,6 +63,16 @@ const mapSession = (r: Row): Session => ({
   parentSessionId: (r.parent_session_id as string | null) ?? null,
   inputTokens: r.input_tokens as number, outputTokens: r.output_tokens as number, costUsd: (r.cost_usd as number | null) ?? null,
 });
+const mapSessionWithContext = (db: DatabaseSync, r: Row): Session => {
+  const session = mapSession(r);
+  const usage = db.prepare('SELECT * FROM session_context_usage WHERE session_id = ?').get(session.id) as Row | undefined;
+  if (usage && usage.provider === session.provider && usage.model === session.model && (usage.provider_session_id ?? null) === session.providerSessionId) {
+    session.contextUsage = { provider: usage.provider as Provider, model: usage.model as string, providerSessionId: (usage.provider_session_id as string | null) ?? null,
+      usedTokens: usage.used_tokens as number, contextWindow: (usage.context_window as number | null) ?? null, estimated: usage.estimated === 1,
+      source: usage.source as string, updatedAt: usage.updated_at as string };
+  }
+  return session;
+};
 const mapDelegated = (r: Row): DelegatedSubagent => ({ id:r.id as string,parentSessionId:r.parent_session_id as string,childSessionId:r.child_session_id as string,name:r.name as string,provider:r.provider as Provider,model:r.model as string,task:r.task as string,status:r.status as DelegatedSubagent['status'],requestedBy:r.requested_by as DelegatedSubagent['requestedBy'],startedAt:r.started_at as string,endedAt:(r.ended_at as string|null)??null,resultPreview:(r.result_preview as string|null)??null,error:(r.error as string|null)??null,resultDelivered:r.result_delivered===1 });
 const mapMessage = (r: Row): Message => {
   const message: Message = { id: r.id as string, sessionId: r.session_id as string, role: r.role as Message['role'], content: r.content as string, createdAt: r.created_at as string };
@@ -182,19 +192,34 @@ export class Store {
   }
   getSession(id: string, includeArchived = false): Session | undefined {
     const row = this.get(`SELECT * FROM sessions WHERE id = ? AND project_id IN (${VISIBLE_PROJECTS})${includeArchived ? '' : ' AND archived_at IS NULL'}`, id);
-    return row ? mapSession(row) : undefined;
+    return row ? mapSessionWithContext(this.db, row) : undefined;
   }
   listSessions(projectId?: string): Session[] {
     const rows = projectId
       ? this.all(`SELECT * FROM sessions WHERE id IN (${VISIBLE_SESSIONS}) AND project_id = ? ORDER BY created_at ASC, rowid ASC`, projectId)
       : this.all(`SELECT * FROM sessions WHERE id IN (${VISIBLE_SESSIONS}) ORDER BY created_at ASC, rowid ASC`);
-    return rows.map(mapSession);
+    return rows.map((row) => mapSessionWithContext(this.db, row));
   }
   insertDelegatedSubagent(input: DelegatedSubagent): DelegatedSubagent { this.run('INSERT INTO delegated_subagents(id,parent_session_id,child_session_id,name,provider,model,task,status,requested_by,started_at,ended_at,result_preview,error,result_delivered) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)',input.id,input.parentSessionId,input.childSessionId,input.name,input.provider,input.model,input.task,input.status,input.requestedBy,input.startedAt,input.endedAt,input.resultPreview,input.error,Number(input.resultDelivered));this.touch();return input; }
   updateDelegatedSubagent(id:string,patch:Partial<Pick<DelegatedSubagent,'status'|'endedAt'|'resultPreview'|'error'|'resultDelivered'>>):DelegatedSubagent { const fields:Record<string,string>={status:'status',endedAt:'ended_at',resultPreview:'result_preview',error:'error',resultDelivered:'result_delivered'};for(const [key,value] of Object.entries(patch)){const col=fields[key];if(col)this.run(`UPDATE delegated_subagents SET ${col}=? WHERE id=?`,key==='resultDelivered'?Number(value):value as string|null,id);}this.touch();const result=this.getDelegatedSubagent(id);if(!result)throw new Error('Subagent not found');return result; }
   getDelegatedSubagent(id:string):DelegatedSubagent|undefined { const row=this.get('SELECT * FROM delegated_subagents WHERE id=?',id);return row?mapDelegated(row):undefined; }
   listDelegatedSubagents(parentSessionId?:string):DelegatedSubagent[] { return (parentSessionId?this.all('SELECT * FROM delegated_subagents WHERE parent_session_id=? ORDER BY started_at,id',parentSessionId):this.all('SELECT * FROM delegated_subagents ORDER BY started_at,id')).map(mapDelegated); }
   lastAssistantMessage(sessionId:string):Message|undefined { const row=this.get("SELECT * FROM messages WHERE session_id=? AND role='assistant' ORDER BY seq DESC LIMIT 1",sessionId);return row?mapMessage(row):undefined; }
+  setContextUsage(sessionId: string, usage: Session['contextUsage']): Session {
+    const session = this.getSession(sessionId, true);
+    if (!session) throw new Error('Session not found');
+    if (!usage || !Number.isSafeInteger(usage.usedTokens) || usage.usedTokens < 0 ||
+      (usage.contextWindow !== null && (!Number.isSafeInteger(usage.contextWindow) || usage.contextWindow <= 0)) ||
+      typeof usage.estimated !== 'boolean' || !usage.source.trim() || usage.source.length > 100 || !Number.isFinite(Date.parse(usage.updatedAt)) ||
+      usage.provider !== session.provider || usage.model !== session.model || usage.providerSessionId !== session.providerSessionId) return session;
+    this.run(`INSERT INTO session_context_usage(session_id,provider,model,provider_session_id,used_tokens,context_window,estimated,source,updated_at)
+      VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(session_id) DO UPDATE SET provider=excluded.provider,model=excluded.model,
+      provider_session_id=excluded.provider_session_id,used_tokens=excluded.used_tokens,context_window=excluded.context_window,
+      estimated=excluded.estimated,source=excluded.source,updated_at=excluded.updated_at`, sessionId, usage.provider, usage.model,
+      usage.providerSessionId, usage.usedTokens, usage.contextWindow, Number(usage.estimated), usage.source, usage.updatedAt);
+    this.touch(sessionId);
+    return this.getSession(sessionId, true)!;
+  }
   updateSession(id: string, patch: Partial<Pick<Session, 'name' | 'provider' | 'model' | 'effort' | 'policy' | 'serviceTier' | 'status' | 'error' | 'providerSessionId' | 'handoffFromProvider' | 'handoffFromModel' | 'handoffPendingAt' | 'inputTokens' | 'outputTokens' | 'costUsd' | 'pinned' | 'unread' | 'branch'>>): Session {
     const columns: Record<string, string> = { branch: 'branch', name: 'name', provider: 'provider', model: 'model', effort: 'effort', policy: 'policy', serviceTier: 'service_tier', status: 'status', error: 'error', providerSessionId: 'provider_session_id', handoffFromProvider: 'handoff_from_provider', handoffFromModel: 'handoff_from_model', handoffPendingAt: 'handoff_pending_at', inputTokens: 'input_tokens', outputTokens: 'output_tokens', costUsd: 'cost_usd', pinned: 'pinned', unread: 'unread' };
     // Organizing a session does not count as conversation activity or change its recency.
