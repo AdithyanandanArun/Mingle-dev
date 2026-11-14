@@ -1,9 +1,9 @@
-import { createHash, randomBytes } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import { MinglePlanUpdateSchema, MingleStatusSetSchema, WorkflowFinishSchema } from '@mingle/contracts';
-import type { MinglePlanUpdate, MingleStatusSet, ProgressMcpConnection, Session, WorkflowFinish } from '@mingle/contracts';
+import { MinglePlanUpdateSchema, MingleRequestUserInputSchema, MingleStatusSetSchema, WorkflowFinishSchema } from '@mingle/contracts';
+import type { MinglePlanUpdate, MingleStatusSet, NativeUserInputRequest, ProgressMcpConnection, Session, UserInputAnswers, WorkflowFinish } from '@mingle/contracts';
 import type { Store } from './store.ts';
 import { errorMessage, redactSecrets, truncate } from './util.ts';
 
@@ -16,6 +16,8 @@ interface Binding {
   updatePlan: (plan: MinglePlanUpdate) => void;
   /** Present only for a run bound to an active workflow; its absence hides the finish tool entirely. */
   finishWorkflow?: (report: WorkflowFinish) => void;
+  requestUserInput?: (request: NativeUserInputRequest) => Promise<UserInputAnswers | null>;
+  readOnly?: boolean;
   revoked: boolean;
 }
 
@@ -34,6 +36,8 @@ export class ProgressMcpBridge {
     runId: string; session: Session; signal: AbortSignal; isLive: () => boolean;
     setStatus: (status: MingleStatusSet) => void; updatePlan: (plan: MinglePlanUpdate) => void;
     finishWorkflow?: (report: WorkflowFinish) => void;
+    requestUserInput?: (request: NativeUserInputRequest) => Promise<UserInputAnswers | null>;
+    readOnly?: boolean;
   }): ProgressMcpConnection {
     if (this.bindings.size >= 256) throw new Error('Too many active progress tool connections');
     const token = randomBytes(32).toString('base64url');
@@ -63,10 +67,10 @@ export class ProgressMcpBridge {
 
   private tools(binding: Binding, requestSignal: AbortSignal): McpServer {
     const server = new McpServer({ name: 'mingle-progress', version: '0.0.1' }, {
-      instructions: `${STATUS_INSTRUCTIONS} ${PLAN_INSTRUCTIONS}${binding.finishWorkflow ? ` ${FINISH_INSTRUCTIONS}` : ''}`,
+      instructions: `${binding.readOnly ? '' : `${STATUS_INSTRUCTIONS} ${PLAN_INSTRUCTIONS}${binding.finishWorkflow ? ` ${FINISH_INSTRUCTIONS}` : ''}`} ${binding.requestUserInput ? 'Ask clarifying questions through mingle_request_user_input whenever needed.' : ''}`,
     });
     const result = (text: string) => ({ content: [{ type: 'text' as const, text }] });
-    server.registerTool('mingle_status_set', {
+    if (!binding.readOnly) server.registerTool('mingle_status_set', {
       description: 'Set the current short status and optional detail shown in Mingle’s composer.',
       inputSchema: MingleStatusSetSchema,
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
@@ -80,7 +84,7 @@ export class ProgressMcpBridge {
         return { ...result(truncate(redactSecrets(errorMessage(error)), 500)), isError: true };
       }
     });
-    server.registerTool('mingle_plan_update', {
+    if (!binding.readOnly) server.registerTool('mingle_plan_update', {
       description: 'Replace the current Mingle plan checklist shown above the composer.',
       inputSchema: MinglePlanUpdateSchema,
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
@@ -94,7 +98,7 @@ export class ProgressMcpBridge {
         return { ...result(truncate(redactSecrets(errorMessage(error)), 500)), isError: true };
       }
     });
-    if (binding.finishWorkflow) {
+    if (binding.finishWorkflow && !binding.readOnly) {
       server.registerTool('mingle_workflow_finish', {
         description: 'Report that the current Mingle goal is complete, blocked, or needs a person. Call at most once, when you stop working on it.',
         inputSchema: WorkflowFinishSchema,
@@ -110,6 +114,21 @@ export class ProgressMcpBridge {
         }
       });
     }
+    if (binding.requestUserInput) server.registerTool('mingle_request_user_input', {
+      description: 'Ask the user focused clarifying questions and wait for their answers.',
+      inputSchema: MingleRequestUserInputSchema,
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+    }, async (args) => {
+      try {
+        this.ensure(binding, requestSignal);
+        const request: NativeUserInputRequest = { nativeRequestId: randomUUID(), tool: 'mingle_request_user_input', questions: MingleRequestUserInputSchema.parse(args).questions };
+        const answers = await binding.requestUserInput!(request);
+        this.ensure(binding, requestSignal);
+        return result(answers === null ? JSON.stringify({ cancelled: true }) : JSON.stringify(answers));
+      } catch (error) {
+        return { ...result(truncate(redactSecrets(errorMessage(error)), 500)), isError: true };
+      }
+    });
     return server;
   }
 

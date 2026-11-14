@@ -1,4 +1,10 @@
 import { z } from 'zod';
+import { UserInputFieldSchema } from './planning';
+
+export const MingleRequestUserInputSchema = z.object({
+  questions: z.array(UserInputFieldSchema).min(1).max(10),
+}).strict();
+export type MingleRequestUserInput = z.infer<typeof MingleRequestUserInputSchema>;
 
 export const MingleStatusProgressSchema = z.object({
   current: z.number().int().min(1).max(100_000), total: z.number().int().min(1).max(100_000),
