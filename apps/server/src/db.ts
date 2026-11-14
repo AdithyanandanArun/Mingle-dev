@@ -458,6 +458,12 @@ const MIGRATIONS: (string | ((db: DatabaseSync) => void))[] = [
       addColumn(db, 'queued_messages', 'subagent_id', 'ALTER TABLE queued_messages ADD COLUMN subagent_id TEXT');
     },
     (db) => addColumn(db, 'sessions', 'name_source', "ALTER TABLE sessions ADD COLUMN name_source TEXT NOT NULL DEFAULT 'legacy' CHECK (name_source IN ('automatic','manual','legacy','pending'))"),
+    `CREATE TABLE IF NOT EXISTS session_context_usage (
+      session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+      provider TEXT NOT NULL, model TEXT NOT NULL, provider_session_id TEXT,
+      used_tokens REAL NOT NULL CHECK(used_tokens >= 0), context_window REAL CHECK(context_window IS NULL OR context_window > 0),
+      estimated INTEGER NOT NULL CHECK(estimated IN (0,1)), source TEXT NOT NULL, updated_at TEXT NOT NULL
+    );`,
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;
