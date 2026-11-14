@@ -9,6 +9,8 @@ import {
   MODE_LABEL, ROLE_LABEL, activeMembers, defaultRecipients, isBusy, maskNonActionable, providerAvailability, providerName, resolveMentions, retiredHandles, type MentionCandidate,
 } from '../../lib/groups';
 import { MOD } from '../ui';
+import { inferComposerIntent } from '../../lib/composerIntent';
+import { ContextUsage } from '../composer/ContextUsage';
 import { Popover } from '../git/Popover';
 import { UsagePanel } from '../UsagePanel';
 import { AgentIdentity } from './AgentIdentity';
@@ -55,10 +57,11 @@ export function GroupComposer({ snapshot, anchor, onOpenMembers, footer }: { sna
   const pickerId = useId();
   const pendingId = useRef<{ key: string; id: string } | null>(null);
   const [picked, setPicked] = useState<string[]>([]);
-  const [planningMode, setPlanningMode] = useState(false);
+  const inferredIntent = inferComposerIntent(draft);
+  const planningMode = inferredIntent.intent === 'plan';
   const [attachments, setAttachments] = useState<AttachmentRef[]>([]);
   const [filePickerOpen, setFilePickerOpen] = useState(false);
-  useEffect(() => { setAttachments([]); setCompactStatus(null); setPlanningMode(false); }, [snapshot.group.id]);
+  useEffect(() => { setAttachments([]); setCompactStatus(null); }, [snapshot.group.id]);
   const [filePickerQuery, setFilePickerQuery] = useState('');
   const [filePickerSessionId, setFilePickerSessionId] = useState(anchor.id);
   const fileMentionTrigger = useRef<FileMentionTrigger | null>(null);
@@ -365,7 +368,8 @@ export function GroupComposer({ snapshot, anchor, onOpenMembers, footer }: { sna
     if (fresh.problems.length) { setError(fresh.problems[0]!.message); return; }
     const targets = members.filter((member) => pickedActive.includes(member.id) || fresh.ids.includes(member.id));
     const ids = (targets.length ? targets : defaults).map((member) => member.id);
-    const content = draft.trim();
+    const content = inferredIntent.content.trim();
+    if (inferredIntent.intent === 'autonomous') { setError('Autonomous workflows are available only in standalone sessions.'); return; }
     const actionMatch = /^\s*(?:@([A-Za-z0-9_-]+)\s+)?([/$])([A-Za-z0-9][A-Za-z0-9_.:-]*)(?:\s+([\s\S]*))?$/.exec(content);
     // Prose may contain paths or shell variables; only leading syntax, optionally after mentions, is an action.
     const actionToken = /^\s*(?:@[A-Za-z0-9_-]+(?:\s*,\s*|\s+))*([/$])([A-Za-z0-9][A-Za-z0-9_.:-]*)(?:\s|$)/.exec(content);
@@ -401,7 +405,6 @@ export function GroupComposer({ snapshot, anchor, onOpenMembers, footer }: { sna
       if (store.drafts[anchor.id] === draft) setDraft('');
       if (store.contextDrafts[anchor.id] === submittedContextRefs) store.setContextDraft(anchor.id, []);
       setPicked([]);
-      setPlanningMode(false);
       attachmentDraft.sent(attachments.map((item) => item.id));
       pendingId.current = null;
       await store.refreshNow();
@@ -518,11 +521,10 @@ export function GroupComposer({ snapshot, anchor, onOpenMembers, footer }: { sna
         </div> : null}
         <div className="composer__bar">
           <div className="composer__controls">
-            <button type="button" className={cx('composer__plan-toggle', planningMode && 'is-active')} aria-pressed={planningMode} disabled={sending} title="Ask one group agent for a native read-only plan" onClick={() => { setPlanningMode((value) => !value); setSelectedNativeAction(null); setError(null); }}>
-              {planningMode ? 'Planning on' : 'Plan'}
-            </button>
+            <span className="composer__mode-label" aria-live="polite">{planningMode ? 'Plan · read-only' : ''}</span>
           </div>
           <div className="composer__send">
+            <ContextUsage session={recipients.length === 1 ? sessionOf(recipients[0]!.sessionId) ?? null : null} disabled={sending || connection !== 'online'} disabledReason={blocker ?? undefined} />
             <button type="button" className="composer__context-button" onClick={() => openFilePicker()} disabled={sending || connection !== 'online'} aria-label="Add workspace file context" title="Add a file from the targeted worktree, or type @/path"><FilePlus2 size={15} /></button>
             <AttachmentDrafts scope={{ kind: 'group', id: snapshot.group.id }} busy={attachmentDraft.busy} onFiles={attachmentDraft.addFiles} disabled={sending || Boolean(blocker)} />
             {compactStatus?.status === 'running' ? <button type="button" className="sendbtn sendbtn--stop" onClick={stopCompaction} aria-label="Request cancellation of this compaction" title="Stop waiting and send a cancellation request"><Square size={12} fill="currentColor" /></button> :
