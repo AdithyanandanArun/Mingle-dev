@@ -27,8 +27,14 @@ export interface Session {
   providerSessionId: string | null; createdAt: string; updatedAt: string; error: string | null;
   handoffFromProvider?: Provider | null; handoffFromModel?: string | null; handoffPendingAt?: string | null;
   isolationNotice?: string;
+  /** Latest native estimate of context occupancy for this provider conversation. */
+  contextUsage?: SessionContextUsage;
   inputTokens: number; outputTokens: number; costUsd: number | null;
   pinned: boolean; unread: boolean;
+}
+export interface SessionContextUsage {
+  usedTokens: number; contextWindow: number | null; estimated: boolean; source: string; updatedAt: string;
+  provider: Provider; model: string; providerSessionId: string | null;
 }
 export type RunStatus = 'running' | 'completed' | 'failed' | 'interrupted';
 export type ToolCategory = 'command' | 'browser' | 'search' | 'file' | 'agent' | 'other';
@@ -279,6 +285,7 @@ export type AdapterEvent =
   | { type: 'tool.output'; id: string; delta: string }
   | { type: 'subagent.text'; parentId: string; messageId: string; text: string }
   | { type: 'usage'; inputTokens: number; outputTokens: number; costUsd: number | null }
+  | { type: 'context.usage'; usedTokens: number; contextWindow: number | null; estimated: boolean; source: string }
   | { type: 'info'; content: string };
 export interface AgentAdapter {
   run(options: RunOptions): Promise<void>;
