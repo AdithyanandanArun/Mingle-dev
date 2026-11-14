@@ -63,9 +63,9 @@ const mapSession = (r: Row): Session => ({
   parentSessionId: (r.parent_session_id as string | null) ?? null,
   inputTokens: r.input_tokens as number, outputTokens: r.output_tokens as number, costUsd: (r.cost_usd as number | null) ?? null,
 });
-const mapSessionWithContext = (db: DatabaseSync, r: Row): Session => {
+const mapSessionWithContext = (db: DatabaseSync, r: Row, context?: Row | null): Session => {
   const session = mapSession(r);
-  const usage = db.prepare('SELECT * FROM session_context_usage WHERE session_id = ?').get(session.id) as Row | undefined;
+  const usage = context === undefined ? db.prepare('SELECT * FROM session_context_usage WHERE session_id = ?').get(session.id) as Row | undefined : context;
   if (usage && usage.provider === session.provider && usage.model === session.model && (usage.provider_session_id ?? null) === session.providerSessionId) {
     session.contextUsage = { provider: usage.provider as Provider, model: usage.model as string, providerSessionId: (usage.provider_session_id as string | null) ?? null,
       usedTokens: usage.used_tokens as number, contextWindow: (usage.context_window as number | null) ?? null, estimated: usage.estimated === 1,
@@ -198,7 +198,8 @@ export class Store {
     const rows = projectId
       ? this.all(`SELECT * FROM sessions WHERE id IN (${VISIBLE_SESSIONS}) AND project_id = ? ORDER BY created_at ASC, rowid ASC`, projectId)
       : this.all(`SELECT * FROM sessions WHERE id IN (${VISIBLE_SESSIONS}) ORDER BY created_at ASC, rowid ASC`);
-    return rows.map((row) => mapSessionWithContext(this.db, row));
+    const contexts = new Map(this.all(`SELECT * FROM session_context_usage WHERE session_id IN (${VISIBLE_SESSIONS})`).map(row => [row.session_id as string, row]));
+    return rows.map((row) => mapSessionWithContext(this.db, row, contexts.get(row.id as string) ?? null));
   }
   insertDelegatedSubagent(input: DelegatedSubagent): DelegatedSubagent { this.run('INSERT INTO delegated_subagents(id,parent_session_id,child_session_id,name,provider,model,task,status,requested_by,started_at,ended_at,result_preview,error,result_delivered) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)',input.id,input.parentSessionId,input.childSessionId,input.name,input.provider,input.model,input.task,input.status,input.requestedBy,input.startedAt,input.endedAt,input.resultPreview,input.error,Number(input.resultDelivered));this.touch();return input; }
   updateDelegatedSubagent(id:string,patch:Partial<Pick<DelegatedSubagent,'status'|'endedAt'|'resultPreview'|'error'|'resultDelivered'>>):DelegatedSubagent { const fields:Record<string,string>={status:'status',endedAt:'ended_at',resultPreview:'result_preview',error:'error',resultDelivered:'result_delivered'};for(const [key,value] of Object.entries(patch)){const col=fields[key];if(col)this.run(`UPDATE delegated_subagents SET ${col}=? WHERE id=?`,key==='resultDelivered'?Number(value):value as string|null,id);}this.touch();const result=this.getDelegatedSubagent(id);if(!result)throw new Error('Subagent not found');return result; }
