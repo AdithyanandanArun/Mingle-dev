@@ -21,6 +21,19 @@ const send = async (t: TestApp, emit: (event: any) => void) => {
 };
 
 describe('provider context usage', () => {
+  it('invalidates occupancy after automatic compaction without inventing an empty context', async () => {
+    const t = await boot();
+    await send(t, emit => {
+      emit({ type: 'session', providerSessionId: 'native-auto-compact' });
+      emit({ type: 'context.usage', usedTokens: 950, contextWindow: 1000, estimated: true, source: 'provider' });
+      emit({ type: 'context.reset' });
+    });
+    expect(await getSession(t)).not.toHaveProperty('contextUsage');
+    const snapshot = await t.api('GET', `/api/sessions/${EXAMPLE_CONTRACT_SESSION_ID}/snapshot`);
+    expect(snapshot.status).toBe(200);
+    expect(JSON.stringify(snapshot.json)).not.toContain('native-auto-compact-context-0');
+    expect(t.app.store.getSession(EXAMPLE_CONTRACT_SESSION_ID)?.contextUsage).toBeUndefined();
+  });
   it('stores native context usage separately from cumulative totals and exposes it in snapshots', async () => {
     const t = await boot();
     await send(t, emit => {
