@@ -910,6 +910,16 @@ export class SessionRuntime {
           this.store.touch(run.sessionId);
           break;
         }
+        case 'context.usage': {
+          const session = this.store.getSession(run.sessionId);
+          if (!session || !session.providerSessionId || run.controller.signal.aborted) break;
+          this.store.setContextUsage(session.id, {
+            usedTokens: event.usedTokens, contextWindow: event.contextWindow, estimated: event.estimated,
+            source: event.source, updatedAt: nowIso(), provider: session.provider, model: session.model,
+            providerSessionId: session.providerSessionId,
+          });
+          break;
+        }
         case 'usage': {
           // Usage events are treated as run-cumulative snapshots on top of the totals at run start.
           const input = Math.max(0, Math.floor(event.inputTokens || 0));
