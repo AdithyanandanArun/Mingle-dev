@@ -389,7 +389,11 @@ class OpencodeRun {
         this.fail('OpenCode changed the selected reasoning effort during the run. Mingle stopped the turn rather than continuing with a different variant.', 'effort_substitution');
       }
     }
-    // Reasoning chunks are provider-private. usage_update.used is context size, not token usage.
+    else if (kind === 'usage_update') {
+      const used = update.used; const size = update.size;
+      if (typeof used === 'number' && Number.isSafeInteger(used) && used >= 0 && (size === undefined || (typeof size === 'number' && Number.isSafeInteger(size) && size > 0)))
+        this.emit({ type: 'context.usage', usedTokens: used, contextWindow: typeof size === 'number' ? size : null, estimated: false, source: 'opencode' });
+    }
   }
 
   private parentLaunchFor(data: Record<string, unknown>, update: Record<string, unknown>): string | undefined {
