@@ -6,6 +6,7 @@ import { bundledClaudeCandidates, resolveExecutableCached, type ResolveResult } 
 import { ClaudeMessageMapper, claudePermissionMode, describeToolUse, previewInput } from './messages.js';
 import { claudeEnvironment } from './auth.js';
 import { autoCompactPercent, claudeCompactEnv, describeClaudeCompaction } from '../compaction.js';
+import { claudeContextWindow, claudeRequestContext } from '../context-usage.js';
 import { base64Of, fileNote, filesOf, imageMime, imagesOf, invocationText, NO_TEXT_PROMPT } from '../attachments.js';
 
 export type QueryFn = (params: { prompt: string; options: Options }) => Query | AsyncGenerator<unknown, void>;
@@ -227,6 +228,8 @@ export function createClaudeAdapter(deps: ClaudeAdapterDeps = {}): AgentAdapter 
             throw new ProviderError(`Claude Code could not enable requested fast mode${reason}.`, { code: 'fast_mode_unavailable' });
           }
         }
+        let latestContext: ReturnType<typeof claudeRequestContext> = null;
+        let contextWindow: number | null = null;
         for await (const message of stream) {
           if (session.providerSessionId && isRecord(message) && message.type === 'system' && message.subtype === 'init' && !message.parent_tool_use_id &&
             typeof message.session_id === 'string' && message.session_id !== session.providerSessionId) {
@@ -235,6 +238,11 @@ export function createClaudeAdapter(deps: ClaudeAdapterDeps = {}): AgentAdapter 
           }
           const compaction = describeClaudeCompaction(message, compactPercent);
           if (compaction) emit({ type: 'info', content: compaction });
+          const requestContext = claudeRequestContext(message);
+          if (requestContext) latestContext = requestContext;
+          const reportedWindow = claudeContextWindow(message, latestContext?.model ?? null);
+          if (reportedWindow) contextWindow = reportedWindow;
+          if (latestContext && (requestContext || reportedWindow)) emit({ type: 'context.usage', usedTokens: latestContext.usedTokens, contextWindow, estimated: true, source: 'claude-latest-input' });
           mapper.handle(message);
           if (signal.aborted) break;
         }
