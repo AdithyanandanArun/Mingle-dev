@@ -37,6 +37,23 @@ describe('provider context usage', () => {
     expect((await t.api('POST', `/api/sessions/${id}/compact`, {})).json.status).toBe('completed');
     expect(t.app.store.getSession(id)?.contextUsage).toBeUndefined();
   });
+  it.each([true, false])('retains only post-boundary context reports after compaction (boundary=%s)', async boundary => {
+    const t = await boot();
+    const id = EXAMPLE_CONTRACT_SESSION_ID;
+    t.app.store.updateSession(id, { providerSessionId: 'native-compact-report' });
+    const original = t.fake.createAdapter.bind(t.fake);
+    t.fake.createAdapter = provider => ({ ...original(provider), compact: async ({ session, onContextEvent }) => {
+      onContextEvent?.({ type: 'context.usage', usedTokens: 900, contextWindow: 1000, estimated: true, source: 'provider' });
+      if (boundary) {
+        onContextEvent?.({ type: 'context.reset' });
+        onContextEvent?.({ type: 'context.usage', usedTokens: 200, contextWindow: 1000, estimated: true, source: 'provider' });
+      }
+      return { sessionId: session.id, provider: session.provider, status: 'completed', message: 'Example compact', error: null, startedAt: new Date().toISOString(), finishedAt: new Date().toISOString(), checkpointId: null };
+    } });
+    expect((await t.api('POST', `/api/sessions/${id}/compact`, {})).json.status).toBe('completed');
+    expect(t.app.store.getSession(id)?.contextUsage?.usedTokens).toBe(boundary ? 200 : undefined);
+  });
+
   it('invalidates occupancy after automatic compaction without inventing an empty context', async () => {
     const t = await boot();
     await send(t, emit => {

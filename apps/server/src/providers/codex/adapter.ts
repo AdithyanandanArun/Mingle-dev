@@ -89,7 +89,7 @@ export function createCodexAdapter(deps: CodexAdapterDeps = {}): AgentAdapter {
       await activeRun.steer(text);
     },
     isSteerable(): boolean { return activeRun?.isSteerable() ?? false; },
-    async compact({ session, settings, signal }): Promise<ContextCompactionResult> {
+    async compact({ session, settings, signal, onContextEvent }): Promise<ContextCompactionResult> {
       const startedAt = new Date().toISOString();
       const result = (status: ContextCompactionResult['status'], message: string, error: string | null): ContextCompactionResult => ({
         sessionId: session.id, provider: 'codex', status, startedAt, finishedAt: new Date().toISOString(), checkpointId: null,
@@ -99,7 +99,7 @@ export function createCodexAdapter(deps: CodexAdapterDeps = {}): AgentAdapter {
       if (signal.aborted) return result('failed', 'Codex compaction was interrupted before it started.', 'interrupted');
       const resolved = await resolveBinary(settings, env);
       if (!resolved.ok) return result('failed', resolved.reason, resolved.reason);
-      const options: RunOptions = { session, prompt: '', settings, signal, onEvent: () => undefined, requestApproval: async () => false };
+      const options: RunOptions = { session, prompt: '', settings, signal, onEvent: event => { if (event.type === 'context.usage' || event.type === 'context.reset') onContextEvent?.(event); }, requestApproval: async () => false };
       try {
         await new CodexRun(options, resolved.executable.path, { env, timeouts, spawn: deps.spawn ?? defaultSpawn, version: deps.clientVersion ?? CODEX_CLIENT_INFO.version }).execute('compact');
         return result('completed', 'Codex compacted the native conversation.', null);
@@ -122,6 +122,7 @@ class CodexRun {
   private conn!: JsonRpcConnection;
   private child!: ChildLike;
   private threadId: string | null = null;
+  private setupContext: Record<string, unknown> | null = null;
   private turnId: string | null = null;
   private omitEffort = false;
   private compaction: CodexCompactionPlan | null = null;
@@ -338,6 +339,8 @@ class CodexRun {
       this.info(`Codex is using model ${result.model} although ${session.model} was requested.`);
     }
     this.emit({ type: 'session', providerSessionId: id });
+    if (this.setupContext?.threadId === id) this.recordContext(this.setupContext.tokenUsage);
+    this.setupContext = null;
   }
 
   private async startTurn(): Promise<void> {
@@ -401,6 +404,11 @@ class CodexRun {
 
   // ---- notifications -------------------------------------------------------------------------------------------
 
+  private recordContext(tokenUsage: unknown): void {
+    const context = codexContextUsage(tokenUsage);
+    if (context) this.emit({ type: 'context.usage', ...context, estimated: true, source: 'codex' });
+  }
+
   private isOurThread(params: Record<string, unknown>): boolean {
     return typeof params.threadId !== 'string' || params.threadId === this.threadId;
   }
@@ -413,7 +421,12 @@ class CodexRun {
       if (text) this.info(`Codex warning: ${text}`);
       return;
     }
-    if (this.phase === 'setup') return;
+    if (this.phase === 'setup') {
+      // Resume can publish occupancy before its response establishes the thread identity.
+      if (method === 'thread/tokenUsage/updated' && typeof params.threadId === 'string'
+        && params.threadId === this.options.session.providerSessionId) this.setupContext = params;
+      return;
+    }
     if (this.phase === 'compact') {
       // Compact success must be tied to this exact resumed thread; legacy broadcasts without identity are not evidence.
       if (!this.compactRequestSent || typeof params.threadId !== 'string' || params.threadId !== this.threadId) return;
@@ -456,7 +469,7 @@ class CodexRun {
       case 'thread/tokenUsage/updated':
         this.usage.update(params.tokenUsage);
         this.checkReportedWindow(params.tokenUsage);
-        { const context = codexContextUsage(params.tokenUsage); if (context) this.emit({ type: 'context.usage', ...context, estimated: true, source: 'codex' }); }
+        this.recordContext(params.tokenUsage);
         break;
       case 'error': {
         const message = describeTurnError(params.error, 'Codex reported an error');
@@ -550,6 +563,7 @@ class CodexRun {
           if (!this.compactItemsStarted.has(id)
             || (startedTurnId !== null && turnId !== null && startedTurnId !== turnId)
             || (turnId !== null && this.compactTurnIds.size > 0 && !this.compactTurnIds.has(turnId))) return;
+          this.emit({ type: 'context.reset' });
           this.compactItemsCompleted.add(id);
           this.confirmCompaction();
         }

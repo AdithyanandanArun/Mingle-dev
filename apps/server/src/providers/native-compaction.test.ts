@@ -110,6 +110,19 @@ function codexSession() {
 }
 
 describe('native manual compaction adapters', () => {
+  it('forwards context boundary and subsequent occupancy from native compaction', async () => {
+    const events: unknown[] = [];
+    const { adapter } = codexHarness((message, runtime) => {
+      if (message.method !== 'thread/compact/start') return;
+      runtime.reply(message, { accepted: true });
+      codexCompactionEvents(runtime, CODEX_THREAD, 'compact-turn', 'compact-item');
+      runtime.notify('thread/tokenUsage/updated', { threadId: CODEX_THREAD, tokenUsage: { last: { totalTokens: 200 }, modelContextWindow: 1000 } });
+    });
+    const result = await adapter.compact!({ session: codexSession(), settings, signal: new AbortController().signal, onContextEvent: event => events.push(event) });
+    expect(result.status).toBe('completed');
+    expect(events).toEqual([{ type: 'context.reset' }, { type: 'context.usage', usedTokens: 200, contextWindow: 1000, estimated: true, source: 'codex' }]);
+  });
+
   it('Codex completes only after a fresh matching contextCompaction item starts and completes', async () => {
     const { adapter, child } = codexHarness((message, runtime) => {
       if (message.method === 'thread/compact/start') {

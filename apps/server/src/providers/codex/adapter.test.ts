@@ -38,6 +38,25 @@ function setup(onMessage: NonNullable<FakeChildOptions['onMessage']>, childOptio
 const completed = (status = 'completed', error?: unknown) => ({ threadId: 'thr_1', turn: { id: 'turn_1', status, items: [], error } });
 
 describe('codex adapter', () => {
+  it('keeps a matching context report received while resuming before the response', async () => {
+    const run = makeRun({ session: { providerSessionId: 'thr_1' } });
+    const handshake = server((message, c) => {
+      if (message.method === 'turn/start') c.notify('turn/completed', completed());
+    });
+    const { adapter } = setup((message, c) => {
+      if (message.method === 'thread/resume') {
+        c.notify('thread/tokenUsage/updated', { threadId: 'thr_1', tokenUsage: { last: { totalTokens: 1234 }, modelContextWindow: 10000 } });
+        c.notify('thread/tokenUsage/updated', { threadId: 'other', tokenUsage: { last: { totalTokens: 9999 }, modelContextWindow: 10000 } });
+      }
+      handshake(message, c);
+    });
+    await adapter.run(run.options);
+    expect(run.events.filter(e => e.type === 'context.usage')).toEqual([
+      { type: 'context.usage', usedTokens: 1234, contextWindow: 10000, estimated: true, source: 'codex' },
+    ]);
+    expect(run.events.findIndex(e => e.type === 'session')).toBeLessThan(run.events.findIndex(e => e.type === 'context.usage'));
+  });
+
   it('runs a full turn: handshake, policy, streaming text, tools, approvals and usage', async () => {
     const run = makeRun({ session: { policy: 'balanced', effort: 'medium' }, prompt: 'Fix the bug' });
     const { child, adapter, spawned } = setup(server((message, c) => {

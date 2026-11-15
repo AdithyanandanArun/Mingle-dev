@@ -294,7 +294,7 @@ export interface AgentAdapter {
   steer?(text: string): Promise<void>;
   isSteerable?(): boolean;
   /** Explicit native context compaction, when supported; unsupported runtimes leave history untouched. */
-  compact?(options: { session: Session; settings: AppSettings; signal: AbortSignal }): Promise<ContextCompactionResult>;
+  compact?(options: { session: Session; settings: AppSettings; signal: AbortSignal; onContextEvent?: (event: Extract<AdapterEvent, { type: "context.usage" | "context.reset" }>) => void }): Promise<ContextCompactionResult>;
 }
 
 /**

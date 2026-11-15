@@ -1332,6 +1332,8 @@ export class SessionRuntime {
     let checkpointId: string | null = null;
     let result: ContextCompactionResult;
     let native: Promise<ContextCompactionResult> | null = null;
+    let compactedUsage: Extract<AdapterEvent, { type: 'context.usage' }> | null = null;
+    let contextReset = false;
     try {
       if (session.provider === 'antigravity') {
         result = this.compactionResult(session, 'unsupported', startedAt, null, 'Antigravity does not expose a client-requested native context compaction operation.', 'Native compaction is unsupported for Antigravity.');
@@ -1369,7 +1371,11 @@ export class SessionRuntime {
                 result = this.compactionResult(session, 'unsupported', startedAt, checkpointId, reason, reason);
               } else {
                 if (lock.controller.signal.aborted) throw new Error('Compaction was interrupted before native work began.');
-                native = Promise.resolve(adapter.compact({ session: currentSession, settings: this.store.getSettings(), signal: lock.controller.signal }));
+                native = Promise.resolve(adapter.compact({ session: currentSession, settings: this.store.getSettings(), signal: lock.controller.signal, onContextEvent: event => {
+                  if (lock.controller.signal.aborted) return;
+                  if (event.type === 'context.reset') { contextReset = true; compactedUsage = null; }
+                  else if (contextReset) compactedUsage = event;
+                } }));
                 native.catch(() => undefined);
                 const outcome = await this.waitForCompaction(native, lock.controller.signal);
                 if (outcome.kind === 'grace') {
@@ -1412,7 +1418,14 @@ export class SessionRuntime {
       result = this.compactionResult(session, 'failed', startedAt, checkpointId, 'The provider could not compact this conversation.', detail);
     }
 
-    if (result.status === 'completed') this.store.clearContextUsage(session.id);
+    if (result.status === 'completed') {
+      this.store.clearContextUsage(session.id);
+      // Only readings emitted after the native compaction boundary describe the new history.
+      if (compactedUsage) this.store.setContextUsage(session.id, {
+        ...(compactedUsage as Extract<AdapterEvent, { type: 'context.usage' }>),
+        provider: session.provider, model: session.model, providerSessionId: session.providerSessionId, updatedAt: nowIso(),
+      });
+    }
     if (!lock.cleanupPending) await this.captureCheckpoint(session.id, `After manual context compaction (${result.status})`);
     const finishedAt = result.finishedAt;
     try {
