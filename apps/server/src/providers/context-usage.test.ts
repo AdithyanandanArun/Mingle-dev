@@ -2,6 +2,13 @@ import { describe, expect, it } from 'vitest';
 import { acpContextUsage, claudeContextWindow, claudeRequestContext } from './context-usage.js';
 
 describe('native context readings', () => {
+  it('accepts only a capacity reported for the exact Claude request model', () => {
+    const result = { type: 'result', modelUsage: { example: { inputTokens: 999999, contextWindow: 1000 } } };
+    expect(claudeContextWindow(result, 'example')).toBe(1000);
+    expect(claudeContextWindow(result, 'other')).toBeNull();
+    expect(claudeContextWindow({ ...result, modelUsage: { example: { contextWindow: Infinity } } }, 'example')).toBeNull();
+    expect(claudeContextWindow({ type: 'assistant', modelUsage: result.modelUsage }, 'example')).toBeNull();
+  });
   it('reads ACP occupancy without substituting billing totals', () => {
     expect(acpContextUsage({ sessionUpdate: 'usage_update', used: 725, size: 1000 })).toEqual({ usedTokens: 725, contextWindow: 1000 });
     expect(acpContextUsage({ sessionUpdate: 'usage_update', used: 0 })).toEqual({ usedTokens: 0, contextWindow: null });
