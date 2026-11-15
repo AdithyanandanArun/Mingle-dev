@@ -51,7 +51,7 @@ const NATIVE_HOLDER = 'desktop-native';
 
 export function BrowserPane({ session, active, popout = false }: { session: Session; active: boolean; popout?: boolean }) {
   const [expanded, setExpanded] = useState(false);
-  const [floating, setFloating] = useState(false);
+  const [floating, setFloating] = useState(true);
   const [detached, setDetached] = useState(false);
   const visible = active || expanded || floating;
   const { state, error: stateError, apply, refresh } = useBrowserState(session.id, visible);
