@@ -323,6 +323,12 @@ export function Composer({ session, progressState, helperCount = 0 }: { session:
         throw new Error('Claude accepts one selected skill per message. Remove the extra skill reference.');
       }
       const inferred = inferComposerIntent(draft);
+      if (inferred.intent === 'autonomous' && !workflowRunning) {
+        if (!canStartWorkflow) throw new Error('Autonomous goals are available only in standalone sessions.');
+        if (workflowOpen) throw new Error('Resume or stop the paused goal before starting a new autonomous request.');
+        if (running) throw new Error('Finish the current turn before starting an autonomous goal.');
+      }
+      if (inferred.intent === 'plan' && !inferred.content.trim()) throw new Error('Describe what you want planned.');
       if (inferred.intent === 'plan' && (messageSkills.length || /^\s*\//.test(inferred.content))) throw new Error('Native plan mode accepts a regular planning prompt, not provider commands or skills.');
       const submittedDraft = draft;
       const submittedAttachmentIds = attachments.map((item) => item.id);
