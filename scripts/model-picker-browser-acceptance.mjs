@@ -132,6 +132,11 @@ try {
   await modelTrigger.click();
   await picker.waitFor();
   await page.waitForFunction(() => document.activeElement?.getAttribute('aria-label') === 'Search models');
+  await page.waitForFunction(() => {
+    const node = document.querySelector('.model-picker__popup');
+    const bounds = node?.getBoundingClientRect();
+    return bounds && bounds.x >= 0 && bounds.right <= innerWidth && node.getAttribute('aria-hidden') !== 'true';
+  });
   const box = await picker.boundingBox();
   assert.ok(box, 'picker is visible at narrow viewport width');
   assert.ok(box.x >= 0 && box.x + box.width <= 360, `picker should be horizontally clamped: ${JSON.stringify(box)}`);
