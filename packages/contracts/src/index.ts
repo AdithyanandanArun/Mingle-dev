@@ -286,6 +286,7 @@ export type AdapterEvent =
   | { type: 'subagent.text'; parentId: string; messageId: string; text: string }
   | { type: 'usage'; inputTokens: number; outputTokens: number; costUsd: number | null }
   | { type: 'context.usage'; usedTokens: number; contextWindow: number | null; estimated: boolean; source: string }
+  | { type: 'context.reset' }
   | { type: 'info'; content: string };
 export interface AgentAdapter {
   run(options: RunOptions): Promise<void>;

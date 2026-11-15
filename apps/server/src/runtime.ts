@@ -910,6 +910,9 @@ export class SessionRuntime {
           this.store.touch(run.sessionId);
           break;
         }
+        case 'context.reset':
+          this.store.clearContextUsage(run.sessionId);
+          break;
         case 'context.usage': {
           const session = this.store.getSession(run.sessionId);
           if (!session || !session.providerSessionId || run.controller.signal.aborted) break;
