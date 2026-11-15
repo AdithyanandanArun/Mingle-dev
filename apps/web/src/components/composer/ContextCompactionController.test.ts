@@ -11,6 +11,19 @@ function fixture() {
   return { controller, compact, cancel, refresh, finish: (value = result()) => finish(value) };
 }
 describe('native context compaction', () => {
+  it('retains a confirmed outcome if bootstrap refresh fails', async () => {
+    const controller = new ContextCompactionController('one', {
+      compact: async () => result(), cancel: async () => ({ interrupted: false }),
+      refresh: async () => { throw new Error('Offline'); }, newId: () => 'refresh-failure',
+    });
+    await controller.start(); expect(controller.snapshot().status).toBe('completed');
+  });
+  it('reports unsupported providers and mismatched native responses honestly', async () => {
+    const unsupported = new ContextCompactionController('one', { compact: async () => result('unsupported'), cancel: async () => ({ interrupted: false }), refresh: async () => {}, newId: () => 'unsupported' });
+    await unsupported.start(); expect(unsupported.snapshot().status).toBe('unsupported');
+    const mismatch = new ContextCompactionController('one', { compact: async () => ({ ...result(), sessionId: 'two' }), cancel: async () => ({ interrupted: false }), refresh: async () => {}, newId: () => 'mismatch' });
+    await mismatch.start(); expect(mismatch.snapshot()).toMatchObject({ status: 'failed', message: 'Compaction returned a different conversation.' });
+  });
   it('serializes duplicate clicks and refreshes after real completion', async () => {
     const f = fixture(); const pending = f.controller.start();
     await f.controller.start(); expect(f.compact).toHaveBeenCalledTimes(1);
