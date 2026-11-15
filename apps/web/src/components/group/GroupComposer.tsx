@@ -369,7 +369,8 @@ export function GroupComposer({ snapshot, anchor, onOpenMembers, footer }: { sna
     const targets = members.filter((member) => pickedActive.includes(member.id) || fresh.ids.includes(member.id));
     const ids = (targets.length ? targets : defaults).map((member) => member.id);
     const content = inferredIntent.content.trim();
-    if (inferredIntent.intent === 'autonomous') { setError('Autonomous workflows are available only in standalone sessions.'); return; }
+    // The existing group coordinator owns continuation; do not create a standalone goal or reject ordinary group instructions.
+    if (planningMode && !content) { setError('Describe what you want planned.'); return; }
     const actionMatch = /^\s*(?:@([A-Za-z0-9_-]+)\s+)?([/$])([A-Za-z0-9][A-Za-z0-9_.:-]*)(?:\s+([\s\S]*))?$/.exec(content);
     // Prose may contain paths or shell variables; only leading syntax, optionally after mentions, is an action.
     const actionToken = /^\s*(?:@[A-Za-z0-9_-]+(?:\s*,\s*|\s+))*([/$])([A-Za-z0-9][A-Za-z0-9_.:-]*)(?:\s|$)/.exec(content);
