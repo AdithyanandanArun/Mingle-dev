@@ -553,7 +553,10 @@ class CodexRun {
           this.compactItemsCompleted.add(id);
           this.confirmCompaction();
         }
-      } else if (phase === 'completed') this.emit({ type: 'info', content: describeCodexCompaction(this.compaction) });
+      } else if (phase === 'completed') {
+        this.emit({ type: 'context.reset' });
+        this.emit({ type: 'info', content: describeCodexCompaction(this.compaction) });
+      }
       return;
     }
     this.mapSubagentThreads(item);

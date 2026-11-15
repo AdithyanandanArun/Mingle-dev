@@ -238,8 +238,15 @@ export function createClaudeAdapter(deps: ClaudeAdapterDeps = {}): AgentAdapter 
           }
           const compaction = describeClaudeCompaction(message, compactPercent);
           if (compaction) emit({ type: 'info', content: compaction });
+          if (isRecord(message) && message.type === 'system' && message.subtype === 'compact_boundary') {
+            latestContext = null;
+            emit({ type: 'context.reset' });
+          }
           const requestContext = claudeRequestContext(message);
-          if (requestContext) latestContext = requestContext;
+          if (requestContext) {
+            if (requestContext.model !== latestContext?.model) contextWindow = null;
+            latestContext = requestContext;
+          }
           const reportedWindow = claudeContextWindow(message, latestContext?.model ?? null);
           if (reportedWindow) contextWindow = reportedWindow;
           if (latestContext && (requestContext || reportedWindow)) emit({ type: 'context.usage', usedTokens: latestContext.usedTokens, contextWindow, estimated: true, source: 'claude-latest-input' });
