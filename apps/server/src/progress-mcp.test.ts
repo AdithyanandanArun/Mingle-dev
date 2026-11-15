@@ -76,6 +76,9 @@ describe('built-in progress MCP', () => {
     expect(runB.progressMcp?.token).not.toBe(runA.progressMcp?.token);
     expect(runA.context).toContain('mingle_status_set');
     expect(runA.context).toContain('mingle_plan_update');
+    expect(runA.browserMcp).toBeDefined();
+    expect(runA.context).toContain('When an app has a web version');
+    expect(runA.context).toContain('built-in browser tools');
     const clientA = await connect(runA.progressMcp!);
     const clientB = await connect(runB.progressMcp!);
 

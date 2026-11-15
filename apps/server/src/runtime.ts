@@ -676,15 +676,16 @@ export class SessionRuntime {
           run.workflow ? 'This turn belongs to a bounded Mingle goal. When the goal is finished, blocked, or needs a person, call mingle_workflow_finish once with outcome complete, blocked or needs_human and a short honest summary; ending a turn alone does not mean the goal is done.' : '',
         ].filter(Boolean).join(' ')
         : undefined;
+      const browserInstructions = browserMcp ? 'When an app has a web version, use Mingle’s built-in browser tools to test the affected web behavior. Start with browser_status, then open the local web app and verify the change. Respect human browser control; report unavailable browser access or checks you could not perform.' : undefined;
       const subagentInstructions=subagentMcp?'Mingle provides subagent tools for parallel self-contained tasks. Start them, continue your work, and finish your turn when ready; Mingle will resume you with each result automatically.':'';
       let effectivePrompt = explicit ? prompt : [providerHandoffBlock, run.intent !== 'plan' ? groupContext?.instructions : undefined, run.context, prompt].filter(Boolean).join('\n\n');
-      if (explicit && (providerHandoffBlock || progressInstructions || subagentInstructions || memoryContext)) run.context = [providerHandoffBlock, progressInstructions, subagentInstructions, memoryContext, run.context].filter(Boolean).join('\n\n');
+      if (explicit && (providerHandoffBlock || progressInstructions || browserInstructions || subagentInstructions || memoryContext)) run.context = [providerHandoffBlock, progressInstructions, browserInstructions, subagentInstructions, memoryContext, run.context].filter(Boolean).join('\n\n');
       if (explicit && groupContext) run.context = [run.context, groupContext.instructions].filter(Boolean).join('\n\n');
       const stagedAttachments = this.attachmentService && run.attachmentOwnerId
         ? await this.attachmentService.stage(run.id, run.attachmentOwnerKind ?? 'message', run.attachmentOwnerId)
         : [];
       if (run.controller.signal.aborted) throw conflict('The run was interrupted before the provider started.');
-      let injectedContext = [explicit ? run.context : undefined, progressInstructions, subagentInstructions, explicit ? undefined : memoryContext].filter(Boolean).join('\n\n');
+      let injectedContext = [explicit ? run.context : undefined, progressInstructions, browserInstructions, subagentInstructions, explicit ? undefined : memoryContext].filter(Boolean).join('\n\n');
       if (run.workflow?.retryOfRunId && run.workflow.replayPrompt !== undefined && run.workflow.replayContext !== undefined) {
         effectivePrompt = run.workflow.replayPrompt;
         injectedContext = run.workflow.replayContext;
