@@ -132,14 +132,19 @@ export function ModelPicker({
   useLayoutEffect(() => {
     if (!effectiveOpen || !anchor.current || !popup.current) return;
     const rect = anchor.current.getBoundingClientRect();
-    const width = Math.min(444, window.innerWidth - 20);
+    const viewport = window.visualViewport;
+    const viewportLeft = viewport?.offsetLeft ?? 0;
+    const viewportTop = viewport?.offsetTop ?? 0;
+    const viewportWidth = viewport?.width ?? window.innerWidth;
+    const viewportHeight = viewport?.height ?? window.innerHeight;
+    const width = Math.max(0, Math.min(444, viewportWidth - 20));
     popup.current.style.width = `${width}px`;
     const previousMaxHeight = popup.current.style.maxHeight;
     popup.current.style.maxHeight = 'none';
     const contentHeight = popup.current.scrollHeight;
     popup.current.style.maxHeight = previousMaxHeight;
-    const availableAbove = Math.max(0, rect.top - 12);
-    const availableBelow = Math.max(0, window.innerHeight - rect.bottom - 12);
+    const availableAbove = Math.max(0, rect.top - viewportTop - 12);
+    const availableBelow = Math.max(0, viewportTop + viewportHeight - rect.bottom - 12);
     const useTop = placement === 'top'
       ? availableAbove >= Math.min(300, availableBelow) || availableBelow < 280
       : availableBelow < Math.min(300, availableAbove);
@@ -147,8 +152,8 @@ export function ModelPicker({
     const maxHeight = Math.max(160, Math.min(440, available));
     const height = Math.min(contentHeight, maxHeight);
     setPosition({
-      left: Math.max(10, Math.min(rect.left, window.innerWidth - width - 10)),
-      top: useTop ? Math.max(10, rect.top - height - 8) : Math.min(window.innerHeight - height - 10, rect.bottom + 8),
+      left: Math.max(viewportLeft + 10, Math.min(rect.left, viewportLeft + viewportWidth - width - 10)),
+      top: useTop ? Math.max(viewportTop + 10, rect.top - height - 8) : Math.min(viewportTop + viewportHeight - height - 10, rect.bottom + 8),
       width,
       maxHeight,
     });
@@ -182,10 +187,14 @@ export function ModelPicker({
     document.addEventListener('pointerdown', outside);
     window.addEventListener('resize', reposition);
     window.addEventListener('scroll', reposition, true);
+    window.visualViewport?.addEventListener('resize', reposition);
+    window.visualViewport?.addEventListener('scroll', reposition);
     return () => {
       document.removeEventListener('pointerdown', outside);
       window.removeEventListener('resize', reposition);
       window.removeEventListener('scroll', reposition, true);
+      window.visualViewport?.removeEventListener('resize', reposition);
+      window.visualViewport?.removeEventListener('scroll', reposition);
     };
   }, [effectiveOpen]);
 
@@ -329,7 +338,7 @@ export function ModelPicker({
       else if (triggerRef) triggerRef.current = element;
     }} type="button" role="combobox" aria-label={label} aria-haspopup="listbox" aria-expanded={effectiveOpen}
       aria-controls={effectiveOpen ? listId : undefined} className={cx('model-picker__trigger', className)} disabled={disabled || catalogProviders.length === 0}
-      title={triggerTitle} onClick={() => effectiveOpen ? close(false) : show()}
+      title={triggerTitle ?? `${selectedModelName} · ${providerName(currentProvider, value.provider)}`} onClick={() => effectiveOpen ? close(false) : show()}
       onKeyDown={(event) => {
         if (event.key === 'ArrowDown' || event.key === 'ArrowUp' || event.key === 'Enter' || event.key === ' ') {
           event.preventDefault();
@@ -343,7 +352,10 @@ export function ModelPicker({
     </button>
     {present ? createPortal(
       <div ref={popup} role="dialog" aria-label="Choose a model" aria-hidden={closing || undefined} inert={closing}
-        className={cx('model-picker__popup', closing && 'is-closing')} style={position ?? {}} onKeyDown={keyDown}>
+        className={cx('model-picker__popup', closing && 'is-closing')} style={position ? {
+          ...position,
+          '--model-picker-origin': `${position.top < (anchor.current?.getBoundingClientRect().top ?? 0) ? 'bottom' : 'top'} ${position.left > (anchor.current?.getBoundingClientRect().left ?? 0) + 20 ? 'right' : 'left'}`,
+        } as React.CSSProperties : { visibility: 'hidden' }} onKeyDown={keyDown}>
         <div className="model-picker__rail" role="tablist" aria-label="Providers">
           {catalogProviders.map((provider) => {
             const locked = lockProvider && provider.id !== value.provider;

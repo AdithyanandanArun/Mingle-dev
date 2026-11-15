@@ -36,7 +36,7 @@
   color: var(--fg-0);
   box-shadow: var(--shadow-pop);
   animation: model-picker-in var(--motion-overlay, 160ms) var(--ease-out) both;
-  transform-origin: bottom left;
+  transform-origin: var(--model-picker-origin, bottom left);
 }
 .model-picker__popup.is-closing { pointer-events: none; animation: model-picker-out var(--motion-overlay, 160ms) var(--ease-out) both; }
 .model-picker__rail {
@@ -139,7 +139,8 @@
 .model-picker__foot button { padding: 2px 4px; border: 0; background: transparent; color: var(--blue-strong); font-size: 10px; }
 .model-picker__foot button:hover { text-decoration: underline; }
 
-.composer__model-picker { width: min(240px, 40vw); min-height: 30px; padding: 3px 7px; border-color: transparent; background: transparent; font-size: var(--text-xs); }
+.composer__model-picker { width: fit-content; max-width: min(160px, 44vw); min-width: 0; min-height: 30px; padding: 3px 7px; border-color: transparent; background: transparent; font-size: var(--text-xs); }
+.composer__model-picker .model-picker__trigger-copy { max-width: min(126px, 34vw); }
 .composer__model-picker:hover:not(:disabled), .composer__model-picker[aria-expanded='true'] { background: var(--bg-hover); border-color: var(--line); }
 .composer__model-picker .model-picker__trigger-copy > small { font-size: 9px; }
 .cfg__model-picker { width: 100%; justify-content: space-between; }

@@ -53,7 +53,7 @@ function Fixture() {
     </header>
     <form onSubmit={(event) => { event.preventDefault(); setSubmitted((count) => count + 1); }}><section className="model-fixture__card" aria-labelledby="unlocked-heading">
       <h2 id="unlocked-heading">Provider switching and catalog search</h2>
-      <ModelPicker label="Model" value={selection} providers={fixtureProviders} onChange={setSelection} />
+      <ModelPicker label="Model" value={selection} providers={fixtureProviders} onChange={setSelection} className="composer__model-picker" />
       <p id="model-fixture-selection" role="status">{selection.provider} · {selection.model}</p>
       <output id="model-fixture-submits">Composer submits: {submitted}</output>
     </section></form>

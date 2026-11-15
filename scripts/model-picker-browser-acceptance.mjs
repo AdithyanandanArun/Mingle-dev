@@ -46,9 +46,12 @@ try {
   await page.getByRole('heading', { name: 'Model picker acceptance' }).waitFor();
 
   const modelTrigger = page.getByRole('combobox', { name: 'Model', exact: true });
+  const triggerWidth = await modelTrigger.evaluate((trigger) => trigger.getBoundingClientRect().width);
+  assert.ok(triggerWidth <= 170, `composer trigger should remain content-sized and capped: ${triggerWidth}px`);
   await modelTrigger.click();
   const picker = page.getByRole('dialog', { name: 'Choose a model' });
   await picker.waitFor();
+  assert.ok((await picker.boundingBox())?.width > triggerWidth * 2, 'popup width is independent of the compact composer trigger');
   await page.waitForFunction(() => document.activeElement?.getAttribute('aria-label') === 'Search models');
   assert.equal(await page.evaluate(() => document.activeElement?.getAttribute('aria-label')), 'Search models', 'opening a large catalog focuses its search field');
   const selected = picker.getByRole('option', { name: /Fixture Codex Search Model 04/ });
@@ -124,6 +127,8 @@ try {
   await page.keyboard.press('Escape');
 
   await page.setViewportSize({ width: 360, height: 800 });
+  const narrowTriggerWidth = await modelTrigger.evaluate((trigger) => trigger.getBoundingClientRect().width);
+  assert.ok(narrowTriggerWidth <= 170, `composer trigger stays capped on narrow screens: ${narrowTriggerWidth}px`);
   await modelTrigger.click();
   await picker.waitFor();
   await page.waitForFunction(() => document.activeElement?.getAttribute('aria-label') === 'Search models');
