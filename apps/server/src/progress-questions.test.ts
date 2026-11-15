@@ -7,7 +7,7 @@ import { deferred, startTestApp, waitFor, type TestApp } from './test-utils.ts';
 
 const apps: TestApp[] = [];
 const clients: Client[] = [];
-const gates: Array<ReturnType<typeof deferred>> = [];
+const gates: Array<ReturnType<typeof deferred<void>>> = [];
 afterEach(async () => {
   while (gates.length) gates.pop()!.resolve(undefined);
   while (clients.length) await clients.pop()!.close();
