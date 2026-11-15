@@ -21,6 +21,22 @@ const send = async (t: TestApp, emit: (event: any) => void) => {
 };
 
 describe('provider context usage', () => {
+  it('clears a context reading only after successful manual native compaction', async () => {
+    const t = await boot();
+    const id = EXAMPLE_CONTRACT_SESSION_ID;
+    t.app.store.updateSession(id, { providerSessionId: 'native-manual' });
+    const s = t.app.store.getSession(id)!;
+    const usage = { provider: s.provider, model: s.model, providerSessionId: s.providerSessionId, usedTokens: 900, contextWindow: 1000, estimated: true, source: 'provider', updatedAt: new Date().toISOString() };
+    t.app.store.setContextUsage(id, usage);
+    const original = t.fake.createAdapter.bind(t.fake);
+    let status: 'completed' | 'failed' = 'failed';
+    t.fake.createAdapter = provider => ({ ...original(provider), compact: async ({ session }) => ({ sessionId: session.id, provider: session.provider, status, message: 'Example compact outcome', error: status === 'failed' ? 'Example failure' : null, startedAt: new Date().toISOString(), finishedAt: new Date().toISOString(), checkpointId: null }) });
+    expect((await t.api('POST', `/api/sessions/${id}/compact`, {})).json.status).toBe('failed');
+    expect(t.app.store.getSession(id)?.contextUsage?.usedTokens).toBe(900);
+    status = 'completed';
+    expect((await t.api('POST', `/api/sessions/${id}/compact`, {})).json.status).toBe('completed');
+    expect(t.app.store.getSession(id)?.contextUsage).toBeUndefined();
+  });
   it('invalidates occupancy after automatic compaction without inventing an empty context', async () => {
     const t = await boot();
     await send(t, emit => {
