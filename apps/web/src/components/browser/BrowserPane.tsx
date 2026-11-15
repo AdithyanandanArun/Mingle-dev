@@ -51,9 +51,16 @@ const NATIVE_HOLDER = 'desktop-native';
 
 export function BrowserPane({ session, active, popout = false }: { session: Session; active: boolean; popout?: boolean }) {
   const [expanded, setExpanded] = useState(false);
-  const [floating, setFloating] = useState(true);
+  const [floating, setFloating] = useState(false);
   const [detached, setDetached] = useState(false);
   const visible = active || expanded || floating;
+  useEffect(() => {
+    const onOpened = (event: Event) => {
+      if ((event as CustomEvent<{ sessionId?: string }>).detail?.sessionId === session.id) setFloating(true);
+    };
+    window.addEventListener('mingle:browser-opened', onOpened);
+    return () => window.removeEventListener('mingle:browser-opened', onOpened);
+  }, [session.id]);
   const { state, error: stateError, apply, refresh } = useBrowserState(session.id, visible);
   const selectedId = useBrowserStore((s) => s.selected[session.id]);
   const current = resolveTab(state, selectedId);

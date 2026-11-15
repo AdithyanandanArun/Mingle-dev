@@ -64,7 +64,7 @@ export function ContextPane() {
       <div className="context__body">
         {TABS.map(({ id }) => (
           <div key={id} role="tabpanel" id={`ctx-panel-${id}`} aria-labelledby={`ctx-tab-${id}`} hidden={tab !== id} className="context__panel">
-            {visited.has(id) ? (
+            {id === 'browser' || visited.has(id) ? (
               <Boundary label={`${id[0]!.toUpperCase()}${id.slice(1)}`}>
                 {id === 'overview' ? <Overview /> : id === 'files' ? <Files active={tab === id} /> : id === 'changes' ? <Changes active={tab === id} /> : id === 'memory' ? <ProjectMemory active={tab === id && open} /> : <Browser active={tab === id && open} />}
               </Boundary>
