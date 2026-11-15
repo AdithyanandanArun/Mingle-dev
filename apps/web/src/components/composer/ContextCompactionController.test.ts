@@ -11,6 +11,18 @@ function fixture() {
   return { controller, compact, cancel, refresh, finish: (value = result()) => finish(value) };
 }
 describe('native context compaction', () => {
+  it('ignores a late cancellation acknowledgement after native completion', async () => {
+    let finish!: (value: ContextCompactionResult) => void;
+    let acknowledge!: (value: { interrupted: boolean }) => void;
+    const controller = new ContextCompactionController('one', {
+      compact: () => new Promise(resolve => { finish = resolve; }),
+      cancel: () => new Promise(resolve => { acknowledge = resolve; }), refresh: async () => {}, newId: () => 'late-cancel',
+    });
+    const running = controller.start(); const cancelling = controller.cancel();
+    finish(result()); await running;
+    acknowledge({ interrupted: true }); await cancelling;
+    expect(controller.snapshot()).toMatchObject({ status: 'completed', cancelling: false, message: 'Native result' });
+  });
   it('retains a confirmed outcome if bootstrap refresh fails', async () => {
     const controller = new ContextCompactionController('one', {
       compact: async () => result(), cancel: async () => ({ interrupted: false }),
