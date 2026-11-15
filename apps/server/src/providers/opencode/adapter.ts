@@ -1,3 +1,4 @@
+import { acpContextUsage } from '../context-usage.js';
 import type { AdapterEvent, AgentAdapter, ContextCompactionResult, Policy, RunOptions, ToolActivity, ToolCategory } from '@mingle/contracts';
 import { ProviderError, abortError, errorMessage, isRecord, markDispatched, markNotDispatched, redactSecrets, truncate } from '../common.js';
 import { nativePlanSteps, sessionPlanSteps } from '../plans.js';
@@ -390,9 +391,8 @@ class OpencodeRun {
       }
     }
     else if (kind === 'usage_update') {
-      const used = update.used; const size = update.size;
-      if (typeof used === 'number' && Number.isSafeInteger(used) && used >= 0 && (size === undefined || (typeof size === 'number' && Number.isSafeInteger(size) && size > 0)))
-        this.emit({ type: 'context.usage', usedTokens: used, contextWindow: typeof size === 'number' ? size : null, estimated: false, source: 'opencode' });
+      const context = acpContextUsage(update);
+      if (context) this.emit({ type: 'context.usage', ...context, estimated: false, source: 'opencode' });
     }
   }
 

@@ -1,3 +1,4 @@
+import { acpContextUsage } from '../context-usage.js';
 import type { AdapterEvent, AgentAdapter, ContextCompactionResult, RunOptions, ToolActivity, ToolCategory } from '@mingle/contracts';
 import { ProviderError, abortError, isRecord, markDispatched, markNotDispatched, redactSecrets, truncate } from '../common.js';
 import { nativePlanSteps, sessionPlanSteps } from '../plans.js';
@@ -248,9 +249,8 @@ class AntigravityRun {
       if (mode !== undefined && mode !== this.expectedMode) this.fail('Antigravity changed the selected permission mode during the run. Mingle stopped the turn.', 'permission_mode_changed');
     } else if (kind === 'current_mode_update' && update.currentModeId !== this.expectedMode) this.fail('Antigravity changed the selected permission mode during the run. Mingle stopped the turn.', 'permission_mode_changed');
     else if (kind === 'usage_update') {
-      const used = update.used; const size = update.size;
-      if (typeof used === 'number' && Number.isSafeInteger(used) && used >= 0 && (size === undefined || (typeof size === 'number' && Number.isSafeInteger(size) && size > 0)))
-        this.emit({ type: 'context.usage', usedTokens: used, contextWindow: typeof size === 'number' ? size : null, estimated: false, source: 'antigravity' });
+      const context = acpContextUsage(update);
+      if (context) this.emit({ type: 'context.usage', ...context, estimated: false, source: 'antigravity' });
     }
   }
 
