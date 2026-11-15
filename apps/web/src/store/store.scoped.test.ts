@@ -96,6 +96,19 @@ afterEach(() => {
 });
 
 describe('scoped session refresh', () => {
+  it('opens the active browser surface without opening or changing the context sidebar', async () => {
+    const { useMingle: store, win, emit } = await startStore(workspace());
+    store.setState({ view: 'workspace', activeProjectId: 'p', sessionByProject: { p: 'a' }, contextOpen: false, contextTab: 'files' });
+    const opened = vi.fn();
+    win.addEventListener('mingle:browser-opened', opened);
+    emit({ type: 'browser.opened', sessionId: 'a', tabId: 'tab_123456789abc' });
+    expect(opened).toHaveBeenCalledTimes(1);
+    expect(store.getState().contextOpen).toBe(false);
+    expect(store.getState().contextTab).toBe('files');
+    emit({ type: 'browser.opened', sessionId: 'b', tabId: 'tab_123456789abc' });
+    expect(opened).toHaveBeenCalledTimes(1);
+  });
+
   it('refreshes a confined event through that session\'s snapshot only, keeping every other reference', async () => {
     const boot = workspace();
     const { useMingle: store, scoped, settle } = await startStore(boot);
