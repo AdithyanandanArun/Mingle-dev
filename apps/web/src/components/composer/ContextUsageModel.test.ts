@@ -5,6 +5,17 @@ const session = { id: 's', provider: 'codex', model: 'm', providerSessionId: 'na
 const reading = (usedTokens: number, contextWindow: number | null = 1000) => contextReading({ ...session,
   contextUsage: { provider: 'codex', model: 'm', providerSessionId: 'native', usedTokens, contextWindow, estimated: false, source: 'example', updatedAt: '2026-11-15T00:00:00Z' } });
 describe('context thresholds', () => {
+  it('rejects readings from a different provider, model or native conversation', () => {
+    const valid = { ...session, contextUsage: { provider: session.provider, model: session.model, providerSessionId: session.providerSessionId, usedTokens: 750, contextWindow: 1000, estimated: true, source: 'example', updatedAt: '2026-11-15T00:00:00Z' } };
+    for (const patch of [{ model: 'other' }, { providerSessionId: 'other' }, { provider: 'claude' as const }]) {
+      expect(contextReading({ ...valid, contextUsage: { ...valid.contextUsage, ...patch } }).percent).toBeNull();
+    }
+    expect(contextReading(valid).label).toContain('Estimated');
+  });
+  it('does not render malformed counts as a percentage', () => {
+    for (const tokens of [NaN, Infinity, -1, .1, Number.MAX_SAFE_INTEGER + 1]) expect(reading(tokens).percent).toBeNull();
+    for (const capacity of [NaN, Infinity, -1, 0, .1]) expect(reading(10, capacity).percent).toBeNull();
+  });
   it('disables native compaction until the selected conversation is available', () => {
     expect(compactBlocker(null, false)).toContain('Select one');
     expect(compactBlocker({ ...session, providerSessionId: null }, false)).toContain('Start a conversation');
