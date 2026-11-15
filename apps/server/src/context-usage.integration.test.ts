@@ -47,7 +47,7 @@ describe('provider context usage', () => {
     expect(await getSession(t)).not.toHaveProperty('contextUsage');
     const snapshot = await t.api('GET', `/api/sessions/${EXAMPLE_CONTRACT_SESSION_ID}/snapshot`);
     expect(snapshot.status).toBe(200);
-    expect(JSON.stringify(snapshot.json)).not.toContain('native-auto-compact-context-0');
+    expect(snapshot.json.session).not.toHaveProperty('contextUsage');
     expect(t.app.store.getSession(EXAMPLE_CONTRACT_SESSION_ID)?.contextUsage).toBeUndefined();
   });
   it('stores native context usage separately from cumulative totals and exposes it in snapshots', async () => {
@@ -62,6 +62,17 @@ describe('provider context usage', () => {
     expect(s.outputTokens).toBe(5);
     expect(s.contextUsage).toMatchObject({ usedTokens: 321, contextWindow: 1000, estimated: false, source: 'provider', providerSessionId: 'native-context-1' });
     expect((await t.api('GET', '/api/bootstrap')).json.sessions.find((x: any) => x.id === s.id).contextUsage).toEqual(s.contextUsage);
+    expect((await t.api('GET', `/api/sessions/${s.id}/snapshot`)).json.session.contextUsage).toEqual(s.contextUsage);
+  });
+  it('retains the latest reported context across a local server restart', async () => {
+    const t = await boot({ keepData: true });
+    await send(t, emit => {
+      emit({ type: 'session', providerSessionId: 'native-restarted' });
+      emit({ type: 'context.usage', usedTokens: 701, contextWindow: 1000, estimated: true, source: 'example' });
+    });
+    await t.app.close();
+    const reopened = await boot({ dataDir: t.dataDir, detectOnStart: false });
+    expect((await getSession(reopened)).contextUsage).toMatchObject({ usedTokens: 701, providerSessionId: 'native-restarted' });
   });
 
   it('leaves context usage absent when the provider reports no native reading', async () => {
