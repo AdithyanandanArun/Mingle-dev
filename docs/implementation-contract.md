@@ -65,6 +65,20 @@ OpenCode: the fourth independent provider uses the user's `opencode acp` executa
 
 ## Run and tool activity
 
+### Conversation context occupancy
+
+`Session.contextUsage` is an optional latest native reading, separate from cumulative input/output usage. It records provider, model, native conversation ID, used tokens, nullable reported capacity, source, estimation flag and report time. Additive migration 36 stores it in `session_context_usage`; bootstrap and per-session snapshots hydrate only readings matching the current identity. Invalid numbers are ignored. Changing model/provider/native identity deletes the reading so switching back cannot resurrect it.
+
+Codex reports its latest-request token estimate; Claude combines the latest main-agent input and cache input, using a capacity only when the SDK reports it for that same model. Both are explicitly estimates. ACP `usage_update` reports occupancy and optional capacity for OpenCode/Antigravity. Unknown capacity never becomes a guessed percentage. Completed native automatic/manual compaction invalidates old readings; a failed manual compact retains them. Native billing totals are never substituted for occupancy.
+
+The composer ring is neutral through 70%, yellow strictly above 70%, and red strictly above 90%. Hover or keyboard activation opens percentage/token details and native compact controls. Only one selected conversation can be compacted, with existing busy/owner/native-history/provider guards. Requests carry operation IDs; cancellation addresses that exact operation and waits for cleanup. Unsent text and attachments are not consumed. Provider failures and unsupported operations remain explicit.
+
+### Automatic composer intent and questions
+
+The composer no longer requires Chat/Autonomous/Plan selection. A local conservative classifier recognizes explicit planning directives (including `/plan`) and explicit keep-working/autonomous goals; ordinary messages, quoted/code text and provider commands stay ordinary. Planning remains native read-only and still requires approval before execution. Standalone autonomy uses existing budgets and lifecycle controls, never silently replacing a paused goal. Group planning still targets exactly one agent and group coordination remains separate. Ambiguous phrasing stays normal chat; no extra classifier inference runs.
+
+Normal and plan runs can use run-scoped `mingle_request_user_input`, feeding the existing durable question/answer/cancel pipeline. In plan runs this MCP connection lists only the question tool; progress mutations and workflow completion remain unavailable. Native question handlers continue to work. Secret-marked answers stay excluded from stored question answers, and expired capabilities cannot release answers. This changes neither file permissions nor approval policy.
+
 Provider adapters emit `tool.activity` lifecycle snapshots keyed by the provider invocation ID and `tool.output` deltas. A start/result pair updates one invocation and counts once. Only real provider parent IDs produce nested calls; shell command strings are not parsed to invent process trees. Provider-reported command, working directory, process ID, exit code, result and timing are retained when available. Text is redacted before persistence/transport using the existing best-effort credential scrubber.
 
 The runtime persists run records and message/run links with additive schema migration 3. Run elapsed duration uses a monotonic host clock during normal completion/interruption. Recovery marks unfinished runs/tools interrupted without fabricating an elapsed duration across server downtime. Old text-only history is retained without guessed identities, timings or subprocesses.
