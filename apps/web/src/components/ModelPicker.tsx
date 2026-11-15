@@ -126,11 +126,12 @@ export function ModelPicker({
     setQuery('');
     setCustomModelId('');
     setPosition(null);
+    setLayoutRevision((revision) => revision + 1);
     setOpen(true);
   };
 
   useLayoutEffect(() => {
-    if (!effectiveOpen || !anchor.current || !popup.current) return;
+    if (!effectiveOpen || !present || !anchor.current || !popup.current) return;
     const rect = anchor.current.getBoundingClientRect();
     const viewport = window.visualViewport;
     const viewportLeft = viewport?.offsetLeft ?? 0;
@@ -157,7 +158,7 @@ export function ModelPicker({
       width,
       maxHeight,
     });
-  }, [effectiveOpen, placement, activeProviderId, matchingModels.length, searchable, layoutRevision]);
+  }, [effectiveOpen, present, placement, activeProviderId, matchingModels.length, searchable, layoutRevision]);
 
   useEffect(() => {
     if (!effectiveOpen || !position || popup.current?.contains(document.activeElement)) return;
@@ -216,7 +217,7 @@ export function ModelPicker({
 
   const close = (restoreFocus = true) => {
     setOpen(false);
-    if (restoreFocus) requestAnimationFrame(() => anchor.current?.focus({ preventScroll: true }));
+    if (restoreFocus) anchor.current?.focus({ preventScroll: true });
   };
 
   const chooseModel = (model: ModelOption) => {
@@ -351,11 +352,11 @@ export function ModelPicker({
       <ChevronDown size={13} aria-hidden="true" />
     </button>
     {present ? createPortal(
-      <div ref={popup} role="dialog" aria-label="Choose a model" aria-hidden={closing || undefined} inert={closing}
+      <div ref={popup} role="dialog" aria-label="Choose a model" aria-hidden={closing || !position || undefined} inert={closing || !position}
         className={cx('model-picker__popup', closing && 'is-closing')} style={position ? {
           ...position,
           '--model-picker-origin': `${position.top < (anchor.current?.getBoundingClientRect().top ?? 0) ? 'bottom' : 'top'} ${position.left > (anchor.current?.getBoundingClientRect().left ?? 0) + 20 ? 'right' : 'left'}`,
-        } as React.CSSProperties : { visibility: 'hidden' }} onKeyDown={keyDown}>
+        } as React.CSSProperties : { left: -10000, top: -10000, visibility: 'visible', opacity: 0, pointerEvents: 'none' }} onKeyDown={keyDown}>
         <div className="model-picker__rail" role="tablist" aria-label="Providers">
           {catalogProviders.map((provider) => {
             const locked = lockProvider && provider.id !== value.provider;
