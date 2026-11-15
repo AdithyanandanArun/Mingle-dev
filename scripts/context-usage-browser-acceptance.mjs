@@ -69,6 +69,16 @@ try {
   await panel().getByRole('button', { name: 'Cancel compaction', exact: true }).click();
   await panel().getByRole('status').filter({ hasText: 'Example cancelled' }).waitFor();
   assert.equal(calls.at(-1).operation, calls.at(-2).operation);
+  await page.getByRole('button', { name: 'Switch conversation', exact: true }).click();
+  assert.equal(await trigger().getAttribute('aria-expanded'), 'false', 'switching sessions closes the prior context details');
+  outcome = 'unsupported'; await trigger().click();
+  await panel().getByRole('button', { name: 'Compact conversation', exact: true }).click();
+  await panel().getByRole('status').filter({ hasText: 'Example unsupported' }).waitFor();
+  assert.equal(calls.at(-1).path, '/api/sessions/two/compact', 'actions address the newly selected conversation');
+  outcome = 'failed';
+  await panel().getByRole('button', { name: 'Compact conversation', exact: true }).click();
+  await panel().getByRole('alert').filter({ hasText: 'Example compact failure' }).waitFor();
+  assert.equal(await page.getByRole('textbox', { name: 'Example draft' }).inputValue(), 'Keep this unsent draft');
   await page.setViewportSize({ width: 390, height: 500 });
   await trigger().click();
   const bounds = await panel().boundingBox();
