@@ -53,10 +53,14 @@ export function BrowserPane({ session, active, popout = false }: { session: Sess
   const [expanded, setExpanded] = useState(false);
   const [floating, setFloating] = useState(false);
   const [detached, setDetached] = useState(false);
+  const presented = useRef(popout);
+  useEffect(() => {
+    if (active && !presented.current) { presented.current = true; setFloating(true); }
+  }, [active]);
   const visible = active || expanded || floating;
   useEffect(() => {
     const onOpened = (event: Event) => {
-      if ((event as CustomEvent<{ sessionId?: string }>).detail?.sessionId === session.id) setFloating(true);
+      if ((event as CustomEvent<{ sessionId?: string }>).detail?.sessionId === session.id) { presented.current = true; setFloating(true); }
     };
     window.addEventListener('mingle:browser-opened', onOpened);
     return () => window.removeEventListener('mingle:browser-opened', onOpened);
