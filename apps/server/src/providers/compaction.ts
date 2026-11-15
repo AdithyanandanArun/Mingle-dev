@@ -82,7 +82,7 @@ export function reportedContextWindow(tokenUsage: unknown): number | null {
 export function codexContextUsage(tokenUsage: unknown): { usedTokens: number; contextWindow: number | null } | null {
   if (!isRecord(tokenUsage) || !isRecord(tokenUsage.last)) return null;
   const used = tokenUsage.last.totalTokens;
-  return typeof used === 'number' && Number.isFinite(used) && used >= 0 ? { usedTokens: used, contextWindow: reportedContextWindow(tokenUsage) } : null;
+  return typeof used === 'number' && Number.isSafeInteger(used) && used >= 0 ? { usedTokens: used, contextWindow: reportedContextWindow(tokenUsage) } : null;
 }
 
 /** Explicit `model_context_window` from a `config/read` response (null when the user never configured one). */
