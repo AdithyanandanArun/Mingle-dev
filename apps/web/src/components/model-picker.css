@@ -35,7 +35,7 @@
   background: var(--bg-raised);
   color: var(--fg-0);
   box-shadow: var(--shadow-pop);
-  animation: model-picker-in var(--motion-overlay, 160ms) var(--ease-out) both;
+  animation: model-picker-in 190ms cubic-bezier(.16, 1.08, .3, 1) both;
   transform-origin: var(--model-picker-origin, bottom left);
 }
 .model-picker__popup.is-closing { pointer-events: none; animation: model-picker-out var(--motion-overlay, 160ms) var(--ease-out) both; }
@@ -145,7 +145,7 @@
 .composer__model-picker .model-picker__trigger-copy > small { font-size: 9px; }
 .cfg__model-picker { width: 100%; justify-content: space-between; }
 
-@keyframes model-picker-in { from { opacity: 0; transform: translateY(5px) scale(.985); } to { opacity: 1; transform: none; } }
+@keyframes model-picker-in { from { opacity: 0; transform: translateY(var(--model-picker-shift, 6px)) scale(.97); } to { opacity: 1; transform: none; } }
 @keyframes model-picker-out { to { opacity: 0; transform: translateY(3px) scale(.985); } }
 @keyframes model-picker-list-in { from { opacity: .78; transform: translateY(2px); } to { opacity: 1; transform: none; } }
 

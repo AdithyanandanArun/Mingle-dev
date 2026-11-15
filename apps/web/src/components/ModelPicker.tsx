@@ -356,6 +356,7 @@ export function ModelPicker({
         className={cx('model-picker__popup', closing && 'is-closing')} style={position ? {
           ...position,
           '--model-picker-origin': `${position.top < (anchor.current?.getBoundingClientRect().top ?? 0) ? 'bottom' : 'top'} ${position.left > (anchor.current?.getBoundingClientRect().left ?? 0) + 20 ? 'right' : 'left'}`,
+          '--model-picker-shift': position.top < (anchor.current?.getBoundingClientRect().top ?? 0) ? '6px' : '-6px',
         } as React.CSSProperties : { left: -10000, top: -10000, visibility: 'visible', opacity: 0, pointerEvents: 'none' }} onKeyDown={keyDown}>
         <div className="model-picker__rail" role="tablist" aria-label="Providers">
           {catalogProviders.map((provider) => {
