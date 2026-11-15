@@ -334,7 +334,7 @@ export function Composer({ session, progressState, helperCount = 0 }: { session:
       const submittedAttachmentIds = attachments.map((item) => item.id);
       const submittedContextRefs = contextRefs;
       if (running) {
-        const response = await api.queueMessage(session.id,{content:inferred.content.trim(),skills:messageSkills,attachmentIds:submittedAttachmentIds,contextRefs:submittedContextRefs,intent:planningMode?'plan':'normal',...(queueForNext?{queueOnly:true}:{}),...(excludeProjectMemory?{memory:'exclude'}:{})});
+        const response = await api.queueMessage(session.id,{content:inferred.content.trim(),skills:messageSkills,attachmentIds:submittedAttachmentIds,contextRefs:submittedContextRefs,intent:planningMode?'plan':'normal',...(queueForNext || planningMode ? {queueOnly:true}:{}),...(excludeProjectMemory?{memory:'exclude'}:{})});
         // A steered message already reached the running turn; only a queued one can be sent next.
         if (response.steered) useMingle.getState().toast('success', 'Sent to the running agent');
         else {
