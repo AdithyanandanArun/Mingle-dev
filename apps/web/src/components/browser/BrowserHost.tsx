@@ -68,9 +68,9 @@ function resizeFromCorner(origin: Geometry, corner: ResizeCorner, dx: number, dy
  * overlay. The host is never cloned, so its socket, canvas and held-input cleanup survive layout changes.
  */
 export function BrowserHost({
-  expanded, floating, onDismiss, onDock, onPopout, children,
+  expanded, floating, onDismiss, onDock, onMinimize, onPopout, children,
 }: {
-  expanded: boolean; floating: boolean; onDismiss(): void; onDock(): void; onPopout?: () => void; children: ReactNode;
+  expanded: boolean; floating: boolean; onDismiss(): void; onDock(): void; onMinimize?: () => void; onPopout?: () => void; children: ReactNode;
 }) {
   const host = useMemo(() => {
     const element = document.createElement('div');
@@ -216,6 +216,7 @@ export function BrowserHost({
           <header className="browser-pip__handle" tabIndex={0} aria-label="Move floating browser with arrow keys; hold Shift to move farther" onPointerDown={onDragStart} onKeyDown={onDragKey}>
             <span className="browser-pip__title">Shared browser</span>
             {onPopout ? <button type="button" className="browser-pip__action" onClick={onPopout}>Open desktop window</button> : null}
+            {onMinimize ? <button type="button" className="browser-pip__action" aria-label="Minimize floating browser" onClick={onMinimize}>Minimize</button> : null}
             <button type="button" className="browser-pip__action" onClick={onDock}>Dock browser</button>
           </header>
           <div className="browser-pip__content" ref={floatingSlot} />

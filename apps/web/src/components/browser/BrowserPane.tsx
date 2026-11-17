@@ -298,7 +298,7 @@ export function BrowserPane({ session, active, popout = false }: { session: Sess
   })();
 
   return (
-    <BrowserHost expanded={expanded} floating={floating && !detached} onDismiss={() => setExpanded(false)} onDock={() => setFloating(false)} onPopout={canOpenBrowserPopout() ? () => void openDesktopWindow() : undefined}>
+    <BrowserHost expanded={expanded} floating={floating && !detached} onDismiss={() => setExpanded(false)} onDock={() => setFloating(false)} onMinimize={() => setFloating(false)} onPopout={canOpenBrowserPopout() ? () => void openDesktopWindow() : undefined}>
       <div
         className={cx('browser__inner', expanded && 'is-expanded')}
         onKeyDown={(e) => { if (expanded && e.key === 'Escape' && !e.defaultPrevented) { e.preventDefault(); e.stopPropagation(); setExpanded(false); } }}
