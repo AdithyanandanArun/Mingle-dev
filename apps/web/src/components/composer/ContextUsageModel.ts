@@ -14,8 +14,9 @@ export function contextReading(session: Session | null) {
   const percent = valid && usage.contextWindow ? usage.usedTokens / usage.contextWindow * 100 : null;
   return { percent, tone: contextTone(percent), fraction: percent === null ? null : Math.min(percent / 100, 1),
     usedTokens: valid ? usage.usedTokens : null, capacity: valid ? usage.contextWindow : null,
-    estimated: valid ? usage.estimated : false, updatedAt: valid ? usage.updatedAt : null,
-    label: percent === null ? 'Context usage unreported' : `${usage?.estimated ? 'Estimated context' : 'Context'}: ${percent.toFixed(1)}% used` };
+    estimated: valid ? usage.estimated : false,
+    updatedAt: valid && Number.isFinite(Date.parse(usage.updatedAt)) ? usage.updatedAt : null,
+    label: percent === null ? (valid ? 'Context capacity unreported' : 'Context usage unreported') : `${usage?.estimated ? 'Estimated context' : 'Context'}: ${percent.toFixed(1)}% used` };
 }
 
 export function compactBlocker(session: Session | null, disabled: boolean, reason?: string): string | null {
