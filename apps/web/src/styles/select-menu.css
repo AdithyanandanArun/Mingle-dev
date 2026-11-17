@@ -32,3 +32,6 @@
 .select-menu__option.is-active { background: var(--bg-active); color: var(--fg-0); }
 .select-menu__option.is-selected { color: var(--fg-0); }
 .select-menu__option[aria-disabled='true'] { opacity: .4; cursor: not-allowed; }
+@media (prefers-reduced-motion: reduce) {
+  .select-menu__popup, .select-menu__popup.is-closing { animation-duration: 1ms; }
+}
