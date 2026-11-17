@@ -15,7 +15,7 @@ export function ContextUsage({ session, disabled = false, disabledReason }: { se
   const button = useRef<HTMLButtonElement>(null), panel = useRef<HTMLDivElement>(null);
   const compactButton = useRef<HTMLButtonElement>(null);
   const closeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const keyboardOpen = useRef(false);
+  const [focusRequested, setFocusRequested] = useState(false);
   const [open, setOpen] = useState(false);
   const [position, setPosition] = useState<ReturnType<typeof contextPopoverPosition> | null>(null);
   const { present, closing } = usePresence(open);
@@ -28,7 +28,7 @@ export function ContextUsage({ session, disabled = false, disabledReason }: { se
     }, 180);
   };
   useEffect(() => () => { if (closeTimer.current) clearTimeout(closeTimer.current); }, []);
-  useEffect(() => { setOpen(false); setPosition(null); }, [session?.id]);
+  useEffect(() => { setOpen(false); setPosition(null); setFocusRequested(false); }, [session?.id]);
   useLayoutEffect(() => {
     if (!open || !panel.current || !button.current) return;
     const place = () => {
@@ -62,17 +62,17 @@ export function ContextUsage({ session, disabled = false, disabledReason }: { se
     return () => { document.removeEventListener('pointerdown', outside); document.removeEventListener('keydown', escape, true); document.removeEventListener('focusin', outside); };
   }, [open]);
   useEffect(() => {
-    if (!open || !position || !keyboardOpen.current) return;
-    keyboardOpen.current = false;
-    (compactButton.current?.disabled ? panel.current : compactButton.current)?.focus({ preventScroll: true });
-  }, [open, position]);
+    if (!open || !position || !focusRequested) return;
+    setFocusRequested(false);
+    (compactButton.current && !compactButton.current.disabled ? compactButton.current : panel.current)?.focus({ preventScroll: true });
+  }, [open, position, focusRequested]);
   const circumference = 2 * Math.PI * 7;
   return <>
     <button ref={button} type="button" className={`context-usage context-usage--${reading.tone}${compacting ? ' is-compacting' : ''}`}
       aria-label={reading.label} aria-haspopup="dialog" aria-expanded={open} aria-controls={present ? id : undefined}
       onPointerEnter={event => { if (event.pointerType !== 'touch') keepOpen(); }} onPointerLeave={closeSoon}
-      onClick={event => { keyboardOpen.current = event.detail === 0; keepOpen(); }}
-      onKeyDown={event => { if (event.key === 'ArrowDown') { event.preventDefault(); keyboardOpen.current = true; keepOpen(); } }}>
+      onClick={event => { setFocusRequested(event.detail === 0); keepOpen(); }}
+      onKeyDown={event => { if (event.key === 'ArrowDown') { event.preventDefault(); setFocusRequested(true); keepOpen(); } }}>
       <svg width="20" height="20" viewBox="0 0 20 20" aria-hidden="true">
         <circle className="context-usage__track" cx="10" cy="10" r="7" />
         <circle className="context-usage__arc" cx="10" cy="10" r="7" transform="rotate(-90 10 10)"
