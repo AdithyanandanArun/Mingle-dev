@@ -11,8 +11,8 @@
 .context-details strong { color: var(--fg-0); font-size: 13px; }
 .context-details p { margin: 7px 0; overflow-wrap: anywhere; }
 .context-details button { display: block; width: 100%; padding: 7px 10px; margin-top: 10px; border: 1px solid var(--line); border-radius: 7px; background: var(--bg-surface); color: var(--fg-0); font: inherit; cursor: pointer; }
-.context-details button:hover:not(:disabled) { background: var(--bg-hover); }
-.context-details button:disabled { opacity: .5; cursor: not-allowed; }
+.context-details button:hover:not([aria-disabled="true"]) { background: var(--bg-hover); }
+.context-details button[aria-disabled="true"] { opacity: .5; cursor: not-allowed; }
 .context-details button:focus-visible { outline: 2px solid var(--accent-line); outline-offset: 2px; }
 .context-details [role='alert'] { color: var(--err); }
 .context-details.is-closing { pointer-events: none; animation: context-details-out 160ms var(--ease-out) both; }

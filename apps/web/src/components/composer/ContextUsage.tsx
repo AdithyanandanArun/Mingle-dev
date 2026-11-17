@@ -64,7 +64,8 @@ export function ContextUsage({ session, disabled = false, disabledReason }: { se
   useEffect(() => {
     if (!open || !position || !focusRequested) return;
     setFocusRequested(false);
-    (compactButton.current && !compactButton.current.disabled ? compactButton.current : panel.current)?.focus({ preventScroll: true });
+    const action = compactButton.current;
+    (action?.getAttribute('aria-disabled') === 'false' ? action : panel.current)?.focus({ preventScroll: true });
   }, [open, position, focusRequested]);
   const circumference = 2 * Math.PI * 7;
   return <>
@@ -89,8 +90,15 @@ export function ContextUsage({ session, disabled = false, disabledReason }: { se
       {reading.updatedAt ? <p><time dateTime={reading.updatedAt}>Last reported {new Date(reading.updatedAt).toLocaleTimeString()}</time></p> : null}
       <p>Compact older conversation context using the provider’s native compaction.</p>
       {blocker && !compacting ? <p id={`${id}-blocked`}>{blocker}</p> : null}
-      {compacting ? <button type="button" disabled={state.cancelling} onClick={() => void cancel()}>{state.cancelling ? 'Cancelling…' : 'Cancel compaction'}</button>
-        : <button ref={compactButton} type="button" disabled={Boolean(blocker)} aria-describedby={blocker ? `${id}-blocked` : undefined} onClick={() => { if (!blocker && session) void start(); }}>Compact conversation</button>}
+      <button ref={compactButton} type="button"
+        aria-disabled={compacting ? state.cancelling : Boolean(blocker)}
+        aria-describedby={blocker && !compacting ? `${id}-blocked` : undefined}
+        onClick={() => {
+          if (compacting && !state.cancelling) void cancel();
+          else if (!compacting && !blocker && session) void start();
+        }}>
+        {compacting ? (state.cancelling ? 'Cancelling…' : 'Cancel compaction') : 'Compact conversation'}
+      </button>
       {state.status !== 'idle' ? <p role={state.status === 'failed' ? 'alert' : 'status'}>{state.message}</p> : null}
     </div>, document.body) : null}
   </>;
