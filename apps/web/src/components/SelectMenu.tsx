@@ -53,7 +53,7 @@ export function SelectMenu({ id, label, value, onChange, options, disabled, read
       const height = Math.min(popup.current.scrollHeight + 2, maxHeight);
       setPosition({
         width, maxHeight, left: Math.max(12, Math.min(rect.left, window.innerWidth - width - 12)),
-        top: useTop ? Math.max(12, rect.top - height - 8) : rect.bottom + 8,
+        top: useTop ? Math.max(12, rect.top - height - 8) : Math.min(window.innerHeight - height - 12, rect.bottom + 8),
       });
     };
     measure();
