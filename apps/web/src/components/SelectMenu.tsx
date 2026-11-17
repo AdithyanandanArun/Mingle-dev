@@ -103,13 +103,15 @@ export function SelectMenu({ id, label, value, onChange, options, disabled, read
   const keyDown = (event: KeyboardEvent<HTMLButtonElement>) => {
     if (event.key === 'Tab') { setOpen(false); return; }
     if (event.key === 'Escape' && effectiveOpen) { event.preventDefault(); event.stopPropagation(); setOpen(false); return; }
-    if (['ArrowDown', 'ArrowUp', 'Home', 'End', 'Enter', ' '].includes(event.key)) {
+    if (['ArrowDown', 'ArrowUp', 'Home', 'End', 'PageDown', 'PageUp', 'Enter', ' '].includes(event.key)) {
       event.preventDefault();
       event.stopPropagation();
       if (!effectiveOpen) { show(event.key === 'ArrowUp' || event.key === 'End'); return; }
       if (event.key === 'Enter' || event.key === ' ') { choose(active); return; }
       const current = enabled.indexOf(active);
       const next = event.key === 'Home' ? 0 : event.key === 'End' ? enabled.length - 1
+        : event.key === 'PageDown' ? Math.min(enabled.length - 1, current + 8)
+        : event.key === 'PageUp' ? Math.max(0, current - 8)
         : (current + (event.key === 'ArrowDown' ? 1 : -1) + enabled.length) % enabled.length;
       if (enabled[next] !== undefined) setActive(enabled[next]);
       return;
