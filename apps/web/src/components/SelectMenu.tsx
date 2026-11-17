@@ -130,7 +130,7 @@ export function SelectMenu({ id, label, value, onChange, options, disabled, read
   return <>
     <button id={id} ref={(element) => { anchor.current = element; if (typeof triggerRef === 'function') triggerRef(element); else if (triggerRef) triggerRef.current = element; }} type="button" role="combobox" aria-label={label} aria-valuetext={displayValue ?? selected?.label ?? value} aria-readonly={readOnly || undefined} aria-haspopup="listbox"
       aria-expanded={effectiveOpen} aria-controls={effectiveOpen ? listId : undefined}
-      aria-activedescendant={effectiveOpen ? `${listId}-${active}` : undefined}
+      aria-activedescendant={effectiveOpen && enabled.includes(active) ? `${listId}-${active}` : undefined}
       className={cx('select-menu__trigger', className)} disabled={disabled} title={title}
       onKeyDown={keyDown} onBlur={(event) => { if (!popup.current?.contains(event.relatedTarget as Node | null)) setOpen(false); }}
       onClick={() => effectiveOpen ? setOpen(false) : show()}>
