@@ -9,3 +9,9 @@ it('keeps context details in narrow and offset visual viewports', () => {
   expect(offset.top).toBeGreaterThanOrEqual(112); expect(offset.maxHeight).toBe(376);
   expect(offset.left).toBeGreaterThanOrEqual(37);
 });
+
+it('shrinks the gutters when the visual viewport is smaller than the usual padding', () => {
+  const position = contextPopoverPosition({ left: 1, right: 6, top: 1, bottom: 6 }, { width: 18, height: 20, left: 40, top: 50 }, 200);
+  expect(position.left + position.width).toBeLessThanOrEqual(58);
+  expect(position.top + position.maxHeight).toBeLessThanOrEqual(70);
+});
