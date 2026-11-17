@@ -83,8 +83,8 @@ export function ContextUsage({ session, disabled = false, disabledReason }: { se
       aria-hidden={closing || !position || undefined} inert={closing || !position}
       className={`context-details${closing ? ' is-closing' : ''}`} style={position ?? { visibility: 'hidden' }}
       onPointerEnter={keepOpen} onPointerLeave={closeSoon}>
-      <strong>{reading.percent === null ? 'Context usage unreported' : `${reading.percent.toFixed(1)}% of context used`}</strong>
-      {reading.usedTokens !== null ? <p>{reading.usedTokens.toLocaleString()} tokens{reading.capacity ? ` of ${reading.capacity.toLocaleString()}` : ' · capacity unreported'}</p> : <p>{session ? 'Waiting for the provider’s next context report. After compaction, usage appears when the provider reports it again; the cleared reading does not mean zero context.' : 'Select one agent to view its context.'}</p>}
+      <strong>{reading.percent === null ? reading.label : `${reading.percent.toFixed(1)}% of context used`}</strong>
+      {reading.usedTokens !== null ? <p>{reading.usedTokens.toLocaleString()} tokens{reading.capacity ? ` of ${reading.capacity.toLocaleString()}` : ' · capacity unreported'}</p> : <p>{session?.providerSessionId ? 'Waiting for the provider’s next context report.' : session ? 'Context usage appears after the provider reports it on a turn.' : 'Select one agent to view its context.'}</p>}
       {reading.estimated ? <p>Estimate from the provider’s latest request.</p> : null}
       {reading.updatedAt ? <p><time dateTime={reading.updatedAt}>Last reported {new Date(reading.updatedAt).toLocaleTimeString()}</time></p> : null}
       <p>Compact older conversation context using the provider’s native compaction.</p>

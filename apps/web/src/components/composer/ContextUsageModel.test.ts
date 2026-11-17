@@ -30,7 +30,7 @@ describe('context thresholds', () => {
   });
   it('keeps unknown readings distinct from a reported empty context', () => {
     expect(contextReading(session).percent).toBeNull(); expect(reading(0).percent).toBe(0);
-    expect(reading(10, null).percent).toBeNull(); expect(reading(10, null).usedTokens).toBe(10);
+    expect(reading(10, null).percent).toBeNull(); expect(reading(10, null)).toMatchObject({ usedTokens: 10, label: 'Context capacity unreported' });
   });
   it('clips the arc while preserving an overcapacity percentage', () => {
     expect(reading(1500)).toMatchObject({ percent: 150, fraction: 1, tone: 'danger', label: 'Context: 150.0% used' });
