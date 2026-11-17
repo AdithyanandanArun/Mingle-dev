@@ -25,6 +25,10 @@ export function SelectMenu({ id, label, value, onChange, options, disabled, read
   const effectiveOpen = open && !disabled;
   const { present, closing } = usePresence(effectiveOpen);
 
+  useEffect(() => {
+    if (enabled.length > 0 && !enabled.includes(active)) setActive(enabled[0]!);
+  }, [active, enabled.join(',')]);
+
   const show = (fromEnd = false) => {
     if (disabled || enabled.length === 0) return;
     const selectedIndex = options.findIndex((option) => option.value === value && !option.disabled);
