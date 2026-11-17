@@ -35,3 +35,7 @@
 @media (prefers-reduced-motion: reduce) {
   .select-menu__popup, .select-menu__popup.is-closing { animation-duration: 1ms; }
 }
+@media (forced-colors: active) {
+  .select-menu__option.is-active { outline: 1px solid Highlight; }
+  .select-menu__option.is-selected { font-weight: 600; }
+}
