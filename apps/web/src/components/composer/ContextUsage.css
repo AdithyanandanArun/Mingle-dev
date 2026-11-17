@@ -1,8 +1,8 @@
 .context-usage { display: grid; place-items: center; flex: none; width: 28px; height: 28px; padding: 0; border: 0; border-radius: 50%; background: transparent; color: var(--fg-2); cursor: pointer; }
 .context-usage:hover, .context-usage[aria-expanded='true'] { background: var(--bg-hover); color: var(--fg-0); }
 .context-usage:focus-visible { outline: 2px solid var(--accent-line); outline-offset: 2px; }
-.context-usage--warning, .context-usage--warning:hover { color: var(--warn); }
-.context-usage--danger, .context-usage--danger:hover { color: var(--err); }
+.context-usage--warning, .context-usage--warning:hover, .context-usage--warning[aria-expanded="true"] { color: var(--warn); }
+.context-usage--danger, .context-usage--danger:hover, .context-usage--danger[aria-expanded="true"] { color: var(--err); }
 .context-usage circle { fill: none; stroke-width: 2; }
 .context-usage__track { stroke: var(--line-strong); }
 .context-usage__arc { stroke: currentColor; transition: stroke-dashoffset 220ms var(--ease-out), stroke 160ms; }
