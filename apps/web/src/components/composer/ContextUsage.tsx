@@ -55,7 +55,14 @@ export function ContextUsage({ session, disabled = false, disabledReason }: { se
     };
     const escape = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return;
-      event.preventDefault(); event.stopPropagation(); setOpen(false); button.current?.focus();
+      setOpen(false);
+      // A hover alone does not take keyboard control away from the composer.
+      const focused = document.activeElement;
+      if (focused === button.current || panel.current?.contains(focused)) {
+        event.preventDefault();
+        event.stopPropagation();
+        button.current?.focus();
+      }
     };
     document.addEventListener('pointerdown', outside); document.addEventListener('keydown', escape, true);
     document.addEventListener('focusin', outside);
