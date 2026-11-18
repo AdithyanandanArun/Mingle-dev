@@ -1,5 +1,5 @@
 import { createPortal } from 'react-dom';
-import { useEffect, useRef, useState, type FormEvent } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState, type FormEvent } from 'react';
 import { ArrowDownToLine, ArrowLeft, ArrowRight, ExternalLink, Globe, Maximize2, Minimize2, Plus, RefreshCw, Scan, Unplug, X } from 'lucide-react';
 import type { BrowserAction, BrowserSessionState, BrowserTab, Session } from '@mingle/contracts';
 import { api, errorMessage } from '../../lib/api';
@@ -55,6 +55,12 @@ export function BrowserPane({ session, active, popout = false }: { session: Sess
   const [floating, setFloating] = useState(false);
   const [minimized, setMinimized] = useState(false);
   const restoreButton = useRef<HTMLButtonElement>(null);
+  const restoreFocus = useRef(false);
+  useLayoutEffect(() => {
+    if (!floating || !restoreFocus.current) return;
+    restoreFocus.current = false;
+    document.querySelector<HTMLElement>('.browser-pip__handle')?.focus({ preventScroll: true });
+  }, [floating]);
   const [detached, setDetached] = useState(false);
   const presented = useRef(popout);
   const docked = useRef(false);
@@ -309,7 +315,7 @@ export function BrowserPane({ session, active, popout = false }: { session: Sess
 
   return (<>
     {minimized ? createPortal(
-      <button ref={restoreButton} className="browser-restore" type="button" onClick={() => { setMinimized(false); setFloating(true); }}>
+      <button ref={restoreButton} className="browser-restore" type="button" onClick={() => { restoreFocus.current = true; setMinimized(false); setFloating(true); }}>
         <Globe size={14} aria-hidden="true" /> Restore browser
       </button>, document.body,
     ) : null}
