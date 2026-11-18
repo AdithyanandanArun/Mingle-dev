@@ -164,6 +164,7 @@ export function ActivityView() {
     () => entries.filter((e) => (!type || e.type === type) && (!sessionId || e.sessionId === sessionId) && activityMatchesSearch(search, e.summary, e.type, e.origin, e.sessionId)).sort((a, b) => b.at - a.at || b.order - a.order).slice(0, 500),
     [entries, type, sessionId, search],
   );
+  const hasFilters = Boolean(search.trim() || type || sessionId);
   const groups = useMemo(() => {
     const out: { day: string; items: Entry[] }[] = [];
     for (const e of filtered) {
@@ -194,6 +195,10 @@ export function ActivityView() {
       {project && !allProjects ? <RepoContext projectId={project.id} /> : null}
       <p className="activity__note muted small">
         {toolSessionId ? `Tool calls for ${sessionName.get(toolSessionId) ?? 'this session'} come from the recent records loaded with the workspace, which are bounded.` : 'Tool calls are listed when a single session is selected, because the loaded tool records are bounded.'}
+      </p>
+      <p className="activity__count muted small" role="status" aria-live="polite">
+        {filtered.length > 0 ? `Showing ${filtered.length}${filtered.length === 500 ? '+' : ''} of ${entries.length} recorded activities.` : null}
+        {hasFilters ? <button type="button" className="activity__clear" onClick={() => { setSearch(''); setType(''); setSessionId(''); }}>Clear filters</button> : null}
       </p>
       <div className="activity__scroll">
         {groups.length === 0 ? (

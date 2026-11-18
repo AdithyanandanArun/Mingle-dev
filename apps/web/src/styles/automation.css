@@ -56,11 +56,14 @@
 .actrepo__body code { font-family: var(--font-mono); font-size: 11.5px; color: var(--fg-1); }
 .activity__note { margin: 0 24px 8px; }
 .activity__search { width: min(240px, 24vw); min-width: 150px; }
+.activity__count { display: flex; align-items: center; gap: 10px; margin: 0 24px 8px; min-height: 18px; }
+.activity__clear { border: 0; padding: 0; background: transparent; color: var(--blue); font: inherit; cursor: pointer; }
+.activity__clear:hover { text-decoration: underline; }
 .evt__detail { min-width: 0; overflow-wrap: anywhere; }
 .evt__payload { max-height: 320px; overflow: auto; padding: 10px; border-radius: 8px; background: var(--bg-surface); white-space: pre-wrap; overflow-wrap: anywhere; }
 .evt__facts { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; margin: 8px 0 0; font-size: 12px; }
 .evt__facts dt { color: var(--fg-2); }
 .evt__facts dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
 .evt__facts code { font-family: var(--font-mono); font-size: 11px; }
-@media (max-width: 899px) { .actrepo__body, .activity__note { margin-inline: 16px; } }
+@media (max-width: 899px) { .actrepo__body, .activity__note, .activity__count { margin-inline: 16px; } }
 @media (max-width: 899px) { .activity__search { width: 100%; } }
