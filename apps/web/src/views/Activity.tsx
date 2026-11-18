@@ -46,7 +46,7 @@ function EntryRow({ entry, sessionName, now }: { entry: Entry; sessionName?: str
         <div className="evt__line">
           <span className="evt__summary">{entry.summary}</span>
           {expandable ? (
-            <button type="button" className="evt__toggle" aria-expanded={open} aria-label={open ? 'Hide details' : 'Show details'} onClick={() => setOpen((o) => !o)}>
+            <button type="button" className="evt__toggle" aria-expanded={open} aria-controls={`evt-detail-${entry.key.replace(/[^a-zA-Z0-9_-]/g, '-')}`} aria-label={`${open ? 'Hide' : 'Show'} details for ${entry.summary}`} onClick={() => setOpen((o) => !o)}>
               <ChevronRight size={13} className={cx('trow__chev', open && 'is-open')} />
             </button>
           ) : null}
@@ -59,7 +59,7 @@ function EntryRow({ entry, sessionName, now }: { entry: Entry; sessionName?: str
           <span title={new Date(entry.createdAt).toLocaleString()}>{clockTime(entry.createdAt)} · {relativeTime(entry.createdAt, now)}</span>
           <span className="evt__id">{entry.origin}</span>
         </div>
-        {open ? <>{entry.detail}{hasPayload ? <pre className="evt__payload">{JSON.stringify(entry.payload, null, 2)}</pre> : null}</> : null}
+        {open ? <div id={`evt-detail-${entry.key.replace(/[^a-zA-Z0-9_-]/g, '-')}`} className="evt__detail">{entry.detail}{hasPayload ? <pre className="evt__payload">{JSON.stringify(entry.payload, null, 2)}</pre> : null}</div> : null}
       </div>
     </li>
   );
