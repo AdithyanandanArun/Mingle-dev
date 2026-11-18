@@ -50,6 +50,9 @@ try {
   }
   await trigger().hover();
   await panel().getByText('90.1% of context used', { exact: true }).waitFor();
+  await trigger().focus();
+  await page.keyboard.press('ArrowDown');
+  await page.waitForFunction(() => document.activeElement?.textContent === 'Compact conversation');
   await panel().getByRole('button', { name: 'Compact conversation', exact: true }).click();
   await panel().getByRole('status').filter({ hasText: 'Example completed' }).waitFor();
   assert.equal(calls.length, 1); assert.equal(calls[0].path, '/api/sessions/one/compact');
@@ -66,6 +69,11 @@ try {
   await page.getByRole('button', { name: 'Toggle busy', exact: true }).click();
   outcome = 'pending'; await trigger().click();
   await panel().getByRole('button', { name: 'Compact conversation', exact: true }).click();
+  await page.waitForFunction(() => document.activeElement?.textContent === 'Cancel compaction');
+  const switching = page.getByRole('button', { name: 'Switch conversation', exact: true });
+  await switching.click();
+  await switching.click();
+  await trigger().click();
   await panel().getByRole('button', { name: 'Cancel compaction', exact: true }).click();
   await panel().getByRole('status').filter({ hasText: 'Example cancelled' }).waitFor();
   assert.equal(calls.at(-1).operation, calls.at(-2).operation);
