@@ -62,17 +62,19 @@ export function BrowserPane({ session, active, popout = false }: { session: Sess
     if (active && !presented.current) { presented.current = true; setFloating(true); }
   }, [active]);
   const visible = (active && !minimized) || expanded || floating;
+  const { state, error: stateError, apply, refresh } = useBrowserState(session.id, visible);
   useEffect(() => {
     const onOpened = (event: Event) => {
-      if ((event as CustomEvent<{ sessionId?: string }>).detail?.sessionId === session.id && !docked.current && !popout && !minimized) {
+      if ((event as CustomEvent<{ sessionId?: string }>).detail?.sessionId !== session.id) return;
+      if (visible) refresh();
+      if (!docked.current && !popout && !minimized) {
         presented.current = true;
         setFloating(true);
       }
     };
     window.addEventListener('mingle:browser-opened', onOpened);
     return () => window.removeEventListener('mingle:browser-opened', onOpened);
-  }, [session.id, popout, minimized]);
-  const { state, error: stateError, apply, refresh } = useBrowserState(session.id, visible);
+  }, [session.id, popout, minimized, visible, refresh]);
   const selectedId = useBrowserStore((s) => s.selected[session.id]);
   const current = resolveTab(state, selectedId);
   const pageVisible = usePageVisible();
