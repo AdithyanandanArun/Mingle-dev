@@ -79,7 +79,8 @@ export function BrowserHost({
   }, []);
   const inline = useRef<HTMLDivElement>(null);
   const floatingSlot = useRef<HTMLDivElement>(null);
-  const floatingPanel = useRef<HTMLDivElement>(null);
+  const floatingPanel = useRef<HTMLElement>(null);
+  const floatingHeader = useRef<HTMLElement>(null);
   const returnFocus = useRef<HTMLElement | null>(null);
   const interactionCleanup = useRef<(() => void) | null>(null);
   const [overlaySlot, setOverlaySlot] = useState<HTMLDivElement | null>(null);
@@ -92,7 +93,8 @@ export function BrowserHost({
     const focused = document.activeElement instanceof HTMLElement && host.contains(document.activeElement) ? document.activeElement : null;
     if (expanded && focused) returnFocus.current = focused;
     target.appendChild(host);
-    const next = focused ?? (!expanded ? returnFocus.current : null);
+    const wasRestored = floating && document.activeElement?.classList.contains('browser-restore');
+    const next = focused ?? (wasRestored ? floatingHeader.current : null) ?? (!expanded ? returnFocus.current : null);
     if (next?.isConnected) next.focus({ preventScroll: true });
     if (!expanded) returnFocus.current = null;
   }, [expanded, floating, overlaySlot, host]);
@@ -213,7 +215,7 @@ export function BrowserHost({
           style={{ left: geometry.left, top: geometry.top, width: geometry.width, height: geometry.height }}
           aria-label="Floating shared browser"
         >
-          <header className="browser-pip__handle" tabIndex={0} aria-label="Move floating browser with arrow keys; hold Shift to move farther" onPointerDown={onDragStart} onKeyDown={onDragKey}>
+          <header ref={floatingHeader} className="browser-pip__handle" tabIndex={0} aria-label="Move floating browser with arrow keys; hold Shift to move farther" onPointerDown={onDragStart} onKeyDown={onDragKey}>
             <span className="browser-pip__title">Shared browser</span>
             {onPopout ? <button type="button" className="browser-pip__action" onClick={onPopout}>Open desktop window</button> : null}
             {onMinimize ? <button type="button" className="browser-pip__action" aria-label="Minimize floating browser" onClick={onMinimize}>Minimize</button> : null}
