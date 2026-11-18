@@ -11,6 +11,7 @@ import { ContextStrip } from '../components/automation/ContextSummary';
 import { SOURCE_LABEL, sourceLocation } from '../components/automation/TaskSource';
 import { shortSha } from '../components/git/gitUtil';
 import { AgentIdentity } from '../components/group/AgentIdentity';
+import { activityEventInScope } from '../lib/activityView';
 
 type Tone = 'ok' | 'warn' | 'err' | 'info' | 'accent' | 'neutral';
 const toneFor = (type: string): Tone => {
@@ -116,7 +117,7 @@ export function ActivityView() {
     const sessionIds = new Set(scopedSessions.map((s) => s.id));
     const covered = { start: new Set<string>(), finish: new Set<string>() };
     for (const e of events ?? []) {
-      if (!(allProjects || e.projectId === project?.id || e.projectId === null)) continue;
+      if (!activityEventInScope(e.projectId, project?.id, allProjects)) continue;
       const taskId = typeof e.payload.taskId === 'string' ? e.payload.taskId : undefined;
       const runId = typeof e.payload.runId === 'string' ? e.payload.runId : undefined;
       if (runId && /run|turn/i.test(e.type)) (/start|begin/i.test(e.type) ? covered.start : covered.finish).add(runId);
