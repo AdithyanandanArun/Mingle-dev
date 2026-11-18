@@ -157,3 +157,6 @@
 .settings-percent input { width: 84px; }
 .settings-percent > span { color: var(--fg-2); font-size: 13px; }
 .settings-percent__error { margin-top: 8px; color: var(--err); font-size: 12px; }
+
+.browser-restore { position: fixed; right: 12px; bottom: 12px; z-index: 85; display: inline-flex; gap: 6px; align-items: center; padding: 8px 12px; border: 1px solid var(--line-strong); border-radius: 8px; background: var(--bg-panel); color: var(--fg-0); box-shadow: var(--shadow-pop); cursor: pointer; }
+.browser-restore:focus-visible { outline: 2px solid var(--blue-line); outline-offset: 2px; }

@@ -1,3 +1,4 @@
+import { createPortal } from 'react-dom';
 import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { ArrowDownToLine, ArrowLeft, ArrowRight, ExternalLink, Globe, Maximize2, Minimize2, Plus, RefreshCw, Scan, Unplug, X } from 'lucide-react';
 import type { BrowserAction, BrowserSessionState, BrowserTab, Session } from '@mingle/contracts';
@@ -52,23 +53,25 @@ const NATIVE_HOLDER = 'desktop-native';
 export function BrowserPane({ session, active, popout = false }: { session: Session; active: boolean; popout?: boolean }) {
   const [expanded, setExpanded] = useState(false);
   const [floating, setFloating] = useState(false);
+  const [minimized, setMinimized] = useState(false);
+  const restoreButton = useRef<HTMLButtonElement>(null);
   const [detached, setDetached] = useState(false);
   const presented = useRef(popout);
   const docked = useRef(false);
   useEffect(() => {
     if (active && !presented.current) { presented.current = true; setFloating(true); }
   }, [active]);
-  const visible = active || expanded || floating;
+  const visible = (active && !minimized) || expanded || floating;
   useEffect(() => {
     const onOpened = (event: Event) => {
-      if ((event as CustomEvent<{ sessionId?: string }>).detail?.sessionId === session.id && !docked.current && !popout) {
+      if ((event as CustomEvent<{ sessionId?: string }>).detail?.sessionId === session.id && !docked.current && !popout && !minimized) {
         presented.current = true;
         setFloating(true);
       }
     };
     window.addEventListener('mingle:browser-opened', onOpened);
     return () => window.removeEventListener('mingle:browser-opened', onOpened);
-  }, [session.id, popout]);
+  }, [session.id, popout, minimized]);
   const { state, error: stateError, apply, refresh } = useBrowserState(session.id, visible);
   const selectedId = useBrowserStore((s) => s.selected[session.id]);
   const current = resolveTab(state, selectedId);
@@ -210,6 +213,7 @@ export function BrowserPane({ session, active, popout = false }: { session: Sess
   };
 
   const content = (() => {
+    if (minimized) return <EmptyState title="Browser minimized">Use Restore browser to reopen it.</EmptyState>;
     if (detached && !popout) return (
       <div className="browser-detached" role="status">
         <Globe size={20} aria-hidden="true" />
@@ -301,8 +305,13 @@ export function BrowserPane({ session, active, popout = false }: { session: Sess
     );
   })();
 
-  return (
-    <BrowserHost expanded={expanded} floating={floating && !detached} onDismiss={() => setExpanded(false)} onDock={() => { docked.current = true; setFloating(false); useMingle.getState().setContextTab('browser'); }} onMinimize={() => setFloating(false)} onPopout={canOpenBrowserPopout() ? () => void openDesktopWindow() : undefined}>
+  return (<>
+    {minimized ? createPortal(
+      <button ref={restoreButton} className="browser-restore" type="button" onClick={() => { setMinimized(false); setFloating(true); }}>
+        <Globe size={14} aria-hidden="true" /> Restore browser
+      </button>, document.body,
+    ) : null}
+    <BrowserHost expanded={expanded} floating={floating && !detached} onDismiss={() => setExpanded(false)} onDock={() => { docked.current = true; setFloating(false); useMingle.getState().setContextTab('browser'); }} onMinimize={() => { setFloating(false); setMinimized(true); requestAnimationFrame(() => restoreButton.current?.focus()); }} onPopout={canOpenBrowserPopout() ? () => void openDesktopWindow() : undefined}>
       <div
         className={cx('browser__inner', expanded && 'is-expanded')}
         onKeyDown={(e) => { if (expanded && e.key === 'Escape' && !e.defaultPrevented) { e.preventDefault(); e.stopPropagation(); setExpanded(false); } }}
@@ -310,7 +319,7 @@ export function BrowserPane({ session, active, popout = false }: { session: Sess
         {content}
       </div>
     </BrowserHost>
-  );
+  </>);
 }
 
 function ConnectingView({ state }: { state: BrowserSessionState }) {
