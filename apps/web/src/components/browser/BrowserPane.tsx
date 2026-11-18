@@ -54,17 +54,21 @@ export function BrowserPane({ session, active, popout = false }: { session: Sess
   const [floating, setFloating] = useState(false);
   const [detached, setDetached] = useState(false);
   const presented = useRef(popout);
+  const docked = useRef(false);
   useEffect(() => {
     if (active && !presented.current) { presented.current = true; setFloating(true); }
   }, [active]);
   const visible = active || expanded || floating;
   useEffect(() => {
     const onOpened = (event: Event) => {
-      if ((event as CustomEvent<{ sessionId?: string }>).detail?.sessionId === session.id) { presented.current = true; setFloating(true); }
+      if ((event as CustomEvent<{ sessionId?: string }>).detail?.sessionId === session.id && !docked.current && !popout) {
+        presented.current = true;
+        setFloating(true);
+      }
     };
     window.addEventListener('mingle:browser-opened', onOpened);
     return () => window.removeEventListener('mingle:browser-opened', onOpened);
-  }, [session.id]);
+  }, [session.id, popout]);
   const { state, error: stateError, apply, refresh } = useBrowserState(session.id, visible);
   const selectedId = useBrowserStore((s) => s.selected[session.id]);
   const current = resolveTab(state, selectedId);
@@ -254,7 +258,7 @@ export function BrowserPane({ session, active, popout = false }: { session: Sess
                 onFocus={(e) => { setDraft(tab.url); e.currentTarget.select(); }} onBlur={() => { setDraft(null); setAddressError(null); }} onChange={(e) => setDraft(e.target.value)}
               />
               {canInput && state.mode !== 'embedded' ? <IconButton label="Fit page viewport to this window" onClick={fitViewport}><Scan size={14} /></IconButton> : null}
-              {!popout && !floating ? <Button size="sm" variant="ghost" className="browser-pip-trigger" onClick={() => setFloating(true)}>Float</Button> : null}
+              {!popout && !floating ? <Button size="sm" variant="ghost" className="browser-pip-trigger" onClick={() => { docked.current = false; setFloating(true); }}>Float</Button> : null}
               {!popout && canOpenBrowserPopout() ? <IconButton label="Open browser in a separate desktop window" onClick={() => void openDesktopWindow()}><ExternalLink size={14} /></IconButton> : null}
               {popout ? <IconButton label="Dock browser back to Mingle" onClick={() => void dockBrowserPopout()}><ArrowDownToLine size={14} /></IconButton> : null}
               <IconButton label={expanded ? 'Exit full view' : 'Open full view'} onClick={() => setExpanded((v) => !v)}>{expanded ? <Minimize2 size={14} /> : <Maximize2 size={14} />}</IconButton>
@@ -298,7 +302,7 @@ export function BrowserPane({ session, active, popout = false }: { session: Sess
   })();
 
   return (
-    <BrowserHost expanded={expanded} floating={floating && !detached} onDismiss={() => setExpanded(false)} onDock={() => setFloating(false)} onMinimize={() => setFloating(false)} onPopout={canOpenBrowserPopout() ? () => void openDesktopWindow() : undefined}>
+    <BrowserHost expanded={expanded} floating={floating && !detached} onDismiss={() => setExpanded(false)} onDock={() => { docked.current = true; setFloating(false); useMingle.getState().setContextTab('browser'); }} onMinimize={() => setFloating(false)} onPopout={canOpenBrowserPopout() ? () => void openDesktopWindow() : undefined}>
       <div
         className={cx('browser__inner', expanded && 'is-expanded')}
         onKeyDown={(e) => { if (expanded && e.key === 'Escape' && !e.defaultPrevented) { e.preventDefault(); e.stopPropagation(); setExpanded(false); } }}
