@@ -11,7 +11,7 @@ import { ContextStrip } from '../components/automation/ContextSummary';
 import { SOURCE_LABEL, sourceLocation } from '../components/automation/TaskSource';
 import { shortSha } from '../components/git/gitUtil';
 import { AgentIdentity } from '../components/group/AgentIdentity';
-import { activityEventInScope } from '../lib/activityView';
+import { activityEventInScope, activityMatchesSearch } from '../lib/activityView';
 
 type Tone = 'ok' | 'warn' | 'err' | 'info' | 'accent' | 'neutral';
 const toneFor = (type: string): Tone => {
@@ -96,6 +96,7 @@ export function ActivityView() {
   const [allProjects, setAllProjects] = useState(false);
   const [type, setType] = useState('');
   const [sessionId, setSessionId] = useState('');
+  const [search, setSearch] = useState('');
   const now = useNow();
 
   const sessionName = useMemo(() => new Map((sessions ?? []).map((s) => [s.id, s.name])), [sessions]);
@@ -160,8 +161,8 @@ export function ActivityView() {
 
   const types = useMemo(() => Array.from(new Set(entries.map((e) => e.type))).sort(), [entries]);
   const filtered = useMemo(
-    () => entries.filter((e) => (!type || e.type === type) && (!sessionId || e.sessionId === sessionId)).sort((a, b) => b.at - a.at || b.order - a.order).slice(0, 500),
-    [entries, type, sessionId],
+    () => entries.filter((e) => (!type || e.type === type) && (!sessionId || e.sessionId === sessionId) && activityMatchesSearch(search, e.summary, e.type, e.origin, e.sessionId)).sort((a, b) => b.at - a.at || b.order - a.order).slice(0, 500),
+    [entries, type, sessionId, search],
   );
   const groups = useMemo(() => {
     const out: { day: string; items: Entry[] }[] = [];
@@ -183,6 +184,8 @@ export function ActivityView() {
         </div>
         <span className="spacer" />
         <label className="sr-only" htmlFor="ev-type">Event type</label>
+        <label className="sr-only" htmlFor="ev-search">Search activity</label>
+        <input id="ev-search" className="activity__search" type="search" value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search activity…" />
         <SelectMenu id="ev-type" label="Event type" value={type} onChange={setType} options={[{ value: '', label: 'All types' }, ...types.map((value) => ({ value, label: value }))]} />
         <label className="sr-only" htmlFor="ev-session">Session</label>
         <SelectMenu id="ev-session" label="Session" value={sessionId} onChange={setSessionId} options={[{ value: '', label: 'All sessions' }, ...scopedSessions.map((s) => ({ value: s.id, label: s.name }))]} />
