@@ -1,4 +1,4 @@
-import { app, BrowserWindow, WebContentsView, ipcMain, session } from 'electron';
+import { app, BrowserWindow, WebContentsView, ipcMain, nativeImage, session } from 'electron';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
@@ -67,7 +67,7 @@ async function run() {
     assert.equal(item.webContentsView.parentWindow, appWindow, `${label}: parked in the workspace window`);
     assert.ok(stackIndex(item.webContentsView) >= 0, `${label}: is a child of the workspace window`);
     assert.ok(stackIndex(item.webContentsView) < stackIndex(uiView), `${label}: sits beneath the UI view, so it cannot cover the interface`);
-    assert.deepEqual(item.webContentsView.getBounds(), { x: 0, y: 0, width: 1280, height: 800 });
+    assert.deepEqual(item.webContentsView.getBounds(), { x: 0, y: 0, width: 1920, height: 1200 });
   };
   assertParked(native, 'new agent tab');
   const background = await context.newPage();
@@ -77,6 +77,23 @@ async function run() {
   assertParked(other, 'second tab');
   const backgroundScreenshot = await background.screenshot();
   assert.ok(backgroundScreenshot.length, 'Parked tabs still produce screenshots');
+  // Floating presentation streams the parked page from beneath the workspace UI.
+  const cdp = await context.newCDPSession(page);
+  let frames = 0;
+  const framePromise = new Promise((resolveFrame, reject) => {
+    const timer = setTimeout(() => reject(new Error('No screencast frame within 5 seconds')), 5000);
+    cdp.on('Page.screencastFrame', async event => {
+      frames++;
+      await cdp.send('Page.screencastFrameAck', { sessionId: event.sessionId });
+      clearTimeout(timer);
+      resolveFrame(nativeImage.createFromBuffer(Buffer.from(event.data, 'base64')).getSize());
+    });
+  });
+  await cdp.send('Page.startScreencast', { format: 'jpeg', quality: 90, maxWidth: 1920, maxHeight: 1200, everyNthFrame: 1 });
+  const screencastSize = await framePromise;
+  assert.deepEqual(screencastSize, { width: 1920, height: 1200 }, 'Parked page streams at the higher floating resolution');
+  await cdp.send('Page.stopScreencast');
+  process.stdout.write(`Parked screencast: ${screencastSize.width} × ${screencastSize.height}\n`);
   const markup = '<input id="input"><button id="button" onclick="document.querySelector(\'#out\').textContent=document.querySelector(\'#input\').value">Write</button><div id="out"></div>';
   await page.goto(`data:text/html,${encodeURIComponent(markup)}`);
   await page.fill('#input', 'mingle-smoke');
@@ -106,26 +123,11 @@ async function run() {
   const screenshot = await page.screenshot();
   if (!screenshot.length) throw new Error('Screenshot was empty');
   const aria = await page.locator('body').ariaSnapshot();
-  // Parked tabs keep rendering beneath the UI, so the stream works whether or not the tab is shown.
-  assert.equal(host.setPresented('smoke', native.targetId, appWindow, native.webContentsView, { x: 100, y: 120, width: 700, height: 450 }), true);
-  const cdp = await context.newCDPSession(page);
-  let frames = 0;
-  const framePromise = new Promise((resolveFrame, reject) => {
-    const timer = setTimeout(() => reject(new Error('No screencast frame within 5 seconds')), 5000);
-    cdp.on('Page.screencastFrame', async event => {
-      frames++;
-      await cdp.send('Page.screencastFrameAck', { sessionId: event.sessionId });
-      clearTimeout(timer); resolveFrame();
-    });
-  });
-  await cdp.send('Page.startScreencast', { format: 'jpeg', quality: 50, everyNthFrame: 1 });
-  await framePromise;
-  await cdp.send('Page.stopScreencast');
   host.park(native.webContentsView);
   await background.close();
   await page.close();
   assert.deepEqual(appWindow.contentView.children, [uiView], 'Closing tabs leaves only the workspace UI');
-  const summary = { value, screenshotBytes: screenshot.length, ariaSnapshot: aria, screencastFrames: frames, cookieRoundTrip: true, independentCdpSessions: true, nativeInputAttribution: true, parkedBeneathUi: true, repeatedPresentation: true, backgroundScreenshotBytes: backgroundScreenshot.length };
+  const summary = { value, screenshotBytes: screenshot.length, ariaSnapshot: aria, screencastFrames: frames, screencastSize, cookieRoundTrip: true, independentCdpSessions: true, nativeInputAttribution: true, parkedBeneathUi: true, repeatedPresentation: true, backgroundScreenshotBytes: backgroundScreenshot.length };
   process.stdout.write(`${JSON.stringify(summary)}\n`);
   inputAbort.abort();
   await inputReading;
