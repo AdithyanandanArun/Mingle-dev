@@ -5,7 +5,7 @@ import { useMingle, useProject } from '../../store/store';
 import { clockTime, cx } from '../../lib/format';
 import { DELIVERY_LABEL, activeMembers } from '../../lib/groups';
 import {
-  buildTimeline, groupRuns, memberSessionIds, placeRuns, speakers, toolCallsByRun, type GroupItem, type NativeItem, type Speaker,
+  buildTimeline, groupRuns, memberSessionIds, speakers, toolCallsByRun, type GroupItem, type NativeItem, type Speaker,
 } from '../../lib/groupTimeline';
 import { Markdown } from '../Markdown';
 import { Button, EmptyState } from '../ui';
@@ -167,7 +167,6 @@ export function GroupConversation({ snapshot }: { snapshot: GroupSnapshot }) {
   const members = useMemo(() => activeMembers(snapshot), [snapshot]);
   const { byMember, bySession } = useMemo(() => speakers(snapshot), [snapshot]);
 
-  const items = useMemo(() => buildTimeline({ snapshot, sessions, messages, streams }), [snapshot, sessions, messages, streams]);
   const sessionIds = useMemo(() => memberSessionIds(snapshot), [snapshot]);
   const plans = useMemo(() => {
     const rows = allPlans.filter((plan) => sessionIds.has(plan.sessionId));
@@ -175,17 +174,9 @@ export function GroupConversation({ snapshot }: { snapshot: GroupSnapshot }) {
     for (const plan of rows) if (plan.status === 'completed') latestCompleted.set(plan.sessionId, plan);
     return [...rows.filter((plan) => plan.status !== 'completed'), ...latestCompleted.values()];
   }, [allPlans, sessionIds]);
-  const questions = useMemo(() => {
-    const rows = allQuestions.filter((question) => sessionIds.has(question.sessionId));
-    return [...rows].sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt));
-  }, [allQuestions, sessionIds]);
   const runs = useMemo(() => groupRuns(snapshot, allRuns), [snapshot, allRuns]);
-  const placement = useMemo(() => placeRuns(items, runs), [items, runs]);
-  const reviewAt = (plan: SessionPlan): number => {
-    const run = allRuns.find((candidate) => candidate.id === plan.runId);
-    const at = Date.parse(run?.finishedAt ?? '');
-    return Number.isFinite(at) ? at : Date.parse(plan.updatedAt);
-  };
+  const items = useMemo(() => buildTimeline({ snapshot, sessions, messages, streams, runs, questions: allQuestions, plans }),
+    [snapshot, sessions, messages, streams, runs, allQuestions, plans]);
   const calls = useMemo(() => toolCallsByRun(allCalls, sessionIds), [allCalls, sessionIds]);
   const activeSessionIds = useMemo(() => new Set(members.map((member) => member.sessionId)), [members]);
   const boardRefreshEvent = allEvents.filter((event) => event.projectId === project?.id
@@ -214,7 +205,7 @@ export function GroupConversation({ snapshot }: { snapshot: GroupSnapshot }) {
   const [boardView, setBoardView] = useState(false);
   const contentSig = items.filter((item): item is NativeItem => item.type === 'native').map((item) => `${item.key}:${item.message.content.length}`).join('|');
   const activitySig = runs.map((run) => `${run.id}:${run.status}:${run.toolCount}:${run.changes?.status ?? 'unknown'}:${run.changes?.fileCount ?? ''}`).join('|');
-  const planningSig = `${plans.map((plan) => `${plan.id}:${plan.revision}:${plan.status}`).join(',')}|${questions.map((question) => `${question.id}:${question.status}`).join(',')}`;
+  const planningSig = `${plans.map((plan) => `${plan.id}:${plan.revision}:${plan.status}`).join(',')}|${items.flatMap(item => item.type === 'question' ? `${item.key}:${item.question.status}` : []).join(',')}`;
   const sig = `${snapshot.group.id}|${items.length}|${contentSig}|${pending.length}|${activitySig}|${allCalls.length}|${snapshot.deliveries.map((d) => d.status).join('')}|${tasks.map((task) => `${task.id}:${task.status}`).join(',')}|${planningSig}`;
   useEffect(() => { stick.current = true; setAway(false); }, [snapshot.group.id]);
   useLayoutEffect(() => {
@@ -232,22 +223,28 @@ export function GroupConversation({ snapshot }: { snapshot: GroupSnapshot }) {
 
   const visible = items.some((item) => (item.type === 'group') || (item.type === 'native' && !item.hidden && (item.message.role === 'user' || item.message.role === 'assistant')));
   const rendered: ReactNode[] = [];
-  const placedQuestions = new Set<string>();
-  const placedPlans = new Set<string>();
-  const renderPlanningAt = (at: number): ReactNode[] => {
-    const cards: ReactNode[] = [];
-    for (const question of questions) if (!placedQuestions.has(question.id) && Date.parse(question.createdAt) <= at) {
-      placedQuestions.add(question.id);
-      cards.push(<UserQuestionCard key={question.id} question={question} speaker={bySession.get(question.sessionId) ?? null} />);
-    }
-    for (const plan of plans) if (!placedPlans.has(plan.id) && reviewAt(plan) <= at) {
-      placedPlans.add(plan.id);
-      cards.push(<SessionPlanCard key={plan.id} plan={plan} reviewReady={allRuns.some((run) => run.id === plan.runId && run.status === 'completed')} speaker={bySession.get(plan.sessionId) ?? null} />);
-    }
-    return cards;
-  };
   items.forEach((item, index) => {
-    rendered.push(...renderPlanningAt(item.at));
+    if (item.type === 'question') {
+      rendered.push(<UserQuestionCard key={item.key} question={item.question} speaker={bySession.get(item.question.sessionId) ?? null} />);
+      return;
+    }
+    if (item.type === 'plan') {
+      rendered.push(<SessionPlanCard key={item.key} plan={item.plan} reviewReady={item.reviewReady} speaker={bySession.get(item.plan.sessionId) ?? null} />);
+      return;
+    }
+    if (item.type === 'changes') {
+      rendered.push(<RunChanges key={item.key} runId={item.run.id} summary={item.run.changes} />);
+      return;
+    }
+    if (item.type === 'activity') {
+      const who = bySession.get(item.run.sessionId);
+      const session = sessions.find(candidate => candidate.id === item.run.sessionId);
+      rendered.push(<div key={item.key} className="group-run">
+        {who ? <AgentIdentity className="group-run__who" handle={who.handle} identityKey={who.sessionId} provider={session?.provider} /> : null}
+        <RunActivity run={item.run} initialCalls={calls.get(item.run.id) ?? NO_CALLS} />
+      </div>);
+      return;
+    }
     if (item.type === 'group') { rendered.push(<GroupMessageRow key={item.key} item={item} snapshot={snapshot} />); return; }
     if (item.type === 'failure') {
       const session = item.member && sessions.find((candidate) => candidate.id === item.member?.sessionId);
@@ -278,20 +275,8 @@ export function GroupConversation({ snapshot }: { snapshot: GroupSnapshot }) {
           onAskAboutThis={(quote) => appendContextReference(snapshot.group.anchorSessionId, { ...quote, sourceGroupId: snapshot.group.id })} />);
       }
     }
-    for (const run of placement.activityAfter.get(item.key) ?? []) {
-      const who = bySession.get(run.sessionId);
-      const runSession = sessions.find((candidate) => candidate.id === run.sessionId);
-      body.push(
-        <div key={`run:${run.id}`} className="group-run">
-          {who ? <AgentIdentity className="group-run__who" handle={who.handle} identityKey={who.sessionId} provider={runSession?.provider} /> : null}
-          <RunActivity run={run} initialCalls={calls.get(run.id) ?? NO_CALLS} />
-        </div>,
-      );
-    }
-    for (const run of (placement.changesAfter.get(item.key) ?? []).filter((candidate) => candidate.status !== 'running')) body.push(<RunChanges key={`changes:${run.id}`} runId={run.id} summary={run.changes} />);
     if (body.length) rendered.push(<Fragment key={item.key}>{body}</Fragment>);
   });
-  rendered.push(...renderPlanningAt(Number.POSITIVE_INFINITY));
 
   const working = members.flatMap((member) => {
     const session = sessions.find((candidate) => candidate.id === member.sessionId);
@@ -326,16 +311,6 @@ export function GroupConversation({ snapshot }: { snapshot: GroupSnapshot }) {
             </div>
           ) : null}
           {rendered}
-          {placement.unplaced.map((run) => {
-            const who = bySession.get(run.sessionId);
-            const session = sessions.find((candidate) => candidate.id === run.sessionId);
-            return (
-              <Fragment key={run.id}>
-                <div className="group-run">{who ? <AgentIdentity className="group-run__who" handle={who.handle} identityKey={who.sessionId} provider={session?.provider} /> : null}<RunActivity run={run} initialCalls={calls.get(run.id) ?? NO_CALLS} /></div>
-                {run.status !== 'running' ? <RunChanges runId={run.id} summary={run.changes} /> : null}
-              </Fragment>
-            );
-          })}
           {working.map((member) => {
             const session = sessions.find((candidate) => candidate.id === member.sessionId);
             return <div key={member.id} className="working" role="status"><span className="activity-shimmer"><AgentIdentity handle={member.handle} identityKey={member.sessionId} provider={session?.provider} /> is working…</span></div>;

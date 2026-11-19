@@ -1,4 +1,4 @@
-import type { GroupDelivery, GroupMember, GroupMessage, GroupSnapshot, Message, Session, SessionRun, ToolCall } from '@mingle/contracts';
+import type { GroupDelivery, GroupMember, GroupMessage, GroupSnapshot, Message, Session, SessionPlan, SessionRun, ToolCall, UserQuestion } from '@mingle/contracts';
 import type { StreamEntry } from '../store/store';
 import type { DisplayMessage } from './conversation';
 
@@ -6,7 +6,11 @@ export interface Speaker { memberId: string; sessionId: string; handle: string; 
 export interface NativeItem { type: 'native'; key: string; at: number; message: DisplayMessage; sessionId: string; speaker: Speaker | null; hidden: boolean }
 export interface GroupItem { type: 'group'; key: string; at: number; message: GroupMessage; sender: Speaker | null; recipients: Speaker[]; deliveries: GroupDelivery[] }
 export interface FailureItem { type: 'failure'; key: string; at: number; delivery: GroupDelivery; member: Speaker | null }
-export type TimelineItem = NativeItem | GroupItem | FailureItem;
+type ActivityItem = { type: 'activity'; key: string; at: number; run: SessionRun };
+type ChangesItem = { type: 'changes'; key: string; at: number; run: SessionRun };
+type QuestionItem = { type: 'question'; key: string; at: number; question: UserQuestion };
+type PlanItem = { type: 'plan'; key: string; at: number; plan: SessionPlan; reviewReady: boolean };
+export type TimelineItem = NativeItem | GroupItem | FailureItem | ActivityItem | ChangesItem | QuestionItem | PlanItem;
 
 /** The server marks the human's delivery to a member with this kind; the group message already shows it once. */
 export const HIDDEN_NATIVE_KIND = 'group-delivery';
@@ -44,7 +48,8 @@ export function memberSessionIds(snapshot: GroupSnapshot): Set<string> {
   return new Set(snapshot.members.map((member) => member.sessionId));
 }
 
-export function buildTimeline({ snapshot, sessions, messages, streams }: {
+export function buildTimeline({ snapshot, sessions, messages, streams, runs = [], questions = [], plans = [] }: {
+  runs?: readonly SessionRun[]; questions?: readonly UserQuestion[]; plans?: readonly SessionPlan[];
   snapshot: GroupSnapshot; sessions: readonly Session[]; messages: readonly Message[]; streams: Record<string, StreamEntry>;
 }): TimelineItem[] {
   const { byMember, bySession } = speakers(snapshot);
@@ -112,44 +117,40 @@ export function buildTimeline({ snapshot, sessions, messages, streams }: {
     if (group && (!native || group.at <= native.at)) { merged.push(group); g++; } else { merged.push(native!); n++; }
   }
 
-  const failures: FailureItem[] = snapshot.deliveries
+  const runById = new Map(runs.map(run => [run.id, run]));
+  const byMessageId = new Map(natives.map(item => [item.message.id, item]));
+  const latestNativeAt = new Map<string, number>();
+  for (const item of natives) if (item.message.runId) latestNativeAt.set(item.message.runId, item.at);
+  const dated: TimelineItem[] = snapshot.deliveries
     .filter((delivery) => delivery.status === 'failed' && delivery.error)
-    .map((delivery) => ({ type: 'failure' as const, key: `f:${delivery.id}`, at: time(delivery.updatedAt), delivery, member: byMember.get(delivery.memberId) ?? null }))
-    .sort((a, b) => a.at - b.at);
-  for (const failure of failures) {
-    let index = merged.length;
-    for (let i = 0; i < merged.length; i++) if (merged[i]!.at > failure.at) { index = i; break; }
-    merged.splice(index, 0, failure);
-  }
-  return merged;
-}
-
-export interface RunPlacement { activityAfter: Map<string, SessionRun[]>; changesAfter: Map<string, SessionRun[]>; unplaced: SessionRun[] }
-
-/** Runs and changed-file cards belong beside the member row that produced them, as in a single session. */
-export function placeRuns(items: readonly TimelineItem[], runs: readonly SessionRun[]): RunPlacement {
-  const natives = items.filter((item): item is NativeItem => item.type === 'native');
-  const byMessage = new Map(natives.map((item) => [item.message.id, item]));
-  const activityAfter = new Map<string, SessionRun[]>();
-  const changesAfter = new Map<string, SessionRun[]>();
-  const unplaced: SessionRun[] = [];
-  const push = (map: Map<string, SessionRun[]>, key: string, run: SessionRun): void => { const list = map.get(key) ?? []; list.push(run); map.set(key, list); };
+    .map((delivery) => ({ type: 'failure', key: `f:${delivery.id}`, at: time(delivery.updatedAt), delivery, member: byMember.get(delivery.memberId) ?? null }));
   for (const run of runs) {
-    const origin = byMessage.get(run.userMessageId);
-    if (!origin) { unplaced.push(run); continue; }
-    push(activityAfter, origin.key, run);
-    const own = natives.filter((item) => item.message.runId === run.id && item.message.role !== 'tool');
-    // A change summary describes the completed run, so anchor it to the last
-    // transcript row at or before completion (rather than the last assistant
-    // row, which can precede later tool output or other members' messages).
-    const finishedAt = time(run.finishedAt);
-    const target = Number.isFinite(finishedAt)
-      ? [...natives].reverse().find((item) => item.at <= finishedAt && (item.sessionId === run.sessionId || item.at > origin.at)) ?? origin
-      : [...own].reverse().find((item) => item.message.role === 'assistant') ?? own.at(-1) ?? origin;
-    push(changesAfter, target.key, run);
+    const started = time(run.startedAt);
+    if (!withinGroup(run.sessionId, started)) continue;
+    const originAt = byMessageId.get(run.userMessageId)?.at ?? started;
+    dated.push({ type: 'activity', key: `activity:${run.id}`, at: Math.max(started, originAt), run });
+    if (run.status !== 'running') {
+      const last = latestNativeAt.get(run.id) ?? originAt;
+      dated.push({ type: 'changes', key: `changes:${run.id}`, at: Math.max(originAt, last, run.finishedAt ? time(run.finishedAt) : last), run });
+    }
   }
-  unplaced.sort((a, b) => a.startedAt.localeCompare(b.startedAt));
-  return { activityAfter, changesAfter, unplaced };
+  for (const question of questions) {
+    const at = time(question.createdAt);
+    if (withinGroup(question.sessionId, at)) dated.push({ type: 'question', key: `question:${question.id}`, at, question });
+  }
+  for (const plan of plans) {
+    if (!withinGroup(plan.sessionId, time(plan.createdAt))) continue;
+    const run = runById.get(plan.runId);
+    dated.push({ type: 'plan', key: `plan:${plan.id}`, at: time(run?.finishedAt ?? plan.createdAt), plan, reviewReady: run?.status === 'completed' });
+  }
+  dated.sort((a, b) => a.at - b.at);
+  const result: TimelineItem[] = [];
+  let next = 0;
+  for (const item of merged) {
+    while (dated[next] && dated[next]!.at < item.at) result.push(dated[next++]!);
+    result.push(item);
+  }
+  return result.concat(dated.slice(next));
 }
 
 export function groupRuns(snapshot: GroupSnapshot, runs: readonly SessionRun[]): SessionRun[] {
