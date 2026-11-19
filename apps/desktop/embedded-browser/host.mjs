@@ -26,7 +26,7 @@ const sessionPattern = /^[A-Za-z0-9_-]{1,80}$/;
 const wsPathPattern = /^\/devtools\/browser\/[A-Za-z0-9-]{8,80}$/;
 
 /** Size background tabs render at while nobody is looking at them. */
-const PARKED_BOUNDS = { x: 0, y: 0, width: 1280, height: 800 };
+const PARKED_BOUNDS = { x: 0, y: 0, width: 1920, height: 1200 };
 
 /** Apply a hide only while the hiding window still owns the native view. */
 export function hideOwnedEmbeddedView(window, view, park) {

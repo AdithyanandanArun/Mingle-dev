@@ -20,7 +20,7 @@ export const STREAM_MAX_CONNECTIONS = 16;
 export const STREAM_MAX_VIEWERS_PER_TAB = 2;
 export const STREAM_MAX_BUFFERED = 2 * 1024 * 1024;
 export const STREAM_ACK_TIMEOUT_MS = 3_000;
-export const STREAM_SETTINGS = { jpegQuality: 80, maxWidth: 1280, maxHeight: 960, minFrameIntervalMs: 1000 / 30 } as const;
+export const STREAM_SETTINGS = { jpegQuality: 90, maxWidth: 1920, maxHeight: 1200, minFrameIntervalMs: 1000 / 30 } as const;
 export const STREAM_MAX_PENDING_INPUTS = 100;
 export const STREAM_MAX_PENDING_MOVES = 16;
 
