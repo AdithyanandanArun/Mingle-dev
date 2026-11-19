@@ -1,0 +1,10 @@
+.browser-float-controls { position: absolute; z-index: 8; top: 10px; right: 12px; display: flex; gap: 5px; padding: 5px; border: 1px solid var(--line-strong); border-radius: 999px; background: color-mix(in srgb, var(--bg-panel) 90%, transparent); box-shadow: var(--shadow-pop); opacity: .22; transition: opacity 140ms ease, transform 140ms ease; }
+.browser-pip:hover .browser-float-controls, .browser-pip:focus-within .browser-float-controls, .browser-float-controls:hover { opacity: 1; }
+.browser-float-controls button { position: relative; display: grid; place-items: center; width: 30px; height: 30px; padding: 0; border: 0; border-radius: 50%; background: transparent; color: var(--fg-1); cursor: pointer; }
+.browser-float-controls button:hover:not(:disabled) { background: var(--bg-hover); color: var(--fg-0); }
+.browser-float-controls button:focus-visible { outline: 2px solid var(--blue-line); outline-offset: 2px; opacity: 1; }
+.browser-float-controls button:disabled { opacity: .4; cursor: not-allowed; }
+.browser-float-controls button[title]::after { position: absolute; top: calc(100% + 7px); right: 0; z-index: 10; width: max-content; max-width: 190px; padding: 5px 8px; border: 1px solid var(--line-strong); border-radius: 6px; background: var(--bg-panel); color: var(--fg-0); box-shadow: var(--shadow-pop); content: attr(title); font-size: var(--text-2xs); opacity: 0; pointer-events: none; transform: translateY(-2px); transition: opacity 120ms ease, transform 120ms ease; }
+.browser-float-controls button:hover::after, .browser-float-controls button:focus-visible::after { opacity: 1; transform: none; }
+@media (max-width: 500px) { .browser-float-controls { top: 6px; right: 6px; gap: 2px; } .browser-float-controls button { width: 28px; height: 28px; } }
+@media (prefers-reduced-motion: reduce) { .browser-float-controls, .browser-float-controls button[title]::after { transition: none; } }
