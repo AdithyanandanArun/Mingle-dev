@@ -86,6 +86,7 @@ export function BrowserHost({
   const interactionCleanup = useRef<(() => void) | null>(null);
   const [overlaySlot, setOverlaySlot] = useState<HTMLDivElement | null>(null);
   const [geometry, setGeometry] = useState<Geometry>(initialGeometry);
+  const geometryCustomized = useRef(false);
   const { present: overlayPresent, closing: overlayClosing } = usePresence(expanded);
 
   useLayoutEffect(() => {
@@ -108,7 +109,7 @@ export function BrowserHost({
   useEffect(() => {
     const resize = () => {
       interactionCleanup.current?.();
-      setGeometry((value) => clampGeometry(value));
+      setGeometry((value) => geometryCustomized.current ? clampGeometry(value) : initialGeometry());
     };
     window.addEventListener('resize', resize);
     return () => window.removeEventListener('resize', resize);
@@ -166,6 +167,7 @@ export function BrowserHost({
       if (next.pointerId !== pointerId) return;
       next.preventDefault();
       const dx = next.clientX - startX, dy = next.clientY - startY;
+      if (dx || dy) geometryCustomized.current = true;
       setGeometry(interaction.kind === 'move'
         ? clampGeometry({ ...origin, left: origin.left + dx, top: origin.top + dy })
         : resizeFromCorner(origin, interaction.corner, dx, dy));
@@ -198,6 +200,7 @@ export function BrowserHost({
     else if (event.key === 'ArrowDown') next.top += delta;
     else return;
     event.preventDefault();
+    geometryCustomized.current = true;
     setGeometry(clampGeometry(next));
   };
 
@@ -207,6 +210,7 @@ export function BrowserHost({
     const dy = event.key === 'ArrowUp' ? -delta : event.key === 'ArrowDown' ? delta : 0;
     if (!dx && !dy) return;
     event.preventDefault();
+    geometryCustomized.current = true;
     setGeometry((value) => resizeFromCorner(value, corner, dx, dy));
   };
 
