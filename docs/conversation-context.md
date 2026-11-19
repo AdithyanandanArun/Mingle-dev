@@ -4,6 +4,8 @@ The small ring beside Send shows the latest context reading for this conversatio
 
 **Compact conversation** asks the selected provider to compact its native history. It preserves your unsent draft and attachments. The action is unavailable during a run or cleanup, before native history exists, for remote-owner conversations, and for unsupported providers. You can request cancellation while it runs. Completion clears the old reading and retains a fresh report if the native provider emits one after its compaction boundary. Otherwise the ring waits for the next provider report; it does not display an invented 0%. The provider decides what its summary retains.
 
+**Auto-compact at** saves a threshold from 1% to 100% for this conversation. Clear the field and select **Save** to turn it off. When a supported provider reports a reading at or above the threshold during a dispatched turn, Mingle pauses that turn, waits for the provider to stop, and saves a recovery checkpoint before compacting. After success, Mingle continues the same run using the compacted native history. Other conversations can keep working. A turn can auto-compact once, and a failed or cancelled compaction stops the run. Native provider compaction can still happen independently.
+
 For a group, select or address one agent to see that agent's ring and compact its history. Multiple recipients have no combined context percentage.
 
 ## Write the request instead of choosing a mode
