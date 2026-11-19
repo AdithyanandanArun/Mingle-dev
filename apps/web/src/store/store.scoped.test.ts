@@ -118,6 +118,24 @@ describe('scoped session refresh', () => {
     expect(store.getState()).toMatchObject({ contextOpen: false, contextTab: 'files', sessionByProject: { p: 'anchor' } });
   });
 
+  it('does not replace a group browser being driven by a person', async () => {
+    const { useMingle: store, emit } = await startStore(workspace());
+    const { useBrowserStore } = await import('./browser');
+    const tabId = 'tab_123456789abc';
+    store.setState({ view: 'workspace', activeProjectId: 'p', sessionByProject: { p: 'anchor' } });
+    useBrowserStore.getState().publish('anchor', {
+      sessionId: 'anchor', status: 'connected', mode: 'managed', activeTabId: tabId, error: null, notices: [],
+      tabs: [{
+        id: tabId, url: 'about:blank', title: 'Example page', managed: true, viewport: { width: 1280, height: 800 },
+        controlOwner: 'person', control: { owner: 'human', holderId: 'person', lease: 'hold', expiresAt: null },
+        agentPointer: null, embeddedTargetId: null, dialog: null,
+      }],
+    });
+    emit({ type: 'browser.opened', sessionId: 'member', tabId: 'tab_bbbbbbbbbbbb' });
+    expect(useBrowserStore.getState().viewerSessions.anchor).toBeUndefined();
+    expect(useBrowserStore.getState().openRequests.member).toBeUndefined();
+  });
+
   it('refreshes a confined event through that session\'s snapshot only, keeping every other reference', async () => {
     const boot = workspace();
     const { useMingle: store, scoped, settle } = await startStore(boot);
