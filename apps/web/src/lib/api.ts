@@ -180,6 +180,7 @@ export const api = {
   refreshProjectContext: (projectId: string) => json<ProjectContext>(`${projectBase(projectId)}/context/refresh`, 'POST', {}),
   createSession: (input: NewSessionInput) => json<Session>('/api/sessions', 'POST', input),
   updateSession: (id: string, patch: SessionPatch) => json<Session>(`/api/sessions/${encodeURIComponent(id)}`, 'PATCH', patch),
+  updateSessionAutoCompaction: (id: string, percent: number | null) => json<Session>(`/api/sessions/${encodeURIComponent(id)}/auto-compaction`, 'PATCH', { percent }),
   createGroup: (input: CreateGroup) => json<GroupSnapshot>('/api/groups', 'POST', input),
   group: (id: string, signal?: AbortSignal) => json<GroupSnapshot>(groupBase(id), 'GET', undefined, signal),
   groupBoard: (id: string, projectId: string, signal?: AbortSignal) =>
