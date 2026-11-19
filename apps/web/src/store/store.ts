@@ -441,10 +441,14 @@ export const useMingle = create<MingleState>((set, get) => {
       case 'browser.opened': {
         // Surface the run's actual tab without stealing focus or changing a human's current tab.
         const { activeProjectId, sessionByProject, view } = get();
-        if (view === 'workspace' && activeProjectId && sessionByProject[activeProjectId] === ev.sessionId) {
+        const selectedSessionId = activeProjectId ? sessionByProject[activeProjectId] : undefined;
+        const selectedGroup = findGroupForSession(get().boot?.groups, selectedSessionId);
+        const belongsToSelection = selectedSessionId === ev.sessionId || Boolean(selectedGroup && findGroupForSession([selectedGroup], ev.sessionId) === selectedGroup);
+        if (view === 'workspace' && activeProjectId && belongsToSelection) {
           const browser = useBrowserStore.getState();
           const current = resolveTab(browser.states[ev.sessionId], browser.selected[ev.sessionId]);
           if (!current?.controlOwner) browser.select(ev.sessionId, ev.tabId);
+          browser.requestOpen(ev.sessionId);
           window.dispatchEvent(new CustomEvent('mingle:browser-opened', { detail: { sessionId: ev.sessionId } }));
           // Keep the user's sidebar choice. BrowserPane follows the selected browser tab and
           // opens it in its floating host by default when the pane is visible.

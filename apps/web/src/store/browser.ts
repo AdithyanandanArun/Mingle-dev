@@ -6,8 +6,11 @@ interface BrowserUiState {
   states: Record<string, BrowserSessionState>;
   /** Tab each session's viewer was explicitly pointed at; absent means follow the server's active tab. */
   selected: Record<string, string>;
+  /** Durable open requests keyed by session, including requests received before the surface mounts. */
+  openRequests: Record<string, number>;
   publish(sessionId: string, state: BrowserSessionState): void;
   select(sessionId: string, tabId: string | null, broadcast?: boolean): void;
+  requestOpen(sessionId: string): void;
 }
 
 const selectionChannel = typeof BroadcastChannel === 'undefined' ? null : new BroadcastChannel('mingle.browser.selection.v1');
@@ -15,7 +18,9 @@ const selectionChannel = typeof BroadcastChannel === 'undefined' ? null : new Br
 export const useBrowserStore = create<BrowserUiState>((set) => ({
   states: {},
   selected: {},
+  openRequests: {},
   publish: (sessionId, state) => set((s) => ({ states: { ...s.states, [sessionId]: state } })),
+  requestOpen: (sessionId) => set((s) => ({ openRequests: { ...s.openRequests, [sessionId]: (s.openRequests[sessionId] ?? 0) + 1 } })),
   select: (sessionId, tabId, broadcast = true) => {
     set((s) => {
       const selected = { ...s.selected };
