@@ -4,11 +4,11 @@ Mingle's shared browser lets you and agents operate the same page. The desktop a
 
 ## Use it
 
-When an agent opens a browser in your selected conversation, Mingle shows the page in a floating window at the bottom right. The control bubble can open the browser in a desktop window or full view, dock it, minimize it, or disconnect it. Docking opens the **Browser** sidebar, where you can switch tabs, enter an address, and manage who is driving. An explicit dock stays in effect while you view that conversation.
+When an agent opens a browser in your selected conversation, Mingle shows the page in a floating window at the bottom right. The circular button at the top left opens a compact control bubble. The bubble can open the browser in a desktop window or full view, dock it, minimize it, or disconnect it. Docking opens the **Browser** sidebar, where you can switch tabs, enter an address, and manage who is driving. Drag the top edge to move the window, or a corner to resize it while keeping its 8:5 shape. An explicit dock stays in effect while you view that conversation.
 
 To connect a browser yourself, open the context pane and select **Browser**. Choose one of:
 
-- **Built-in browser (desktop):** uses Electron's own sandboxed Chromium in an isolated, persistent partition for the session. No second Chromium download is required. The page accepts your keyboard and mouse directly. The sidebar and desktop window can show the native page. The floating layout and its full view use the live stream so the controls can overlay the page.
+- **Built-in browser (desktop):** uses Electron's own sandboxed Chromium in an isolated, persistent partition for the session. No second Chromium download is required. The page accepts your keyboard and mouse directly. The sidebar and desktop window can show the native page. The floating layout and its full view use a live stream up to 1920×1200 so the controls can overlay the page.
 - **Mingle-managed Chromium:** a separately installed browser with its own persistent profile for the session. Install the pinned browser from the pane or **Settings → Browser**, or configure an absolute executable path. It starts without your personal browser's logins.
 - **Your running browser:** share existing logins and open web tabs by connecting to a running Chromium browser. Enable remote debugging in that browser, select the detected browser or enter its loopback CDP endpoint, and explicitly connect. An agent cannot attach to a personal browser by itself.
 

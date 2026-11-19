@@ -48,7 +48,13 @@ try {
   await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/scripts/floating-browser-fixture.html`);
   const sidebar = page.locator('aside[aria-label="Example browser sidebar"]');
   const floating = page.getByRole('region', { name: 'Floating shared browser' });
-  const bubble = floating.getByRole('navigation', { name: 'Floating browser controls' });
+  const toggle = floating.getByRole('button', { name: 'Floating browser controls' });
+  const bubble = floating.getByRole('navigation', { name: 'Floating browser actions' });
+  const control = (name) => bubble.getByRole('button', { name, exact: true });
+  const openControls = async () => {
+    if (await toggle.getAttribute('aria-expanded') !== 'true') await toggle.click();
+    await bubble.waitFor();
+  };
   const full = page.getByRole('dialog', { name: 'Shared browser', exact: true });
   await floating.waitFor();
   await floating.getByRole('application').waitFor();
@@ -57,15 +63,33 @@ try {
     assert.equal(await floating.locator(removed).count(), 0, `page-only layout hides ${removed}`);
   }
   assert.equal(await page.locator('body').getAttribute('data-native-shown'), null, 'only the live stream participates in floating layout');
+  assert.equal(await toggle.getAttribute('aria-expanded'), 'false');
+  assert.equal(await bubble.count(), 0, 'the page starts with only the circular toggle');
+  const initialPanel = await floating.boundingBox();
+  const initialToggle = await toggle.boundingBox();
+  assert.ok(initialToggle && initialPanel && initialToggle.x - initialPanel.x < 18 && initialToggle.y - initialPanel.y < 18);
+  assert.ok(initialToggle && initialToggle.width === initialToggle.height && initialToggle.width <= 32);
+  await toggle.press('Enter');
+  await bubble.waitFor();
+  assert.notEqual(await bubble.evaluate((node) => getComputedStyle(node).animationName), 'none');
   for (const name of ['Open desktop window', 'Dock browser', 'Disconnect browser', 'Open full browser', 'Minimize floating browser']) {
     await bubble.getByRole('button', { name, exact: true }).waitFor();
   }
+
+  await control('Dock browser').focus();
+  await page.keyboard.press('Escape');
+  await bubble.waitFor({ state: 'hidden' });
+  assert.ok(await toggle.evaluate((node) => node === document.activeElement));
+  await openControls();
+  await page.getByRole('heading', { name: 'Example browser workspace' }).click();
+  await bubble.waitFor({ state: 'hidden' });
 
   await page.setViewportSize({ width: 320, height: 480 });
   await page.waitForFunction(() => {
     const panel = document.querySelector('.browser-pip')?.getBoundingClientRect();
     return panel && panel.left >= 0 && panel.top >= 0
       && panel.right <= innerWidth && panel.bottom <= innerHeight
+      && Math.abs(panel.width / panel.height - 1.6) < 0.005
       && innerHeight - panel.bottom <= 13;
   });
   await page.setViewportSize({ width: 920, height: 740 });
@@ -73,34 +97,74 @@ try {
     const panel = document.querySelector('.browser-pip')?.getBoundingClientRect();
     return panel && innerWidth - panel.right < 14 && innerHeight - panel.bottom < 14;
   });
+  const beforeResize = await floating.boundingBox();
+  const resizeCorner = floating.getByRole('group', { name: /Resize floating browser from top-left corner/ });
+  await resizeCorner.press('Shift+ArrowLeft');
+  await page.waitForFunction(({ oldWidth, right, bottom }) => {
+    const panel = document.querySelector('.browser-pip')?.getBoundingClientRect();
+    return panel && panel.width > oldWidth + 35 && Math.abs(panel.width / panel.height - 1.6) < 0.005
+      && Math.abs(panel.right - right) < 1 && Math.abs(panel.bottom - bottom) < 1;
+  }, { oldWidth: beforeResize.width, right: beforeResize.x + beforeResize.width, bottom: beforeResize.y + beforeResize.height });
+
+  const beforeCornerDrag = await floating.boundingBox();
+  const ne = await floating.getByRole('group', { name: /Resize floating browser from top-right corner/ }).boundingBox();
+  await page.mouse.move(ne.x + ne.width / 2, ne.y + ne.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(ne.x + ne.width / 2 - 55, ne.y + ne.height / 2 + 20, { steps: 4 });
+  await page.mouse.up();
+  await page.waitForFunction(({ left, bottom, width }) => {
+    const panel = document.querySelector('.browser-pip')?.getBoundingClientRect();
+    return panel && panel.width < width - 50 && Math.abs(panel.width / panel.height - 1.6) < 0.005
+      && Math.abs(panel.left - left) < 1 && Math.abs(panel.bottom - bottom) < 1;
+  }, { left: beforeCornerDrag.x, bottom: beforeCornerDrag.y + beforeCornerDrag.height, width: beforeCornerDrag.width });
+
+  const beforeMove = await floating.boundingBox();
+  const handle = await floating.locator('.browser-pip__handle').boundingBox();
+  const handleCenter = { x: handle.x + handle.width / 2, y: handle.y + handle.height / 2 };
+  await page.mouse.move(handleCenter.x, handleCenter.y);
+  await page.mouse.down();
+  await page.mouse.move(handleCenter.x - 45, handleCenter.y - 35, { steps: 4 });
+  await page.mouse.up();
+  await page.waitForFunction((before) => {
+    const panel = document.querySelector('.browser-pip')?.getBoundingClientRect();
+    return panel && Math.abs(panel.left - before.x + 45) < 1 && Math.abs(panel.top - before.y + 35) < 1
+      && Math.abs(panel.width - before.width) < 1 && Math.abs(panel.height - before.height) < 1;
+  }, beforeMove);
+
   await page.emulateMedia({ reducedMotion: 'reduce' });
+  await openControls();
   assert.equal(await bubble.evaluate((node) => getComputedStyle(node).animationName), 'none');
 
   await floating.getByRole('application').focus();
   await page.keyboard.press('Alt+Shift+Escape');
-  assert.match(await page.evaluate(() => document.activeElement?.getAttribute('aria-label')), /Move floating browser/);
+  assert.equal(await page.evaluate(() => document.activeElement?.getAttribute('aria-label')), 'Floating browser controls');
   await bubble.getByRole('button', { name: 'Open full browser' }).click();
   await full.waitFor();
   assert.equal(await full.locator('.browser-bar, .browser-status, .browser-tabs').count(), 0);
   await full.getByRole('button', { name: 'Exit full browser' }).click();
   await floating.waitFor();
-  assert.equal(await page.evaluate(() => document.activeElement?.getAttribute('aria-label')), 'Open full browser');
+  assert.equal(await page.evaluate(() => document.activeElement?.getAttribute('aria-label')), 'Floating browser controls');
+  assert.equal(await toggle.getAttribute('aria-expanded'), 'false');
 
-  await bubble.getByRole('button', { name: 'Minimize floating browser' }).click();
+  await openControls();
+  await control('Minimize floating browser').click();
   await floating.waitFor({ state: 'hidden' });
   await page.getByRole('button', { name: 'Restore browser' }).click();
   await floating.waitFor();
   assert.equal(await sidebar.isVisible(), false);
 
-  await bubble.getByRole('button', { name: 'Open desktop window' }).click();
+  await openControls();
+  await control('Open desktop window').click();
   await floating.waitFor({ state: 'hidden' });
   await page.getByRole('button', { name: 'Example desktop window closes' }).click();
   await floating.waitFor();
 
-  await bubble.getByRole('button', { name: 'Disconnect browser' }).click();
+  await openControls();
+  await control('Disconnect browser').click();
   await floating.getByText('Example disconnect failed').waitFor();
   assert.equal(await floating.isVisible(), true, 'a failed disconnect keeps the browser and the failure visible');
-  await bubble.getByRole('button', { name: 'Dock browser' }).click();
+  await openControls();
+  await control('Dock browser').click();
   await floating.waitFor({ state: 'hidden' });
   await sidebar.getByRole('tablist', { name: 'Browser tabs' }).waitFor();
   await sidebar.getByRole('textbox', { name: 'Address' }).waitFor();
@@ -111,9 +175,10 @@ try {
   await sidebar.getByRole('button', { name: 'Float', exact: true }).click();
   await floating.waitFor();
   allowDisconnect = true;
-  await bubble.getByRole('button', { name: 'Disconnect browser' }).click();
+  await openControls();
+  await control('Disconnect browser').click();
   await floating.waitFor({ state: 'hidden' });
   assert.equal(disconnected, true);
   assert.deepEqual(errors, []);
-  console.log('Floating browser acceptance passed: startup, layout, keyboard, dock, minimize, full view, popout, disconnect, and reduced motion.');
+  console.log('Floating browser acceptance passed: collapsed controls, popup dismissal, ratio lock, keyboard, dock, minimize, full view, popout, disconnect, and reduced motion.');
 } finally { await browser?.close(); await server?.close(); }
