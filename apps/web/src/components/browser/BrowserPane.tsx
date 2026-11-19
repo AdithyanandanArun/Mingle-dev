@@ -233,7 +233,7 @@ export function BrowserPane({ session, active, popout = false }: { session: Sess
     if (state.status !== 'connected') return <BrowserConnect sessionId={session.id} state={state} onState={apply} />;
     return (
       <>
-        <div className="browser-tabs" role="tablist" aria-label="Browser tabs">
+        {!pageOnly ? <div className="browser-tabs" role="tablist" aria-label="Browser tabs">
           {state.tabs.map((t) => (
             <div key={t.id} className={cx('browser-tab', t.id === tab?.id && 'is-active')} role="presentation">
               <button type="button" role="tab" aria-selected={t.id === tab?.id} title={`${tabLabel(t)}\n${t.url}`} onClick={() => useBrowserStore.getState().select(session.id, t.id)}>{tabLabel(t)}</button>
@@ -246,8 +246,8 @@ export function BrowserPane({ session, active, popout = false }: { session: Sess
             </div>
           ))}
           <IconButton label="New tab" className="browser-tabs__new" onClick={() => void openTab()} disabled={busy === 'tab'}><Plus size={14} /></IconButton>
-        </div>
-        {confirmPresent && confirmedTab.current ? (
+        </div> : null}
+        {!pageOnly && confirmPresent && confirmedTab.current ? (
           <div className={cx('browser-confirm', confirmClosing && 'is-closing')} role="alert" aria-hidden={confirmClosing || undefined} inert={confirmClosing}>
             <span>Close “{tabLabel(confirmedTab.current)}” in your own browser? It will close there too.</span>
             <Button size="sm" variant="danger" onClick={() => void closeTab(confirmedTab.current!.id)}>Close tab</Button>
@@ -256,7 +256,7 @@ export function BrowserPane({ session, active, popout = false }: { session: Sess
         ) : null}
         {tab ? (
           <>
-            <form className="browser-bar" onSubmit={submitAddress}>
+            {!pageOnly ? <form className="browser-bar" onSubmit={submitAddress}>
               <IconButton label="Back" disabled={!canInput} onClick={() => act({ type: 'back' })}><ArrowLeft size={14} /></IconButton>
               <IconButton label="Forward" disabled={!canInput} onClick={() => act({ type: 'forward' })}><ArrowRight size={14} /></IconButton>
               <IconButton label="Reload" disabled={!canInput} onClick={() => act({ type: 'reload' })}><RefreshCw size={13} /></IconButton>
@@ -272,13 +272,13 @@ export function BrowserPane({ session, active, popout = false }: { session: Sess
               {popout ? <IconButton label="Dock browser back to Mingle" onClick={() => void dockBrowserPopout()}><ArrowDownToLine size={14} /></IconButton> : null}
               <IconButton label={expanded ? 'Exit full view' : 'Open full view'} onClick={() => setExpanded((v) => !v)}>{expanded ? <Minimize2 size={14} /> : <Maximize2 size={14} />}</IconButton>
               <IconButton label="Disconnect browser" title={state.mode === 'existing' ? 'Disconnect (your browser stays open)' : 'Disconnect and close the Mingle browser'} disabled={busy === 'disconnect'} onClick={() => void disconnect()}><Unplug size={14} /></IconButton>
-            </form>
-            {addressError ? <p className="browser-addr-error" role="alert">{addressError}</p> : null}
+            </form> : null}
+            {!pageOnly && addressError ? <p className="browser-addr-error" role="alert">{addressError}</p> : null}
             {pageDialogPresent && pageDialogSnapshot.current ? <PageDialog key={pageDialogKey} tab={pageDialogSnapshot.current.tab} canInput={pageDialogSnapshot.current.canInput} act={pageDialogSnapshot.current.act} closing={pageDialogClosing} /> : null}
             <div className="browser-viewport">{nativeCandidate && tab.embeddedTargetId
               ? <NativeBrowserView sessionId={session.id} targetId={tab.embeddedTargetId} active={visible && pageVisible && !detached} stream={stream} tab={tab} canvasRef={canvasRef} canInput={canInput} onFallbackChange={setNativeFallback} />
               : <BrowserSurface stream={stream} tab={tab} canvasRef={canvasRef} canInput={canInput} />}</div>
-            <div className="browser-status">
+            {!pageOnly ? <div className="browser-status">
               {embeddedNative || stream.status === 'live'
                 ? <>
                   {/* The countdown is visual only; screen readers hear one announcement per control change. */}
@@ -291,8 +291,8 @@ export function BrowserPane({ session, active, popout = false }: { session: Sess
                   : ownsLease ? <Button size="sm" onClick={() => setControl('human')}>Keep control</Button> : null}
               {state.mode === 'managed' ? <BrowserSignInButton sessionId={session.id} /> : null}
               {state.mode !== 'existing' ? <BrowserImportButton sessionId={session.id} /> : null}
-            </div>
-            {canInput ? <p className="browser-hint">Keys and clicks go to the page. Alt+Shift+Escape moves focus back to Mingle. Paste with {navigator.platform.includes('Mac') ? '⌘' : 'Ctrl'}+V.</p> : null}
+            </div> : null}
+            {!pageOnly && canInput ? <p className="browser-hint">Keys and clicks go to the page. Alt+Shift+Escape moves focus back to Mingle. Paste with {navigator.platform.includes('Mac') ? '⌘' : 'Ctrl'}+V.</p> : null}
             {stream.error ? <div className="browser-stream-error"><InlineError>{stream.error}</InlineError><button type="button" className="link-btn" onClick={stream.dismissError}>Dismiss</button></div> : null}
           </>
         ) : (
