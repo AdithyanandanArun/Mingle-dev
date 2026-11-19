@@ -64,6 +64,7 @@ export function BrowserPane({ session, active, popout = false }: { session: Sess
   const [detached, setDetached] = useState(false);
   const docked = useRef(false);
   const visible = (active && !minimized) || expanded || floating;
+  const pageOnly = floating && !detached;
   const { state, error: stateError, apply, refresh } = useBrowserState(session.id, visible);
   useEffect(() => {
     const onOpened = (event: Event) => {
@@ -81,8 +82,9 @@ export function BrowserPane({ session, active, popout = false }: { session: Sess
   const pageVisible = usePageVisible();
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [nativeFallback, setNativeFallback] = useState(false);
-  // A natively shown built-in tab needs no screencast unless an overlay forces the fallback surface.
-  const nativeCandidate = Boolean(state?.mode === 'embedded' && canShowEmbedded() && current?.embeddedTargetId);
+  // Electron views sit above DOM controls. The floating and expanded page-first layouts use
+  // the same live stream as the web client so the controls can overlap the page.
+  const nativeCandidate = Boolean(!pageOnly && state?.mode === 'embedded' && canShowEmbedded() && current?.embeddedTargetId);
   const stream = useBrowserStream(session.id, current?.id, visible && pageVisible && Boolean(current) && !detached && (!nativeCandidate || nativeFallback), canvasRef);
   const tab = current && stream.status === 'live' && stream.tab && stream.tab.id === current.id ? stream.tab : current;
   const embeddedNative = nativeCandidate && !nativeFallback;
@@ -273,7 +275,7 @@ export function BrowserPane({ session, active, popout = false }: { session: Sess
             </form>
             {addressError ? <p className="browser-addr-error" role="alert">{addressError}</p> : null}
             {pageDialogPresent && pageDialogSnapshot.current ? <PageDialog key={pageDialogKey} tab={pageDialogSnapshot.current.tab} canInput={pageDialogSnapshot.current.canInput} act={pageDialogSnapshot.current.act} closing={pageDialogClosing} /> : null}
-            <div className="browser-viewport">{state.mode === 'embedded' && canShowEmbedded() && tab.embeddedTargetId
+            <div className="browser-viewport">{nativeCandidate && tab.embeddedTargetId
               ? <NativeBrowserView sessionId={session.id} targetId={tab.embeddedTargetId} active={visible && pageVisible && !detached} stream={stream} tab={tab} canvasRef={canvasRef} canInput={canInput} onFallbackChange={setNativeFallback} />
               : <BrowserSurface stream={stream} tab={tab} canvasRef={canvasRef} canInput={canInput} />}</div>
             <div className="browser-status">
