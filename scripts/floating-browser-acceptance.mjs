@@ -65,6 +65,11 @@ try {
   const bounds = await floating.boundingBox();
   assert.ok(bounds && bounds.x >= 0 && bounds.y >= 0 && bounds.x + bounds.width <= 320 && bounds.y + bounds.height <= 480);
   assert.ok(bounds && 480 - bounds.y - bounds.height <= 13, 'default bottom-right anchor survives viewport shrink');
+  await page.setViewportSize({ width: 920, height: 740 });
+  await page.waitForFunction(() => {
+    const panel = document.querySelector('.browser-pip')?.getBoundingClientRect();
+    return panel && innerWidth - panel.right < 14 && innerHeight - panel.bottom < 14;
+  });
   await page.emulateMedia({ reducedMotion: 'reduce' });
   assert.equal(await bubble.evaluate((node) => getComputedStyle(node).animationName), 'none');
 
