@@ -4,8 +4,8 @@
 .browser-float-controls button:hover:not(:disabled) { background: var(--bg-hover); color: var(--fg-0); }
 .browser-float-controls button:focus-visible { outline: 2px solid var(--blue-line); outline-offset: 2px; opacity: 1; }
 .browser-float-controls button:disabled { opacity: .4; cursor: not-allowed; }
-.browser-float-controls button[title]::after { position: absolute; top: calc(100% + 7px); right: 0; z-index: 10; width: max-content; max-width: 190px; padding: 5px 8px; border: 1px solid var(--line-strong); border-radius: 6px; background: var(--bg-panel); color: var(--fg-0); box-shadow: var(--shadow-pop); content: attr(title); font-size: var(--text-2xs); opacity: 0; pointer-events: none; transform: translateY(-2px); transition: opacity 120ms ease, transform 120ms ease; }
+.browser-float-controls button[data-tooltip]::after { position: absolute; top: calc(100% + 7px); right: 0; z-index: 10; width: max-content; max-width: 190px; padding: 5px 8px; border: 1px solid var(--line-strong); border-radius: 6px; background: var(--bg-panel); color: var(--fg-0); box-shadow: var(--shadow-pop); content: attr(data-tooltip); font-size: var(--text-2xs); opacity: 0; pointer-events: none; transform: translateY(-2px); transition: opacity 120ms ease, transform 120ms ease; }
 .browser-float-controls button:hover::after, .browser-float-controls button:focus-visible::after { opacity: 1; transform: none; }
 @media (max-width: 500px) { .browser-float-controls { top: 6px; right: 6px; gap: 2px; } .browser-float-controls button { width: 28px; height: 28px; } }
 @keyframes browser-controls-in { from { opacity: 0; transform: translateY(-4px) scale(.94); } to { transform: none; } }
-@media (prefers-reduced-motion: reduce) { .browser-float-controls, .browser-float-controls button[title]::after { animation: none; transition: none; } }
+@media (prefers-reduced-motion: reduce) { .browser-float-controls, .browser-float-controls button[data-tooltip]::after { animation: none; transition: none; } }
