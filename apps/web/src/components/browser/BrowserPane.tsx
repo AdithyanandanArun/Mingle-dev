@@ -66,9 +66,17 @@ export function BrowserPane({ session, active, popout = false }: { session: Sess
   const visible = (active && !minimized) || expanded || floating;
   const pageOnly = floating && !detached;
   const { state, error: stateError, apply, refresh } = useBrowserState(session.id, visible);
+  const openRequest = useBrowserStore((s) => s.openRequests[session.id]);
+  useEffect(() => {
+    if (!openRequest || popout) return;
+    useBrowserStore.getState().acknowledgeOpen(session.id, openRequest);
+    if (visible) refresh();
+    if (!docked.current && !minimized) setFloating(true);
+  }, [session.id, openRequest, popout, visible, minimized, refresh]);
   useEffect(() => {
     const onOpened = (event: Event) => {
       if ((event as CustomEvent<{ sessionId?: string }>).detail?.sessionId !== session.id) return;
+      if (useBrowserStore.getState().openRequests[session.id]) return;
       if (visible) refresh();
       if (!docked.current && !popout && !minimized) {
         setFloating(true);
