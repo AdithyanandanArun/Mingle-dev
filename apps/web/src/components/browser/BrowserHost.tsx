@@ -32,7 +32,7 @@ function viewportBounds() {
 
 function initialGeometry(): Geometry {
   const { gutterX, gutterY, maxWidth, maxHeight } = viewportBounds();
-  const width = Math.min(480, maxWidth), height = Math.min(360, maxHeight);
+  const width = Math.min(480, maxWidth), height = Math.min(300, maxHeight);
   return {
     left: Math.max(gutterX, window.innerWidth - width - gutterX),
     top: Math.max(gutterY, window.innerHeight - height - gutterY), width, height,
