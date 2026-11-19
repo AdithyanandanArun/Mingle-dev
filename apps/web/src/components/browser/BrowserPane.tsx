@@ -163,9 +163,10 @@ export function BrowserPane({ session, active, popout = false }: { session: Sess
     refresh();
   });
   const disconnect = () => run('disconnect', async () => {
+    apply(await api.browserDisconnect(session.id));
     setExpanded(false);
     setFloating(false);
-    apply(await api.browserDisconnect(session.id));
+    setMinimized(false);
     useBrowserStore.getState().select(session.id, null);
   });
   const openDesktopWindow = async () => {
@@ -324,7 +325,11 @@ export function BrowserPane({ session, active, popout = false }: { session: Sess
         <Globe size={14} aria-hidden="true" /> Restore browser
       </button>, document.body,
     ) : null}
-    <BrowserHost expanded={expanded} floating={floating && !detached} onDismiss={() => setExpanded(false)} onDock={() => { docked.current = true; setFloating(false); useMingle.getState().setContextTab('browser'); }} onMinimize={() => { setFloating(false); setMinimized(true); requestAnimationFrame(() => restoreButton.current?.focus()); }} onPopout={canOpenBrowserPopout() ? () => void openDesktopWindow() : undefined}>
+    <BrowserHost expanded={expanded} floating={floating && !detached} onDismiss={() => setExpanded(false)} onDock={() => { docked.current = true; setFloating(false); useMingle.getState().setContextTab('browser'); }} onMinimize={() => { setFloating(false); setMinimized(true); requestAnimationFrame(() => restoreButton.current?.focus()); }} onPopout={canOpenBrowserPopout() ? () => void openDesktopWindow() : undefined}
+      onDisconnect={state?.status === 'connected' ? () => void disconnect() : undefined}
+      disconnectDisabled={busy === 'disconnect'}
+      onExpand={tab ? () => setExpanded(true) : undefined}
+    >
       <div
         className={cx('browser__inner', expanded && 'is-expanded')}
         onKeyDown={(e) => { if (expanded && e.key === 'Escape' && !e.defaultPrevented) { e.preventDefault(); e.stopPropagation(); setExpanded(false); } }}
