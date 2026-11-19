@@ -1,11 +1,14 @@
-.browser-float-controls { position: absolute; z-index: 8; top: 10px; right: 12px; display: flex; gap: 5px; padding: 5px; border: 1px solid var(--line-strong); border-radius: 999px; background: color-mix(in srgb, var(--bg-panel) 92%, transparent); backdrop-filter: blur(8px); box-shadow: var(--shadow-pop); opacity: .75; animation: browser-controls-in 190ms var(--ease-out); transition: opacity 140ms ease; }
-.browser-pip:hover .browser-float-controls, .browser-pip:focus-within .browser-float-controls, .browser-float-controls:hover { opacity: 1; }
-.browser-float-controls button { position: relative; display: grid; place-items: center; width: 30px; height: 30px; padding: 0; border: 0; border-radius: 50%; background: transparent; color: var(--fg-1); cursor: pointer; }
-.browser-float-controls button:hover:not(:disabled) { background: var(--bg-hover); color: var(--fg-0); }
-.browser-float-controls button:focus-visible { outline: 2px solid var(--blue-line); outline-offset: 2px; opacity: 1; }
-.browser-float-controls button:disabled { opacity: .4; cursor: not-allowed; }
-.browser-float-controls button[data-tooltip]::after { position: absolute; top: calc(100% + 7px); right: 0; z-index: 10; width: max-content; max-width: 190px; padding: 5px 8px; border: 1px solid var(--line-strong); border-radius: 6px; background: var(--bg-panel); color: var(--fg-0); box-shadow: var(--shadow-pop); content: attr(data-tooltip); font-size: var(--text-2xs); opacity: 0; pointer-events: none; transform: translateY(-2px); transition: opacity 120ms ease, transform 120ms ease; }
-.browser-float-controls button:hover::after, .browser-float-controls button:focus-visible::after { opacity: 1; transform: none; }
-@media (max-width: 500px) { .browser-float-controls { top: 6px; right: 6px; gap: 2px; } .browser-float-controls button { width: 28px; height: 28px; } }
-@keyframes browser-controls-in { from { opacity: 0; transform: translateY(-4px) scale(.94); } to { transform: none; } }
-@media (prefers-reduced-motion: reduce) { .browser-float-controls, .browser-float-controls button[data-tooltip]::after { animation: none; transition: none; } }
+.browser-float-controls { position: absolute; z-index: 8; top: 10px; left: 12px; display: flex; align-items: flex-start; gap: 6px; }
+.browser-float-controls__toggle, .browser-float-controls__bubble button { position: relative; display: grid; place-items: center; width: 32px; height: 32px; flex: 0 0 auto; padding: 0; border: 1px solid var(--line-strong); border-radius: 50%; background: color-mix(in srgb, var(--bg-panel) 94%, transparent); color: var(--fg-1); box-shadow: var(--shadow-pop); backdrop-filter: blur(8px); cursor: pointer; }
+.browser-float-controls__toggle:hover, .browser-float-controls__bubble button:hover:not(:disabled) { background: var(--bg-hover); color: var(--fg-0); }
+.browser-float-controls__toggle:focus-visible, .browser-float-controls__bubble button:focus-visible { outline: 2px solid var(--blue-line); outline-offset: 2px; }
+.browser-float-controls__bubble { display: flex; gap: 5px; padding: 4px; border: 1px solid var(--line-strong); border-radius: 999px; background: color-mix(in srgb, var(--bg-panel) 94%, transparent); box-shadow: var(--shadow-pop); backdrop-filter: blur(8px); transform-origin: top left; }
+.browser-float-controls__bubble[data-open="false"] { display: none; }
+.browser-float-controls__bubble[data-open="true"] { animation: browser-controls-in 150ms var(--ease-out); }
+.browser-float-controls__bubble button { width: 30px; height: 30px; border: 0; background: transparent; box-shadow: none; }
+.browser-float-controls__bubble button:disabled { opacity: .4; cursor: not-allowed; }
+.browser-float-controls__bubble button[data-tooltip]::after { position: absolute; top: calc(100% + 7px); right: 0; z-index: 10; width: max-content; max-width: 190px; padding: 5px 8px; border: 1px solid var(--line-strong); border-radius: 6px; background: var(--bg-panel); color: var(--fg-0); box-shadow: var(--shadow-pop); content: attr(data-tooltip); font-size: var(--text-2xs); opacity: 0; pointer-events: none; transform: translateY(-2px); transition: opacity 120ms ease, transform 120ms ease; }
+.browser-float-controls__bubble button:hover::after, .browser-float-controls__bubble button:focus-visible::after { opacity: 1; transform: none; }
+@keyframes browser-controls-in { from { opacity: 0; transform: translateY(-4px) scale(.94); } to { opacity: 1; transform: none; } }
+@media (max-width: 500px) { .browser-float-controls { top: 6px; left: 6px; gap: 4px; } .browser-float-controls__toggle { width: 30px; height: 30px; } }
+@media (prefers-reduced-motion: reduce) { .browser-float-controls__bubble[data-open="true"], .browser-float-controls__bubble button[data-tooltip]::after { animation: none; transition: none; } }
