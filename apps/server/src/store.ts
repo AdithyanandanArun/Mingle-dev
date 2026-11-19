@@ -60,6 +60,7 @@ const mapSession = (r: Row): Session => ({
   handoffPendingAt: (r.handoff_pending_at as string | null) ?? null,
   createdAt: r.created_at as string, updatedAt: r.updated_at as string, error: (r.error as string | null) ?? null,
   pinned: r.pinned === 1, unread: r.unread === 1,
+  autoCompactionPercent: (r.auto_compaction_percent as number | null) ?? null,
   parentSessionId: (r.parent_session_id as string | null) ?? null,
   inputTokens: r.input_tokens as number, outputTokens: r.output_tokens as number, costUsd: (r.cost_usd as number | null) ?? null,
 });
@@ -218,6 +219,11 @@ export class Store {
       provider_session_id=excluded.provider_session_id,used_tokens=excluded.used_tokens,context_window=excluded.context_window,
       estimated=excluded.estimated,source=excluded.source,updated_at=excluded.updated_at`, sessionId, usage.provider, usage.model,
       usage.providerSessionId, usage.usedTokens, usage.contextWindow, Number(usage.estimated), usage.source, usage.updatedAt);
+    this.touch(sessionId);
+    return this.getSession(sessionId, true)!;
+  }
+  setAutoCompactionPercent(sessionId: string, percent: number | null): Session {
+    this.run('UPDATE sessions SET auto_compaction_percent = ? WHERE id = ?', percent, sessionId);
     this.touch(sessionId);
     return this.getSession(sessionId, true)!;
   }

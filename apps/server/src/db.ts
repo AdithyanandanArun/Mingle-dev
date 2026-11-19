@@ -464,6 +464,7 @@ const MIGRATIONS: (string | ((db: DatabaseSync) => void))[] = [
       used_tokens REAL NOT NULL CHECK(used_tokens >= 0), context_window REAL CHECK(context_window IS NULL OR context_window > 0),
       estimated INTEGER NOT NULL CHECK(estimated IN (0,1)), source TEXT NOT NULL, updated_at TEXT NOT NULL
     );`,
+    (db) => addColumn(db, 'sessions', 'auto_compaction_percent', "ALTER TABLE sessions ADD COLUMN auto_compaction_percent INTEGER CHECK (auto_compaction_percent IS NULL OR (typeof(auto_compaction_percent) = 'integer' AND auto_compaction_percent BETWEEN 1 AND 100))"),
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;

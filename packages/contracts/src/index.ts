@@ -29,9 +29,12 @@ export interface Session {
   isolationNotice?: string;
   /** Latest native estimate of context occupancy for this provider conversation. */
   contextUsage?: SessionContextUsage;
+  /** Pause this session to compact at this occupancy, or use provider defaults when unset. */
+  autoCompactionPercent?: number | null;
   inputTokens: number; outputTokens: number; costUsd: number | null;
   pinned: boolean; unread: boolean;
 }
+export const SessionAutoCompactionSchema = z.object({ percent: z.number().int().min(1).max(100).nullable() }).strict();
 export interface SessionContextUsage {
   usedTokens: number; contextWindow: number | null; estimated: boolean; source: string; updatedAt: string;
   provider: Provider; model: string; providerSessionId: string | null;

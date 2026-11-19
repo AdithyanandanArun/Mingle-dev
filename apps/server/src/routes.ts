@@ -1,3 +1,4 @@
+import { SessionAutoCompactionSchema } from '@mingle/contracts';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { z } from 'zod';
 import {
@@ -443,6 +444,14 @@ export function buildRouter(s: Services) {
     const id = recoverySession(ctx);
     const body = await ctx.body(checkpointBody);
     return new Reply(201, await s.recovery.capture(id, body.reason, body.runId));
+  });
+  add('PATCH', '/api/sessions/:id/auto-compaction', async (ctx) => {
+    const { percent } = await ctx.body(SessionAutoCompactionSchema);
+    const id = recoverySession(ctx);
+    if (percent !== null && s.store.getSession(id)?.provider === 'antigravity') {
+      throw badRequest('Antigravity does not support Mingle automatic compaction.');
+    }
+    return s.store.setAutoCompactionPercent(id, percent);
   });
   add('POST', '/api/sessions/:id/compact', async (ctx) => {
     const id = recoverySession(ctx);
