@@ -74,18 +74,6 @@ export function BrowserPane({ session, active, popout = false }: { session: Sess
     if (visible) refresh();
     if (!docked.current && !minimized) setFloating(true);
   }, [session.id, openRequest, popout, visible, minimized, refresh]);
-  useEffect(() => {
-    const onOpened = (event: Event) => {
-      if ((event as CustomEvent<{ sessionId?: string }>).detail?.sessionId !== session.id) return;
-      if (useBrowserStore.getState().openRequests[session.id]) return;
-      if (visible) refresh();
-      if (!docked.current && !popout && !minimized) {
-        setFloating(true);
-      }
-    };
-    window.addEventListener('mingle:browser-opened', onOpened);
-    return () => window.removeEventListener('mingle:browser-opened', onOpened);
-  }, [session.id, popout, minimized, visible, refresh]);
   const selectedId = useBrowserStore((s) => s.selected[session.id]);
   const current = resolveTab(state, selectedId);
   const pageVisible = usePageVisible();

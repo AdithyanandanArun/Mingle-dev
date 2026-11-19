@@ -451,9 +451,6 @@ export const useMingle = create<MingleState>((set, get) => {
           const current = resolveTab(browser.states[ev.sessionId], browser.selected[ev.sessionId]);
           if (!current?.controlOwner) browser.select(ev.sessionId, ev.tabId);
           browser.requestOpen(ev.sessionId, selectedSessionId);
-          window.dispatchEvent(new CustomEvent('mingle:browser-opened', { detail: { sessionId: ev.sessionId } }));
-          // Keep the user's sidebar choice. BrowserPane follows the selected browser tab and
-          // opens it in its floating host by default when the pane is visible.
         }
         break;
       }
