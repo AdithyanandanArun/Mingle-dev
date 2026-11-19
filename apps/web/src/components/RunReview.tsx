@@ -79,69 +79,66 @@ export function RunReview({ block }: { block: RunBlock }) {
   const onToggle = (event: SyntheticEvent<HTMLDetailsElement>): void => {
     if (event.target === event.currentTarget) setDetailsOpen(event.currentTarget.open);
   };
-  const noChangeCapture = !changesVisible(run.changes);
-  const hasDetails = run.toolCount > 0;
+  const showChanges = changesVisible(run.changes);
   const loading = state.phase === 'loading';
   const goal = evidence?.goalTurn ?? null;
   const failure = evidence?.failure ?? null;
+  const count = (value: number, unit: string) => `${value.toLocaleString()} ${unit}${value === 1 ? '' : 's'}`;
+  const counts = [
+    run.changes?.status === 'available' && run.changes.fileCount > 0 ? count(run.changes.fileCount, 'changed file') : null,
+    commands.total > 0 ? count(commands.total, 'command') : run.toolCount > 0 ? count(run.toolCount, 'tool call') : null,
+    checklist.total > 0 ? `${checklist.completed}/${checklist.total} steps reported done` : null,
+  ].filter(Boolean);
 
   return (
     <section className={`run-review is-${run.status}`} aria-label="Review of this turn" data-run-review-id={run.id} data-run-id={run.id} tabIndex={-1}>
-      <header className="run-review__head">
-        <span className="run-review__title">Turn review</span>
-        <span className="run-review__status">{turnStatusLabel(run.status)}</span>
-      </header>
-      <p className="run-review__note">A completed provider turn does not verify the goal.</p>
-
-      <div className="run-review__group" role="group" aria-labelledby={ids.recorded}>
-        <p className="run-review__label" id={ids.recorded}>Recorded by Mingle</p>
-        <RunChanges runId={run.id} summary={run.changes} embedded />
-        {noChangeCapture ? <p className="run-review__line">{run.changes ? 'No file changes were saved for this turn.' : 'No change capture was saved for this run.'}</p> : null}
-
-        {run.status === 'interrupted' ? <p className="run-review__line is-bad">The turn was interrupted before it finished, so changes and commands may be partial.</p> : null}
-        {run.status === 'failed' ? <p className="run-review__line is-bad">The provider turn failed{failure ? '' : evidence ? '; no classified failure was stored for it.' : '.'}</p> : null}
-        {failure ? <p className="run-review__line is-bad">{FAILURE_KIND[failure.kind] ?? 'Failure'}: {failure.message}{failure.outcomeUnknown ? ' The provider may have acted before it failed, so the outcome is unknown.' : ''}</p> : null}
-
-        {hasDetails ? (
-          <details className="run-review__details" onToggle={onToggle}>
-          <summary className="run-review__summary"><span>{commands.total ? 'Commands' : 'Recorded activity'}</span><span className="run-review__quiet">{commandsSummary(commands)}</span></summary>
-            <div className="run-review__body">
-              <p className="run-review__caveat">Recorded commands and outcomes only. Mingle did not run these checks; test results are unknown.</p>
-              {loading ? <p className="run-review__line" role="status">Loading recorded details…</p> : null}
-              {state.phase === 'error' ? <p className="run-review__line is-bad" role="alert">Could not load recorded details: {state.message} <button type="button" className="run-review__retry" onClick={retry}>Try again</button></p> : null}
-              {commands.rows.length ? <ul className="run-review__list" aria-label="Commands recorded for this turn">
+      <details className="run-review__details" onToggle={onToggle}>
+        <summary className="run-review__summary">
+          <span className="run-review__title">Turn review</span>
+          <span className="run-review__status">{turnStatusLabel(run.status)}</span>
+          {counts.length > 0 ? <span className="run-review__counts">{counts.join(' · ')}</span> : null}
+        </summary>
+        <div className="run-review__group" role="group" aria-labelledby={ids.recorded}>
+          <p className="run-review__label" id={ids.recorded}>Recorded by Mingle</p>
+          <RunChanges runId={run.id} summary={run.changes} embedded />
+          {run.status === 'interrupted' ? <p className="run-review__line is-bad">Changes and command records may be partial.</p> : null}
+          {failure ? <p className="run-review__line is-bad">{FAILURE_KIND[failure.kind] ?? 'Failure'} · {failure.message}{failure.outcomeUnknown ? ' Provider outcome unknown.' : ''}</p> : null}
+          {loading ? <p className="run-review__line" role="status">Loading details…</p> : null}
+          {state.phase === 'error' ? <p className="run-review__line is-bad" role="alert">Could not load details. {state.message} <button type="button" className="run-review__retry" onClick={retry}>Try again</button></p> : null}
+          {run.toolCount > 0 ? <div className="run-review__body">
+            <p className="run-review__line">{commandsSummary(commands)}</p>
+            {commands.rows.length ? <>
+              <p className="run-review__caveat">Recorded exit codes and outcomes. Test results are unknown.</p>
+              <ul className="run-review__list" aria-label="Commands recorded for this turn">
                 {commands.rows.map((row) => <li key={row.id} className={commandWentWrong(row) ? 'is-bad' : undefined}>
                   <code className="run-review__command" title={row.command ?? undefined}>{row.command?.trim() || row.title}</code>
                   <span className="run-review__outcome">{commandOutcome(row.status, row.exitCode)}{row.durationMs !== null ? ` · ${formatToolDuration(row.durationMs)}` : ''}</span>
                 </li>)}
-              </ul> : null}
-              {!loading && commands.rows.length < commands.total ? <p className="run-review__line">Showing {commands.rows.length.toLocaleString('en-US')} of {commands.total.toLocaleString('en-US')} recorded commands.</p> : null}
-              {problems.length ? <>
-                <p className="run-review__label">Other calls that failed or exited non-zero</p>
-                <ul className="run-review__list" aria-label="Other tool calls with problems">
-                  {problems.map((row) => <li key={row.id} className="is-bad"><span className="run-review__command">{row.title}</span><span className="run-review__outcome">{row.category} · {row.outcome}</span></li>)}
-                </ul>
-                {evidence && evidence.problems.truncated ? <p className="run-review__line">Showing the first {evidence.problems.items.length} of {evidence.problems.total.toLocaleString('en-US')} problem calls.</p> : null}
-              </> : null}
-            </div>
-          </details>
-        ) : run.toolCount === 0 ? <p className="run-review__line">No provider tool calls were captured for this turn. That does not show that nothing ran.</p>
-          : <p className="run-review__line">No commands were recorded for this turn.</p>}
-      </div>
-
-      <div className="run-review__group" role="group" aria-labelledby={ids.agent}>
-        <p className="run-review__label" id={ids.agent}>Reported by the agent</p>
-        {goal?.report ? <p className="run-review__line">{GOAL_OUTCOME_LABEL[goal.report.outcome]}: “{goal.report.summary}”<span className="run-review__quiet"> This is the agent’s own report, {GOAL_STATE_LABEL[goal.report.state]}; Mingle has not verified it.</span></p>
-          : goal ? <p className="run-review__line">This turn belonged to an autonomous goal, but the agent filed no report for it.</p>
-            : hints.goalTurn && loading ? <p className="run-review__line" role="status">Checking for a goal report…</p> : null}
-        {checklist.total > 0 ? <div className="run-review__line">
-          <span>Checklist as last reported in this turn: {checklist.completed} of {checklist.total} marked complete{checklist.open.length ? `, ${checklist.open.length} still open` : ''}.</span>
-          {checklist.open.length ? <ul className="run-review__list" aria-label="Checklist items still open">
-            {checklist.open.map((step) => <li key={step.id} className={step.status === 'blocked' ? 'is-bad' : undefined}><span className="run-review__command">{step.title}</span><span className="run-review__outcome">{STEP_STATUS_LABEL[step.status]}</span></li>)}
-          </ul> : null}
-          <span className="run-review__quiet">These are the agent’s claims. Mingle leaves completed items in Review for you to accept.</span>
-        </div> : <p className="run-review__line">No checklist was recorded for this turn, so remaining work is not reported.</p>}
-      </div>
+              </ul>
+            </> : null}
+            {!loading && commands.rows.length < commands.total ? <p className="run-review__line">Showing {commands.rows.length.toLocaleString('en-US')} of {commands.total.toLocaleString('en-US')} recorded commands.</p> : null}
+            {problems.length ? <>
+              <p className="run-review__label">Other calls with problems</p>
+              <ul className="run-review__list" aria-label="Other tool calls with problems">
+                {problems.map((row) => <li key={row.id} className="is-bad"><span className="run-review__command">{row.title}</span><span className="run-review__outcome">{row.category} · {row.outcome}</span></li>)}
+              </ul>
+              {evidence?.problems.truncated ? <p className="run-review__line">Showing the first {evidence.problems.items.length} of {evidence.problems.total.toLocaleString('en-US')} problem calls.</p> : null}
+            </> : null}
+          </div> : null}
+          {!loading && !showChanges && run.toolCount === 0 && !failure && run.status !== 'interrupted' ? <p className="run-review__line">{run.changes ? 'No file changes recorded.' : 'No file capture for this turn.'}</p> : null}
+        </div>
+        {goal || checklist.total > 0 ? <div className="run-review__group" role="group" aria-labelledby={ids.agent}>
+          <p className="run-review__label" id={ids.agent}>Reported by the agent</p>
+          {goal?.report ? <p className="run-review__line">{GOAL_OUTCOME_LABEL[goal.report.outcome]} · “{goal.report.summary}” <span className="run-review__quiet">{GOAL_STATE_LABEL[goal.report.state]}.</span></p>
+            : goal ? <p className="run-review__line">No goal report filed.</p> : null}
+          {checklist.total > 0 ? <div className="run-review__line">
+            <span>{checklist.completed} of {checklist.total} steps marked complete</span>
+            {checklist.open.length ? <ul className="run-review__list" aria-label="Checklist items still open">
+              {checklist.open.map((step) => <li key={step.id} className={step.status === 'blocked' ? 'is-bad' : undefined}><span className="run-review__command">{step.title}</span><span className="run-review__outcome">{STEP_STATUS_LABEL[step.status]}</span></li>)}
+            </ul> : null}
+          </div> : null}
+        </div> : null}
+      </details>
     </section>
   );
 }

@@ -95,7 +95,7 @@ function seed() {
     };
     runs.push(row);
   }
-  // An orphan whose user message is not loaded (older history), the oldest run by start time.
+  // An orphan whose user message is not loaded (older history), so it appears before the loaded messages by recorded time.
   const orphanTools = fullTools['run-orphan']!;
   runs.push({ id: 'run-orphan', sessionId: 'a', userMessageId: 'u-not-loaded', provider: 'claude', model: 'example-model', status: 'completed', startedAt: stamp(-50), finishedAt: stamp(-40), durationMs: 10_000, toolCount: orphanTools.length, toolCounts: { command: 1 }, changes: capture([file('src/orphan.ts', 'M', 1, 0)]) });
   for (const row of runs) db.runs.set(row.id, row);

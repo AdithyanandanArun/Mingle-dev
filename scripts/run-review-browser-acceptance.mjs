@@ -27,7 +27,7 @@ let server, browser, failed = false;
 const report = {};
 const errors = [];
 let passed = 0;
-const ORDER = ['run-ok', 'run-nocalls', 'run-partial', 'run-unavail', 'run-failed', 'run-interrupted', 'run-goal', 'run-tool-failure', 'run-latest', 'run-orphan'];
+const ORDER = ['run-orphan', 'run-ok', 'run-nocalls', 'run-partial', 'run-unavail', 'run-failed', 'run-interrupted', 'run-goal', 'run-tool-failure', 'run-latest'];
 try {
   server = await createServer({ configFile: join(root, 'apps/web/vite.config.ts'), root, appType: 'mpa', logLevel: 'error', server: { host: '127.0.0.1', port: 0, strictPort: false }, optimizeDeps: { entries: [join(root, 'scripts/run-review-browser-fixture.html')] }, resolve: { alias: [{ find: /^@mingle\/contracts$/, replacement: join(root, 'packages/contracts/src/index.ts') }, { find: /^@mingle\/contracts\/stream$/, replacement: join(root, 'packages/contracts/src/stream.ts') }, { find: 'react', replacement: join(root, 'apps/web/node_modules/react') }, { find: 'react-dom', replacement: join(root, 'apps/web/node_modules/react-dom') }], dedupe: ['react', 'react-dom'] } });
   await server.listen();
@@ -63,7 +63,7 @@ try {
 
   await test('one review card per run with something to review, in the right place, with exactly one changes list each', async () => {
     await fresh();
-    assert.deepEqual(await page.locator('section.run-review').evaluateAll((els) => els.map((el) => el.dataset.runId)), ORDER, 'document order: placed runs in transcript order, the orphan last; the plain answer has none');
+    assert.deepEqual(await page.locator('section.run-review').evaluateAll((els) => els.map((el) => el.dataset.runId)), ORDER, 'document order: reviews follow completion time, including the older orphan; the plain answer has none');
     assert.equal(await page.locator('.run-changes:not(.run-review .run-changes)').count(), 0, 'no stacked changes card outside the review');
     assert.equal(await page.locator('section.run-review .run-changes').count(), 7, 'one embedded list for each of the seven runs with saved or unavailable changes');
     for (const id of ['run-ok', 'run-nocalls', 'run-latest']) assert.equal(await card(id).locator('.run-changes').count(), 1);
@@ -74,10 +74,10 @@ try {
       return {
         afterAssistant: before(text('Example reply 1 from run-ok'), cardEl('run-ok')) && before(cardEl('run-ok'), text('Example request 2')),
         fallbackUser: before(text('Example request 5'), cardEl('run-failed')) && before(cardEl('run-failed'), text('Example request 6')),
-        orphanLast: before(text('Example reply 9'), cardEl('run-orphan')),
+        orphanBeforeHistory: before(cardEl('run-orphan'), text('Example request 1')),
       };
     });
-    assert.deepEqual(where, { afterAssistant: true, fallbackUser: true, orphanLast: true });
+    assert.deepEqual(where, { afterAssistant: true, fallbackUser: true, orphanBeforeHistory: true });
   });
 
   await test('only the newest run and the goal’s latest turn load evidence on their own; nothing else is requested or written', async () => {
@@ -95,9 +95,10 @@ try {
     await settle();
     const latest = card('run-latest');
     assert.equal((await latest.locator('.run-review__status').innerText()).trim(), 'Provider turn completed');
-    assert.match(await latest.locator('.run-review__note').innerText(), /does not verify the goal/);
-    assert.match(await summaryOf('run-latest'), /^Commands 1 command recorded$/);
-    assert.match(await group('run-latest', 'Reported by the agent').innerText(), /Checklist as last reported in this turn: 1 of 1 marked complete\./);
+    assert.match(await summaryOf('run-latest'), /^Turn review Provider turn completed 1 changed file · 1 command · 1\/1 steps reported done$/);
+    assert.equal(await group('run-latest', 'Recorded by Mingle').isVisible(), false);
+    await openDetails('run-latest');
+    assert.match(await group('run-latest', 'Reported by the agent').innerText(), /1 of 1 steps marked complete/);
     assert.equal(await group('run-latest', 'Reported by the agent').locator('text=/goal complete/i').count(), 0);
   });
 
@@ -105,15 +106,15 @@ try {
     await fresh();
     await settle();
     assert.equal((await reviews('run-ok')).length, 0, 'run-ok has not been asked for yet');
-    assert.equal(await summaryOf('run-ok'), 'Commands 4 commands recorded · 1 failed · 1 exited non-zero · 1 without an exit code');
+    assert.match(await summaryOf('run-ok'), /2 changed files · 4 commands · 1\/3 steps reported done/);
     await openDetails('run-ok');
     await page.waitForFunction(() => document.querySelectorAll('section[data-run-id="run-ok"] .run-review__list[aria-label="Commands recorded for this turn"] li').length === 4);
     assert.equal((await reviews('run-ok')).length, 1);
     assert.deepEqual(await outcomes('run-ok'), ['exit 0 · 1.2 s', 'exit 0 · 1.2 s', 'failed · exit 2 · 1.2 s', 'no exit code recorded · 1.2 s']);
     assert.equal(await card('run-ok').locator('.run-review__list[aria-label="Commands recorded for this turn"] li.is-bad').count(), 1, 'only the recorded command failure is highlighted');
     const text = await card('run-ok').innerText();
-    assert.doesNotMatch(text.replace(/whether checks passed is unknown/, ''), /pass|success|green|verified by mingle/i);
-    assert.match(text, /Mingle did not run these checks; test results are unknown\./);
+    assert.doesNotMatch(text, /pass|success|green|verified by mingle/i);
+    assert.match(text, /Test results are unknown\./);
     assert.doesNotMatch(text, /EXAMPLE-OUTPUT-NOT-SHOWN-IN-REVIEW/);
   });
 
@@ -124,11 +125,10 @@ try {
     const agent = group('run-ok', 'Reported by the agent');
     await agent.locator('text=Example agent report: the helper is finished.').waitFor();
     const agentText = await agent.innerText();
-    assert.match(agentText, /The agent reported the goal complete: “Example agent report: the helper is finished\.”/);
-    assert.match(agentText, /own report, accepted as the goal’s outcome; Mingle has not verified it\./);
-    assert.match(agentText, /Checklist as last reported in this turn: 1 of 3 marked complete, 2 still open\./);
+    assert.match(agentText, /The agent reported the goal complete · “Example agent report: the helper is finished\.”/);
+    assert.match(agentText, /accepted as the goal’s outcome\./);
+    assert.match(agentText, /1 of 3 steps marked complete/);
     assert.deepEqual(await agent.locator('ul[aria-label="Checklist items still open"] li').allInnerTexts(), ['Example step: document the helper\nnot started', 'Example step: publish the helper\nblocked']);
-    assert.match(agentText, /Mingle leaves completed items in Review for you to accept\./);
     const recorded = await group('run-ok', 'Recorded by Mingle').innerText();
     assert.doesNotMatch(recorded, /Example agent report|marked complete/);
     assert.equal((await card('run-ok').locator('.run-review__status').innerText()).trim(), 'Provider turn completed', 'the native status is unchanged by the agent’s claim');
@@ -137,26 +137,25 @@ try {
     assert.doesNotMatch(pageText, /Latest goal summary that must not appear on other runs/);
     // Another run's checklist step is not shown on this one and vice versa.
     assert.doesNotMatch(agentText, /later run/);
-    assert.match(await group('run-latest', 'Reported by the agent').innerText(), /Checklist as last reported in this turn: 1 of 1 marked complete\./);
+    assert.match(await summaryOf('run-latest'), /1\/1 steps reported done/);
     assert.deepEqual(await page.evaluate(() => window.__review.taskStatuses()), { 'step-1': 'review', 'step-2': 'ready', 'step-3': 'blocked', 'step-x': 'review' });
   });
 
   await test('a goal turn with nothing else still gets its own card, and a blocked report reads as blocked', async () => {
     await fresh();
     await settle();
+    await openDetails('run-goal');
     const text = await card('run-goal').innerText();
-    assert.match(text, /The agent reported it is blocked: “Example agent report: waiting for credentials\.”/);
-    assert.match(text, /No change capture was saved for this run\./);
-    assert.match(text, /No provider tool calls were captured for this turn\. That does not show that nothing ran\./);
-    assert.equal(await details('run-goal').count(), 0);
+    assert.match(text, /The agent reported it is blocked · “Example agent report: waiting for credentials\.”/);
+    assert.match(text, /No file capture for this turn\./);
+    assert.equal(await card('run-goal').locator('.run-review__body').count(), 0);
   });
 
-  await test('no provider tool calls: stated plainly, with no commands section and the changes still reviewable', async () => {
+  await test('turn with no calls omits command and checklist sections and keeps changes reviewable', async () => {
     await fresh();
-    const text = await card('run-nocalls').innerText();
-    assert.match(text, /No provider tool calls were captured for this turn\. That does not show that nothing ran\./);
-    assert.match(text, /No checklist was recorded for this turn, so remaining work is not reported\./);
-    assert.equal(await details('run-nocalls').count(), 0);
+    await openDetails('run-nocalls');
+    assert.equal(await card('run-nocalls').locator('.run-review__body').count(), 0);
+    assert.equal(await group('run-nocalls', 'Reported by the agent').count(), 0);
     assert.equal(await card('run-nocalls').getByRole('button', { name: 'Review changes' }).count(), 1);
   });
 
@@ -165,45 +164,44 @@ try {
     const review = card('run-tool-failure');
     assert.equal(await review.count(), 1);
     assert.equal(await details('run-tool-failure').count(), 1);
-    assert.equal((await summaryOf('run-tool-failure')), 'Recorded activity No commands recorded');
+    assert.equal((await summaryOf('run-tool-failure')), 'Turn review Provider turn completed 1 tool call');
     await openDetails('run-tool-failure');
-    await review.getByText('Other calls that failed or exited non-zero').waitFor();
+    await review.getByText('Other calls with problems').waitFor();
     assert.deepEqual(await review.locator('ul[aria-label="Other tool calls with problems"] li').allInnerTexts(), ['Example file write failed\nfile · failed']);
   });
 
   await test('partial metadata is never presented as complete: truncated evidence, unloaded rows and unavailable change capture', async () => {
     await fresh();
     await settle();
-    assert.equal(await summaryOf('run-partial'), 'Commands 55 commands recorded · outcomes not fully loaded');
+    assert.match(await summaryOf('run-partial'), /55 commands/);
     await openDetails('run-partial');
     await page.getByText('Showing 50 of 55 recorded commands.').waitFor();
     assert.equal(await card('run-partial').locator('.run-review__list[aria-label="Commands recorded for this turn"] li').count(), 50);
-    assert.equal(await summaryOf('run-partial'), 'Commands 55 commands recorded · outcomes not fully loaded', 'still partial after loading the bounded list');
+    assert.match(await summaryOf('run-partial'), /55 commands/, 'still partial after loading the bounded list');
     const others = await card('run-partial').locator('ul[aria-label="Other tool calls with problems"] li').allInnerTexts();
     assert.deepEqual(others, ['Edit many.ts\nfile · failed'], 'the failed edit is listed once; the non-zero command is already in the command list');
     // Three recorded commands, none carried by the snapshot: the count is known, the outcomes are not, until evidence loads.
-    assert.equal(await summaryOf('run-unavail'), 'Commands 3 commands recorded · outcomes not fully loaded');
+    assert.match(await summaryOf('run-unavail'), /3 commands/);
+    await openDetails('run-unavail');
     const unavailable = await card('run-unavail').innerText();
     assert.match(unavailable, /Changes unavailable/);
     assert.match(unavailable, /Example capture notice: the repository was locked\./);
     assert.equal(await card('run-unavail').getByRole('button', { name: 'Review changes' }).count(), 0, 'nothing to open when capture failed');
-    await openDetails('run-unavail');
-    await page.waitForFunction(() => /^Commands 3 commands recorded$/.test(document.querySelector('section[data-run-id="run-unavail"] details.run-review__details > summary').innerText.replace(/\s+/g, ' ').trim()));
+    await page.waitForFunction(() => document.querySelectorAll('section[data-run-id="run-unavail"] .run-review__list li').length === 3);
   });
 
   await test('failed and interrupted turns say so, with the stored failure only for its own run', async () => {
     await fresh();
     await settle();
     assert.equal((await card('run-failed').locator('.run-review__status').innerText()).trim(), 'Provider turn failed');
-    assert.match(await card('run-failed').innerText(), /The provider turn failed\./);
     assert.equal(await card('run-failed').locator('text=/quota/i').count(), 0, 'the failure record is loaded on demand');
     await openDetails('run-failed');
-    await card('run-failed').locator('text=Usage quota exhausted').waitFor();
-    assert.match(await card('run-failed').innerText(), /Usage quota exhausted: Example provider quota was exhausted\. The provider may have acted before it failed, so the outcome is unknown\./);
+    await card('run-failed').getByText(/Usage quota exhausted/).waitFor();
+    assert.match(await card('run-failed').innerText(), /Usage quota exhausted · Example provider quota was exhausted\. Provider outcome unknown\./);
     assert.deepEqual(await outcomes('run-failed'), ['failed · exit 127 · 1.2 s']);
     assert.equal((await card('run-interrupted').locator('.run-review__status').innerText()).trim(), 'Turn interrupted');
-    assert.match(await card('run-interrupted').innerText(), /The turn was interrupted before it finished, so changes and commands may be partial\./);
     await openDetails('run-interrupted');
+    assert.match(await card('run-interrupted').innerText(), /Changes and command records may be partial\./);
     await page.waitForFunction(() => /interrupted/.test(document.querySelector('section[data-run-id="run-interrupted"] .run-review__list li .run-review__outcome')?.textContent ?? ''));
     assert.equal(await card('run-ok').locator('text=/quota/i').count(), 0);
   });
@@ -211,6 +209,7 @@ try {
   await test('Review changes opens the existing saved diff, keeps focus inside, returns focus, and leaves tasks in Review', async () => {
     await fresh();
     await settle();
+    await openDetails('run-ok');
     const button = card('run-ok').getByRole('button', { name: 'Review changes' });
     await button.focus();
     await page.keyboard.press('Enter');
@@ -258,9 +257,9 @@ try {
     assert.equal((await reviews()).length, 0);
     await page.evaluate(() => window.__review.finishLive(1));
     await card('run-live').waitFor();
-    await page.waitForFunction(() => /1 command recorded/.test(document.querySelector('section[data-run-id="run-live"]')?.innerText ?? '') && !/Loading/.test(document.querySelector('section[data-run-id="run-live"]')?.innerText ?? ''));
+    await page.waitForFunction(() => window.__review.log().some(e => e.kind === 'review' && e.id === 'run-live'));
     assert.deepEqual((await reviews()).map((e) => e.id), ['run-live']);
-    assert.match(await summaryOf('run-latest'), /1 command recorded/);
+    assert.match(await summaryOf('run-latest'), /1 command/);
     assert.equal(await page.locator('section.run-review[data-run-id="run-live"] .run-changes').count(), 1);
   });
 
@@ -271,8 +270,8 @@ try {
     await page.evaluate(() => { window.__review.clearLog(); window.__review.fail(1); });
     await openDetails('run-partial');
     await card('run-partial').getByRole('alert').waitFor();
-    assert.match(await card('run-partial').getByRole('alert').innerText(), /Could not load recorded details: Example review failure\./);
-    assert.equal(await summaryOf('run-partial'), 'Commands 55 commands recorded · outcomes not fully loaded', 'the count from the run record still shows');
+    assert.match(await card('run-partial').getByRole('alert').innerText(), /Could not load details\. Example review failure\./);
+    assert.match(await summaryOf('run-partial'), /55 commands/, 'the count from the run record still shows');
     await card('run-partial').getByRole('button', { name: 'Try again' }).click();
     await page.getByText('Showing 50 of 55 recorded commands.').waitFor();
     assert.equal(await card('run-partial').getByRole('alert').count(), 0);
@@ -285,9 +284,9 @@ try {
     await page.evaluate(() => window.__review.releaseAll());
     await settle();
     assert.deepEqual((await reviews('run-unavail')).map((e) => e.aborted), [true], 'the closed request was cancelled');
-    assert.equal(await summaryOf('run-unavail'), 'Commands 3 commands recorded · outcomes not fully loaded', 'the late answer was ignored');
+    assert.match(await summaryOf('run-unavail'), /3 commands/, 'the late answer was ignored');
     await openDetails('run-unavail');
-    await page.waitForFunction(() => /^Commands 3 commands recorded$/.test(document.querySelector('section[data-run-id="run-unavail"] details.run-review__details > summary').innerText.replace(/\s+/g, ' ').trim()));
+    await page.waitForFunction(() => document.querySelectorAll('section[data-run-id="run-unavail"] .run-review__list li').length === 3);
     assert.equal((await reviews('run-unavail')).length, 2);
   });
 
@@ -297,11 +296,11 @@ try {
     await page.evaluate(() => window.__review.addTool('run-latest'));
     await page.waitForFunction(() => window.__review.heldCount() === 3);
     await page.evaluate(() => window.__review.releaseAll());
-    await page.waitForFunction(() => /2 commands recorded/.test(document.querySelector('section[data-run-id="run-latest"]').innerText) && !/Loading/.test(document.querySelector('section[data-run-id="run-latest"]').innerText));
+    await page.waitForFunction(() => /2 commands/.test(document.querySelector('section[data-run-id="run-latest"] summary').innerText));
     const latest = (await reviews('run-latest'));
     assert.equal(latest.length, 2);
     assert.equal(latest[0].aborted, true, 'the first request was cancelled when the run changed');
-    assert.doesNotMatch(await card('run-latest').innerText(), /\b1 command recorded/);
+    assert.doesNotMatch(await card('run-latest').innerText(), /\b1 command\b/);
     // Unmount with answers outstanding.
     await page.goto(url);
     await page.waitForFunction(() => Boolean(window.__review));
@@ -334,7 +333,7 @@ try {
     await settle();
     const touched = await page.evaluate(() => Object.entries(window.__mutations).filter(([, n]) => n > 0).map(([id]) => id));
     assert.deepEqual(touched, ['run-ok']);
-    assert.match(await group('run-ok', 'Reported by the agent').innerText(), /2 of 3 marked complete, 1 still open/);
+    assert.match(await group('run-ok', 'Reported by the agent').innerText(), /2 of 3 steps marked complete/);
   });
 
   await test('layouts at 900px and 390px keep every card inside the viewport, wrap long text and stay neutral (no blue, no gradients)', async () => {
@@ -352,7 +351,7 @@ try {
       });
       assert.ok(geometry.scroll <= geometry.limit, `no horizontal page scroll at ${width}px (${geometry.scroll} > ${geometry.limit})`);
       assert.deepEqual(geometry.wide, [], `nothing in a card extends past ${width}px`);
-      const smallTargets = await page.evaluate(() => [...document.querySelectorAll('section.run-review button, section.run-review summary')].filter((el) => el.getBoundingClientRect().height < 24).map((el) => el.textContent.trim().slice(0, 30)));
+      const smallTargets = await page.evaluate(() => [...document.querySelectorAll('section.run-review button, section.run-review summary')].filter((el) => el.checkVisibility() && el.getBoundingClientRect().height < 24).map((el) => el.textContent.trim().slice(0, 30)));
       assert.deepEqual(smallTargets, [], 'interactive rows are at least 24px tall');
       await card('run-ok').scrollIntoViewIfNeeded();
       await page.screenshot({ path: join(outDir, `review-${width}.png`) });
