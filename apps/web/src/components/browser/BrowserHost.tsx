@@ -12,7 +12,7 @@ type PointerInteraction = { kind: 'move' } | { kind: 'resize'; corner: ResizeCor
 const PIP_GUTTER = 12;
 const PIP_MIN_WIDTH = 320;
 const PIP_ASPECT_RATIO = 8 / 5;
-const PIP_DEFAULT_WIDTH = 480;
+const PIP_DEFAULT_WIDTH = 360;
 const RESIZE_CORNERS: { corner: ResizeCorner; label: string }[] = [
   { corner: 'nw', label: 'top-left' },
   { corner: 'ne', label: 'top-right' },
@@ -37,15 +37,15 @@ function sizeWithin(width: number, availableWidth: number, availableHeight: numb
 
 function initialGeometry(protectedArea?: DOMRect): Geometry {
   const { gutterX, gutterY, maxWidth, maxHeight } = viewportBounds();
-  const right = window.innerWidth - gutterX;
+  const left = gutterX;
   let bottom = window.innerHeight - gutterY;
   let size = sizeWithin(PIP_DEFAULT_WIDTH, maxWidth, maxHeight);
-  if (protectedArea?.width && protectedArea.height && protectedArea.right > right - size.width && protectedArea.left < right
+  if (protectedArea?.width && protectedArea.height && protectedArea.right > left && protectedArea.left < left + size.width
     && protectedArea.bottom > bottom - size.height && protectedArea.top < bottom) {
     bottom = Math.max(gutterY + 1, protectedArea.top - PIP_GUTTER);
     size = sizeWithin(PIP_DEFAULT_WIDTH, maxWidth, bottom - gutterY);
   }
-  return { left: right - size.width, top: bottom - size.height, ...size };
+  return { left, top: bottom - size.height, ...size };
 }
 
 function clampGeometry(value: Geometry): Geometry {

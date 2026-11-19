@@ -4,7 +4,7 @@ Mingle's shared browser lets you and agents operate the same page. The desktop a
 
 ## Use it
 
-When an agent opens a browser in your selected conversation, Mingle shows the page in a floating window at the bottom right, leaving the prompt box clear. The circular button at the top right expands into a compact row of controls. You can use it to open the browser in a desktop window or full view, dock it, minimize it, or disconnect it. Docking opens the **Browser** sidebar, where you can switch tabs, enter an address, and manage who is driving. Drag the top edge to move the window, or a corner to resize it while keeping its 8:5 shape. An explicit dock stays in effect while you view that conversation.
+When an agent opens a browser in your selected conversation, Mingle shows the page in a floating window at the bottom left. It starts at 360 × 225 pixels and moves up or shrinks if it would cover the prompt box. The circular button at the top right expands into a compact row of controls. You can use it to open the browser in a desktop window or full view, dock it, minimize it, or disconnect it. Docking opens the **Browser** sidebar, where you can switch tabs, enter an address, and manage who is driving. Drag the top edge to move the window, or a corner to resize it while keeping its 8:5 shape. An explicit dock stays in effect while you view that conversation.
 
 To connect a browser yourself, open the context pane and select **Browser**. Choose one of:
 

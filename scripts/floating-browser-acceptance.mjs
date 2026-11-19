@@ -69,8 +69,8 @@ try {
   const assertClearOfPrompt = () => page.waitForFunction(() => {
     const panel = document.querySelector('.browser-pip')?.getBoundingClientRect();
     const prompt = document.querySelector('[data-floating-browser-clear]')?.getBoundingClientRect();
-    return panel && prompt && panel.bottom <= prompt.top - 11
-      && innerWidth - panel.right < 14 && Math.abs(panel.width / panel.height - 1.6) < 0.005;
+    return panel && prompt && Math.abs(prompt.top - panel.bottom - 12) < 1
+      && Math.abs(panel.left - 12) < 1 && Math.abs(panel.width / panel.height - 1.6) < 0.005;
   });
   await assertClearOfPrompt();
   await prompt.click();
@@ -80,6 +80,8 @@ try {
   await prompt.evaluate(node => { node.style.height = '100px'; });
   await assertClearOfPrompt();
   const initialPanel = await floating.boundingBox();
+  assert.equal(initialPanel.width, 360);
+  assert.equal(initialPanel.height, 225);
   const initialToggle = await toggle.boundingBox();
   const pill = floating.locator('.browser-float-controls');
   const initialPill = await pill.boundingBox();
@@ -113,18 +115,18 @@ try {
   await page.waitForFunction(() => {
     const panel = document.querySelector('.browser-pip')?.getBoundingClientRect();
     const prompt = document.querySelector('[data-floating-browser-clear]')?.getBoundingClientRect();
-    return panel && prompt && panel.left >= prompt.right && innerHeight - panel.bottom < 14;
+    return panel && prompt && panel.right <= prompt.left && Math.abs(panel.left - 12) < 1 && Math.abs(innerHeight - panel.bottom - 12) < 1;
   });
   await page.setViewportSize({ width: 920, height: 740 });
   await assertClearOfPrompt();
   const beforeResize = await floating.boundingBox();
-  const resizeCorner = floating.getByRole('group', { name: /Resize floating browser from top-left corner/ });
-  await resizeCorner.press('Shift+ArrowLeft');
-  await page.waitForFunction(({ oldWidth, right, bottom }) => {
+  const resizeCorner = floating.getByRole('group', { name: /Resize floating browser from top-right corner/ });
+  await resizeCorner.press('Shift+ArrowRight');
+  await page.waitForFunction(({ oldWidth, left, bottom }) => {
     const panel = document.querySelector('.browser-pip')?.getBoundingClientRect();
     return panel && panel.width > oldWidth + 35 && Math.abs(panel.width / panel.height - 1.6) < 0.005
-      && Math.abs(panel.right - right) < 1 && Math.abs(panel.bottom - bottom) < 1;
-  }, { oldWidth: beforeResize.width, right: beforeResize.x + beforeResize.width, bottom: beforeResize.y + beforeResize.height });
+      && Math.abs(panel.left - left) < 1 && Math.abs(panel.bottom - bottom) < 1;
+  }, { oldWidth: beforeResize.width, left: beforeResize.x, bottom: beforeResize.y + beforeResize.height });
 
   const beforeCornerDrag = await floating.boundingBox();
   const ne = await floating.getByRole('group', { name: /Resize floating browser from top-right corner/ }).boundingBox();
@@ -143,11 +145,11 @@ try {
   const handleCenter = { x: handle.x + handle.width / 2, y: handle.y + handle.height / 2 };
   await page.mouse.move(handleCenter.x, handleCenter.y);
   await page.mouse.down();
-  await page.mouse.move(handleCenter.x - 45, handleCenter.y - 35, { steps: 4 });
+  await page.mouse.move(handleCenter.x + 45, handleCenter.y - 35, { steps: 4 });
   await page.mouse.up();
   await page.waitForFunction((before) => {
     const panel = document.querySelector('.browser-pip')?.getBoundingClientRect();
-    return panel && Math.abs(panel.left - before.x + 45) < 1 && Math.abs(panel.top - before.y + 35) < 1
+    return panel && Math.abs(panel.left - before.x - 45) < 1 && Math.abs(panel.top - before.y + 35) < 1
       && Math.abs(panel.width - before.width) < 1 && Math.abs(panel.height - before.height) < 1;
   }, beforeMove);
 
