@@ -40,6 +40,10 @@ try {
   await page.route('**/api/sessions/example-session/queue/example-queued/send-now', async (route) => { sendNowCount++; await route.fulfill({ status: 202, json: { accepted: true } }); });
   await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/scripts/conversation-navigation-browser-fixture.html`);
   await page.getByRole('button', { name: 'Find & bookmarks' }).waitFor({ timeout: 10_000 }).catch(async () => { throw new Error(`Navigation fixture did not mount. Errors: ${errors.join(' | ')} Body: ${(await page.locator('body').innerText()).slice(0, 1000)}`); });
+  const chronologicalCards = await page.locator('.chat__inner [data-message-id], .chat__inner [data-question-id], .chat__inner [data-run-review-id]').evaluateAll(
+    nodes => nodes.map(node => node.dataset.messageId ?? node.dataset.questionId ?? node.dataset.runReviewId),
+  );
+  assert.deepEqual(chronologicalCards, ['example-message-1', 'example-question', 'example-message-2', 'example-run', 'example-message-3']);
   await page.getByRole('button', { name: 'Edit queued message' }).click();
   await page.getByRole('textbox', { name: 'Edit queued message' }).fill('Example edited content');
   await page.getByRole('button', { name: 'Save' }).dblclick();

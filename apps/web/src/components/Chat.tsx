@@ -5,7 +5,7 @@ import type { DisplayMessage } from '../lib/conversation';
 import type { SubagentRun } from '../lib/subagents';
 import { useMingle, useProject, useActiveSession, useActiveGroup } from '../store/store';
 import { Button, EmptyState, MingleGlyph, PROVIDER_NAME } from './ui';
-import { ApprovalCard, SessionPlanCard, UserQuestionCard } from './ConversationParts';
+import { ApprovalCard } from './ConversationParts';
 import { TranscriptList } from './TranscriptList';
 import { GroupConversation } from './group/GroupConversation';
 import { Composer } from './Composer';
@@ -76,12 +76,14 @@ function SingleSessionPane() {
   const allToolCalls = useMingle((s) => s.boot?.toolCalls);
   const reviewTasks = useMingle((s) => s.boot?.tasks);
   const reviewWorkflows = useMingle((s) => s.boot?.workflows);
+  const allPlans = useMingle((s) => s.boot?.plans ?? EMPTY_PLANS);
+  const allQuestions = useMingle((s) => s.boot?.questions ?? EMPTY_QUESTIONS);
   const deriveTranscript = useRef<ReturnType<typeof createTranscriptDeriver>>(undefined);
   deriveTranscript.current ??= createTranscriptDeriver();
   const transcript = useMemo(() => session ? deriveTranscript.current!({
     sessionId: session.id, provider: session.provider, model: session.model, running: session.status === 'running',
-    messages: allMessages, runs: allRuns, toolCalls: allToolCalls, streamIds, tasks: reviewTasks, workflows: reviewWorkflows,
-  }) : null, [session?.id, session?.provider, session?.model, session?.status, allMessages, allRuns, allToolCalls, streamIds, reviewTasks, reviewWorkflows]);
+    messages: allMessages, runs: allRuns, toolCalls: allToolCalls, streamIds, tasks: reviewTasks, workflows: reviewWorkflows, questions: allQuestions, plans: allPlans,
+  }) : null, [session?.id, session?.provider, session?.model, session?.status, allMessages, allRuns, allToolCalls, streamIds, reviewTasks, reviewWorkflows, allQuestions, allPlans]);
   const messages = transcript?.messages ?? EMPTY_MESSAGES;
   const runs = transcript?.runs ?? EMPTY_SESSION_RUNS;
   const sessionToolCalls = transcript?.toolCalls ?? EMPTY_SESSION_CALLS;
@@ -89,8 +91,6 @@ function SingleSessionPane() {
   // Select the stable store array, then filter: a selector that returns a new array each time re-renders forever.
   const allDelegatedSubagents = useMingle((s) => s.boot?.delegatedSubagents);
   const delegatedSubagents = useStableById(useMemo(() => (allDelegatedSubagents ?? []).filter((item) => item.parentSessionId === sessionId), [allDelegatedSubagents, sessionId]));
-  const allPlans = useMingle((s) => s.boot?.plans ?? EMPTY_PLANS);
-  const allQuestions = useMingle((s) => s.boot?.questions ?? EMPTY_QUESTIONS);
   const allTasks = useMingle((s) => s.boot?.tasks ?? EMPTY_TASKS);
   const allEvents = useMingle((s) => s.boot?.events ?? EMPTY_EVENTS);
   const allApprovals = useMingle((s) => s.boot?.approvals ?? EMPTY_APPROVALS);
@@ -99,17 +99,6 @@ function SingleSessionPane() {
     session, runs, toolCalls: sessionToolCalls, tasks: allTasks, events: allEvents, approvals: allApprovals, questions: allQuestions,
     delegatedSubagents,
   }) : null, [session, runs, sessionToolCalls, allTasks, allEvents, allApprovals, allQuestions, delegatedSubagents]);
-  const plans = useStableById(useMemo(() => {
-    const rows = allPlans.filter((plan) => plan.sessionId === sessionId);
-    const completed = rows.filter((plan) => plan.status === 'completed').at(-1);
-    return [...rows.filter((plan) => plan.status !== 'completed'), ...(completed ? [completed] : [])];
-  }, [allPlans, sessionId]));
-  const questions = useStableById(useMemo(() => {
-    const rows = allQuestions.filter((question) => question.sessionId === sessionId);
-    const pendingRows = rows.filter((question) => question.status === 'pending');
-    return [...rows.filter((question) => question.status !== 'pending').slice(-2), ...pendingRows];
-  }, [allQuestions, sessionId]));
-  const completedRunIds = useMemo(() => new Set(runs.filter((run) => run.status === 'completed').map((run) => run.id)), [runs]);
   const hasRunningRun = useMemo(() => runs.some((run) => run.status === 'running'), [runs]);
   const hasConversation = useMemo(() => messages.some((message) => message.role === 'user' || message.role === 'assistant'), [messages]);
   const { openDialog } = useMingle.getState();
@@ -129,9 +118,8 @@ function SingleSessionPane() {
   const persistTimer = useRef<number | null>(null);
   const last = messages[messages.length - 1];
   const activitySig = useMemo(() => runs.map(run => `${run.id}:${run.status}:${run.toolCount}:${run.changes?.status ?? 'unknown'}:${run.changes?.fileCount ?? ''}:${run.changes?.additions ?? ''}:${run.changes?.deletions ?? ''}`).join('|'), [runs]);
-  const planningSig = useMemo(() => `${plans.map((plan) => `${plan.id}:${plan.revision}:${plan.status}`).join(',')}|${questions.map((question) => `${question.id}:${question.status}`).join(',')}`, [plans, questions]);
-  // Prepended history is not new output: it must neither pin the view to the bottom nor count as growth.
-  const sig = `${session?.id}|${messages.length - history.older.length}|${last?.id}|${last?.content.length ?? 0}|${pending.length}|${activitySig}|${allToolCalls?.length ?? 0}|${planningSig}`;
+  // Prepended history is not new output: the explicit history path restores the reader's anchor.
+  const sig = `${session?.id}|${messages.length - history.older.length}|${last?.id}|${last?.content.length ?? 0}|${pending.length}|${activitySig}|${allToolCalls?.length ?? 0}`;
   /** Streamed text grows inside its own row, which asks to stay pinned to the latest output when the reader has not scrolled away. */
   const pinToBottom = useCallback(() => {
     const el = scroller.current;
@@ -325,8 +313,6 @@ function SingleSessionPane() {
           ) : null}
           {session.error && session.status === 'error' ? <div className="chat__error" role="alert"><strong>Session error</strong><span>{session.error}</span></div> : null}
           {pending.map((a) => <ApprovalCard key={a.id} approval={a} />)}
-          {plans.map((plan) => <SessionPlanCard key={plan.id} plan={plan} reviewReady={completedRunIds.has(plan.runId)} />)}
-          {questions.filter((question) => question.status !== 'pending').map((question) => <UserQuestionCard key={question.id} question={question} />)}
         </div>
       </div>
       {readerNotice ? <p className="chat__reader-notice" role="status">The saved reading position is outside the loaded history.{history.hasMore ? <> <button type="button" onClick={loadOlderMessages}>Load older messages</button> to look for it.</> : ' It is not available in this session history.'}</p> : null}

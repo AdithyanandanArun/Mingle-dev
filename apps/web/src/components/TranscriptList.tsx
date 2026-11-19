@@ -1,9 +1,9 @@
-import { Fragment, memo, useCallback, useLayoutEffect, useMemo } from 'react';
+import { memo, useCallback, useLayoutEffect, useMemo } from 'react';
 import type { Provider, QuoteCitation } from '@mingle/contracts';
 import type { DisplayMessage } from '../lib/conversation';
 import { useMingle } from '../store/store';
 import { overlayStream, type RunBlock, type TranscriptLayout, type TranscriptRow } from '../lib/transcript';
-import { InternalDeliveryDisclosure, LegacyToolGroup, MessageRow } from './ConversationParts';
+import { InternalDeliveryDisclosure, LegacyToolGroup, MessageRow, SessionPlanCard, UserQuestionCard } from './ConversationParts';
 import { appendContextReference } from './MessageContextControls';
 import { RunActivity } from './RunActivity';
 import { RunReview } from './RunReview';
@@ -37,6 +37,10 @@ const RunBlockView = memo(function RunBlockView({ block, onOpenSubagent }: { blo
 const TranscriptEntry = memo(function TranscriptEntry({ row, provider, onAskAboutThis, onOpenSubagent, onGrow }: {
   row: TranscriptRow; provider: Provider; onAskAboutThis: (quote: QuoteCitation) => void; onOpenSubagent: (id: string) => void; onGrow: () => void;
 }) {
+  if (row.kind === 'question') return <UserQuestionCard question={row.question} />;
+  if (row.kind === 'plan') return <SessionPlanCard plan={row.plan} reviewReady={row.reviewReady} />;
+  if (row.kind === 'review') return <MemoRunReview block={row.block} />;
+  if (row.kind === 'activity') return <RunBlockView block={row.block} onOpenSubagent={onOpenSubagent} />;
   if (row.kind === 'tools') return <LegacyToolGroup messages={row.messages} />;
   if (row.kind === 'delivery') {
     return <>
@@ -47,20 +51,13 @@ const TranscriptEntry = memo(function TranscriptEntry({ row, provider, onAskAbou
   return <>
     <StreamAwareMessageRow m={row.message} tracked={row.streamed} provider={provider} onAskAboutThis={onAskAboutThis} onGrow={onGrow} />
     {row.runs.map((block) => <RunBlockView key={block.run.id} block={block} onOpenSubagent={onOpenSubagent} />)}
-    {row.changes.map((block) => <MemoRunReview key={block.run.id} block={block} />)}
   </>;
 });
 
-/** Messages, their run activity and completion review cards, then runs whose user message is not in the transcript. */
+/** The conversation timeline, including inline provider cards and run evidence. */
 export const TranscriptList = memo(function TranscriptList({ layout, sessionId, provider, onOpenSubagent, onGrow }: {
   layout: TranscriptLayout; sessionId: string; provider: Provider; onOpenSubagent: (id: string) => void; onGrow: () => void;
 }) {
   const onAskAboutThis = useCallback((quote: QuoteCitation) => appendContextReference(sessionId, quote), [sessionId]);
-  return <>
-    {layout.rows.map((row) => <TranscriptEntry key={row.key} row={row} provider={provider} onAskAboutThis={onAskAboutThis} onOpenSubagent={onOpenSubagent} onGrow={onGrow} />)}
-    {layout.unplaced.map((block) => <Fragment key={block.run.id}>
-      <RunBlockView block={block} onOpenSubagent={onOpenSubagent} />
-      {block.run.status !== 'running' ? <MemoRunReview block={block} /> : null}
-    </Fragment>)}
-  </>;
+  return layout.rows.map((row) => <TranscriptEntry key={row.key} row={row} provider={provider} onAskAboutThis={onAskAboutThis} onOpenSubagent={onOpenSubagent} onGrow={onGrow} />);
 });

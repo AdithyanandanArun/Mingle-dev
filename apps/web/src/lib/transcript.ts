@@ -1,4 +1,4 @@
-import type { Message, Provider, SessionRun, SessionWorkflow, Task, ToolCall } from '@mingle/contracts';
+import type { Message, Provider, SessionPlan, SessionRun, SessionWorkflow, Task, ToolCall, UserQuestion } from '@mingle/contracts';
 import type { DisplayMessage } from './conversation';
 import { deriveSubagents, type SubagentRun } from './subagents';
 import { deriveReviewHints, NO_HINTS, type RunReviewHints } from './runReview';
@@ -8,8 +8,8 @@ import { deriveReviewHints, NO_HINTS, type RunReviewHints } from './runReview';
  *
  * Every stage reuses the previous result's object identities whenever the data is structurally unchanged, so
  * React.memo boundaries downstream hold across bootstrap refetches that return identical history, and a
- * streamed token only invalidates the one message it belongs to. All lookups use maps built in one pass:
- * the whole derivation is O(messages + runs + tool calls) instead of O(runs × messages).
+ * streamed token only invalidates the one message it belongs to. Message and run lookups are indexed; dated cards are
+ * placed by bisection without rescanning the transcript for each card.
  */
 
 const EMPTY: readonly never[] = [];
@@ -108,11 +108,15 @@ export interface RunBlock {
 export type TranscriptRow =
   | { kind: 'tools'; key: string; messages: readonly DisplayMessage[] }
   | { kind: 'delivery'; key: string; message: DisplayMessage; runs: readonly RunBlock[] }
-  | { kind: 'message'; key: string; message: DisplayMessage; streamed: boolean; runs: readonly RunBlock[]; changes: readonly RunBlock[] };
-export interface TranscriptLayout { rows: readonly TranscriptRow[]; unplaced: readonly RunBlock[]; blocks: ReadonlyMap<string, RunBlock> }
+  | { kind: 'message'; key: string; message: DisplayMessage; streamed: boolean; runs: readonly RunBlock[] }
+  | { kind: 'activity'; key: string; block: RunBlock }
+  | { kind: 'review'; key: string; block: RunBlock }
+  | { kind: 'question'; key: string; question: UserQuestion }
+  | { kind: 'plan'; key: string; plan: SessionPlan; reviewReady: boolean };
+export interface TranscriptLayout { rows: readonly TranscriptRow[]; blocks: ReadonlyMap<string, RunBlock> }
 export interface LayoutInput {
   messages: readonly DisplayMessage[]; runs: readonly SessionRun[]; toolCalls: readonly ToolCall[]; subagents: readonly SubagentRun[]; streamIds: readonly string[];
-  hints?: ReadonlyMap<string, RunReviewHints>;
+  hints?: ReadonlyMap<string, RunReviewHints>; questions?: readonly UserQuestion[]; plans?: readonly SessionPlan[];
 }
 
 function groupBy<T>(items: readonly T[], key: (item: T) => string): Map<string, T[]> {
@@ -134,26 +138,34 @@ function rowsEqual(a: TranscriptRow, b: TranscriptRow): boolean {
   if (a.kind === 'tools' && b.kind === 'tools') return sameItems(a.messages, b.messages);
   if (a.kind === 'delivery' && b.kind === 'delivery') return a.message === b.message && sameItems(a.runs, b.runs);
   if (a.kind === 'message' && b.kind === 'message') {
-    return a.message === b.message && a.streamed === b.streamed && sameItems(a.runs, b.runs) && sameItems(a.changes, b.changes);
+    return a.message === b.message && a.streamed === b.streamed && sameItems(a.runs, b.runs);
   }
+  if ((a.kind === 'activity' || a.kind === 'review') && (b.kind === 'activity' || b.kind === 'review')) return a.block === b.block;
+  if (a.kind === 'question' && b.kind === 'question') return a.question === b.question;
+  if (a.kind === 'plan' && b.kind === 'plan') return a.plan === b.plan && a.reviewReady === b.reviewReady;
   return false;
 }
 
+const timestamp = (value: string | null | undefined): number => {
+  const at = value ? Date.parse(value) : NaN;
+  return Number.isFinite(at) ? at : Infinity;
+};
+
 /**
- * Places run activity under its user message, and a finished run's review card after the run's final assistant
- * message (falling back to its last non-tool message, then the user message), in one pass over the messages.
+ * Places run activity under its user message, and dated cards in the transcript even when the originating message
+ * is outside the loaded page. Message sequence remains authoritative for paging and timestamp ties.
  */
 export function buildTranscriptLayout(input: LayoutInput, previous?: TranscriptLayout): TranscriptLayout {
   const { messages, runs } = input;
   const indexById = new Map<string, number>();
-  const lastAssistantByRun = new Map<string, number>();
-  const lastNonToolByRun = new Map<string, number>();
+  const lastMessageByRun = new Map<string, number>();
+  const messageTimes: number[] = [];
   for (let index = 0; index < messages.length; index++) {
     const message = messages[index]!;
     if (!indexById.has(message.id)) indexById.set(message.id, index);
-    if (message.runId === undefined) continue;
-    if (message.role === 'assistant') lastAssistantByRun.set(message.runId, index);
-    if (message.role !== 'tool') lastNonToolByRun.set(message.runId, index);
+    if (message.runId !== undefined) lastMessageByRun.set(message.runId, index);
+    const at = timestamp(message.createdAt);
+    messageTimes.push(Math.max(messageTimes.at(-1) ?? -Infinity, at));
   }
 
   const callsByRun = groupBy(input.toolCalls, (call) => call.runId);
@@ -175,20 +187,53 @@ export function buildTranscriptLayout(input: LayoutInput, previous?: TranscriptL
   };
 
   const blocksByUserMessage = new Map<string, RunBlock[]>();
-  const changesByIndex = new Map<number, RunBlock[]>();
-  const unplacedRuns: SessionRun[] = [];
+  const datedRows = new Map<number, { at: number; row: TranscriptRow }[]>();
+  const runsById = new Map(runs.map(run => [run.id, run]));
+  const slotFor = (at: number): number => {
+    let low = 0;
+    let high = messageTimes.length;
+    while (low < high) {
+      const mid = (low + high) >> 1;
+      if (messageTimes[mid]! < at) low = mid + 1;
+      else high = mid;
+    }
+    return low;
+  };
+  const place = (row: TranscriptRow, at: number, slot = slotFor(at)) => {
+    const list = datedRows.get(slot) ?? [];
+    list.push({ at, row });
+    datedRows.set(slot, list);
+  };
   for (const run of runs) {
-    const userIndex = indexById.get(run.userMessageId);
-    if (userIndex === undefined) { unplacedRuns.push(run); continue; }
-    const list = blocksByUserMessage.get(run.userMessageId);
     const block = blockFor(run);
-    if (list) list.push(block); else blocksByUserMessage.set(run.userMessageId, [block]);
-    const at = lastAssistantByRun.get(run.id) ?? lastNonToolByRun.get(run.id) ?? userIndex;
-    const placed = changesByIndex.get(at);
-    if (placed) placed.push(block); else changesByIndex.set(at, [block]);
+    const userIndex = indexById.get(run.userMessageId);
+    const started = timestamp(run.startedAt);
+    if (userIndex === undefined) place({ kind: 'activity', key: `activity:${run.id}`, block }, started);
+    else {
+      const list = blocksByUserMessage.get(run.userMessageId) ?? [];
+      list.push(block);
+      blocksByUserMessage.set(run.userMessageId, list);
+    }
+    if (run.status === 'running') continue;
+    const anchor = Math.max(userIndex ?? -1, lastMessageByRun.get(run.id) ?? -1);
+    const finished = timestamp(run.finishedAt);
+    const at = finished === Infinity ? messageTimes[anchor] ?? started : finished;
+    const slot = finished === Infinity && anchor >= 0 ? anchor + 1 : Math.max(anchor + 1, slotFor(at));
+    place({ kind: 'review', key: `review:${run.id}`, block }, at, slot);
   }
-  unplacedRuns.sort((a, b) => a.startedAt.localeCompare(b.startedAt));
-  const unplaced = unplacedRuns.map(blockFor);
+  for (const question of input.questions ?? EMPTY) {
+    const at = timestamp(question.createdAt);
+    const run = runsById.get(question.runId);
+    const origin = run ? indexById.get(run.userMessageId) : undefined;
+    place({ kind: 'question', key: `question:${question.id}`, question }, at, Math.max((origin ?? -1) + 1, slotFor(at)));
+  }
+  for (const plan of input.plans ?? EMPTY) {
+    const run = runsById.get(plan.runId);
+    const at = timestamp(run?.finishedAt ?? plan.createdAt);
+    const origin = run ? indexById.get(run.userMessageId) ?? -1 : -1;
+    const anchor = run?.finishedAt ? lastMessageByRun.get(run.id) ?? origin : origin;
+    place({ kind: 'plan', key: `plan:${plan.id}`, plan, reviewReady: run?.status === 'completed' }, at, Math.max(anchor + 1, slotFor(at)));
+  }
 
   const streamed = new Set(input.streamIds);
   const previousRows = new Map<string, TranscriptRow>();
@@ -198,25 +243,25 @@ export function buildTranscriptLayout(input: LayoutInput, previous?: TranscriptL
     const old = previousRows.get(row.key);
     rows.push(old && rowsEqual(old, row) ? old : row);
   };
+  const insertDatedRows = (index: number) => {
+    for (const entry of datedRows.get(index)?.sort((a, b) => a.at - b.at) ?? EMPTY) keep(entry.row);
+  };
   for (let index = 0; index < messages.length; index++) {
+    insertDatedRows(index);
     const message = messages[index]!;
     if (message.role === 'tool') {
-      if (index > 0 && messages[index - 1]!.role === 'tool') continue;
       const group = [message];
-      for (let next = index + 1; next < messages.length && messages[next]!.role === 'tool'; next++) group.push(messages[next]!);
+      while (messages[index + 1]?.role === 'tool' && !datedRows.has(index + 1)) group.push(messages[++index]!);
       keep({ kind: 'tools', key: message.id, messages: group });
     } else if (isDelivery(message)) {
       keep({ kind: 'delivery', key: message.id, message, runs: blocksByUserMessage.get(message.id) ?? EMPTY });
     } else {
-      const finished = (changesByIndex.get(index) ?? EMPTY).filter((block) => block.run.status !== 'running');
-      keep({ kind: 'message', key: message.id, message, streamed: streamed.has(message.id), runs: message.role === 'user' ? blocksByUserMessage.get(message.id) ?? EMPTY : EMPTY, changes: finished });
+      keep({ kind: 'message', key: message.id, message, streamed: streamed.has(message.id), runs: message.role === 'user' ? blocksByUserMessage.get(message.id) ?? EMPTY : EMPTY });
     }
   }
-
-  const stableRows = previous && sameItems(previous.rows, rows) ? previous.rows : rows;
-  const stableUnplaced = previous && sameItems(previous.unplaced, unplaced) ? previous.unplaced : unplaced;
-  if (previous && stableRows === previous.rows && stableUnplaced === previous.unplaced) return previous;
-  return { rows: stableRows, unplaced: stableUnplaced, blocks };
+  insertDatedRows(messages.length);
+  if (previous && sameItems(previous.rows, rows)) return previous;
+  return { rows, blocks };
 }
 
 export interface TranscriptInput {
@@ -224,7 +269,7 @@ export interface TranscriptInput {
   messages: readonly Message[] | undefined; runs: readonly SessionRun[] | undefined; toolCalls: readonly ToolCall[] | undefined;
   streamIds: readonly string[];
   /** Tasks and goal records the review card's per-run checklist and goal hints come from. */
-  tasks?: readonly Task[]; workflows?: readonly SessionWorkflow[];
+  tasks?: readonly Task[]; workflows?: readonly SessionWorkflow[]; questions?: readonly UserQuestion[]; plans?: readonly SessionPlan[];
 }
 export interface TranscriptModel {
   messages: readonly DisplayMessage[]; runs: readonly SessionRun[]; toolCalls: readonly ToolCall[]; subagents: readonly SubagentRun[]; layout: TranscriptLayout;
@@ -244,6 +289,9 @@ export function createTranscriptDeriver(): (input: TranscriptInput) => Transcrip
   let toolCalls: readonly ToolCall[] = EMPTY_TOOL_CALLS;
   let subagentKey: unknown[] = [];
   let subagents: readonly SubagentRun[] = EMPTY_SUBAGENTS;
+  let cardKey: unknown[] = [];
+  let questions: readonly UserQuestion[] = EMPTY;
+  let plans: readonly SessionPlan[] = EMPTY;
   let hintKey: unknown[] = [];
   let hints: ReadonlyMap<string, RunReviewHints> | undefined;
   let layoutKey: unknown[] = [];
@@ -282,10 +330,18 @@ export function createTranscriptDeriver(): (input: TranscriptInput) => Transcrip
       hintKey = nextHintKey;
       hints = deriveReviewHints(input.tasks, input.workflows, input.sessionId, hints);
     }
-    const nextLayoutKey = [messages, runs, toolCalls, subagents, input.streamIds, hints];
+    const nextCardKey = [input.questions, input.plans];
+    if (changed(cardKey, nextCardKey)) {
+      cardKey = nextCardKey;
+      questions = reuseById(questions, (input.questions ?? EMPTY).filter(question => question.sessionId === input.sessionId));
+      const sessionPlans = (input.plans ?? EMPTY).filter(plan => plan.sessionId === input.sessionId);
+      const completed = sessionPlans.filter(plan => plan.status === 'completed').at(-1);
+      plans = reuseById(plans, sessionPlans.filter(plan => plan.status !== 'completed' || plan === completed));
+    }
+    const nextLayoutKey = [messages, runs, toolCalls, subagents, input.streamIds, hints, questions, plans];
     if (changed(layoutKey, nextLayoutKey) || !layout) {
       layoutKey = nextLayoutKey;
-      layout = buildTranscriptLayout({ messages, runs, toolCalls, subagents, streamIds: input.streamIds, hints }, layout);
+      layout = buildTranscriptLayout({ messages, runs, toolCalls, subagents, streamIds: input.streamIds, hints, questions, plans }, layout);
     }
     if (model && model.messages === messages && model.runs === runs && model.toolCalls === toolCalls && model.subagents === subagents && model.layout === layout) return model;
     model = { messages, runs, toolCalls, subagents, layout };

@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import type { Message, SessionRun, SessionWorkflow, Task, ToolCall } from '@mingle/contracts';
+import type { Message, SessionRun, SessionWorkflow, Task, ToolCall, UserQuestion } from '@mingle/contracts';
 import type { DisplayMessage } from './conversation';
 import {
   buildTranscriptLayout, createTranscriptDeriver, deepEqualData, deriveDisplayMessages, overlayStream, pickSessionStreamIds, reuseById,
-  type TranscriptInput, type TranscriptRow,
+  type TranscriptInput,
 } from './transcript';
 
 const T0 = Date.parse('2026-11-01T00:00:00Z');
@@ -17,34 +17,12 @@ const call = (id: string, runId: string, extra: Partial<ToolCall> = {}): ToolCal
 });
 const clone = <T,>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
 
-// The previous implementation, kept verbatim as the behavioural oracle for placement.
+// Model the older quadratic run lookup for the derivation's complexity check.
 function referencePlacement(messages: readonly DisplayMessage[], runs: readonly SessionRun[]) {
-  const messageIds = new Set(messages.map((m) => m.id));
-  const unplaced = runs.filter((r) => !messageIds.has(r.userMessageId)).sort((a, b) => a.startedAt.localeCompare(b.startedAt)).map((r) => r.id);
-  const placements = new Map<number, string[]>();
-  for (const r of runs) {
-    if (!messageIds.has(r.userMessageId)) continue;
-    const assistants = messages.map((m, index) => ({ message: m, index })).filter((row) => row.message.role === 'assistant' && row.message.runId === r.id);
-    let index = assistants.at(-1)?.index;
-    if (index === undefined) {
-      const fallback = messages.map((m, candidate) => ({ message: m, candidate })).filter((row) => row.message.role !== 'tool' && row.message.runId === r.id).at(-1);
-      index = fallback?.candidate ?? messages.findIndex((m) => m.id === r.userMessageId);
-    }
-    if (index === undefined || index < 0) continue;
-    placements.set(index, [...(placements.get(index) ?? []), r.id]);
-  }
-  return { unplaced, placements };
-}
-
-function layoutPlacement(rows: readonly TranscriptRow[], messages: readonly DisplayMessage[]) {
-  const indexOf = new Map(messages.map((m, index) => [m.id, index]));
-  const placements = new Map<number, string[]>();
-  const activity = new Map<string, string[]>();
-  for (const row of rows) {
-    if (row.kind === 'message' && row.changes.length) placements.set(indexOf.get(row.message.id)!, row.changes.map((block) => block.run.id));
-    if (row.kind !== 'tools') activity.set(row.message.id, row.runs.map((block) => block.run.id));
-  }
-  return { placements, activity };
+  return runs.map(run => ({
+    user: messages.find(row => row.id === run.userMessageId),
+    messages: messages.filter(row => row.runId === run.id),
+  }));
 }
 
 /** Deterministic pseudo-random generator so fixtures are reproducible. */
@@ -118,7 +96,7 @@ describe('stream buffers', () => {
 });
 
 describe('transcript layout', () => {
-  it('places run activity and change cards like the previous quadratic implementation (randomised fixtures)', () => {
+  it('keeps one activity per run and one review per finished run across mixed transcripts', () => {
     for (let seed = 1; seed <= 40; seed++) {
       const next = random(seed);
       const messages: Message[] = [];
@@ -138,21 +116,30 @@ describe('transcript layout', () => {
       }
       const display = deriveDisplayMessages(messages, { sessionId: 's1', running: false, streamIds: [] });
       const layout = buildTranscriptLayout({ messages: display, runs, toolCalls: [], subagents: [], streamIds: [] });
-      const reference = referencePlacement(display, runs);
-      const actual = layoutPlacement(layout.rows, display);
-      // Delivery rows never show change cards (previous behaviour), so compare only message rows.
-      for (const [index, ids] of reference.placements) {
-        const target = display[index]!;
-        const isDeliveryOrTool = target.role === 'tool' || (target.role === 'user' && (target.kind === 'group-delivery' || target.kind === 'team-delivery'));
-        const expected = isDeliveryOrTool ? undefined : ids.filter((id) => runs.find((r) => r.id === id)!.status !== 'running');
-        expect(actual.placements.get(index) ?? undefined, `seed ${seed} index ${index}`).toEqual(expected?.length ? expected : undefined);
-      }
-      expect([...actual.placements.keys()].every((index) => reference.placements.has(index)), `seed ${seed}`).toBe(true);
-      expect(layout.unplaced.map((block) => block.run.id), `seed ${seed}`).toEqual(reference.unplaced);
-      // Tool messages collapse into one group per consecutive run, exactly as before.
+      const activity = layout.rows.flatMap(row => row.kind === 'activity' ? [row.block] : row.kind === 'message' || row.kind === 'delivery' ? row.runs : []);
+      const reviews = layout.rows.flatMap(row => row.kind === 'review' ? [row.block.run.id] : []);
+      expect(activity.map(block => block.run.id).sort(), `activity seed ${seed}`).toEqual(runs.map(run => run.id).sort());
+      expect(reviews.sort(), `reviews seed ${seed}`).toEqual(runs.filter(run => run.status !== 'running').map(run => run.id).sort());
       const toolRows = layout.rows.filter((row) => row.kind === 'tools');
       expect(toolRows.reduce((total, row) => total + (row.kind === 'tools' ? row.messages.length : 0), 0)).toBe(display.filter((m) => m.role === 'tool').length);
     }
+  });
+
+  it('interleaves questions, resumed work, and reviews even when an old request is outside the message window', () => {
+    const questions: UserQuestion[] = [{ id: 'q1', sessionId: 's1', runId: 'r1', provider: 'claude', tool: 'Example', questions: [],
+      createdAt: at(3), resolvedAt: null, status: 'pending' }];
+    const messages = [message('a2', 'assistant', { runId: 'r1' }), message('a4', 'assistant', { runId: 'r1' }), message('u5', 'user')];
+    const runs = [run('r1', 'u1', { finishedAt: at(5) }), run('r2', 'u5', { startedAt: at(5), status: 'running' })];
+    const derive = createTranscriptDeriver();
+    const input: TranscriptInput = { sessionId: 's1', provider: 'claude', model: 'm', running: true, messages, runs, questions, toolCalls: [], streamIds: [] };
+    const pending = derive(input);
+    expect(pending.layout.rows.map(row => row.key)).toEqual(['activity:r1', 'a2', 'question:q1', 'a4', 'review:r1', 'u5']);
+    const answered = derive({ ...input, questions: [{ ...questions[0]!, status: 'answered', resolvedAt: at(6) }] });
+    expect(answered.layout.rows.map(row => row.key)).toEqual(pending.layout.rows.map(row => row.key));
+    expect(answered.layout.rows[0]).toBe(pending.layout.rows[0]);
+    expect(answered.layout.rows[2]).not.toBe(pending.layout.rows[2]);
+    const paged = derive({ ...input, messages: [message('u1', 'user'), ...messages], streamIds: ['m-live'] });
+    expect(paged.layout.rows.map(row => row.key)).toEqual(['u1', 'a2', 'question:q1', 'a4', 'review:r1', 'u5', 'm-live']);
   });
 
   it('assigns tool calls and subagents to their run block', () => {

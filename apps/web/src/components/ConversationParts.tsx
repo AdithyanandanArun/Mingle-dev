@@ -15,7 +15,6 @@ import { AgentIdentity } from './group/AgentIdentity';
 import { AttachmentHistory } from './AttachmentHistory';
 import { ContextReferenceChips, quoteFromSelection } from './MessageContextControls';
 import { deepEqualData } from '../lib/transcript';
-import './composer/question-dock.css';
 
 function legacyToolTitle(m: DisplayMessage): string {
   const candidates = [m.kind, ...m.content.split('\n')];
@@ -313,8 +312,7 @@ const initialQuestionValues = (question: UserQuestion): Record<string, QuestionV
   return [field.id, { selected: saved.filter((value) => allowed.has(value)), other: custom.join(', '), otherSelected: custom.length > 0 }];
 }));
 
-/** `compact` is the activity-dock variant: neutral surface, bounded field scroll, and the submit/cancel row stays outside the scroll region. */
-export function UserQuestionCard({ question, speaker, compact = false }: { question: UserQuestion; speaker?: Pick<Speaker, 'handle' | 'memberId'> | null; compact?: boolean }) {
+export function UserQuestionCard({ question, speaker }: { question: UserQuestion; speaker?: Pick<Speaker, 'handle' | 'memberId'> | null }) {
   const [values, setValues] = useState<Record<string, QuestionValue>>(() => initialQuestionValues(question));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -365,13 +363,13 @@ export function UserQuestionCard({ question, speaker, compact = false }: { quest
     );
   });
   return (
-    <section className={cx('question-card', compact && 'question-card--compact')} data-question-id={question.id} aria-label={`Provider question, ${question.status}`}>
+    <section className="question-card" data-question-id={question.id} tabIndex={-1} aria-label={`Provider question, ${question.status}`}>
       <header className="question-card__header">
         <CircleHelp size={15} aria-hidden="true" />
         <strong>{pending ? 'Provider needs your input' : question.status === 'answered' ? 'Provider question answered' : 'Provider question cancelled'}</strong>
         {speaker ? <AgentIdentity className="question-card__who" handle={speaker.handle} identityKey={speaker.memberId} /> : null}
       </header>
-      {compact ? <div className="question-card__scroll">{fields}</div> : fields}
+      {fields}
       {pending ? <div className="question-card__actions"><Button variant="primary" size="sm" busy={busy} disabled={busy || question.questions.some((field) => { const value = values[field.id] ?? { selected: [], other: '', otherSelected: false }; return !value.selected.length && !(field.allowOther && value.otherSelected && value.other.trim()); })} onClick={() => void act('answer')}><Check size={13} /> Submit answers</Button><Button size="sm" disabled={busy} onClick={() => void act('cancel')}><X size={13} /> Cancel request</Button><span>Answers are sent directly to {question.provider}.</span></div> : question.reason ? <p className="question-card__saved">{question.reason}</p> : null}
       {error ? <p className="question-card__error" role="alert">{error}</p> : null}
     </section>

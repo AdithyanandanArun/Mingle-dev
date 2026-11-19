@@ -16,7 +16,7 @@ For a group, select or address one agent to see that agent's ring and compact it
 
 The routing uses explicit leading directives, not background model calls. Ambiguous wording stays in normal chat. Provider commands, skill invocations and quoted code are not treated as instructions to start autonomy. Existing provider permissions remain in force.
 
-Agents can ask focused questions whenever they need more context, including during ordinary chat. Questions appear in the composer activity area and wait for your answer. There is no need to choose Plan first.
+Agents can ask focused questions whenever they need more context, including during ordinary chat. Questions appear where they were asked in the conversation. While a question is pending, **Go to the question** returns you to its answer controls. Answered questions and turn reviews stay in the conversation as newer activity arrives below them. There is no need to choose Plan first.
 
 The model control now sizes to its label with a compact maximum width. Its popup retains room for model names and search, opens from the corresponding edge of the control and respects reduced-motion preferences.
 

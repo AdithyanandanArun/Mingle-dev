@@ -71,8 +71,7 @@ export function Composer({ session, progressState, helperCount = 0 }: { session:
   const sessionRuns = useMemo(() => bootRuns.filter((run) => run.sessionId === session.id), [bootRuns, session.id]);
   const pendingApproval = useMingle((s) => s.boot?.approvals.find((item) => item.sessionId === session.id && item.status === 'pending'));
   const allQuestions = useMingle((s) => s.boot?.questions);
-  const pendingQuestions = useMemo(() => (allQuestions ?? []).filter((item) => item.sessionId === session.id && item.status === 'pending'), [allQuestions, session.id]);
-  const pendingQuestion = pendingQuestions[0];
+  const pendingQuestion = allQuestions?.find(item => item.sessionId === session.id && item.status === 'pending');
   const project = useMingle((s) => s.boot?.projects.find((p) => p.id === session.projectId));
   const teamStructure = useTeamStructure().snapshot;
   const allQueuedMessages = useMingle((s) => s.boot?.queuedMessages);
@@ -406,12 +405,14 @@ export function Composer({ session, progressState, helperCount = 0 }: { session:
     if (!selector) return;
     const target = document.querySelector<HTMLElement>(selector);
     target?.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    target?.querySelector<HTMLElement>('button, input, [tabindex="0"]')?.focus({ preventScroll: true });
+    const control = target?.querySelector<HTMLElement>('input:enabled, button:enabled, [tabindex="0"]');
+    (control ?? target)?.focus({ preventScroll: true });
   };
   const focusRunReview = () => {
     const runId = currentFailure?.runId ?? currentFailedRun?.id;
     if (!runId) return;
-    const review = document.querySelector<HTMLElement>(`[data-run-id="${CSS.escape(runId)}"]`);
+    const review = document.querySelector<HTMLElement>(`[data-run-review-id="${CSS.escape(runId)}"]`)
+      ?? document.querySelector<HTMLElement>(`[data-run-id="${CSS.escape(runId)}"]`);
     review?.scrollIntoView({ behavior: 'smooth', block: 'center' });
     review?.focus({ preventScroll: true });
   };
@@ -572,7 +573,8 @@ export function Composer({ session, progressState, helperCount = 0 }: { session:
         {currentFailedRun ? <button type="button" className="link-btn" onClick={focusRunReview}>Review this run</button> : null}
       </div> : null}
       <div className="composer-surface">
-      <SessionProgress session={session} workflow={workflow} state={progressState} questions={pendingQuestions} helperCount={helperCount} onStop={() => void stop()} />
+      {pendingQuestion && !providerFailureCopy ? <div className="composer__note"><button type="button" className="link-btn" onClick={focusPendingBoundary}>Go to the question</button></div> : null}
+      <SessionProgress session={session} workflow={workflow} state={progressState} helperCount={helperCount} onStop={() => void stop()} />
       <div className={cx('composer', blocker && 'is-blocked')}>
         <label htmlFor={`composer-${session.id}`} className="sr-only">Message {session.name}</label>
         <ContextReferenceChips refs={contextRefs} disabled={sending || updating} onRemove={(index) => useMingle.getState().setContextDraft(session.id, contextRefs.filter((_, i) => i !== index))} />
