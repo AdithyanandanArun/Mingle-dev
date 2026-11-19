@@ -219,6 +219,13 @@ export function BrowserPane({ session, active, popout = false }: { session: Sess
     act({ type: 'resize', width: clamp(stage.clientWidth, 320, 2560), height: clamp(stage.clientHeight, 240, 1600) });
   };
 
+  const dock = () => {
+    docked.current = true;
+    setExpanded(false);
+    setFloating(false);
+    useMingle.getState().setContextTab('browser');
+  };
+
   const content = (() => {
     if (minimized) return <EmptyState title="Browser minimized">Use Restore browser to reopen it.</EmptyState>;
     if (detached && !popout) return (
@@ -321,10 +328,13 @@ export function BrowserPane({ session, active, popout = false }: { session: Sess
         <Globe size={14} aria-hidden="true" /> Restore browser
       </button>, document.body,
     ) : null}
-    <BrowserHost expanded={expanded} floating={floating && !detached} onDismiss={() => setExpanded(false)} onDock={() => { docked.current = true; setFloating(false); useMingle.getState().setContextTab('browser'); }} onMinimize={() => { setFloating(false); setMinimized(true); requestAnimationFrame(() => restoreButton.current?.focus()); }} onPopout={canOpenBrowserPopout() ? () => void openDesktopWindow() : undefined}
+    <BrowserHost expanded={expanded} floating={floating && !detached} onDismiss={() => setExpanded(false)} onDock={dock} onMinimize={() => { setFloating(false); setMinimized(true); requestAnimationFrame(() => restoreButton.current?.focus()); }} onPopout={canOpenBrowserPopout() ? () => void openDesktopWindow() : undefined}
       onDisconnect={state?.status === 'connected' ? () => void disconnect() : undefined}
       disconnectDisabled={busy === 'disconnect'}
       onExpand={tab ? () => setExpanded(true) : undefined}
+      inlineFallback={active && pageOnly ? <EmptyState icon={<Globe size={20} />} title="Browser is floating">
+        <Button size="sm" onClick={dock}>Dock browser</Button>
+      </EmptyState> : undefined}
     >
       <div
         className={cx('browser__inner', expanded && 'is-expanded', pageOnly && 'browser__inner--page-only')}

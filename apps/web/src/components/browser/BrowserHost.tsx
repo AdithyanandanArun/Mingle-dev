@@ -70,9 +70,9 @@ function resizeFromCorner(origin: Geometry, corner: ResizeCorner, dx: number, dy
  * overlay. The host is never cloned, so its socket, canvas and held-input cleanup survive layout changes.
  */
 export function BrowserHost({
-  expanded, floating, onDismiss, onDock, onMinimize, onPopout, onDisconnect, disconnectDisabled, onExpand, children,
+  expanded, floating, onDismiss, onDock, onMinimize, onPopout, onDisconnect, disconnectDisabled, onExpand, inlineFallback, children,
 }: {
-  expanded: boolean; floating: boolean; onDismiss(): void; onDock(): void; onMinimize?: () => void; onPopout?: () => void; onDisconnect?: () => void; disconnectDisabled?: boolean; onExpand?: () => void; children: ReactNode;
+  expanded: boolean; floating: boolean; onDismiss(): void; onDock(): void; onMinimize?: () => void; onPopout?: () => void; onDisconnect?: () => void; disconnectDisabled?: boolean; onExpand?: () => void; inlineFallback?: ReactNode; children: ReactNode;
 }) {
   const host = useMemo(() => {
     const element = document.createElement('div');
@@ -216,7 +216,10 @@ export function BrowserHost({
 
   return (
     <>
-      <div className="browser-slot" ref={inline} />
+      <div className="browser-slot">
+        {floating || expanded ? inlineFallback : null}
+        <div className="browser-slot" ref={inline} />
+      </div>
       {floating && !expanded ? createPortal(
         <section
           className="browser-pip" ref={floatingPanel}
