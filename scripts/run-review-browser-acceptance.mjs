@@ -51,8 +51,9 @@ try {
   const reviews = (id) => page.evaluate((i) => window.__review.log().filter((e) => e.kind === 'review' && (!i || e.id === i)), id);
   const card = (id) => page.locator(`section.run-review[data-run-id="${id}"]`);
   const details = (id) => card(id).locator('details.run-review__details');
-  const openDetails = async (id) => { await details(id).locator('> summary').click(); await page.waitForFunction((i) => document.querySelector(`section.run-review[data-run-id="${i}"] details.run-review__details`).open, id); };
-  const closeDetails = async (id) => { await details(id).locator('> summary').click(); await page.waitForFunction((i) => !document.querySelector(`section.run-review[data-run-id="${i}"] details.run-review__details`).open, id); };
+  const evidenceDetails = (id) => details(id).locator('details.run-review__evidence');
+  const openDetails = async (id) => { await evidenceDetails(id).locator('> summary').click(); await page.waitForFunction((i) => document.querySelector(`section.run-review[data-run-id="${i}"] details.run-review__evidence`).open, id); };
+  const closeDetails = async (id) => { await evidenceDetails(id).locator('> summary').click(); await page.waitForFunction((i) => !document.querySelector(`section.run-review[data-run-id="${i}"] details.run-review__evidence`).open, id); };
   const summaryOf = async (id) => (await details(id).locator('> summary').innerText()).replace(/\s+/g, ' ').trim();
   const group = (id, label) => card(id).locator('div.run-review__group', { has: page.locator('p.run-review__label', { hasText: new RegExp(`^${label}$`) }) });
   const outcomes = (id) => card(id).locator('.run-review__body .run-review__list[aria-label="Commands recorded for this turn"] li .run-review__outcome').allInnerTexts();
@@ -90,13 +91,27 @@ try {
     report.requestsAtMount = log.length;
   });
 
+  await test('basic review opens by default with changes and command aggregates visible while detailed evidence stays closed', async () => {
+    await fresh();
+    const review = card('run-ok');
+    assert.equal(await details('run-ok').evaluate((el) => el.open), true, 'outer review starts open');
+    assert.equal(await evidenceDetails('run-ok').count(), 1);
+    assert.equal(await evidenceDetails('run-ok').evaluate((el) => el.open), false, 'Review details starts closed');
+    await review.getByText('Recorded by Mingle', { exact: true }).waitFor();
+    await review.locator('.run-changes').waitFor();
+    await review.getByText(/4 commands? recorded/, { exact: false }).waitFor();
+    assert.equal(await review.locator('.run-review__evidence .run-review__list[aria-label="Commands recorded for this turn"]').isVisible(), false, 'command rows are hidden until evidence opens');
+    assert.equal(await group('run-ok', 'Reported by the agent').isVisible(), false, 'agent content is hidden until evidence opens');
+    assert.equal(await evidenceDetails('run-ok').locator('> summary').innerText(), 'Review details');
+  });
+
   await test('a finished provider turn is labelled as exactly that and kept apart from what the agent says', async () => {
     await fresh();
     await settle();
     const latest = card('run-latest');
     assert.equal((await latest.locator('.run-review__status').innerText()).trim(), 'Provider turn completed');
     assert.match(await summaryOf('run-latest'), /^Turn review Provider turn completed 1 changed file · 1 command · 1\/1 steps reported done$/);
-    assert.equal(await group('run-latest', 'Recorded by Mingle').isVisible(), false);
+    assert.equal(await group('run-latest', 'Recorded by Mingle').isVisible(), true);
     await openDetails('run-latest');
     assert.match(await group('run-latest', 'Reported by the agent').innerText(), /1 of 1 steps marked complete/);
     assert.equal(await group('run-latest', 'Reported by the agent').locator('text=/goal complete/i').count(), 0);
@@ -109,7 +124,7 @@ try {
     assert.match(await summaryOf('run-ok'), /2 changed files · 4 commands · 1\/3 steps reported done/);
     await openDetails('run-ok');
     await page.waitForFunction(() => document.querySelectorAll('section[data-run-id="run-ok"] .run-review__list[aria-label="Commands recorded for this turn"] li').length === 4);
-    assert.equal((await reviews('run-ok')).length, 1);
+    assert.equal((await reviews('run-ok')).length, 0, 'complete command rows already present in the run snapshot need no evidence fetch');
     assert.deepEqual(await outcomes('run-ok'), ['exit 0 · 1.2 s', 'exit 0 · 1.2 s', 'failed · exit 2 · 1.2 s', 'no exit code recorded · 1.2 s']);
     assert.equal(await card('run-ok').locator('.run-review__list[aria-label="Commands recorded for this turn"] li.is-bad').count(), 1, 'only the recorded command failure is highlighted');
     const text = await card('run-ok').innerText();
@@ -153,7 +168,6 @@ try {
 
   await test('turn with no calls omits command and checklist sections and keeps changes reviewable', async () => {
     await fresh();
-    await openDetails('run-nocalls');
     assert.equal(await card('run-nocalls').locator('.run-review__body').count(), 0);
     assert.equal(await group('run-nocalls', 'Reported by the agent').count(), 0);
     assert.equal(await card('run-nocalls').getByRole('button', { name: 'Review changes' }).count(), 1);
@@ -237,13 +251,13 @@ try {
   await test('keyboard: details open and close with Enter and Space and show a visible focus ring', async () => {
     await fresh();
     await settle();
-    const summary = details('run-partial').locator('> summary');
+    const summary = evidenceDetails('run-partial').locator('> summary');
     await summary.focus();
     assert.notEqual(await summary.evaluate((el) => getComputedStyle(el).outlineStyle), 'none', 'focus is visible');
     await page.keyboard.press('Enter');
-    await page.waitForFunction(() => document.querySelector('section[data-run-id="run-partial"] details.run-review__details').open);
+    await page.waitForFunction(() => document.querySelector('section[data-run-id="run-partial"] details.run-review__evidence').open);
     await page.keyboard.press('Space');
-    await page.waitForFunction(() => !document.querySelector('section[data-run-id="run-partial"] details.run-review__details').open);
+    await page.waitForFunction(() => !document.querySelector('section[data-run-id="run-partial"] details.run-review__evidence').open);
     const reachable = await page.evaluate(() => [...document.querySelectorAll('section.run-review button, section.run-review summary')].every((el) => el.tabIndex >= 0));
     assert.ok(reachable);
   });
@@ -339,7 +353,7 @@ try {
   await test('layouts at 900px and 390px keep every card inside the viewport, wrap long text and stay neutral (no blue, no gradients)', async () => {
     await fresh();
     await settle();
-    for (const id of ORDER) if (await details(id).count()) await openDetails(id);
+    for (const id of ORDER) if (await evidenceDetails(id).count()) await openDetails(id);
     await page.waitForFunction(() => document.querySelector('section[data-run-id="run-partial"]').innerText.includes('Showing 50 of 55'));
     for (const width of [900, 390]) {
       await page.setViewportSize({ width, height: 900 });
