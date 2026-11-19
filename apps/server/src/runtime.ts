@@ -1,7 +1,7 @@
 import { ContextCompactionResultSchema, EditSessionPlanSchema, NativeUserInputRequestSchema, ProviderTaskPlanSchema, SessionPlanProposalSchema, SessionPlanStepsSchema, UserInputAnswersSchema, SUBAGENT_RESULT_KIND } from '@mingle/contracts';
 import type { ProjectIntelligenceService } from './project-intelligence/service.ts';
 import { existsSync, statSync } from 'node:fs';
-import type { ProviderTaskPlan, AdapterEvent, Approval, ContextCompactionResult, EditSessionPlan, Message, MinglePlanUpdate, MingleStatusSet, Provider, ProviderFailure, ProviderSkill, RunChanges, RunOptions, Session, SessionPlan, SubagentMessage, Task, UserInputAnswers, UserQuestion, ToolActivity, ToolCall } from '@mingle/contracts';
+import type { AppSettings, GroupRunContext, ProviderTaskPlan, AdapterEvent, Approval, ContextCompactionResult, EditSessionPlan, Message, MinglePlanUpdate, MingleStatusSet, Provider, ProviderFailure, ProviderSkill, RunChanges, RunOptions, Session, SessionPlan, SubagentMessage, Task, UserInputAnswers, UserQuestion, ToolActivity, ToolCall } from '@mingle/contracts';
 import type { Hub } from './hub.ts';
 import type { Store } from './store.ts';
 import type { TaskService } from './tasks.ts';
@@ -640,39 +640,21 @@ export class SessionRuntime {
         await this.finish(run, 'interrupted', null, unavailableRunChanges('Group scheduling was paused before the provider started.'));
         return;
       }
-      run.acceptingTools = true;
-      // Browser actions and team tools can have external side effects and are deliberately absent from read-only planning.
-      const browserMcp = run.intent !== 'plan' && settings.browserAgentEnabled !== false ? this.browserMcp?.create(run.id, session, run.controller.signal, (request) => this.requestApproval(run, request)) : undefined;
-      if (browserMcp) capabilityTokens.push(browserMcp.token);
+      const explicit = run.invocation;
+      // The provider turn can stop independently while the logical run keeps its queue slot
+      // and attachment staging. Scope local tools to this provider turn so they expire on pause.
+      const turn = adapter.compact && session.provider !== 'antigravity' && !explicit ? new AbortController() : undefined;
+      const signal = turn ? AbortSignal.any([run.controller.signal, turn.signal]) : run.controller.signal;
+      if (turn) run.autoCompaction = { turn };
       const groupContext = run.teamRun ? undefined : this.groups?.contextForRun(session.id, run.id);
       if (!run.teamRun && this.groups?.forSession(session.id) && !groupContext) throw conflict('Group runs must start through a recorded group delivery. Refresh and send through the group conversation.');
-      const teamMcp = run.intent !== 'plan' && run.teamRun
-        ? run.teamMcpConnection
-        : run.intent !== 'plan' && groupContext ? this.teamMcp?.create(run.id, session, run.controller.signal, groupContext) : undefined;
-      if (teamMcp) capabilityTokens.push(teamMcp.token);
-      const progressMcp = this.progressMcp?.create({
-        runId: run.id, session, signal: run.controller.signal,
-        isLive: () => this.isRunLive(run.sessionId, run.id),
-        setStatus: (status) => this.setProgressStatus(run, status),
-        updatePlan: (plan) => this.updateProgressPlan(run, plan),
-        requestUserInput: (request) => this.requestUserInput(run, request),
-        readOnly: run.intent === 'plan',
-        ...(run.workflow ? { finishWorkflow: (report: WorkflowFinish) => this.recordWorkflowReport(run, report) } : {}),
-      });
-      if (progressMcp) capabilityTokens.push(progressMcp.token);
-      const subagentMcp = run.intent !== 'plan' && !session.parentSessionId && !this.groups?.forSession(session.id)
-        ? this.subagentMcp?.create({runId:run.id,session,signal:run.controller.signal,live:()=>this.isRunLive(run.sessionId,run.id)}) : undefined;
-      if(subagentMcp) capabilityTokens.push(subagentMcp.token);
-      // Project memory: agent tools exist only for runs that may act (never read-only planning); recalled entries are reference data in every run.
-      const memoryMcp = run.intent !== 'plan' && !run.excludeProjectMemory ? this.memoryMcp?.create({
-        runId: run.id, session, signal: run.controller.signal, isLive: () => this.isRunLive(run.sessionId, run.id),
-      }) : undefined;
-      if (memoryMcp) capabilityTokens.push(memoryMcp.token);
+      run.acceptingTools = true;
+      const connections = this.createRunConnections(run, session, settings, signal, groupContext);
+      const { browserMcp, progressMcp, subagentMcp, memoryMcp } = connections;
       let memoryContext: string | undefined;
       const replayingExactContext = Boolean(run.workflow?.retryOfRunId && run.workflow.replayPrompt !== undefined && run.workflow.replayContext !== undefined);
       try { if (!run.excludeProjectMemory && !replayingExactContext) memoryContext = this.projectMemory?.buildRunContext({ session, runId: run.id, prompt, tools: Boolean(memoryMcp) }); }
       catch (error) { this.log('warn', `Project memory context was skipped: ${redactSecrets(errorMessage(error)).slice(0, 200)}`); }
-      const explicit = run.invocation;
       const providerHandoffBlock = await this.providerHandoffBlock(run, session);
       const progressInstructions = progressMcp
         ? [run.intent === 'plan' ? '' : 'Mingle provides mingle_status_set for the live composer status and mingle_plan_update for a replaceable checklist. Keep them current during multi-step work, updating status as you make progress.',
@@ -697,19 +679,14 @@ export class SessionRuntime {
         this.workflowHooks?.recordReplayPrompt?.({ runId: run.id, prompt: effectivePrompt, context: injectedContext });
       }
       const runOptions: RunOptions & DispatchAwareOptions = {
-        session, prompt: effectivePrompt, intent: run.intent, ...(explicit ? { invocation: explicit } : {}), ...(injectedContext ? { context: injectedContext } : {}), attachments: stagedAttachments, teamMcp, progressMcp, subagentMcp, memoryMcp, providerTaskState: this.nativeTaskState(session), skills: run.skills, browserMcp, signal: run.controller.signal, settings,
+        session, prompt: effectivePrompt, intent: run.intent, ...(explicit ? { invocation: explicit } : {}), ...(injectedContext ? { context: injectedContext } : {}), attachments: stagedAttachments, ...connections, providerTaskState: this.nativeTaskState(session), skills: run.skills, signal, settings,
         onEvent: (event) => this.handleEvent(run, capabilityTokens.length ? JSON.parse(scrubCapabilities(JSON.stringify(event))) as AdapterEvent : event),
         requestApproval: (request) => this.requestApproval(run, JSON.parse(scrubCapabilities(JSON.stringify(request)))),
         requestUserInput: (request) => this.requestUserInput(run, request),
         onDispatchState: (state) => { run.dispatchState = state; },
       };
-      // The provider turn can stop independently of the logical run. The run retains its
-      // queue slot, MCP ownership, workflow binding and attachment staging during compaction.
-      const turn = new AbortController();
-      const signal = AbortSignal.any([run.controller.signal, turn.signal]);
-      if (adapter.compact && session.provider !== 'antigravity' && !explicit) run.autoCompaction = { turn };
       const adapterRun = Promise.resolve().then(() => {
-        const running = adapter.run({ ...runOptions, signal });
+        const running = adapter.run(runOptions);
         if (providerHandoffBlock) this.consumeProviderHandoff(run, providerHandoffBlock);
         return running;
       });
@@ -718,7 +695,7 @@ export class SessionRuntime {
       run.autoCompaction = undefined;
       if (percent !== undefined && result.kind !== 'grace' && !run.controller.signal.aborted) {
         if (result.kind === 'error' && !isAbortError(result.error)) throw result.error;
-        await this.compactActiveRun(run, runOptions, percent, result.kind === 'error');
+        await this.compactActiveRun(run, runOptions, percent, result.kind === 'error', groupContext);
       } else if (result.kind === 'error') {
         throw result.error;
       } else if (result.kind === 'grace' && !run.controller.signal.aborted) {
@@ -746,11 +723,7 @@ export class SessionRuntime {
     }
     run.acceptingTools = false;
     if (!run.cleanupPending) await this.attachmentService?.release(run.id);
-    this.browserMcp?.revoke(run.id);
-    this.teamMcp?.revoke(run.id);
-    this.progressMcp?.revoke(run.id);
-    this.subagentMcp?.revoke(run.id);
-    this.memoryMcp?.revoke(run.id);
+    this.revokeRunConnections(run.id);
     let changes: RunChanges;
     try {
       changes = run.cleanupPending
@@ -767,6 +740,43 @@ export class SessionRuntime {
     await this.finish(run, outcome, failure, changes);
   }
 
+  private createRunConnections(run: ActiveRun, session: Session, settings: AppSettings, signal: AbortSignal, groupContext?: GroupRunContext) {
+    // Browser actions and team tools can have external side effects and are deliberately absent from read-only planning.
+    const browserMcp = run.intent !== 'plan' && settings.browserAgentEnabled !== false ? this.browserMcp?.create(run.id, session, signal, (request) => this.requestApproval(run, request)) : undefined;
+    if (browserMcp) run.capabilityTokens.push(browserMcp.token);
+    const teamMcp = run.intent !== 'plan' && run.teamRun
+      ? run.teamMcpConnection
+      : run.intent !== 'plan' && groupContext ? this.teamMcp?.create(run.id, session, signal, groupContext) : undefined;
+    if (teamMcp) run.capabilityTokens.push(teamMcp.token);
+    const progressMcp = this.progressMcp?.create({
+      runId: run.id, session, signal,
+      isLive: () => this.isRunLive(run.sessionId, run.id),
+      setStatus: (status) => this.setProgressStatus(run, status),
+      updatePlan: (plan) => this.updateProgressPlan(run, plan),
+      requestUserInput: (request) => this.requestUserInput(run, request),
+      readOnly: run.intent === 'plan',
+      ...(run.workflow ? { finishWorkflow: (report: WorkflowFinish) => this.recordWorkflowReport(run, report) } : {}),
+    });
+    if (progressMcp) run.capabilityTokens.push(progressMcp.token);
+    const subagentMcp = run.intent !== 'plan' && !session.parentSessionId && !this.groups?.forSession(session.id)
+      ? this.subagentMcp?.create({ runId: run.id, session, signal, live: () => this.isRunLive(run.sessionId, run.id) }) : undefined;
+    if (subagentMcp) run.capabilityTokens.push(subagentMcp.token);
+    // Project memory: agent tools exist only for runs that may act (never read-only planning); recalled entries are reference data in every run.
+    const memoryMcp = run.intent !== 'plan' && !run.excludeProjectMemory ? this.memoryMcp?.create({
+      runId: run.id, session, signal, isLive: () => this.isRunLive(run.sessionId, run.id),
+    }) : undefined;
+    if (memoryMcp) run.capabilityTokens.push(memoryMcp.token);
+    return { browserMcp, teamMcp, progressMcp, subagentMcp, memoryMcp };
+  }
+
+  private revokeRunConnections(runId: string): void {
+    this.browserMcp?.revoke(runId);
+    this.teamMcp?.revoke(runId);
+    this.progressMcp?.revoke(runId);
+    this.subagentMcp?.revoke(runId);
+    this.memoryMcp?.revoke(runId);
+  }
+
   private async waitForProvider(run: ActiveRun, native: Promise<void>, signal: AbortSignal) {
     const result = await this.waitForNative(native, signal);
     if (result.kind === 'grace') {
@@ -778,7 +788,8 @@ export class SessionRuntime {
     return result;
   }
 
-  private async compactActiveRun(run: ActiveRun, previous: RunOptions & DispatchAwareOptions, percent: number, resume: boolean): Promise<void> {
+  private async compactActiveRun(run: ActiveRun, previous: RunOptions & DispatchAwareOptions, percent: number, resume: boolean, groupContext?: GroupRunContext): Promise<void> {
+    this.revokeRunConnections(run.id);
     const stored = this.store.getSession(run.sessionId);
     if (this.shutdownStartedAt !== null) {
       run.controller.abort();
@@ -812,7 +823,9 @@ export class SessionRuntime {
     this.store.recordEvent({ projectId: session.projectId, sessionId: session.id, type: 'session.progress.status',
       summary: 'Continuing after automatic context compaction', payload: { runId: run.id, status: { step: 'Continuing after compaction' } } });
     const continuation: RunOptions & DispatchAwareOptions = {
-      ...previous, session, invocation: undefined,
+      ...previous, session, invocation: undefined, signal: run.controller.signal,
+      ...this.createRunConnections(run, session, this.store.getSettings(), run.controller.signal, groupContext),
+      providerTaskState: this.nativeTaskState(session),
       prompt: 'Mingle paused this turn to compact the native conversation. Continue the request already in this conversation from where you stopped. Check the existing tool results and workspace state before continuing. Do not repeat actions that already completed.',
       onEvent: (event) => previous.onEvent(namespaceResumedToolEvent(event)),
       // Failure handling must account for the initial dispatch even if continuing could not start.

@@ -73,6 +73,8 @@ it('pauses at the threshold, holds the session slot, and resumes exactly once in
       expect(options.session.providerSessionId).toBe('native-example');
       expect(options.prompt).toContain('Continue the request already in this conversation');
       expect(options.signal.aborted).toBe(false);
+      expect(options.progressMcp?.token).toBeTruthy();
+      expect(options.progressMcp?.token).not.toBe(t.fake.runs[0]?.progressMcp?.token);
       emit(report(805));
       emit({ type: 'usage', inputTokens: 12, outputTokens: 3, costUsd: null });
       emit({ type: 'text', text: 'Example work continued.' });
@@ -83,6 +85,9 @@ it('pauses at the threshold, holds the session slot, and resumes exactly once in
     await compactEntered.promise;
     expect(t.fake.runs).toHaveLength(1);
     expect(t.app.runtime.activeCount()).toBe(1);
+    const token = t.fake.runs[0]?.progressMcp?.token;
+    expect(token).toBeTruthy();
+    expect((await t.api('POST', '/api/progress/mcp', {}, { authorization: `Bearer ${token}` })).status).toBe(401);
     expect((await t.api('POST', `${path}/compact`, {})).status).toBe(409);
   } finally {
     releaseCompact.resolve();
@@ -135,4 +140,42 @@ it.each(['failed', 'unsupported', 'cancelled'] as const)('does not resume after 
   await waitFor(() => !t.app.runtime.isActive(sessionId));
   expect(t.fake.runs).toHaveLength(1);
   expect(t.app.store.getSession(sessionId)?.status).toBe(reason === 'cancelled' ? 'interrupted' : 'error');
+});
+
+it('compacts without dispatching another turn when the provider already finished', async () => {
+  const t = await boot();
+  await configure(t, 80);
+  let attempts = 0;
+  installCompact(t, async ({ session }) => { attempts++; return compactOutcome(session); });
+  t.fake.script = async (options, emit) => {
+    markDispatched(options);
+    emit({ type: 'session', providerSessionId: 'example' });
+    emit({ type: 'text', text: 'Example work finished.' });
+    emit(report(800));
+  };
+  await start(t);
+  await waitFor(() => !t.app.runtime.isActive(sessionId));
+  expect(attempts).toBe(1);
+  expect(t.fake.runs).toHaveLength(1);
+  expect(t.app.store.getSession(sessionId)?.status).toBe('idle');
+});
+
+it('keeps a pending approval available when a provider reports usage above the threshold', async () => {
+  const t = await boot();
+  await configure(t, 80);
+  let called = false;
+  installCompact(t, async ({ session }) => { called = true; return compactOutcome(session); });
+  t.fake.script = async (options, emit) => {
+    markDispatched(options);
+    emit({ type: 'session', providerSessionId: 'example' });
+    const approved = options.requestApproval({ tool: 'Example tool', description: 'Example approval', input: {} });
+    emit(report(900));
+    await approved;
+  };
+  await start(t);
+  await waitFor(() => t.app.store.getSession(sessionId)?.status === 'waiting');
+  expect(t.fake.runs[0]?.signal.aborted).toBe(false);
+  expect(called).toBe(false);
+  expect((await t.api('POST', `${path}/interrupt`, {})).status).toBe(200);
+  await waitFor(() => !t.app.runtime.isActive(sessionId));
 });
