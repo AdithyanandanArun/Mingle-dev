@@ -307,6 +307,8 @@ export function BrowserPane({ session, active, popout = false }: { session: Sess
             </div> : null}
             {!pageOnly && stream.error ? <div className="browser-stream-error"><InlineError>{stream.error}</InlineError><button type="button" className="link-btn" onClick={stream.dismissError}>Dismiss</button></div> : null}
           </>
+        ) : pageOnly ? (
+          <EmptyState icon={<Globe size={20} />} title="No open tabs">Dock the browser to open a tab.</EmptyState>
         ) : (
           <EmptyState icon={<Globe size={20} />} title="No open tabs">
             Open a page to start. The agent can use it as soon as it exists.
