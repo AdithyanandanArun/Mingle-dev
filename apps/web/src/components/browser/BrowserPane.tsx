@@ -64,7 +64,7 @@ export function BrowserPane({ session, active, popout = false }: { session: Sess
   }, [floating]);
   const [detached, setDetached] = useState(false);
   const docked = useRef(false);
-  const visible = (active && !minimized) || expanded || floating;
+  const visible = (active && !minimized) || expanded || (floating && !detached);
   const pageOnly = floating && !detached;
   const { state, error: stateError, apply, refresh } = useBrowserState(session.id, visible);
   const openRequest = useBrowserStore((s) => s.openRequests[session.id]);
@@ -176,7 +176,6 @@ export function BrowserPane({ session, active, popout = false }: { session: Sess
       const opened = await openBrowserPopout(session.id);
       if (!opened) throw new Error('The desktop browser window could not be opened.');
       setExpanded(false);
-      setFloating(false);
       setDetached(true);
     } catch (cause) { setActionError(errorMessage(cause)); }
   };
