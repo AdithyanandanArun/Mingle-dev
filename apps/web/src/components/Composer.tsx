@@ -419,6 +419,8 @@ export function Composer({ session, progressState, helperCount = 0 }: { session:
       ?? document.querySelector<HTMLElement>(`[data-run-id="${CSS.escape(runId)}"]`);
     const details = review?.querySelector<HTMLDetailsElement>('.run-review__details');
     if (details) details.open = true;
+    const evidence = review?.querySelector<HTMLDetailsElement>('.run-review__evidence');
+    if (evidence) evidence.open = true;
     review?.scrollIntoView({ behavior: 'smooth', block: 'center' });
     review?.focus({ preventScroll: true });
   };

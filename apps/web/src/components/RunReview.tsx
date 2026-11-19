@@ -66,9 +66,10 @@ const FAILURE_KIND: Record<string, string> = {
 export function RunReview({ block }: { block: RunBlock }) {
   const { run, calls, hints, latest } = block;
   const ids = { recorded: useId(), agent: useId() };
-  const [detailsOpen, setDetailsOpen] = useState(false);
-  // Loaded without being opened for the newest run and for the run the goal record names; older runs wait until a person opens them.
-  const { state, retry } = useRunReviewEvidence(run, calls, latest || hints.goalTurn || detailsOpen);
+  const [basicOpen, setBasicOpen] = useState(true);
+  const [evidenceOpen, setEvidenceOpen] = useState(false);
+  // The basic review uses the snapshot. Older runs fetch full evidence when its disclosure opens.
+  const { state, retry } = useRunReviewEvidence(run, calls, latest || hints.goalTurn || (basicOpen && evidenceOpen));
   // Evidence read for an older version of the run record is not shown as if it described the current one.
   const evidence = state.phase !== 'idle' && state.key === evidenceKey(run, calls) ? state.data : null;
   const commands = useMemo(() => deriveCommands(run, calls, evidence), [run, calls, evidence]);
@@ -76,13 +77,17 @@ export function RunReview({ block }: { block: RunBlock }) {
   const checklist = useMemo(() => checklistSummary(hints.checklist), [hints.checklist]);
   if (!hasReviewContent({ run, hints })) return null;
 
-  const onToggle = (event: SyntheticEvent<HTMLDetailsElement>): void => {
-    if (event.target === event.currentTarget) setDetailsOpen(event.currentTarget.open);
+  const toggleBasic = (event: SyntheticEvent<HTMLDetailsElement>) => {
+    if (event.target === event.currentTarget) setBasicOpen(event.currentTarget.open);
+  };
+  const toggleEvidence = (event: SyntheticEvent<HTMLDetailsElement>) => {
+    if (event.target === event.currentTarget) setEvidenceOpen(event.currentTarget.open);
   };
   const showChanges = changesVisible(run.changes);
   const loading = state.phase === 'loading';
   const goal = evidence?.goalTurn ?? null;
   const failure = evidence?.failure ?? null;
+  const hasDetails = run.toolCount > 0 || run.status !== 'completed' || hints.goalTurn || checklist.total > 0;
   const count = (value: number, unit: string) => `${value.toLocaleString()} ${unit}${value === 1 ? '' : 's'}`;
   const counts = [
     run.changes?.status === 'available' && run.changes.fileCount > 0 ? count(run.changes.fileCount, 'changed file') : null,
@@ -92,7 +97,7 @@ export function RunReview({ block }: { block: RunBlock }) {
 
   return (
     <section className={`run-review is-${run.status}`} aria-label="Review of this turn" data-run-review-id={run.id} data-run-id={run.id} tabIndex={-1}>
-      <details className="run-review__details" onToggle={onToggle}>
+      <details className="run-review__details" open={basicOpen} onToggle={toggleBasic}>
         <summary className="run-review__summary">
           <span className="run-review__title">Turn review</span>
           <span className="run-review__status">{turnStatusLabel(run.status)}</span>
@@ -103,41 +108,47 @@ export function RunReview({ block }: { block: RunBlock }) {
           <RunChanges runId={run.id} summary={run.changes} embedded />
           {run.status === 'interrupted' ? <p className="run-review__line is-bad">Changes and command records may be partial.</p> : null}
           {failure ? <p className="run-review__line is-bad">{FAILURE_KIND[failure.kind] ?? 'Failure'} · {failure.message}{failure.outcomeUnknown ? ' Provider outcome unknown.' : ''}</p> : null}
-          {loading ? <p className="run-review__line" role="status">Loading details…</p> : null}
-          {state.phase === 'error' ? <p className="run-review__line is-bad" role="alert">Could not load details. {state.message} <button type="button" className="run-review__retry" onClick={retry}>Try again</button></p> : null}
-          {run.toolCount > 0 ? <div className="run-review__body">
-            <p className="run-review__line">{commandsSummary(commands)}</p>
-            {commands.rows.length ? <>
-              <p className="run-review__caveat">Recorded exit codes and outcomes. Test results are unknown.</p>
-              <ul className="run-review__list" aria-label="Commands recorded for this turn">
-                {commands.rows.map((row) => <li key={row.id} className={commandWentWrong(row) ? 'is-bad' : undefined}>
-                  <code className="run-review__command" title={row.command ?? undefined}>{row.command?.trim() || row.title}</code>
-                  <span className="run-review__outcome">{commandOutcome(row.status, row.exitCode)}{row.durationMs !== null ? ` · ${formatToolDuration(row.durationMs)}` : ''}</span>
-                </li>)}
-              </ul>
-            </> : null}
-            {!loading && commands.rows.length < commands.total ? <p className="run-review__line">Showing {commands.rows.length.toLocaleString('en-US')} of {commands.total.toLocaleString('en-US')} recorded commands.</p> : null}
-            {problems.length ? <>
-              <p className="run-review__label">Other calls with problems</p>
-              <ul className="run-review__list" aria-label="Other tool calls with problems">
-                {problems.map((row) => <li key={row.id} className="is-bad"><span className="run-review__command">{row.title}</span><span className="run-review__outcome">{row.category} · {row.outcome}</span></li>)}
-              </ul>
-              {evidence?.problems.truncated ? <p className="run-review__line">Showing the first {evidence.problems.items.length} of {evidence.problems.total.toLocaleString('en-US')} problem calls.</p> : null}
-            </> : null}
-          </div> : null}
+          {run.toolCount > 0 ? <p className="run-review__line">{commandsSummary(commands)}</p> : null}
           {!loading && !showChanges && run.toolCount === 0 && !failure && run.status !== 'interrupted' ? <p className="run-review__line">{run.changes ? 'No file changes recorded.' : 'No file capture for this turn.'}</p> : null}
         </div>
-        {goal || checklist.total > 0 ? <div className="run-review__group" role="group" aria-labelledby={ids.agent}>
-          <p className="run-review__label" id={ids.agent}>Reported by the agent</p>
-          {goal?.report ? <p className="run-review__line">{GOAL_OUTCOME_LABEL[goal.report.outcome]} · “{goal.report.summary}” <span className="run-review__quiet">{GOAL_STATE_LABEL[goal.report.state]}.</span></p>
-            : goal ? <p className="run-review__line">No goal report filed.</p> : null}
-          {checklist.total > 0 ? <div className="run-review__line">
-            <span>{checklist.completed} of {checklist.total} steps marked complete</span>
-            {checklist.open.length ? <ul className="run-review__list" aria-label="Checklist items still open">
-              {checklist.open.map((step) => <li key={step.id} className={step.status === 'blocked' ? 'is-bad' : undefined}><span className="run-review__command">{step.title}</span><span className="run-review__outcome">{STEP_STATUS_LABEL[step.status]}</span></li>)}
-            </ul> : null}
+        {hasDetails ? <details className="run-review__evidence" onToggle={toggleEvidence}>
+          <summary className="run-review__summary run-review__evidence-summary">Review details</summary>
+          <div className="run-review__group">
+            {loading ? <p className="run-review__line" role="status">Loading details…</p> : null}
+            {state.phase === 'error' ? <p className="run-review__line is-bad" role="alert">Could not load details. {state.message} <button type="button" className="run-review__retry" onClick={retry}>Try again</button></p> : null}
+            {commands.total > 0 || problems.length > 0 ? <div className="run-review__body">
+              {commands.rows.length ? <>
+                <p className="run-review__caveat">Recorded exit codes and outcomes. Test results are unknown.</p>
+                <ul className="run-review__list" aria-label="Commands recorded for this turn">
+                  {commands.rows.map((row) => <li key={row.id} className={commandWentWrong(row) ? 'is-bad' : undefined}>
+                    <code className="run-review__command" title={row.command ?? undefined}>{row.command?.trim() || row.title}</code>
+                    <span className="run-review__outcome">{commandOutcome(row.status, row.exitCode)}{row.durationMs !== null ? ` · ${formatToolDuration(row.durationMs)}` : ''}</span>
+                  </li>)}
+                </ul>
+              </> : null}
+              {!loading && commands.rows.length < commands.total ? <p className="run-review__line">Showing {commands.rows.length.toLocaleString('en-US')} of {commands.total.toLocaleString('en-US')} recorded commands.</p> : null}
+              {problems.length ? <>
+                <p className="run-review__label">Other calls with problems</p>
+                <ul className="run-review__list" aria-label="Other tool calls with problems">
+                  {problems.map((row) => <li key={row.id} className="is-bad"><span className="run-review__command">{row.title}</span><span className="run-review__outcome">{row.category} · {row.outcome}</span></li>)}
+                </ul>
+                {evidence?.problems.truncated ? <p className="run-review__line">Showing the first {evidence.problems.items.length} of {evidence.problems.total.toLocaleString('en-US')} problem calls.</p> : null}
+              </> : null}
+            </div> : null}
+            {state.phase === 'ready' && commands.total === 0 && problems.length === 0 && !goal && checklist.total === 0 ? <p className="run-review__line">No additional details recorded.</p> : null}
+          </div>
+          {goal || checklist.total > 0 ? <div className="run-review__group" role="group" aria-labelledby={ids.agent}>
+            <p className="run-review__label" id={ids.agent}>Reported by the agent</p>
+            {goal?.report ? <p className="run-review__line">{GOAL_OUTCOME_LABEL[goal.report.outcome]} · “{goal.report.summary}” <span className="run-review__quiet">{GOAL_STATE_LABEL[goal.report.state]}.</span></p>
+              : goal ? <p className="run-review__line">No goal report filed.</p> : null}
+            {checklist.total > 0 ? <div className="run-review__line">
+              <span>{checklist.completed} of {checklist.total} steps marked complete</span>
+              {checklist.open.length ? <ul className="run-review__list" aria-label="Checklist items still open">
+                {checklist.open.map((step) => <li key={step.id} className={step.status === 'blocked' ? 'is-bad' : undefined}><span className="run-review__command">{step.title}</span><span className="run-review__outcome">{STEP_STATUS_LABEL[step.status]}</span></li>)}
+              </ul> : null}
+            </div> : null}
           </div> : null}
-        </div> : null}
+        </details> : null}
       </details>
     </section>
   );
