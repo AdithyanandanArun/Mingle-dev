@@ -1,9 +1,8 @@
-import { SessionAutoCompactionSchema } from '@mingle/contracts';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { z } from 'zod';
 import {
   CreateGroupSchema, AddGroupAgentSchema, UpdateGroupSchema, SendGroupMessageSchema, RepositoryCommitSchema, RepositoryPushSchema, RepositoryBranchSchema, RepositoryPullRequestSchema, BrowserConnectSchema, BrowserSignInSchema, BrowserActionSchema, ApprovalDecisionSchema, ConversationIdSchema, ImportConversationSchema, ProviderSchema, CloneProjectSchema, NewProjectSchema, CreateProjectSchema, CreateSessionSchema, CreateTaskSchema, HandoffSchema, SendMessageSchema, UpdateProjectSchema, UpdateSessionSchema, UpdateSettingsSchema, UpdateTaskSchema, EditSessionPlanSchema, UserInputAnswersSchema, StartSubagentSchema,
-  RecoveryActionRequestSchema, InitializeGitSchema,
+  RecoveryActionRequestSchema, InitializeGitSchema, SessionAutoCompactionSchema,
   StartSessionWorkflowSchema, WorkflowControlSchema, ResumeSessionWorkflowSchema,
   AccountUsageProviderSchema, RedeemProviderResetSchema, SUBAGENT_RESULT_KIND,
 } from '@mingle/contracts';

@@ -20,7 +20,7 @@ import type { NativeInvocation, RunAttachment } from '@mingle/contracts';
 import type { RecoveryService } from './recovery/service.ts';
 import type { TeamProxyRuntimeService } from './team-orchestration/types.ts';
 import { providerFailure } from './providers/failure.ts';
-import type { DispatchAwareOptions, DispatchState } from './providers/common.ts';
+import { isAbortError, type DispatchAwareOptions, type DispatchState } from './providers/common.ts';
 import { buildMessageContext } from './message-context.ts';
 import { buildProviderHandoff } from './provider-handoff.ts';
 import { git } from './repository/git-run.ts';
@@ -132,6 +132,8 @@ interface ActiveRun {
   checklist: RunChecklistState | null;
   endInfo?: RunEndInfo;
   idleNotified: boolean;
+  autoCompaction?: { turn: AbortController; percent?: number };
+  workflowReported?: boolean;
   promise: Promise<void>;
 }
 
@@ -142,6 +144,7 @@ interface ActiveCompaction {
   startedAt: string;
   previousStatus: Session['status'];
   previousError: string | null;
+  autoRun?: ActiveRun;
   promise: Promise<ContextCompactionResult>;
 }
 
@@ -281,7 +284,8 @@ export class SessionRuntime {
   }
 
   activeCount(): number {
-    return this.active.size + this.compactions.size + (this.teamProxy?.activeCount() ?? 0);
+    const compactionOnly = [...this.compactions.keys()].filter((id) => !this.active.has(id)).length;
+    return this.active.size + compactionOnly + (this.teamProxy?.activeCount() ?? 0);
   }
   reserveProviderMaintenance(provider: Provider): (() => void) | null {
     if (this.shutdownStartedAt !== null || this.providerMaintenance.has(provider)) return null;
@@ -699,23 +703,26 @@ export class SessionRuntime {
         requestUserInput: (request) => this.requestUserInput(run, request),
         onDispatchState: (state) => { run.dispatchState = state; },
       };
+      // The provider turn can stop independently of the logical run. The run retains its
+      // queue slot, MCP ownership, workflow binding and attachment staging during compaction.
+      const turn = new AbortController();
+      const signal = AbortSignal.any([run.controller.signal, turn.signal]);
+      if (adapter.compact && session.provider !== 'antigravity' && !explicit) run.autoCompaction = { turn };
       const adapterRun = Promise.resolve().then(() => {
-        const running = adapter.run(runOptions);
+        const running = adapter.run({ ...runOptions, signal });
         if (providerHandoffBlock) this.consumeProviderHandoff(run, providerHandoffBlock);
         return running;
       });
-      const grace = new Promise<'grace'>((resolve) => {
-        const onAbort = () => setTimeout(() => resolve('grace'), this.abortGraceMs).unref();
-        if (run.controller.signal.aborted) onAbort();
-        else run.controller.signal.addEventListener('abort', onAbort, { once: true });
-      });
-      adapterRun.catch(() => undefined); // an orphaned adapter promise must never become an unhandled rejection
-      const result = await Promise.race([adapterRun.then(() => 'done' as const), grace]);
-      if (result === 'grace') {
-        this.log('warn', `Adapter for session ${run.sessionId} ignored abort; keeping its session locked until cleanup finishes`);
-        run.cleanupPending = true;
-        // Finishing the visible turn must never grant a second writer access to the same worktree.
-        void adapterRun.then(() => this.releaseAfterCleanup(run), () => this.releaseAfterCleanup(run));
+      const result = await this.waitForProvider(run, adapterRun, signal);
+      const percent = run.autoCompaction?.percent;
+      run.autoCompaction = undefined;
+      if (percent !== undefined && result.kind !== 'grace' && !run.controller.signal.aborted) {
+        if (result.kind === 'error' && !isAbortError(result.error)) throw result.error;
+        await this.compactActiveRun(run, runOptions, percent, result.kind === 'error');
+      } else if (result.kind === 'error') {
+        throw result.error;
+      } else if (result.kind === 'grace' && !run.controller.signal.aborted) {
+        throw new Error('Automatic compaction stopped because the provider turn did not exit. The session remains locked until cleanup finishes.');
       }
       outcome = run.controller.signal.aborted ? 'interrupted' : 'completed';
     } catch (error) {
@@ -758,6 +765,62 @@ export class SessionRuntime {
       changes = unavailableRunChanges('Workspace changes could not be captured for this run.');
     }
     await this.finish(run, outcome, failure, changes);
+  }
+
+  private async waitForProvider(run: ActiveRun, native: Promise<void>, signal: AbortSignal) {
+    const result = await this.waitForNative(native, signal);
+    if (result.kind === 'grace') {
+      this.log('warn', `Adapter for session ${run.sessionId} ignored abort; keeping its session locked until cleanup finishes`);
+      run.cleanupPending = true;
+      // Do not grant another writer access while the abandoned provider is still exiting.
+      void native.then(() => this.releaseAfterCleanup(run), () => this.releaseAfterCleanup(run));
+    }
+    return result;
+  }
+
+  private async compactActiveRun(run: ActiveRun, previous: RunOptions & DispatchAwareOptions, percent: number, resume: boolean): Promise<void> {
+    const stored = this.store.getSession(run.sessionId);
+    if (this.shutdownStartedAt !== null) {
+      run.controller.abort();
+      return;
+    }
+    if (!stored?.providerSessionId || stored.provider !== previous.session.provider || stored.model !== previous.session.model) {
+      throw new Error('Automatic compaction stopped because the native conversation changed.');
+    }
+    const session = { ...previous.session, providerSessionId: stored.providerSessionId };
+    this.store.tx(() => {
+      this.closeStream(run, resume ? 'partial' : null);
+      this.finishTools(run);
+      this.store.recordEvent({ projectId: session.projectId, sessionId: session.id, type: 'session.progress.status',
+        summary: 'Paused for automatic context compaction', payload: { runId: run.id, status: { step: 'Automatically compacting context', detail: `Threshold reached at ${percent}%` } } });
+    });
+    const compacted = await this.startCompaction({ ...stored, worktreePath: session.worktreePath }, newId('cmp'), run);
+    if (run.controller.signal.aborted) return;
+    if (compacted.status !== 'completed') throw new Error(`Automatic compaction stopped: ${compacted.error || compacted.message}`);
+    if (!resume) return; // The original turn finished normally before the provider acted on the pause.
+    if (this.shutdownStartedAt !== null || this.groups?.forSession(session.id)?.group.paused) {
+      run.controller.abort();
+      return;
+    }
+    run.baseInput = stored.inputTokens;
+    run.baseOutput = stored.outputTokens;
+    run.baseCost = stored.costUsd;
+    const adapter = this.providers.createAdapter(session.provider);
+    run.adapter = adapter;
+    run.providerPhase = true;
+    run.acceptingTools = true;
+    this.store.recordEvent({ projectId: session.projectId, sessionId: session.id, type: 'session.progress.status',
+      summary: 'Continuing after automatic context compaction', payload: { runId: run.id, status: { step: 'Continuing after compaction' } } });
+    const continuation: RunOptions & DispatchAwareOptions = {
+      ...previous, session, invocation: undefined,
+      prompt: 'Mingle paused this turn to compact the native conversation. Continue the request already in this conversation from where you stopped. Check the existing tool results and workspace state before continuing. Do not repeat actions that already completed.',
+      onEvent: (event) => previous.onEvent(namespaceResumedToolEvent(event)),
+      // Failure handling must account for the initial dispatch even if continuing could not start.
+      onDispatchState: undefined,
+    };
+    const native = Promise.resolve().then(() => adapter.run(continuation));
+    const result = await this.waitForProvider(run, native, run.controller.signal);
+    if (result.kind === 'error') throw result.error;
   }
 
   private async captureCheckpoint(sessionId: string, reason: string, runId?: string): Promise<string | null> {
@@ -842,6 +905,7 @@ export class SessionRuntime {
   private recordWorkflowReport(run: ActiveRun, report: WorkflowFinish): void {
     if (!run.workflow || !this.workflowHooks || !this.isRunLive(run.sessionId, run.id)) throw conflict('This goal connection has expired');
     this.workflowHooks.recordReport({ sessionId: run.sessionId, runId: run.id, report });
+    run.workflowReported = true;
   }
 
   private async releaseAfterCleanup(run: ActiveRun): Promise<void> {
@@ -917,11 +981,23 @@ export class SessionRuntime {
         case 'context.usage': {
           const session = this.store.getSession(run.sessionId);
           if (!session || !session.providerSessionId || run.controller.signal.aborted) break;
-          this.store.setContextUsage(session.id, {
+          const saved = this.store.setContextUsage(session.id, {
             usedTokens: event.usedTokens, contextWindow: event.contextWindow, estimated: event.estimated,
             source: event.source, updatedAt: nowIso(), provider: session.provider, model: session.model,
             providerSessionId: session.providerSessionId,
           });
+          const pause = run.autoCompaction;
+          const percent = session.autoCompactionPercent;
+          if (saved && pause && pause.percent === undefined && percent != null && event.contextWindow !== null
+            && event.usedTokens / event.contextWindow >= percent / 100
+            && run.dispatchState === 'dispatched' && session.status === 'running' && !run.workflowReported
+            && !run.questions.size && !run.approvals.size
+            && this.shutdownStartedAt === null) {
+            pause.percent = percent;
+            run.providerPhase = false;
+            run.acceptingTools = false;
+            pause.turn.abort();
+          }
           break;
         }
         case 'usage': {
@@ -1185,7 +1261,7 @@ export class SessionRuntime {
   }
 
   private requestApproval(run: ActiveRun, request: { tool: string; description: string; input: Record<string, unknown> }): Promise<boolean> {
-    if (run.closed || run.controller.signal.aborted) return Promise.resolve(false);
+    if (!this.isRunLive(run.sessionId, run.id)) return Promise.resolve(false);
     const approval = this.store.tx(() => {
       const created = this.store.insertApproval({ sessionId: run.sessionId, tool: truncate(String(request.tool), 200), description: truncate(redactSecrets(String(request.description ?? '')), 4000), input: sanitizeInput(request.input) });
       this.store.updateSession(run.sessionId, { status: 'waiting' });
@@ -1307,10 +1383,15 @@ export class SessionRuntime {
     if (this.isActive(sessionId) || session.status === 'running' || session.status === 'waiting') {
       throw conflict('This session is busy; wait for its run or provider cleanup to finish before compacting.');
     }
+    return this.startCompaction(session, compactOperationId);
+  }
+
+  private startCompaction(session: Session, operationId: string, autoRun?: ActiveRun): Promise<ContextCompactionResult> {
     this.validateSession?.(session);
+    const sessionId = session.id;
     const startedAt = nowIso();
     const lock: ActiveCompaction = {
-      controller: new AbortController(), operationId: compactOperationId, cleanupPending: false, startedAt, previousStatus: session.status, previousError: session.error,
+      controller: autoRun?.controller ?? new AbortController(), operationId, cleanupPending: false, startedAt, previousStatus: session.status, previousError: session.error, autoRun,
       promise: Promise.resolve(null as unknown as ContextCompactionResult),
     };
     this.compactions.set(sessionId, lock);
@@ -1318,7 +1399,7 @@ export class SessionRuntime {
       this.store.tx(() => {
         // Other windows read session status from bootstrap. Keep that view busy until native cleanup is done.
         this.store.updateSession(sessionId, { status: 'running' });
-        this.store.recordEvent({ projectId: session.projectId, sessionId, type: 'session.compaction.started', summary: `Context compaction started: ${session.name}`, payload: { provider: session.provider, startedAt } });
+        this.store.recordEvent({ projectId: session.projectId, sessionId, type: 'session.compaction.started', summary: `Context compaction started: ${session.name}`, payload: { provider: session.provider, startedAt, automatic: Boolean(autoRun) } });
       });
     } catch (error) {
       this.compactions.delete(sessionId);
@@ -1330,6 +1411,7 @@ export class SessionRuntime {
 
   private async executeCompaction(session: Session, lock: ActiveCompaction): Promise<ContextCompactionResult> {
     const startedAt = lock.startedAt;
+    const mode = lock.autoRun ? 'automatic' : 'manual';
     let checkpointId: string | null = null;
     let result: ContextCompactionResult;
     let native: Promise<ContextCompactionResult> | null = null;
@@ -1348,7 +1430,7 @@ export class SessionRuntime {
         } else if (lock.controller.signal.aborted) {
           result = this.compactionResult(session, 'failed', startedAt, null, 'Compaction was interrupted before native work began.', 'Interrupted before native compaction started.');
         } else {
-          checkpointId = await this.captureCheckpoint(session.id, 'Before manual context compaction') ?? null;
+          checkpointId = await this.captureCheckpoint(session.id, `Before ${mode} context compaction`) ?? null;
           if (!checkpointId) {
             result = this.compactionResult(session, 'failed', startedAt, null,
               'A durable pre-compaction checkpoint could not be saved. Native history was left untouched; resolve the storage/recovery issue and try again.',
@@ -1358,7 +1440,7 @@ export class SessionRuntime {
             if (!currentSession || !this.store.getProject(session.projectId)) {
               throw new Error('The selected session or project is no longer visible; native compaction was not started.');
             }
-            if (currentSession.status !== 'running' || currentSession.provider !== session.provider || currentSession.providerSessionId !== session.providerSessionId) {
+            if (currentSession.status !== 'running' || currentSession.provider !== session.provider || currentSession.model !== session.model || currentSession.providerSessionId !== session.providerSessionId) {
               throw new Error('The session configuration or native conversation changed during checkpoint capture; native compaction was not started.');
             }
             // Provider availability, policy, model, and permissions may have changed while Git/checkpoint capture awaited.
@@ -1372,13 +1454,13 @@ export class SessionRuntime {
                 result = this.compactionResult(session, 'unsupported', startedAt, checkpointId, reason, reason);
               } else {
                 if (lock.controller.signal.aborted) throw new Error('Compaction was interrupted before native work began.');
-                native = Promise.resolve(adapter.compact({ session: currentSession, settings: this.store.getSettings(), signal: lock.controller.signal, onContextEvent: event => {
+                native = Promise.resolve(adapter.compact({ session: { ...currentSession, worktreePath: session.worktreePath }, settings: this.store.getSettings(), signal: lock.controller.signal, onContextEvent: event => {
                   if (lock.controller.signal.aborted) return;
                   if (event.type === 'context.reset') { contextReset = true; compactedUsage = null; }
                   else if (contextReset) compactedUsage = event;
                 } }));
                 native.catch(() => undefined);
-                const outcome = await this.waitForCompaction(native, lock.controller.signal);
+                const outcome = await this.waitForNative(native, lock.controller.signal);
                 if (outcome.kind === 'grace') {
                   lock.cleanupPending = true;
                   void native.then(
@@ -1427,13 +1509,13 @@ export class SessionRuntime {
         provider: session.provider, model: session.model, providerSessionId: session.providerSessionId, updatedAt: nowIso(),
       });
     }
-    if (!lock.cleanupPending) await this.captureCheckpoint(session.id, `After manual context compaction (${result.status})`);
+    if (!lock.cleanupPending) await this.captureCheckpoint(session.id, `After ${mode} context compaction (${result.status})`);
     const finishedAt = result.finishedAt;
     try {
       this.store.recordEvent({
         projectId: session.projectId, sessionId: session.id, type: `session.compaction.${result.status}`,
         summary: result.status === 'completed' ? `Context compaction completed: ${session.name}` : result.status === 'unsupported' ? `Context compaction unavailable: ${session.name}` : `Context compaction failed: ${session.name}`,
-        payload: { provider: session.provider, startedAt: result.startedAt, finishedAt, checkpointId: result.checkpointId, message: result.message, error: result.error },
+        payload: { provider: session.provider, startedAt: result.startedAt, finishedAt, checkpointId: result.checkpointId, message: result.message, error: result.error, automatic: Boolean(lock.autoRun) },
       });
     } catch (error) {
       this.log('warn', `Could not persist compaction outcome for ${session.id}: ${redactSecrets(errorMessage(error)).slice(0, 500)}`);
@@ -1449,7 +1531,7 @@ export class SessionRuntime {
     };
   }
 
-  private waitForCompaction(native: Promise<ContextCompactionResult>, signal: AbortSignal): Promise<{ kind: 'result'; result: ContextCompactionResult } | { kind: 'error'; error: unknown } | { kind: 'grace' }> {
+  private waitForNative<T>(native: Promise<T>, signal: AbortSignal): Promise<{ kind: 'result'; result: T } | { kind: 'error'; error: unknown } | { kind: 'grace' }> {
     const settled = native.then((result) => ({ kind: 'result' as const, result }), (error: unknown) => ({ kind: 'error' as const, error }));
     const grace = new Promise<{ kind: 'grace' }>((resolve) => {
       let timer: NodeJS.Timeout | null = null;
@@ -1470,13 +1552,23 @@ export class SessionRuntime {
 
   private async releaseCompaction(session: Session, lock: ActiveCompaction): Promise<void> {
     if (this.compactions.get(session.id) !== lock) return;
-    await this.captureCheckpoint(session.id, 'Manual compaction provider cleanup released');
+    await this.captureCheckpoint(session.id, 'Compaction provider cleanup released');
     this.releaseCompactionNow(session.id, lock, true);
   }
 
   private releaseCompactionNow(sessionId: string, lock: ActiveCompaction, notifyIdle: boolean): void {
     if (this.compactions.get(sessionId) !== lock) return;
     lock.cleanupPending = false;
+    const autoRun = lock.autoRun;
+    if (autoRun) {
+      this.compactions.delete(sessionId);
+      if (autoRun.closed && !this.active.has(sessionId)) {
+        try { this.groups?.onRuntimeIdle(sessionId); }
+        catch (error) { this.log('error', `Failed to resume group queue after compaction for ${sessionId}`, error); }
+        if (!autoRun.teamRun) queueMicrotask(() => this.afterRunIdle(autoRun));
+      }
+      return;
+    }
     let session: Session | undefined;
     try { session = this.store.getSession(sessionId, true); }
     catch (error) { this.log('warn', `Could not read session after compaction for ${sessionId}: ${redactSecrets(errorMessage(error)).slice(0, 500)}`); }
@@ -1573,7 +1665,7 @@ export class SessionRuntime {
       };
       if (!run.teamRun) { try { this.workflowHooks?.runEnded(run.endInfo); } catch (error) { this.log('error', 'Workflow run-end handling failed', error); } }
     }
-    if (!run.cleanupPending && !run.teamRun) queueMicrotask(() => this.afterRunIdle(run));
+    if (!run.cleanupPending && !run.teamRun && !this.compactions.has(run.sessionId)) queueMicrotask(() => this.afterRunIdle(run));
   }
 
   /** The runtime idle edge: provider cleanup is done and the queue-drain attempt for this run has been made. */
@@ -1618,6 +1710,17 @@ export class SessionRuntime {
     for (const [sessionId] of compactions) this.interrupt(sessionId);
     const pending = [...runs.map((run) => run.promise), ...compactions.map(([, lock]) => lock.promise)];
     await Promise.race([Promise.allSettled(pending), new Promise((resolve) => setTimeout(resolve, this.abortGraceMs + 1000).unref())]);
+  }
+}
+
+/** Native tool IDs may start from the same sequence again with a fresh provider process. */
+function namespaceResumedToolEvent(event: AdapterEvent): AdapterEvent {
+  const id = (value: string) => `resumed:${value}`;
+  switch (event.type) {
+    case 'tool.activity': return { ...event, activity: { ...event.activity, id: id(event.activity.id), parentId: event.activity.parentId ? id(event.activity.parentId) : event.activity.parentId } };
+    case 'tool.output': return { ...event, id: id(event.id) };
+    case 'subagent.text': return { ...event, parentId: id(event.parentId) };
+    default: return event;
   }
 }
 

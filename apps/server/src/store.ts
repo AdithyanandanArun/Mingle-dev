@@ -207,20 +207,20 @@ export class Store {
   getDelegatedSubagent(id:string):DelegatedSubagent|undefined { const row=this.get('SELECT * FROM delegated_subagents WHERE id=?',id);return row?mapDelegated(row):undefined; }
   listDelegatedSubagents(parentSessionId?:string):DelegatedSubagent[] { return (parentSessionId?this.all('SELECT * FROM delegated_subagents WHERE parent_session_id=? ORDER BY started_at,id',parentSessionId):this.all('SELECT * FROM delegated_subagents ORDER BY started_at,id')).map(mapDelegated); }
   lastAssistantMessage(sessionId:string):Message|undefined { const row=this.get("SELECT * FROM messages WHERE session_id=? AND role='assistant' ORDER BY seq DESC LIMIT 1",sessionId);return row?mapMessage(row):undefined; }
-  setContextUsage(sessionId: string, usage: Session['contextUsage']): Session {
+  setContextUsage(sessionId: string, usage: Session['contextUsage']): boolean {
     const session = this.getSession(sessionId, true);
     if (!session) throw new Error('Session not found');
     if (!usage || !Number.isSafeInteger(usage.usedTokens) || usage.usedTokens < 0 ||
       (usage.contextWindow !== null && (!Number.isSafeInteger(usage.contextWindow) || usage.contextWindow <= 0)) ||
       typeof usage.estimated !== 'boolean' || typeof usage.source !== 'string' || !usage.source.trim() || usage.source.length > 100 || !Number.isFinite(Date.parse(usage.updatedAt)) ||
-      usage.provider !== session.provider || usage.model !== session.model || usage.providerSessionId !== session.providerSessionId) return session;
+      usage.provider !== session.provider || usage.model !== session.model || usage.providerSessionId !== session.providerSessionId) return false;
     this.run(`INSERT INTO session_context_usage(session_id,provider,model,provider_session_id,used_tokens,context_window,estimated,source,updated_at)
       VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(session_id) DO UPDATE SET provider=excluded.provider,model=excluded.model,
       provider_session_id=excluded.provider_session_id,used_tokens=excluded.used_tokens,context_window=excluded.context_window,
       estimated=excluded.estimated,source=excluded.source,updated_at=excluded.updated_at`, sessionId, usage.provider, usage.model,
       usage.providerSessionId, usage.usedTokens, usage.contextWindow, Number(usage.estimated), usage.source, usage.updatedAt);
     this.touch(sessionId);
-    return this.getSession(sessionId, true)!;
+    return true;
   }
   setAutoCompactionPercent(sessionId: string, percent: number | null): Session {
     this.run('UPDATE sessions SET auto_compaction_percent = ? WHERE id = ?', percent, sessionId);
