@@ -37,15 +37,15 @@ function sizeWithin(width: number, availableWidth: number, availableHeight: numb
 
 function initialGeometry(protectedArea?: DOMRect): Geometry {
   const { gutterX, gutterY, maxWidth, maxHeight } = viewportBounds();
-  const left = gutterX;
+  const right = window.innerWidth - gutterX;
   let bottom = window.innerHeight - gutterY;
   let size = sizeWithin(PIP_DEFAULT_WIDTH, maxWidth, maxHeight);
-  if (protectedArea?.width && protectedArea.height && protectedArea.right > left && protectedArea.left < left + size.width
+  if (protectedArea?.width && protectedArea.height && protectedArea.right > right - size.width && protectedArea.left < right
     && protectedArea.bottom > bottom - size.height && protectedArea.top < bottom) {
     bottom = Math.max(gutterY + 1, protectedArea.top - PIP_GUTTER);
     size = sizeWithin(PIP_DEFAULT_WIDTH, maxWidth, bottom - gutterY);
   }
-  return { left, top: bottom - size.height, ...size };
+  return { left: right - size.width, top: bottom - size.height, ...size };
 }
 
 function clampGeometry(value: Geometry): Geometry {
@@ -119,6 +119,9 @@ export function BrowserHost({
 
   useEffect(() => () => interactionCleanup.current?.(), []);
   useEffect(() => () => interactionCleanup.current?.(), [floating, expanded]);
+  useLayoutEffect(() => {
+    if (floating) geometryCustomized.current = false;
+  }, [floating]);
   useLayoutEffect(() => {
     if (!floating || expanded) return;
     const workspace = inline.current?.closest('.workspace');
