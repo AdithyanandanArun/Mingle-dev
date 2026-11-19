@@ -11,7 +11,8 @@ type PointerInteraction = { kind: 'move' } | { kind: 'resize'; corner: ResizeCor
 
 const PIP_GUTTER = 12;
 const PIP_MIN_WIDTH = 320;
-const PIP_MIN_HEIGHT = 240;
+const PIP_ASPECT_RATIO = 8 / 5;
+const PIP_DEFAULT_WIDTH = 480;
 const RESIZE_CORNERS: { corner: ResizeCorner; label: string }[] = [
   { corner: 'nw', label: 'top-left' },
   { corner: 'ne', label: 'top-right' },
@@ -24,44 +25,53 @@ function viewportBounds() {
   const gutterY = Math.min(PIP_GUTTER, Math.max(0, (window.innerHeight - 1) / 2));
   const maxWidth = Math.max(1, window.innerWidth - gutterX * 2);
   const maxHeight = Math.max(1, window.innerHeight - gutterY * 2);
-  return {
-    gutterX, gutterY, maxWidth, maxHeight,
-    minWidth: Math.min(PIP_MIN_WIDTH, maxWidth), minHeight: Math.min(PIP_MIN_HEIGHT, maxHeight),
-  };
+  return { gutterX, gutterY, maxWidth, maxHeight };
+}
+
+function sizeWithin(width: number, availableWidth: number, availableHeight: number) {
+  const maxWidth = Math.min(availableWidth, availableHeight * PIP_ASPECT_RATIO);
+  const minWidth = Math.min(PIP_MIN_WIDTH, maxWidth);
+  const fittedWidth = Math.min(maxWidth, Math.max(minWidth, width));
+  return { width: fittedWidth, height: fittedWidth / PIP_ASPECT_RATIO };
 }
 
 function initialGeometry(): Geometry {
   const { gutterX, gutterY, maxWidth, maxHeight } = viewportBounds();
-  const width = Math.min(480, maxWidth), height = Math.min(300, maxHeight);
+  const size = sizeWithin(PIP_DEFAULT_WIDTH, maxWidth, maxHeight);
   return {
-    left: Math.max(gutterX, window.innerWidth - width - gutterX),
-    top: Math.max(gutterY, window.innerHeight - height - gutterY), width, height,
+    left: window.innerWidth - size.width - gutterX,
+    top: window.innerHeight - size.height - gutterY,
+    ...size,
   };
 }
 
 function clampGeometry(value: Geometry): Geometry {
-  const { gutterX, gutterY, maxWidth, maxHeight, minWidth, minHeight } = viewportBounds();
-  const width = Math.min(maxWidth, Math.max(minWidth, value.width));
-  const height = Math.min(maxHeight, Math.max(minHeight, value.height));
+  const { gutterX, gutterY, maxWidth, maxHeight } = viewportBounds();
+  const size = sizeWithin(value.width, maxWidth, maxHeight);
   return {
-    left: Math.max(gutterX, Math.min(window.innerWidth - gutterX - width, value.left)),
-    top: Math.max(gutterY, Math.min(window.innerHeight - gutterY - height, value.top)), width, height,
+    left: Math.max(gutterX, Math.min(window.innerWidth - gutterX - size.width, value.left)),
+    top: Math.max(gutterY, Math.min(window.innerHeight - gutterY - size.height, value.top)),
+    ...size,
   };
 }
 
 function resizeFromCorner(origin: Geometry, corner: ResizeCorner, dx: number, dy: number): Geometry {
   const { gutterX, gutterY } = viewportBounds();
-  const west = corner.endsWith('w'), north = corner.startsWith('n');
-  const right = origin.left + origin.width, bottom = origin.top + origin.height;
-  const maxWidth = Math.max(1, west ? right - gutterX : window.innerWidth - gutterX - origin.left);
-  const maxHeight = Math.max(1, north ? bottom - gutterY : window.innerHeight - gutterY - origin.top);
-  const minWidth = Math.min(PIP_MIN_WIDTH, maxWidth), minHeight = Math.min(PIP_MIN_HEIGHT, maxHeight);
-  const width = Math.max(minWidth, Math.min(maxWidth, origin.width + (west ? -dx : dx)));
-  const height = Math.max(minHeight, Math.min(maxHeight, origin.height + (north ? -dy : dy)));
+  const west = corner.endsWith('w');
+  const north = corner.startsWith('n');
+  const right = origin.left + origin.width;
+  const bottom = origin.top + origin.height;
+  const availableWidth = west ? right - gutterX : window.innerWidth - gutterX - origin.left;
+  const availableHeight = north ? bottom - gutterY : window.innerHeight - gutterY - origin.top;
+  const widthDelta = west ? -dx : dx;
+  const heightDelta = (north ? -dy : dy) * PIP_ASPECT_RATIO;
+  // Follow whichever axis the user moved farther, in equivalent width units.
+  const delta = Math.abs(widthDelta) >= Math.abs(heightDelta) ? widthDelta : heightDelta;
+  const size = sizeWithin(origin.width + delta, availableWidth, availableHeight);
   return {
-    left: west ? right - width : origin.left,
-    top: north ? bottom - height : origin.top,
-    width, height,
+    left: west ? right - size.width : origin.left,
+    top: north ? bottom - size.height : origin.top,
+    ...size,
   };
 }
 
@@ -97,7 +107,7 @@ export function BrowserHost({
     const leavingFullView = host.parentNode === overlaySlot && !expanded;
     target.appendChild(host);
     const floatingOpener = leavingFullView && floating
-      ? floatingPanel.current?.querySelector<HTMLElement>('[aria-label="Open full browser"]')
+      ? floatingPanel.current?.querySelector<HTMLElement>('[data-browser-focus-exit]')
       : null;
     const next = focused ?? floatingOpener ?? (!expanded ? returnFocus.current : null);
     if (next?.isConnected) next.focus({ preventScroll: true });

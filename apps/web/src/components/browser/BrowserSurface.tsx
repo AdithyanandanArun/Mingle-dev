@@ -128,7 +128,7 @@ export function BrowserSurface({ stream, tab, canvasRef, canInput }: { stream: B
       e.stopPropagation();
       const floating = e.currentTarget.closest('.browser-pip');
       const chrome = e.currentTarget.closest('.browser');
-      const target = floating?.querySelector<HTMLElement>('.browser-pip__handle')
+      const target = floating?.querySelector<HTMLElement>('[data-browser-focus-exit]')
         ?? chrome?.querySelector<HTMLElement>('[data-browser-focus-exit], .browser-bar__url');
       target?.focus({ preventScroll: true });
       return;

@@ -26,9 +26,9 @@
 .browser-overlay .browser-viewport { min-height: 0; }
 @media (max-width: 700px) { .browser-overlay { padding: 0; } .browser-overlay__panel { border-radius: 0; border-width: 0; } }
 
-.browser-pip { position: fixed; z-index: 85; display: flex; box-sizing: border-box; min-width: min(320px, calc(100vw - 24px)); min-height: min(240px, calc(100vh - 24px)); max-width: calc(100vw - 24px); max-height: calc(100vh - 24px); flex-direction: column; overflow: hidden; border: 1px solid var(--line-strong); border-radius: 10px; background: var(--bg-panel); box-shadow: var(--shadow-pop); transition: none; }
-.browser-pip__handle { position: absolute; z-index: 3; top: 0; left: 0; width: 38px; height: 38px; touch-action: none; user-select: none; -webkit-user-select: none; cursor: move; }
-.browser-pip__handle::after { content: ''; position: absolute; inset: 12px; border-radius: 3px; background: radial-gradient(circle, var(--fg-1) 1px, transparent 1.5px) 0 0 / 5px 5px, var(--bg-panel); opacity: 0; transition: opacity 140ms ease; }
+.browser-pip { position: fixed; z-index: 85; display: flex; box-sizing: border-box; flex-direction: column; overflow: hidden; border: 1px solid var(--line-strong); border-radius: 10px; background: var(--bg-panel); box-shadow: var(--shadow-pop); transition: none; }
+.browser-pip__handle { position: absolute; z-index: 3; top: 0; right: 24px; width: 38px; height: 32px; touch-action: none; user-select: none; -webkit-user-select: none; cursor: move; }
+.browser-pip__handle::after { content: ''; position: absolute; inset: 8px 12px; border-radius: 3px; background: radial-gradient(circle, var(--fg-1) 1px, transparent 1.5px) 0 0 / 5px 5px, var(--bg-panel); opacity: 0; transition: opacity 140ms ease; }
 .browser-pip:hover .browser-pip__handle::after, .browser-pip__handle:focus-visible::after { opacity: 1; }
 @media (prefers-reduced-motion: reduce) { .browser-pip__handle::after { transition: none; } }
 .browser-pip__handle:focus-visible { outline: 2px solid var(--blue-line); outline-offset: -2px; }
@@ -59,7 +59,6 @@
 .browser-popout-shell { width: 100vw; height: 100vh; min-width: 0; min-height: 0; display: flex; overflow: hidden; background: var(--bg-panel); }
 .browser-popout-shell > .browser { flex: 1; min-width: 0; min-height: 0; }
 @media (max-width: 700px) {
-  .browser-pip { min-width: min(300px, calc(100vw - 24px)); }
   .browser-status { flex-wrap: wrap; }
   .browser-profile { flex: 1; }
   .browser-profile__select { width: 100%; }

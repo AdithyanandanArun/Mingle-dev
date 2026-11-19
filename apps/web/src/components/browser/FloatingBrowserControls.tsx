@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import { AppWindow, Maximize2, Menu, Minus, PanelRight, Unplug, type LucideIcon } from 'lucide-react';
 
 function Control({ icon: Icon, label, onClick, disabled }: {
@@ -18,6 +18,7 @@ export function FloatingBrowserControls({ onPopout, onDock, onDisconnect, discon
   onPopout?: () => void; onDock: () => void; onDisconnect?: () => void; disconnectDisabled?: boolean; onExpand?: () => void; onMinimize?: () => void;
 }) {
   const [open, setOpen] = useState(false);
+  const actionsId = useId();
   const container = useRef<HTMLDivElement>(null);
   const toggle = useRef<HTMLButtonElement>(null);
 
@@ -26,35 +27,31 @@ export function FloatingBrowserControls({ onPopout, onDock, onDisconnect, discon
     const onPointerDown = (event: PointerEvent) => {
       if (!container.current?.contains(event.target as Node)) setOpen(false);
     };
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        setOpen(false);
-        toggle.current?.focus({ preventScroll: true });
-      }
-    };
     document.addEventListener('pointerdown', onPointerDown);
-    document.addEventListener('keydown', onKeyDown);
-    return () => {
-      document.removeEventListener('pointerdown', onPointerDown);
-      document.removeEventListener('keydown', onKeyDown);
-    };
+    return () => document.removeEventListener('pointerdown', onPointerDown);
   }, [open]);
 
   return (
-    <div className="browser-float-controls" ref={container}>
+    <div className="browser-float-controls" ref={container} onKeyDown={(event) => {
+      if (!open || event.key !== 'Escape') return;
+      event.preventDefault();
+      event.stopPropagation();
+      setOpen(false);
+      toggle.current?.focus({ preventScroll: true });
+    }}>
       <button
         ref={toggle}
         className="browser-float-controls__toggle"
         type="button"
         aria-label="Floating browser controls"
         aria-expanded={open}
-        aria-controls="floating-browser-actions"
+        aria-controls={actionsId}
         data-browser-focus-exit
         onClick={() => setOpen((value) => !value)}
       >
         <Menu size={16} aria-hidden="true" />
       </button>
-      <nav id="floating-browser-actions" className="browser-float-controls__bubble" aria-label="Floating browser actions" data-open={open} inert={!open}>
+      <nav id={actionsId} className="browser-float-controls__bubble" aria-label="Floating browser actions" data-open={open} inert={!open}>
         {onPopout ? <Control icon={AppWindow} label="Open desktop window" onClick={onPopout} /> : null}
         <Control icon={PanelRight} label="Dock browser" onClick={onDock} />
         {onExpand ? <Control icon={Maximize2} label="Open full browser" onClick={onExpand} /> : null}

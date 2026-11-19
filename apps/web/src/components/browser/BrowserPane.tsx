@@ -60,7 +60,7 @@ export function BrowserPane({ session, active, popout = false }: { session: Sess
   useLayoutEffect(() => {
     if (!floating || !restoreFocus.current) return;
     restoreFocus.current = false;
-    document.querySelector<HTMLElement>('.browser-pip__handle')?.focus({ preventScroll: true });
+    document.querySelector<HTMLElement>('.browser-pip [data-browser-focus-exit]')?.focus({ preventScroll: true });
   }, [floating]);
   const [detached, setDetached] = useState(false);
   const docked = useRef(false);
