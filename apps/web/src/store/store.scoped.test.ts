@@ -109,6 +109,16 @@ describe('scoped session refresh', () => {
     expect(opened).toHaveBeenCalledTimes(1);
   });
 
+  it('keeps a group member browser request ready for its viewer without opening the sidebar', async () => {
+    const { useMingle: store, emit } = await startStore(workspace());
+    const { useBrowserStore } = await import('./browser');
+    store.setState({ view: 'workspace', activeProjectId: 'p', sessionByProject: { p: 'anchor' }, contextOpen: false, contextTab: 'files' });
+    emit({ type: 'browser.opened', sessionId: 'member', tabId: 'tab_123456789abc' });
+    expect(useBrowserStore.getState().viewerSessions.anchor).toBe('member');
+    expect(useBrowserStore.getState().openRequests.member).toBe(1);
+    expect(store.getState()).toMatchObject({ contextOpen: false, contextTab: 'files', sessionByProject: { p: 'anchor' } });
+  });
+
   it('refreshes a confined event through that session\'s snapshot only, keeping every other reference', async () => {
     const boot = workspace();
     const { useMingle: store, scoped, settle } = await startStore(boot);
