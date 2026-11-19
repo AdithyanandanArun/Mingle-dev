@@ -123,14 +123,19 @@ export function BrowserSurface({ stream, tab, canvasRef, canInput }: { stream: B
   };
 
   const onKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
-    if (!canInput) return;
-    // The page owns the keyboard while it has focus; keep Mingle's own shortcuts (command menu, terminal) out of it.
-    e.stopPropagation();
     if (isFocusExit(e)) {
       e.preventDefault();
-      e.currentTarget.closest('.browser')?.querySelector<HTMLElement>('[data-browser-focus-exit]')?.focus();
+      e.stopPropagation();
+      const floating = e.currentTarget.closest('.browser-pip');
+      const chrome = e.currentTarget.closest('.browser');
+      const target = floating?.querySelector<HTMLElement>('.browser-pip__handle')
+        ?? chrome?.querySelector<HTMLElement>('[data-browser-focus-exit], .browser-bar__url');
+      target?.focus({ preventScroll: true });
       return;
     }
+    if (!canInput) return;
+    // Keep application shortcuts out of the page while it owns the keyboard.
+    e.stopPropagation();
     const action = keyToAction(e);
     if (!action) return;
     e.preventDefault();
