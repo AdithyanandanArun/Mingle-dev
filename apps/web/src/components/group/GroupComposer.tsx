@@ -45,7 +45,7 @@ const MAX_RECIPIENTS = 8;
 interface Suggestion { key: string; token: string; description: string; group: string; identityKey?: string; provider?: Provider; browseFiles?: boolean; action?: { kind: 'command' | 'skill'; id: string; name: string } }
 
 /** The group conversation's composer: it resolves recipients itself and sends one message to the group endpoint. */
-export function GroupComposer({ snapshot, anchor, onOpenMembers, footer }: { snapshot: GroupSnapshot; anchor: Session; onOpenMembers: () => void; footer?: ReactNode }) {
+export function GroupComposer({ snapshot, anchor, onOpenMembers, pendingInput, footer }: { snapshot: GroupSnapshot; anchor: Session; onOpenMembers: () => void; pendingInput?: ReactNode; footer?: ReactNode }) {
   const draft = useMingle((s) => s.drafts[anchor.id] ?? '');
   const contextRefs = useMingle((s) => s.contextDrafts[anchor.id] ?? EMPTY_CONTEXT_REFS);
   const connection = useMingle((s) => s.connection);
@@ -438,6 +438,8 @@ export function GroupComposer({ snapshot, anchor, onOpenMembers, footer }: { sna
 
   return (
     <div className="composer-wrap">
+      <div className="composer-surface">
+      {pendingInput}
       <div className={cx('composer composer--group', blocker && 'is-blocked')}>
         <div className="recips" role="group" aria-label="Recipients">
           <span className="recips__label">To</span>
@@ -555,6 +557,7 @@ export function GroupComposer({ snapshot, anchor, onOpenMembers, footer }: { sna
           <button type="button" className="link-btn" disabled={!picked.length} onClick={() => setPicked([])}>Clear selection</button>
         </div>
       </Popover>
+      </div>
       {footer}
       {note || snapshot.group.paused ? (
         <p className={cx('composer__note', noteIsError && 'is-error')} role={noteIsError ? 'alert' : 'status'}>

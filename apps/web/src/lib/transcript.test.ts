@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { Message, SessionRun, SessionWorkflow, Task, ToolCall, UserQuestion } from '@mingle/contracts';
+import type { Message, SessionRun, SessionWorkflow, Task, ToolCall } from '@mingle/contracts';
 import type { DisplayMessage } from './conversation';
 import {
   buildTranscriptLayout, createTranscriptDeriver, deepEqualData, deriveDisplayMessages, overlayStream, pickSessionStreamIds, reuseById,
@@ -125,21 +125,14 @@ describe('transcript layout', () => {
     }
   });
 
-  it('interleaves questions, resumed work, and reviews even when an old request is outside the message window', () => {
-    const questions: UserQuestion[] = [{ id: 'q1', sessionId: 's1', runId: 'r1', provider: 'claude', tool: 'Example', questions: [],
-      createdAt: at(3), resolvedAt: null, status: 'pending' }];
+  it('orders resumed work and reviews even when an old request is outside the message window', () => {
     const messages = [message('a2', 'assistant', { runId: 'r1' }), message('a4', 'assistant', { runId: 'r1' }), message('u5', 'user')];
     const runs = [run('r1', 'u1', { finishedAt: at(5) }), run('r2', 'u5', { startedAt: at(5), status: 'running' })];
     const derive = createTranscriptDeriver();
-    const input: TranscriptInput = { sessionId: 's1', provider: 'claude', model: 'm', running: true, messages, runs, questions, toolCalls: [], streamIds: [] };
-    const pending = derive(input);
-    expect(pending.layout.rows.map(row => row.key)).toEqual(['activity:r1', 'a2', 'question:q1', 'a4', 'review:r1', 'u5']);
-    const answered = derive({ ...input, questions: [{ ...questions[0]!, status: 'answered', resolvedAt: at(6) }] });
-    expect(answered.layout.rows.map(row => row.key)).toEqual(pending.layout.rows.map(row => row.key));
-    expect(answered.layout.rows[0]).toBe(pending.layout.rows[0]);
-    expect(answered.layout.rows[2]).not.toBe(pending.layout.rows[2]);
+    const input: TranscriptInput = { sessionId: 's1', provider: 'claude', model: 'm', running: true, messages, runs, toolCalls: [], streamIds: [] };
+    expect(derive(input).layout.rows.map(row => row.key)).toEqual(['activity:r1', 'a2', 'a4', 'review:r1', 'u5']);
     const paged = derive({ ...input, messages: [message('u1', 'user'), ...messages], streamIds: ['m-live'] });
-    expect(paged.layout.rows.map(row => row.key)).toEqual(['u1', 'a2', 'question:q1', 'a4', 'review:r1', 'u5', 'm-live']);
+    expect(paged.layout.rows.map(row => row.key)).toEqual(['u1', 'a2', 'a4', 'review:r1', 'u5', 'm-live']);
   });
 
   it('assigns tool calls and subagents to their run block', () => {

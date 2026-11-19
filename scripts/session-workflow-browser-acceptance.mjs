@@ -71,6 +71,12 @@ async function handle(route, schemas) {
   if (path === '/api/bootstrap') return json({ projects: world.projects, sessions: world.sessions, messages: world.messages, queuedMessages: world.queuedMessages, tasks: [], events: [], approvals: world.approvals, plans: [], questions: world.questions, providers, settings: {}, version: 'Example fixture', runs: world.runs, toolCalls: [], workflows: world.workflows, delegatedSubagents: world.delegated });
   if (path.match(/^\/api\/projects\/[^/]+\/memory\/context-preview$/)) return json({ injection: { query: url.searchParams.get('query') ?? '', entries: [{ id: '00000000-0000-4000-8000-000000000008', revision: 3, title: 'Example memory rule', kind: 'fact', lifecycle: 'active', pinned: false, reason: 'relevant' }], chars: 64, truncated: false }, text: 'Example preview only' });
   if (path.match(/^\/api\/sessions\/[^/]+\/memory-injections$/)) return json({ injections: [{ runId: 'example-run-memory', sessionId: 's-a', at: iso(Date.now() - 60_000), query: 'Example', entries: [{ id: '00000000-0000-4000-8000-000000000008', revision: 2, title: 'Earlier memory rule', kind: 'fact', lifecycle: 'active', pinned: false, reason: 'relevant' }], chars: 48, truncated: false }] });
+  if ((match = path.match(/^\/api\/questions\/([^/]+)\/answer$/)) && method === 'POST') {
+    const question = world.questions.find(item => item.id === match[1]);
+    if (!question) return fail(404, 'Unknown Example question.');
+    Object.assign(question, { status: 'answered', answers: body, resolvedAt: iso(Date.now()) });
+    return json(question);
+  }
   if (path === '/api/workspace/selection') return json({ projectId: body?.projectId ?? null });
   if ((match = path.match(/^\/api\/sessions\/([^/]+)\/catalog$/))) return json({ commands: [], skills: [], warnings: [] });
   if ((match = path.match(/^\/api\/sessions\/([^/]+)\/recovery$/))) return json({ checkpoint: null, failure: world.failure });
@@ -860,8 +866,18 @@ try {
       assert.match(await note.innerText(), /separate from your Mingle account/);
       world.questions = [{ id: 'example-pending-question', sessionId: 's-a', runId: 'example-failed-run', provider: 'claude', tool: 'AskUserQuestion', questions: [{ id: 'example-choice', header: 'Next step', question: 'Should Mingle continue?', options: [{ label: 'Yes' }, { label: 'No' }], multiSelect: false, allowOther: false, secret: false }], status: 'pending', createdAt: stamp, resolvedAt: null }];
       await page.evaluate(() => window.refreshExampleBootstrap());
+      const dock = page.locator('.composer-surface .composer-question-dock');
+      await dock.getByRole('radio', { name: 'Yes' }).waitFor();
+      assert.equal(await page.locator('[data-question-id]').count(), 1);
+      await dock.locator('summary').click();
+      assert.equal(await dock.getByRole('radio', { name: 'Yes' }).count(), 0);
       await note.getByRole('button', { name: 'Go to the question' }).click();
       assert.equal(await page.evaluate(() => document.activeElement?.closest('[data-question-id]')?.getAttribute('data-question-id')), 'example-pending-question');
+      await dock.getByRole('radio', { name: 'Yes' }).check();
+      await dock.getByRole('button', { name: 'Submit answers' }).click();
+      await dock.waitFor({ state: 'detached' });
+      assert.deepEqual(posts('/questions/example-pending-question/answer').map(item => item.body), [{ 'example-choice': ['Yes'] }]);
+      assert.equal(await page.locator('[data-question-id]').count(), 0);
       await note.getByRole('button', { name: 'Open Providers settings' }).click();
       await page.waitForFunction(() => window.getExampleSettingsState?.().view === 'settings' && window.getExampleSettingsState?.().section === 'providers');
       await shot('15-auth-provider-settings');
@@ -897,10 +913,10 @@ try {
     });
   });
 
-  await test('boundary: only Example endpoints and mocked local sockets were used; no external hosts or run-control endpoints', () => {
+  await test('boundary: only Example endpoints and mocked local sockets were used', () => {
     assert.ok(aggregate.sockets.every((url) => new URL(url).hostname === '127.0.0.1' && new URL(url).pathname === '/ws'));
     assert.deepEqual(aggregate.unexposed.filter((path) => !unexposedAllowed.test(path)), []);
-    assert.deepEqual(aggregate.requests.filter((entry) => /\/(interrupt|approvals|questions|compact|runs|retry)\b/.test(entry) && !/GET /.test(entry)), []);
+    assert.deepEqual(aggregate.requests.filter((entry) => /\/(interrupt|approvals|questions|compact|runs|retry)\b/.test(entry) && !/GET /.test(entry)), ['POST /api/questions/example-pending-question/answer']);
   });
 } finally { await browser?.close(); await server?.close(); }
 

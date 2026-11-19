@@ -43,7 +43,7 @@ try {
   const chronologicalCards = await page.locator('.chat__inner [data-message-id], .chat__inner [data-question-id], .chat__inner [data-run-review-id]').evaluateAll(
     nodes => nodes.map(node => node.dataset.messageId ?? node.dataset.questionId ?? node.dataset.runReviewId),
   );
-  assert.deepEqual(chronologicalCards, ['example-message-1', 'example-question', 'example-message-2', 'example-run', 'example-message-3']);
+  assert.deepEqual(chronologicalCards, ['example-message-1', 'example-message-2', 'example-run', 'example-message-3']);
   await page.getByRole('button', { name: 'Edit queued message' }).click();
   await page.getByRole('textbox', { name: 'Edit queued message' }).fill('Example edited content');
   await page.getByRole('button', { name: 'Save' }).dblclick();

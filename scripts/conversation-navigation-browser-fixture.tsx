@@ -1,5 +1,4 @@
 import React from 'react';
-import type { UserQuestion } from '@mingle/contracts';
 import { createRoot } from 'react-dom/client';
 import { ConversationNavigation } from '../apps/web/src/components/ConversationNavigation';
 import { QueuedMessages } from '../apps/web/src/components/composer/QueuedMessages';
@@ -23,9 +22,6 @@ const examples = [
   { id: 'example-message-3', sessionId: 'example-session', role: 'assistant' as const, content: 'Example newest response token=secret-value-must-not-persist', createdAt: later(4) },
 ];
 const run = { id: 'example-run', sessionId: 'example-session', userMessageId: examples[0]!.id, provider: 'claude' as const, model: 'example-model', status: 'completed' as const, startedAt: at, finishedAt: later(3), durationMs: 3000, toolCount: 1, toolCounts: { command: 1 }, changes: { status: 'available' as const, capturedAt: at, fileCount: 1, files: [], additions: 1, deletions: 0, truncated: false, notices: [] } };
-const questions: UserQuestion[] = [{ id: 'example-question', sessionId: 'example-session', runId: run.id, provider: 'claude', tool: 'Example',
-  questions: [{ id: 'choice', question: 'Proceed with the Example?', options: [{ label: 'Continue' }], multiSelect: false, allowOther: false, secret: false }],
-  status: 'answered', createdAt: later(1), resolvedAt: later(2), answers: { choice: ['Continue'] } }];
 let messages = [...examples]; let older = false;
 const queued = [{ id: 'example-queued', sessionId: 'example-session', content: 'Example queued text', intent: 'normal' as const, skills: ['skill-a'], attachmentIds: ['attachment-a'], contextRefs: [], createdAt: at }];
 const bootForQueue = (items: typeof queued) => ({ queuedMessages: items }) as never;
@@ -43,7 +39,7 @@ function App() {
     useMingle.setState({ boot: bootForQueue(next) });
   };
   const loadOlder = () => { if (!older) { older = true; messages = [{ ...examples[0]!, id: 'example-older-message', content: 'Example older history needle' }, ...messages]; update((x) => x + 1); } };
-  const transcript = derive({ sessionId: 'example-session', provider: 'claude', model: 'example-model', running: false, messages, runs: [run], toolCalls: calls, streamIds: [], questions, tasks: [], workflows: [] });
+  const transcript = derive({ sessionId: 'example-session', provider: 'claude', model: 'example-model', running: false, messages, runs: [run], toolCalls: calls, streamIds: [], tasks: [], workflows: [] });
   return <main style={{ height: '100dvh', display: 'flex', flexDirection: 'column', padding: 20, fontFamily: 'system-ui' }}><p>Example workspace fixture · no provider or server calls</p>
     <button type="button" onClick={() => setActive(!active)}>Toggle example run</button><QueuedMessages sessionId="example-session" items={queueItems} active={active} />
     <div className="chat__history"><ConversationNavigation projectId="example-project" sessionId="example-session" messages={messages} runs={[run]} calls={calls} hasOlder={!older} onLoadOlder={loadOlder} />

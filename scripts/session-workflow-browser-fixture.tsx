@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { SubagentRail } from '../apps/web/src/components/subagents/SubagentRail';
 import { Composer } from '../apps/web/src/components/Composer';
-import { ApprovalCard, UserQuestionCard } from '../apps/web/src/components/ConversationParts';
+import { ApprovalCard } from '../apps/web/src/components/ConversationParts';
 import { useMingle } from '../apps/web/src/store/store';
 import '../apps/web/src/styles/tokens.css';
 import '../apps/web/src/styles/base.css';
@@ -30,7 +30,6 @@ function Fixture() {
   const delegated = useMingle(state => state.boot?.delegatedSubagents);
   const runs = useMingle(state => state.boot?.runs ?? []);
   const approvals = useMingle(state => state.boot?.approvals ?? []);
-  const questions = useMingle(state => state.boot?.questions ?? []);
   const integrated = new URLSearchParams(location.search).has('progress');
   const [openedHelper, setOpenedHelper] = useState('');
   const contextTab = useMingle((state) => state.contextTab);
@@ -50,7 +49,6 @@ function Fixture() {
     <p>{openedHelper ? `Opened helper ${openedHelper}` : ''}</p>
     {runs.filter((run) => run.status !== 'running').map((run) => <section key={run.id} data-run-id={run.id} tabIndex={-1} aria-label="Example run review target">Example run review for {run.id}</section>)}
     <div style={{ flex: 1 }} />
-    {questions.filter((item) => item.sessionId === session?.id).map((item) => <UserQuestionCard key={item.id} question={item} />)}
     {approvals.filter((item) => item.sessionId === session?.id).map((item) => <ApprovalCard key={item.id} approval={item} provider={session?.provider} />)}
     {session && integrated ? <SubagentRail subagents={[]} delegated={delegated?.filter(item => item.parentSessionId === session.id)} provider={session.provider} onOpen={() => {}} onOpenDelegated={item => setOpenedHelper(item.name)} /> : null}
     {session ? <Composer key={session.id} session={session}

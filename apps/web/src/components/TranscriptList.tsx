@@ -3,7 +3,7 @@ import type { Provider, QuoteCitation } from '@mingle/contracts';
 import type { DisplayMessage } from '../lib/conversation';
 import { useMingle } from '../store/store';
 import { overlayStream, type RunBlock, type TranscriptLayout, type TranscriptRow } from '../lib/transcript';
-import { InternalDeliveryDisclosure, LegacyToolGroup, MessageRow, SessionPlanCard, UserQuestionCard } from './ConversationParts';
+import { InternalDeliveryDisclosure, LegacyToolGroup, MessageRow, SessionPlanCard } from './ConversationParts';
 import { appendContextReference } from './MessageContextControls';
 import { RunActivity } from './RunActivity';
 import { RunReview } from './RunReview';
@@ -37,7 +37,6 @@ const RunBlockView = memo(function RunBlockView({ block, onOpenSubagent }: { blo
 const TranscriptEntry = memo(function TranscriptEntry({ row, provider, onAskAboutThis, onOpenSubagent, onGrow }: {
   row: TranscriptRow; provider: Provider; onAskAboutThis: (quote: QuoteCitation) => void; onOpenSubagent: (id: string) => void; onGrow: () => void;
 }) {
-  if (row.kind === 'question') return <UserQuestionCard question={row.question} />;
   if (row.kind === 'plan') return <SessionPlanCard plan={row.plan} reviewReady={row.reviewReady} />;
   if (row.kind === 'review') return <MemoRunReview block={row.block} />;
   if (row.kind === 'activity') return <RunBlockView block={row.block} onOpenSubagent={onOpenSubagent} />;

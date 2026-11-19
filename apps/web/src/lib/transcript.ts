@@ -1,4 +1,4 @@
-import type { Message, Provider, SessionPlan, SessionRun, SessionWorkflow, Task, ToolCall, UserQuestion } from '@mingle/contracts';
+import type { Message, Provider, SessionPlan, SessionRun, SessionWorkflow, Task, ToolCall } from '@mingle/contracts';
 import type { DisplayMessage } from './conversation';
 import { deriveSubagents, type SubagentRun } from './subagents';
 import { deriveReviewHints, NO_HINTS, type RunReviewHints } from './runReview';
@@ -111,12 +111,11 @@ export type TranscriptRow =
   | { kind: 'message'; key: string; message: DisplayMessage; streamed: boolean; runs: readonly RunBlock[] }
   | { kind: 'activity'; key: string; block: RunBlock }
   | { kind: 'review'; key: string; block: RunBlock }
-  | { kind: 'question'; key: string; question: UserQuestion }
   | { kind: 'plan'; key: string; plan: SessionPlan; reviewReady: boolean };
 export interface TranscriptLayout { rows: readonly TranscriptRow[]; blocks: ReadonlyMap<string, RunBlock> }
 export interface LayoutInput {
   messages: readonly DisplayMessage[]; runs: readonly SessionRun[]; toolCalls: readonly ToolCall[]; subagents: readonly SubagentRun[]; streamIds: readonly string[];
-  hints?: ReadonlyMap<string, RunReviewHints>; questions?: readonly UserQuestion[]; plans?: readonly SessionPlan[];
+  hints?: ReadonlyMap<string, RunReviewHints>; plans?: readonly SessionPlan[];
 }
 
 function groupBy<T>(items: readonly T[], key: (item: T) => string): Map<string, T[]> {
@@ -141,7 +140,6 @@ function rowsEqual(a: TranscriptRow, b: TranscriptRow): boolean {
     return a.message === b.message && a.streamed === b.streamed && sameItems(a.runs, b.runs);
   }
   if ((a.kind === 'activity' || a.kind === 'review') && (b.kind === 'activity' || b.kind === 'review')) return a.block === b.block;
-  if (a.kind === 'question' && b.kind === 'question') return a.question === b.question;
   if (a.kind === 'plan' && b.kind === 'plan') return a.plan === b.plan && a.reviewReady === b.reviewReady;
   return false;
 }
@@ -221,12 +219,6 @@ export function buildTranscriptLayout(input: LayoutInput, previous?: TranscriptL
     const slot = finished === Infinity && anchor >= 0 ? anchor + 1 : Math.max(anchor + 1, slotFor(at));
     place({ kind: 'review', key: `review:${run.id}`, block }, at, slot);
   }
-  for (const question of input.questions ?? EMPTY) {
-    const at = timestamp(question.createdAt);
-    const run = runsById.get(question.runId);
-    const origin = run ? indexById.get(run.userMessageId) : undefined;
-    place({ kind: 'question', key: `question:${question.id}`, question }, at, Math.max((origin ?? -1) + 1, slotFor(at)));
-  }
   for (const plan of input.plans ?? EMPTY) {
     const run = runsById.get(plan.runId);
     const at = timestamp(run?.finishedAt ?? plan.createdAt);
@@ -269,7 +261,7 @@ export interface TranscriptInput {
   messages: readonly Message[] | undefined; runs: readonly SessionRun[] | undefined; toolCalls: readonly ToolCall[] | undefined;
   streamIds: readonly string[];
   /** Tasks and goal records the review card's per-run checklist and goal hints come from. */
-  tasks?: readonly Task[]; workflows?: readonly SessionWorkflow[]; questions?: readonly UserQuestion[]; plans?: readonly SessionPlan[];
+  tasks?: readonly Task[]; workflows?: readonly SessionWorkflow[]; plans?: readonly SessionPlan[];
 }
 export interface TranscriptModel {
   messages: readonly DisplayMessage[]; runs: readonly SessionRun[]; toolCalls: readonly ToolCall[]; subagents: readonly SubagentRun[]; layout: TranscriptLayout;
@@ -289,8 +281,7 @@ export function createTranscriptDeriver(): (input: TranscriptInput) => Transcrip
   let toolCalls: readonly ToolCall[] = EMPTY_TOOL_CALLS;
   let subagentKey: unknown[] = [];
   let subagents: readonly SubagentRun[] = EMPTY_SUBAGENTS;
-  let cardKey: unknown[] = [];
-  let questions: readonly UserQuestion[] = EMPTY;
+  let planKey: unknown[] = [];
   let plans: readonly SessionPlan[] = EMPTY;
   let hintKey: unknown[] = [];
   let hints: ReadonlyMap<string, RunReviewHints> | undefined;
@@ -330,18 +321,17 @@ export function createTranscriptDeriver(): (input: TranscriptInput) => Transcrip
       hintKey = nextHintKey;
       hints = deriveReviewHints(input.tasks, input.workflows, input.sessionId, hints);
     }
-    const nextCardKey = [input.questions, input.plans];
-    if (changed(cardKey, nextCardKey)) {
-      cardKey = nextCardKey;
-      questions = reuseById(questions, (input.questions ?? EMPTY).filter(question => question.sessionId === input.sessionId));
+    const nextPlanKey = [input.sessionId, input.plans];
+    if (changed(planKey, nextPlanKey)) {
+      planKey = nextPlanKey;
       const sessionPlans = (input.plans ?? EMPTY).filter(plan => plan.sessionId === input.sessionId);
       const completed = sessionPlans.filter(plan => plan.status === 'completed').at(-1);
       plans = reuseById(plans, sessionPlans.filter(plan => plan.status !== 'completed' || plan === completed));
     }
-    const nextLayoutKey = [messages, runs, toolCalls, subagents, input.streamIds, hints, questions, plans];
+    const nextLayoutKey = [messages, runs, toolCalls, subagents, input.streamIds, hints, plans];
     if (changed(layoutKey, nextLayoutKey) || !layout) {
       layoutKey = nextLayoutKey;
-      layout = buildTranscriptLayout({ messages, runs, toolCalls, subagents, streamIds: input.streamIds, hints, questions, plans }, layout);
+      layout = buildTranscriptLayout({ messages, runs, toolCalls, subagents, streamIds: input.streamIds, hints, plans }, layout);
     }
     if (model && model.messages === messages && model.runs === runs && model.toolCalls === toolCalls && model.subagents === subagents && model.layout === layout) return model;
     model = { messages, runs, toolCalls, subagents, layout };

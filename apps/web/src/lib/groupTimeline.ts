@@ -1,4 +1,4 @@
-import type { GroupDelivery, GroupMember, GroupMessage, GroupSnapshot, Message, Session, SessionPlan, SessionRun, ToolCall, UserQuestion } from '@mingle/contracts';
+import type { GroupDelivery, GroupMember, GroupMessage, GroupSnapshot, Message, Session, SessionPlan, SessionRun, ToolCall } from '@mingle/contracts';
 import type { StreamEntry } from '../store/store';
 import type { DisplayMessage } from './conversation';
 
@@ -8,9 +8,8 @@ export interface GroupItem { type: 'group'; key: string; at: number; message: Gr
 export interface FailureItem { type: 'failure'; key: string; at: number; delivery: GroupDelivery; member: Speaker | null }
 type ActivityItem = { type: 'activity'; key: string; at: number; run: SessionRun };
 type ChangesItem = { type: 'changes'; key: string; at: number; run: SessionRun };
-type QuestionItem = { type: 'question'; key: string; at: number; question: UserQuestion };
 type PlanItem = { type: 'plan'; key: string; at: number; plan: SessionPlan; reviewReady: boolean };
-export type TimelineItem = NativeItem | GroupItem | FailureItem | ActivityItem | ChangesItem | QuestionItem | PlanItem;
+export type TimelineItem = NativeItem | GroupItem | FailureItem | ActivityItem | ChangesItem | PlanItem;
 
 /** The server marks the human's delivery to a member with this kind; the group message already shows it once. */
 export const HIDDEN_NATIVE_KIND = 'group-delivery';
@@ -48,8 +47,8 @@ export function memberSessionIds(snapshot: GroupSnapshot): Set<string> {
   return new Set(snapshot.members.map((member) => member.sessionId));
 }
 
-export function buildTimeline({ snapshot, sessions, messages, streams, runs = [], questions = [], plans = [] }: {
-  runs?: readonly SessionRun[]; questions?: readonly UserQuestion[]; plans?: readonly SessionPlan[];
+export function buildTimeline({ snapshot, sessions, messages, streams, runs = [], plans = [] }: {
+  runs?: readonly SessionRun[]; plans?: readonly SessionPlan[];
   snapshot: GroupSnapshot; sessions: readonly Session[]; messages: readonly Message[]; streams: Record<string, StreamEntry>;
 }): TimelineItem[] {
   const { byMember, bySession } = speakers(snapshot);
@@ -133,10 +132,6 @@ export function buildTimeline({ snapshot, sessions, messages, streams, runs = []
       const last = latestNativeAt.get(run.id) ?? originAt;
       dated.push({ type: 'changes', key: `changes:${run.id}`, at: Math.max(originAt, last, run.finishedAt ? time(run.finishedAt) : last), run });
     }
-  }
-  for (const question of questions) {
-    const at = time(question.createdAt);
-    if (withinGroup(question.sessionId, at)) dated.push({ type: 'question', key: `question:${question.id}`, at, question });
   }
   for (const plan of plans) {
     if (!withinGroup(plan.sessionId, time(plan.createdAt))) continue;

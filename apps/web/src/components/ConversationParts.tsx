@@ -363,13 +363,13 @@ export function UserQuestionCard({ question, speaker }: { question: UserQuestion
     );
   });
   return (
-    <section className="question-card" data-question-id={question.id} tabIndex={-1} aria-label={`Provider question, ${question.status}`}>
+    <section className="question-card question-card--compact" data-question-id={question.id} tabIndex={-1} aria-label={`Provider question, ${question.status}`}>
       <header className="question-card__header">
         <CircleHelp size={15} aria-hidden="true" />
         <strong>{pending ? 'Provider needs your input' : question.status === 'answered' ? 'Provider question answered' : 'Provider question cancelled'}</strong>
         {speaker ? <AgentIdentity className="question-card__who" handle={speaker.handle} identityKey={speaker.memberId} /> : null}
       </header>
-      {fields}
+      <div className="question-card__scroll">{fields}</div>
       {pending ? <div className="question-card__actions"><Button variant="primary" size="sm" busy={busy} disabled={busy || question.questions.some((field) => { const value = values[field.id] ?? { selected: [], other: '', otherSelected: false }; return !value.selected.length && !(field.allowOther && value.otherSelected && value.other.trim()); })} onClick={() => void act('answer')}><Check size={13} /> Submit answers</Button><Button size="sm" disabled={busy} onClick={() => void act('cancel')}><X size={13} /> Cancel request</Button><span>Answers are sent directly to {question.provider}.</span></div> : question.reason ? <p className="question-card__saved">{question.reason}</p> : null}
       {error ? <p className="question-card__error" role="alert">{error}</p> : null}
     </section>

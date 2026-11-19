@@ -18,6 +18,7 @@ import { useTeamStructure } from '../lib/team-structure-context';
 import { isSafeUndispatchedTransientFailure, providerRecoveryCopy, providerRecoveryKind } from '../lib/providerFailureUi';
 import { reasoningEffortChoices } from '../lib/providers';
 import { WorkflowLimitsControl } from './session-workflow/SessionWorkflowPanel';
+import { PendingQuestions } from './composer/PendingQuestions';
 import { SessionProgress } from './session-workflow/SessionProgress';
 import { memoryApi } from './project-memory/memory-api';
 import { clearDraftIfMatches, loadDraft, saveDraft } from '../lib/conversationPersistence';
@@ -71,7 +72,8 @@ export function Composer({ session, progressState, helperCount = 0 }: { session:
   const sessionRuns = useMemo(() => bootRuns.filter((run) => run.sessionId === session.id), [bootRuns, session.id]);
   const pendingApproval = useMingle((s) => s.boot?.approvals.find((item) => item.sessionId === session.id && item.status === 'pending'));
   const allQuestions = useMingle((s) => s.boot?.questions);
-  const pendingQuestion = allQuestions?.find(item => item.sessionId === session.id && item.status === 'pending');
+  const pendingQuestions = useMemo(() => (allQuestions ?? []).filter(item => item.sessionId === session.id && item.status === 'pending'), [allQuestions, session.id]);
+  const pendingQuestion = pendingQuestions[0];
   const project = useMingle((s) => s.boot?.projects.find((p) => p.id === session.projectId));
   const teamStructure = useTeamStructure().snapshot;
   const allQueuedMessages = useMingle((s) => s.boot?.queuedMessages);
@@ -404,6 +406,8 @@ export function Composer({ session, progressState, helperCount = 0 }: { session:
     const selector = pendingQuestion ? `[data-question-id="${CSS.escape(pendingQuestion.id)}"]` : pendingApproval ? `[data-approval-id="${CSS.escape(pendingApproval.id)}"]` : null;
     if (!selector) return;
     const target = document.querySelector<HTMLElement>(selector);
+    const dock = target?.closest<HTMLDetailsElement>('details.composer-question-dock');
+    if (dock) dock.open = true;
     target?.scrollIntoView({ behavior: 'smooth', block: 'center' });
     const control = target?.querySelector<HTMLElement>('input:enabled, button:enabled, [tabindex="0"]');
     (control ?? target)?.focus({ preventScroll: true });
@@ -575,7 +579,7 @@ export function Composer({ session, progressState, helperCount = 0 }: { session:
         {currentFailedRun ? <button type="button" className="link-btn" onClick={focusRunReview}>Review this run</button> : null}
       </div> : null}
       <div className="composer-surface">
-      {pendingQuestion && !providerFailureCopy ? <div className="composer__note"><button type="button" className="link-btn" onClick={focusPendingBoundary}>Go to the question</button></div> : null}
+      <PendingQuestions questions={pendingQuestions} />
       <SessionProgress session={session} workflow={workflow} state={progressState} helperCount={helperCount} onStop={() => void stop()} />
       <div className={cx('composer', blocker && 'is-blocked')}>
         <label htmlFor={`composer-${session.id}`} className="sr-only">Message {session.name}</label>

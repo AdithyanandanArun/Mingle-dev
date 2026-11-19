@@ -9,11 +9,12 @@ import {
 } from '../../lib/groupTimeline';
 import { Markdown } from '../Markdown';
 import { Button, EmptyState } from '../ui';
-import { ApprovalCard, LegacyToolGroup, MessageRow, SessionPlanCard, SpeakerLabel, UserQuestionCard } from '../ConversationParts';
+import { ApprovalCard, LegacyToolGroup, MessageRow, SessionPlanCard, SpeakerLabel } from '../ConversationParts';
 import { RunActivity } from '../RunActivity';
 import { RunChanges } from '../RunChanges';
 import { GitBar } from '../git/GitBar';
 import { GroupComposer } from './GroupComposer';
+import { PendingQuestions } from '../composer/PendingQuestions';
 import { AgentIdentity } from './AgentIdentity';
 import { AgentPresenceRail } from './AgentPresenceRail';
 import { GroupResultSummary } from './GroupResultSummary';
@@ -175,10 +176,11 @@ export function GroupConversation({ snapshot }: { snapshot: GroupSnapshot }) {
     return [...rows.filter((plan) => plan.status !== 'completed'), ...latestCompleted.values()];
   }, [allPlans, sessionIds]);
   const runs = useMemo(() => groupRuns(snapshot, allRuns), [snapshot, allRuns]);
-  const items = useMemo(() => buildTimeline({ snapshot, sessions, messages, streams, runs, questions: allQuestions, plans }),
-    [snapshot, sessions, messages, streams, runs, allQuestions, plans]);
+  const items = useMemo(() => buildTimeline({ snapshot, sessions, messages, streams, runs, plans }),
+    [snapshot, sessions, messages, streams, runs, plans]);
   const calls = useMemo(() => toolCallsByRun(allCalls, sessionIds), [allCalls, sessionIds]);
   const activeSessionIds = useMemo(() => new Set(members.map((member) => member.sessionId)), [members]);
+  const pendingQuestions = useMemo(() => allQuestions.filter(question => question.status === 'pending' && activeSessionIds.has(question.sessionId)), [allQuestions, activeSessionIds]);
   const boardRefreshEvent = allEvents.filter((event) => event.projectId === project?.id
     && ((event.sessionId && activeSessionIds.has(event.sessionId)) || event.payload.groupId === snapshot.group.id)).at(-1)?.id ?? 0;
   const boardRefreshKey = `${snapshot.group.updatedAt}:${snapshot.deliveries.map((delivery) => `${delivery.id}:${delivery.updatedAt}`).join(',')}:${boardRefreshEvent}`;
@@ -205,7 +207,7 @@ export function GroupConversation({ snapshot }: { snapshot: GroupSnapshot }) {
   const [boardView, setBoardView] = useState(false);
   const contentSig = items.filter((item): item is NativeItem => item.type === 'native').map((item) => `${item.key}:${item.message.content.length}`).join('|');
   const activitySig = runs.map((run) => `${run.id}:${run.status}:${run.toolCount}:${run.changes?.status ?? 'unknown'}:${run.changes?.fileCount ?? ''}`).join('|');
-  const planningSig = `${plans.map((plan) => `${plan.id}:${plan.revision}:${plan.status}`).join(',')}|${items.flatMap(item => item.type === 'question' ? `${item.key}:${item.question.status}` : []).join(',')}`;
+  const planningSig = plans.map(plan => [plan.id, plan.revision, plan.status].join(':')).join(',');
   const sig = `${snapshot.group.id}|${items.length}|${contentSig}|${pending.length}|${activitySig}|${allCalls.length}|${snapshot.deliveries.map((d) => d.status).join('')}|${tasks.map((task) => `${task.id}:${task.status}`).join(',')}|${planningSig}`;
   useEffect(() => { stick.current = true; setAway(false); }, [snapshot.group.id]);
   useLayoutEffect(() => {
@@ -224,10 +226,6 @@ export function GroupConversation({ snapshot }: { snapshot: GroupSnapshot }) {
   const visible = items.some((item) => (item.type === 'group') || (item.type === 'native' && !item.hidden && (item.message.role === 'user' || item.message.role === 'assistant')));
   const rendered: ReactNode[] = [];
   items.forEach((item, index) => {
-    if (item.type === 'question') {
-      rendered.push(<UserQuestionCard key={item.key} question={item.question} speaker={bySession.get(item.question.sessionId) ?? null} />);
-      return;
-    }
     if (item.type === 'plan') {
       rendered.push(<SessionPlanCard key={item.key} plan={item.plan} reviewReady={item.reviewReady} speaker={bySession.get(item.plan.sessionId) ?? null} />);
       return;
@@ -335,7 +333,7 @@ export function GroupConversation({ snapshot }: { snapshot: GroupSnapshot }) {
       </div>
       <div className="group-composer-dock" data-floating-browser-clear>
         {statusBarState ? <div className="composer-wrap group-status-wrap"><StatusBar state={statusBarState} onStop={() => stopGroup(snapshot)} /></div> : null}
-        <GroupComposer key={snapshot.group.id} snapshot={snapshot} anchor={anchor} onOpenMembers={() => useMingle.getState().setGroupMembersOpen(snapshot.group.id)} footer={<GitBar project={project} session={anchor} />} />
+        <GroupComposer key={snapshot.group.id} snapshot={snapshot} anchor={anchor} pendingInput={<PendingQuestions questions={pendingQuestions} speakers={bySession} />} onOpenMembers={() => useMingle.getState().setGroupMembersOpen(snapshot.group.id)} footer={<GitBar project={project} session={anchor} />} />
       </div>
       </section>
       <AgentPresenceRail snapshot={snapshot} members={members} sessions={sessions} runs={allRuns} approvals={approvals ?? []} connection={connection} providers={providers} hidden={contextOpen || boardView}
