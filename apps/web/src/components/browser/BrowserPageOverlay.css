@@ -1,0 +1,16 @@
+.browser__inner--page-only {
+  position: relative;
+  overflow: hidden;
+}
+
+.browser-page-overlay {
+  position: absolute;
+  z-index: 5;
+  inset: 12px 12px auto auto;
+  padding: 4px;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  color: var(--fg-0);
+  background: var(--bg-panel);
+  box-shadow: var(--shadow-pop);
+}

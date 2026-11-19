@@ -12,6 +12,7 @@ import { BrowserConnect } from './BrowserConnect';
 import { BrowserSignInButton, BrowserSigningInBanner } from './BrowserSignIn';
 import { BrowserImportButton } from './BrowserImport';
 import { BrowserHost } from './BrowserHost';
+import './BrowserPageOverlay.css';
 import { BrowserSurface } from './BrowserSurface';
 import { canOpenBrowserPopout, canShowEmbedded, dockBrowserPopout, focusBrowserPopout, isBrowserPopoutOpen, onBrowserPopoutClosed, openBrowserPopout } from './desktopBridge';
 import { NativeBrowserView } from './NativeBrowserView';
@@ -331,9 +332,12 @@ export function BrowserPane({ session, active, popout = false }: { session: Sess
       onExpand={tab ? () => setExpanded(true) : undefined}
     >
       <div
-        className={cx('browser__inner', expanded && 'is-expanded')}
+        className={cx('browser__inner', expanded && 'is-expanded', pageOnly && 'browser__inner--page-only')}
         onKeyDown={(e) => { if (expanded && e.key === 'Escape' && !e.defaultPrevented) { e.preventDefault(); e.stopPropagation(); setExpanded(false); } }}
       >
+        {pageOnly && expanded ? <div className="browser-page-overlay">
+          <IconButton label="Exit full browser" onClick={() => setExpanded(false)} data-browser-focus-exit><Minimize2 size={16} /></IconButton>
+        </div> : null}
         {content}
       </div>
     </BrowserHost>
