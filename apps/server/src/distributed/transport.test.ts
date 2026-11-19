@@ -1371,7 +1371,9 @@ describe('TransportService authenticated mailbox', () => {
       });
       await second.sync();
       unsubscribe();
-      expect(versions).toEqual([3, 1, 2]);
+      // Older rows may share a receive timestamp and are then ordered by their generated IDs.
+      expect(versions[0]).toBe(3);
+      expect(versions.slice(1).sort()).toEqual([1, 2]);
       const db = (second as unknown as { db: DatabaseSync }).db;
       expect(db.prepare("SELECT count(*) AS superseded FROM mingle_transport_inbox WHERE error LIKE 'Superseded%'").get()).toEqual({ superseded: 0 });
     } finally {
