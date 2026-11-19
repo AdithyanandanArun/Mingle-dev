@@ -139,7 +139,13 @@ export function placeRuns(items: readonly TimelineItem[], runs: readonly Session
     if (!origin) { unplaced.push(run); continue; }
     push(activityAfter, origin.key, run);
     const own = natives.filter((item) => item.message.runId === run.id && item.message.role !== 'tool');
-    const target = [...own].reverse().find((item) => item.message.role === 'assistant') ?? own.at(-1) ?? origin;
+    // A change summary describes the completed run, so anchor it to the last
+    // transcript row at or before completion (rather than the last assistant
+    // row, which can precede later tool output or other members' messages).
+    const finishedAt = time(run.finishedAt);
+    const target = Number.isFinite(finishedAt)
+      ? [...natives].reverse().find((item) => item.at <= finishedAt && (item.sessionId === run.sessionId || item.at > origin.at)) ?? origin
+      : [...own].reverse().find((item) => item.message.role === 'assistant') ?? own.at(-1) ?? origin;
     push(changesAfter, target.key, run);
   }
   unplaced.sort((a, b) => a.startedAt.localeCompare(b.startedAt));

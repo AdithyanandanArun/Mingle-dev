@@ -177,10 +177,15 @@ export function GroupConversation({ snapshot }: { snapshot: GroupSnapshot }) {
   }, [allPlans, sessionIds]);
   const questions = useMemo(() => {
     const rows = allQuestions.filter((question) => sessionIds.has(question.sessionId));
-    return [...rows.filter((question) => question.status !== 'pending').slice(-2), ...rows.filter((question) => question.status === 'pending')];
+    return [...rows].sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt));
   }, [allQuestions, sessionIds]);
   const runs = useMemo(() => groupRuns(snapshot, allRuns), [snapshot, allRuns]);
   const placement = useMemo(() => placeRuns(items, runs), [items, runs]);
+  const reviewAt = (plan: SessionPlan): number => {
+    const run = allRuns.find((candidate) => candidate.id === plan.runId);
+    const at = Date.parse(run?.finishedAt ?? '');
+    return Number.isFinite(at) ? at : Date.parse(plan.updatedAt);
+  };
   const calls = useMemo(() => toolCallsByRun(allCalls, sessionIds), [allCalls, sessionIds]);
   const activeSessionIds = useMemo(() => new Set(members.map((member) => member.sessionId)), [members]);
   const boardRefreshEvent = allEvents.filter((event) => event.projectId === project?.id
@@ -227,7 +232,22 @@ export function GroupConversation({ snapshot }: { snapshot: GroupSnapshot }) {
 
   const visible = items.some((item) => (item.type === 'group') || (item.type === 'native' && !item.hidden && (item.message.role === 'user' || item.message.role === 'assistant')));
   const rendered: ReactNode[] = [];
+  const placedQuestions = new Set<string>();
+  const placedPlans = new Set<string>();
+  const renderPlanningAt = (at: number): ReactNode[] => {
+    const cards: ReactNode[] = [];
+    for (const question of questions) if (!placedQuestions.has(question.id) && Date.parse(question.createdAt) <= at) {
+      placedQuestions.add(question.id);
+      cards.push(<UserQuestionCard key={question.id} question={question} speaker={bySession.get(question.sessionId) ?? null} />);
+    }
+    for (const plan of plans) if (!placedPlans.has(plan.id) && reviewAt(plan) <= at) {
+      placedPlans.add(plan.id);
+      cards.push(<SessionPlanCard key={plan.id} plan={plan} reviewReady={allRuns.some((run) => run.id === plan.runId && run.status === 'completed')} speaker={bySession.get(plan.sessionId) ?? null} />);
+    }
+    return cards;
+  };
   items.forEach((item, index) => {
+    rendered.push(...renderPlanningAt(item.at));
     if (item.type === 'group') { rendered.push(<GroupMessageRow key={item.key} item={item} snapshot={snapshot} />); return; }
     if (item.type === 'failure') {
       const session = item.member && sessions.find((candidate) => candidate.id === item.member?.sessionId);
@@ -271,6 +291,7 @@ export function GroupConversation({ snapshot }: { snapshot: GroupSnapshot }) {
     for (const run of (placement.changesAfter.get(item.key) ?? []).filter((candidate) => candidate.status !== 'running')) body.push(<RunChanges key={`changes:${run.id}`} runId={run.id} summary={run.changes} />);
     if (body.length) rendered.push(<Fragment key={item.key}>{body}</Fragment>);
   });
+  rendered.push(...renderPlanningAt(Number.POSITIVE_INFINITY));
 
   const working = members.flatMap((member) => {
     const session = sessions.find((candidate) => candidate.id === member.sessionId);
@@ -327,8 +348,6 @@ export function GroupConversation({ snapshot }: { snapshot: GroupSnapshot }) {
             const speaker = bySession.get(approval.sessionId) ?? byMember.get(approval.sessionId) ?? null;
             return <ApprovalCard key={approval.id} approval={approval} speaker={speaker} provider={sessions.find((session) => session.id === approval.sessionId)?.provider} />;
           })}
-          {plans.map((plan) => <SessionPlanCard key={plan.id} plan={plan} reviewReady={allRuns.some((run) => run.id === plan.runId && run.status === 'completed')} speaker={bySession.get(plan.sessionId) ?? null} />)}
-          {questions.map((question) => <UserQuestionCard key={question.id} question={question} speaker={bySession.get(question.sessionId) ?? null} />)}
           <GroupResultSummary snapshot={snapshot} sessions={sessions} messages={messages} runs={allRuns} tasks={tasks} approvals={approvals ?? []} />
           <GroupRemoteActivity key={snapshot.group.id} groupId={snapshot.group.id} />
         </div>
