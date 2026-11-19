@@ -100,9 +100,14 @@ export function BrowserPane({ session, active, popout = false }: { session: Sess
   // Native toolbar input and page touches share one holder. The overlay fallback uses its own live viewer instead.
   const inputId = embeddedNative ? NATIVE_HOLDER : stream.clientId;
   const canInput = Boolean(tab && (embeddedNative || stream.status === 'live') && inputId && (tab.control.holderId === null || tab.control.holderId === inputId));
-  const ownership = tab ? controlLabel(tab, inputId) : { label: 'Watching', description: 'You are watching this tab.' };
+  const ownership = !pageOnly && tab ? controlLabel(tab, inputId) : { label: 'Watching', description: 'You are watching this tab.' };
   const [leaseNow, setLeaseNow] = useState(Date.now());
-  useEffect(() => { const timer = window.setInterval(() => setLeaseNow(Date.now()), 250); return () => window.clearInterval(timer); }, []);
+  useEffect(() => {
+    if (!visible || pageOnly || tab?.control.lease !== 'touch') return;
+    setLeaseNow(Date.now());
+    const timer = window.setInterval(() => setLeaseNow(Date.now()), 250);
+    return () => window.clearInterval(timer);
+  }, [visible, pageOnly, tab?.control.lease]);
   const ownsLease = Boolean(tab && inputId && tab.control.holderId === inputId);
   const leaseSeconds = tab?.control.expiresAt ? Math.max(0, Math.ceil((tab.control.expiresAt - leaseNow) / 1000)) : 0;
 
