@@ -19,9 +19,6 @@ export function ContextUsage({ session, disabled = false, disabledReason }: { se
   const closeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [focusRequested, setFocusRequested] = useState(false);
   const [open, setOpen] = useState(false);
-  const [threshold, setThreshold] = useState(session?.autoCompactionPercent == null ? '' : String(session.autoCompactionPercent));
-  const [savingThreshold, setSavingThreshold] = useState(false);
-  const [thresholdError, setThresholdError] = useState('');
   const [position, setPosition] = useState<ReturnType<typeof contextPopoverPosition> | null>(null);
   const { present, closing } = usePresence(open);
   const id = useId();
@@ -34,24 +31,6 @@ export function ContextUsage({ session, disabled = false, disabledReason }: { se
   };
   useEffect(() => () => { if (closeTimer.current) clearTimeout(closeTimer.current); }, []);
   useEffect(() => { setOpen(false); setPosition(null); setFocusRequested(false); }, [session?.id]);
-  useEffect(() => { setThreshold(session?.autoCompactionPercent == null ? '' : String(session.autoCompactionPercent)); }, [session?.id, session?.autoCompactionPercent]);
-  const saveThreshold = async () => {
-    if (!session || savingThreshold) return;
-    const value = threshold.trim();
-    const percent = value === '' ? null : Number(value);
-    if (percent !== null && (!Number.isInteger(percent) || percent < 1 || percent > 100)) {
-      setThresholdError('Enter a whole percentage from 1 to 100, or leave blank to turn it off.'); return;
-    }
-    if (percent === (session.autoCompactionPercent ?? null)) return;
-    setSavingThreshold(true); setThresholdError('');
-    try {
-      const updated = await api.updateSessionAutoCompaction(session.id, percent);
-      useMingle.setState(s => ({ boot: s.boot ? { ...s.boot, sessions: s.boot.sessions.map(row => row.id === updated.id ? { ...row, ...updated } : row) } : s.boot }));
-      setThreshold(updated.autoCompactionPercent == null ? '' : String(updated.autoCompactionPercent));
-    } catch (error) {
-      setThresholdError(error instanceof Error ? error.message : 'Could not save auto-compact setting.');
-    } finally { setSavingThreshold(false); }
-  };
   useLayoutEffect(() => {
     if (!open || !panel.current || !button.current) return;
     const place = () => {
@@ -119,13 +98,8 @@ export function ContextUsage({ session, disabled = false, disabledReason }: { se
       {reading.estimated ? <p>Estimated from the provider’s latest report.</p> : null}
       {reading.updatedAt ? <p><time dateTime={reading.updatedAt}>Last reported {new Date(reading.updatedAt).toLocaleTimeString()}</time></p> : null}
       <p>Compact older conversation context using the provider’s native compaction.</p>
-      <label className="context-auto-compact">Auto-compact at
-        <input aria-label="Auto-compact at percentage" type="number" min="1" max="100" step="1" inputMode="numeric" value={threshold} disabled={!session || savingThreshold}
-          placeholder="Off" onChange={event => { setThreshold(event.target.value); setThresholdError(''); }}
-          onBlur={() => void saveThreshold()} onKeyDown={event => { if (event.key === 'Enter') { event.preventDefault(); event.currentTarget.blur(); } }} />
-        <span>%</span>
-      </label>
-      {thresholdError ? <p role="alert">{thresholdError}</p> : null}
+      {session?.provider === 'antigravity' ? <p>Custom auto-compaction is unavailable for Antigravity.</p>
+        : session ? <AutoCompactionThreshold key={session.id} session={session} /> : null}
       {blocker && !compacting ? <p id={`${id}-blocked`}>{blocker}</p> : null}
       <button ref={compactButton} type="button"
         aria-disabled={compacting ? state.cancelling : Boolean(blocker)}
@@ -139,4 +113,50 @@ export function ContextUsage({ session, disabled = false, disabledReason }: { se
       {state.status !== 'idle' ? <p role={state.status === 'failed' ? 'alert' : 'status'}>{state.message}</p> : null}
     </div>, document.body) : null}
   </>;
+}
+
+function AutoCompactionThreshold({ session }: { session: Session }) {
+  const saved = session.autoCompactionPercent == null ? '' : String(session.autoCompactionPercent);
+  const [draft, setDraft] = useState(saved);
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState('');
+  const helpId = useId();
+  useEffect(() => setDraft(saved), [saved]);
+
+  const save = async () => {
+    const value = draft.trim();
+    const percent = value ? Number(value) : null;
+    if (percent !== null && (!/^\d+$/.test(value) || percent < 1 || percent > 100)) {
+      setError('Enter a whole percentage from 1 to 100, or clear the field to turn it off.');
+      return;
+    }
+    if (pending || percent === (session.autoCompactionPercent ?? null)) return;
+    setPending(true);
+    setError('');
+    try {
+      const updated = await api.updateSessionAutoCompaction(session.id, percent);
+      useMingle.setState(state => ({ boot: state.boot ? { ...state.boot,
+        sessions: state.boot.sessions.map(row => row.id === updated.id ? { ...row, autoCompactionPercent: updated.autoCompactionPercent } : row),
+      } : state.boot }));
+      setDraft(updated.autoCompactionPercent == null ? '' : String(updated.autoCompactionPercent));
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : 'Could not save auto-compaction.');
+    } finally {
+      setPending(false);
+    }
+  };
+
+  return <form className="context-auto-compact" aria-busy={pending} onSubmit={event => { event.preventDefault(); void save(); }}>
+    <div className="context-auto-compact__row">
+      <label>Auto-compact at
+        <input aria-label="Auto-compact at percentage" aria-describedby={helpId} aria-invalid={Boolean(error)}
+          inputMode="numeric" value={draft} disabled={pending} placeholder="Off"
+          onChange={event => { setDraft(event.target.value); setError(''); }} />
+        <span aria-hidden="true">%</span>
+      </label>
+      <button type="submit" disabled={pending || draft === saved}>{pending ? 'Saving…' : 'Save'}</button>
+    </div>
+    <p id={helpId}>Pauses and resumes this conversation after compaction. Clear to turn off.</p>
+    {error ? <p role="alert">{error}</p> : null}
+  </form>;
 }

@@ -22,3 +22,10 @@
 @keyframes context-details-out { to { opacity: 0; transform: translateY(3px) scale(.98); } }
 @keyframes context-spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .context-usage__arc { transition: none; } .context-usage.is-compacting svg, .context-details, .context-details.is-closing { animation: none; } }
+
+.context-auto-compact__row, .context-auto-compact__row label { display: flex; align-items: center; gap: 6px; }
+.context-auto-compact__row { justify-content: space-between; flex-wrap: wrap; }
+.context-auto-compact__row input { box-sizing: border-box; width: 44px; padding: 4px; border: 1px solid var(--line); border-radius: 5px; background: var(--bg-surface); color: var(--fg-0); text-align: center; font: inherit; }
+.context-auto-compact__row input:focus-visible { outline: 2px solid var(--accent-line); outline-offset: 1px; }
+.context-auto-compact__row button { margin: 0; width: auto; padding: 4px 8px; }
+.context-auto-compact__row button:disabled { opacity: .5; cursor: default; }
