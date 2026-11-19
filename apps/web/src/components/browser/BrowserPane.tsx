@@ -62,11 +62,7 @@ export function BrowserPane({ session, active, popout = false }: { session: Sess
     document.querySelector<HTMLElement>('.browser-pip__handle')?.focus({ preventScroll: true });
   }, [floating]);
   const [detached, setDetached] = useState(false);
-  const presented = useRef(popout);
   const docked = useRef(false);
-  useEffect(() => {
-    if (active && !presented.current) { presented.current = true; setFloating(true); }
-  }, [active]);
   const visible = (active && !minimized) || expanded || floating;
   const { state, error: stateError, apply, refresh } = useBrowserState(session.id, visible);
   useEffect(() => {
@@ -74,7 +70,6 @@ export function BrowserPane({ session, active, popout = false }: { session: Sess
       if ((event as CustomEvent<{ sessionId?: string }>).detail?.sessionId !== session.id) return;
       if (visible) refresh();
       if (!docked.current && !popout && !minimized) {
-        presented.current = true;
         setFloating(true);
       }
     };
