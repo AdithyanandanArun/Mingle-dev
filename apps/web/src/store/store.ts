@@ -446,6 +446,8 @@ export const useMingle = create<MingleState>((set, get) => {
         const belongsToSelection = selectedSessionId === ev.sessionId || Boolean(selectedGroup && findGroupForSession([selectedGroup], ev.sessionId) === selectedGroup);
         if (view === 'workspace' && selectedSessionId && belongsToSelection) {
           const browser = useBrowserStore.getState();
+          const viewerId = browser.viewerSessions[selectedSessionId] ?? selectedSessionId;
+          if (viewerId !== ev.sessionId && resolveTab(browser.states[viewerId], browser.selected[viewerId])?.control.holderId) break;
           const current = resolveTab(browser.states[ev.sessionId], browser.selected[ev.sessionId]);
           if (!current?.controlOwner) browser.select(ev.sessionId, ev.tabId);
           browser.requestOpen(ev.sessionId, selectedSessionId);
