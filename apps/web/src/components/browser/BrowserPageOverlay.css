@@ -14,3 +14,15 @@
   background: var(--bg-panel);
   box-shadow: var(--shadow-pop);
 }
+
+.browser-page-reconnect {
+  position: absolute;
+  z-index: 4;
+  right: 12px;
+  bottom: 12px;
+}
+
+.browser-page-reconnect button {
+  background: var(--bg-panel);
+  box-shadow: var(--shadow-pop);
+}

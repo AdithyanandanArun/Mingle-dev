@@ -307,7 +307,10 @@ export function BrowserPane({ session, active, popout = false }: { session: Sess
               {state.mode !== 'existing' ? <BrowserImportButton sessionId={session.id} /> : null}
             </div> : null}
             {!pageOnly && canInput ? <p className="browser-hint">Keys and clicks go to the page. Alt+Shift+Escape moves focus back to Mingle. Paste with {navigator.platform.includes('Mac') ? '⌘' : 'Ctrl'}+V.</p> : null}
-            {stream.error ? <div className="browser-stream-error"><InlineError>{stream.error}</InlineError><button type="button" className="link-btn" onClick={stream.dismissError}>Dismiss</button></div> : null}
+            {pageOnly && stream.status === 'closed' ? <div className="browser-page-reconnect">
+              <Button size="sm" onClick={stream.reconnect}>Reconnect live view</Button>
+            </div> : null}
+            {!pageOnly && stream.error ? <div className="browser-stream-error"><InlineError>{stream.error}</InlineError><button type="button" className="link-btn" onClick={stream.dismissError}>Dismiss</button></div> : null}
           </>
         ) : (
           <EmptyState icon={<Globe size={20} />} title="No open tabs">
@@ -317,7 +320,7 @@ export function BrowserPane({ session, active, popout = false }: { session: Sess
           </EmptyState>
         )}
         {state.error ? <div className="browser-stream-error"><InlineError>{state.error}</InlineError></div> : null}
-        {state.notices.length ? <ul className="browser-notices browser-notices--pad">{state.notices.map((n) => <li key={n}>{n}</li>)}</ul> : null}
+        {!pageOnly && state.notices.length ? <ul className="browser-notices browser-notices--pad">{state.notices.map((n) => <li key={n}>{n}</li>)}</ul> : null}
         {actionError ? <div className="browser-stream-error"><InlineError>{actionError}</InlineError><button type="button" className="link-btn" onClick={() => setActionError(null)}>Dismiss</button></div> : null}
         {stateError ? <p className="browser-stale" role="status">Browser status may be out of date: {stateError}</p> : null}
       </>
