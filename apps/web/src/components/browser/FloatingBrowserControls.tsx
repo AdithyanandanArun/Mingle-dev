@@ -8,7 +8,7 @@ function Control({ icon: Icon, label, onClick, disabled }: {
   disabled?: boolean;
 }) {
   return (
-    <button type="button" aria-label={label} data-tooltip={label} onClick={onClick} disabled={disabled}>
+    <button type="button" aria-label={label} title={label} onClick={onClick} disabled={disabled}>
       <Icon size={15} aria-hidden="true" />
     </button>
   );
@@ -21,22 +21,6 @@ export function FloatingBrowserControls({ onPopout, onDock, onDisconnect, discon
   const actionsId = useId();
   const container = useRef<HTMLDivElement>(null);
   const toggle = useRef<HTMLButtonElement>(null);
-
-  useEffect(() => {
-    const element = container.current;
-    const panel = element?.parentElement;
-    if (!element || !panel) return;
-    const updateInset = () => {
-      const available = panel.clientWidth - 42;
-      const width = element.scrollWidth;
-      element.style.setProperty('--browser-controls-shift', `${Math.max(0, width - available)}px`);
-    };
-    const observer = new ResizeObserver(updateInset);
-    observer.observe(panel);
-    observer.observe(element);
-    updateInset();
-    return () => observer.disconnect();
-  }, [open, onPopout, onDock, onExpand, onMinimize, onDisconnect]);
 
   useEffect(() => {
     if (!open) return;

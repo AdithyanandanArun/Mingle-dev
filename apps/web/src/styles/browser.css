@@ -26,7 +26,7 @@
 .browser-overlay .browser-viewport { min-height: 0; }
 @media (max-width: 700px) { .browser-overlay { padding: 0; } .browser-overlay__panel { border-radius: 0; border-width: 0; } }
 
-.browser-pip { position: fixed; z-index: 85; display: flex; box-sizing: border-box; flex-direction: column; overflow: hidden; border: 1px solid var(--line-strong); border-radius: 10px; background: var(--bg-panel); box-shadow: var(--shadow-pop); transition: none; }
+.browser-pip { container-type: inline-size; position: fixed; z-index: 85; display: flex; box-sizing: border-box; flex-direction: column; overflow: hidden; border: 1px solid var(--line-strong); border-radius: 10px; background: var(--bg-panel); box-shadow: var(--shadow-pop); transition: none; }
 .browser-pip__handle { position: absolute; z-index: 3; inset: 0 24px auto; height: 12px; touch-action: none; user-select: none; -webkit-user-select: none; cursor: move; }
 .browser-pip__handle::after { content: ''; position: absolute; top: 4px; left: 50%; width: 28px; height: 4px; transform: translateX(-50%); border-radius: 999px; background: var(--bg-panel); box-shadow: 0 0 0 1px var(--line-strong); opacity: 0; transition: opacity 140ms ease; }
 .browser-pip:hover .browser-pip__handle::after, .browser-pip__handle:focus-visible::after { opacity: 1; }
