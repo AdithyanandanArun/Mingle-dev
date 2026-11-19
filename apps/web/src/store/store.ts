@@ -444,11 +444,11 @@ export const useMingle = create<MingleState>((set, get) => {
         const selectedSessionId = activeProjectId ? sessionByProject[activeProjectId] : undefined;
         const selectedGroup = findGroupForSession(get().boot?.groups, selectedSessionId);
         const belongsToSelection = selectedSessionId === ev.sessionId || Boolean(selectedGroup && findGroupForSession([selectedGroup], ev.sessionId) === selectedGroup);
-        if (view === 'workspace' && activeProjectId && belongsToSelection) {
+        if (view === 'workspace' && selectedSessionId && belongsToSelection) {
           const browser = useBrowserStore.getState();
           const current = resolveTab(browser.states[ev.sessionId], browser.selected[ev.sessionId]);
           if (!current?.controlOwner) browser.select(ev.sessionId, ev.tabId);
-          browser.requestOpen(ev.sessionId);
+          browser.requestOpen(ev.sessionId, selectedSessionId);
           window.dispatchEvent(new CustomEvent('mingle:browser-opened', { detail: { sessionId: ev.sessionId } }));
           // Keep the user's sidebar choice. BrowserPane follows the selected browser tab and
           // opens it in its floating host by default when the pane is visible.

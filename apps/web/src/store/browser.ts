@@ -8,9 +8,11 @@ interface BrowserUiState {
   selected: Record<string, string>;
   /** Open requests held until the session viewer mounts. */
   openRequests: Record<string, number>;
+  /** A group conversation can display a browser owned by one of its members. */
+  viewerSessions: Record<string, string>;
   publish(sessionId: string, state: BrowserSessionState): void;
   select(sessionId: string, tabId: string | null, broadcast?: boolean): void;
-  requestOpen(sessionId: string): void;
+  requestOpen(sessionId: string, conversationId?: string): void;
   acknowledgeOpen(sessionId: string, revision: number): void;
 }
 
@@ -20,8 +22,17 @@ export const useBrowserStore = create<BrowserUiState>((set) => ({
   states: {},
   selected: {},
   openRequests: {},
+  viewerSessions: {},
   publish: (sessionId, state) => set((s) => ({ states: { ...s.states, [sessionId]: state } })),
-  requestOpen: (sessionId) => set((s) => ({ openRequests: { ...s.openRequests, [sessionId]: (s.openRequests[sessionId] ?? 0) + 1 } })),
+  requestOpen: (sessionId, conversationId = sessionId) => set((s) => {
+    const viewerSessions = { ...s.viewerSessions };
+    if (conversationId === sessionId) delete viewerSessions[conversationId];
+    else viewerSessions[conversationId] = sessionId;
+    return {
+      openRequests: { ...s.openRequests, [sessionId]: (s.openRequests[sessionId] ?? 0) + 1 },
+      viewerSessions,
+    };
+  }),
   acknowledgeOpen: (sessionId, revision) => set((s) => {
     if (s.openRequests[sessionId] !== revision) return s;
     const openRequests = { ...s.openRequests };
