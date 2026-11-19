@@ -339,7 +339,7 @@ export function GroupConversation({ snapshot }: { snapshot: GroupSnapshot }) {
         </button>
       ) : null}
       </div>
-      <div className="group-composer-dock">
+      <div className="group-composer-dock" data-floating-browser-clear>
         {statusBarState ? <div className="composer-wrap group-status-wrap"><StatusBar state={statusBarState} onStop={() => stopGroup(snapshot)} /></div> : null}
         <GroupComposer key={snapshot.group.id} snapshot={snapshot} anchor={anchor} onOpenMembers={() => useMingle.getState().setGroupMembersOpen(snapshot.group.id)} footer={<GitBar project={project} session={anchor} />} />
       </div>

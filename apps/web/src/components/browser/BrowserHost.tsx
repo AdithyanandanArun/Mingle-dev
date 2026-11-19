@@ -35,14 +35,17 @@ function sizeWithin(width: number, availableWidth: number, availableHeight: numb
   return { width: fittedWidth, height: fittedWidth / PIP_ASPECT_RATIO };
 }
 
-function initialGeometry(): Geometry {
+function initialGeometry(protectedArea?: DOMRect): Geometry {
   const { gutterX, gutterY, maxWidth, maxHeight } = viewportBounds();
-  const size = sizeWithin(PIP_DEFAULT_WIDTH, maxWidth, maxHeight);
-  return {
-    left: window.innerWidth - size.width - gutterX,
-    top: window.innerHeight - size.height - gutterY,
-    ...size,
-  };
+  const right = window.innerWidth - gutterX;
+  let bottom = window.innerHeight - gutterY;
+  let size = sizeWithin(PIP_DEFAULT_WIDTH, maxWidth, maxHeight);
+  if (protectedArea?.width && protectedArea.height && protectedArea.right > right - size.width && protectedArea.left < right
+    && protectedArea.bottom > bottom - size.height && protectedArea.top < bottom) {
+    bottom = Math.max(gutterY + 1, protectedArea.top - PIP_GUTTER);
+    size = sizeWithin(PIP_DEFAULT_WIDTH, maxWidth, bottom - gutterY);
+  }
+  return { left: right - size.width, top: bottom - size.height, ...size };
 }
 
 function clampGeometry(value: Geometry): Geometry {
@@ -116,14 +119,45 @@ export function BrowserHost({
 
   useEffect(() => () => interactionCleanup.current?.(), []);
   useEffect(() => () => interactionCleanup.current?.(), [floating, expanded]);
-  useEffect(() => {
+  useLayoutEffect(() => {
+    if (!floating || expanded) return;
+    const workspace = inline.current?.closest('.workspace');
+    let protectedArea: Element | null = null;
+    const place = () => {
+      if (geometryCustomized.current) return;
+      const next = initialGeometry(protectedArea?.getBoundingClientRect());
+      setGeometry(current => current.left === next.left && current.top === next.top
+        && current.width === next.width && current.height === next.height ? current : next);
+    };
+    const sizes = new ResizeObserver(place);
+    const workspaceMain = workspace?.querySelector('.workspace__main');
+    if (workspaceMain) sizes.observe(workspaceMain);
+    const syncProtectedArea = () => {
+      if (protectedArea && workspace?.contains(protectedArea)) return;
+      const next = workspace?.querySelector('[data-floating-browser-clear]') ?? null;
+      if (next === protectedArea) return;
+      if (protectedArea) sizes.unobserve(protectedArea);
+      protectedArea = next;
+      if (protectedArea) sizes.observe(protectedArea);
+      place();
+    };
+    syncProtectedArea();
+    place();
+    const markup = new MutationObserver(syncProtectedArea);
+    if (workspace) markup.observe(workspace, { childList: true, subtree: true });
     const resize = () => {
       interactionCleanup.current?.();
-      setGeometry((value) => geometryCustomized.current ? clampGeometry(value) : initialGeometry());
+      if (geometryCustomized.current) setGeometry(clampGeometry);
+      else place();
     };
+    if (geometryCustomized.current) setGeometry(clampGeometry);
     window.addEventListener('resize', resize);
-    return () => window.removeEventListener('resize', resize);
-  }, []);
+    return () => {
+      window.removeEventListener('resize', resize);
+      sizes.disconnect();
+      markup.disconnect();
+    };
+  }, [floating, expanded]);
 
   const dismiss = useRef(onDismiss);
   dismiss.current = onDismiss;

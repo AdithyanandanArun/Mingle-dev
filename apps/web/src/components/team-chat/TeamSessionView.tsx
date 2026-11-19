@@ -250,7 +250,7 @@ function TeamSessionComposer({ projectId, sessionId, agents, structure, groupVie
     finally { setSending(false); }
   };
 
-  return <div className="composer-wrap">
+  return <div className="composer-wrap" data-floating-browser-clear>
     <form className="composer composer--group" onSubmit={(event) => { event.preventDefault(); void send(); }}>
       <div className="recips" role="group" aria-label="Recipients">
         <span className="recips__label">To</span>

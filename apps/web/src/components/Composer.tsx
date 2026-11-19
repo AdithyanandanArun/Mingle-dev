@@ -553,7 +553,7 @@ export function Composer({ session, progressState, helperCount = 0 }: { session:
     document.getElementById(`${pickerId}-option-${activeSuggestion}`)?.scrollIntoView({ block: 'nearest' });
   }, [activeSuggestion, pickerId, suggestion]);
   return (
-    <div className="composer-wrap">
+    <div className="composer-wrap" data-floating-browser-clear>
       <QueuedMessages sessionId={session.id} active={session.status === 'running'} items={queuedMessages} />
       {providerFailureCopy ? <div className="composer__note is-error" role="alert">
         <span>{providerFailureCopy}</span>{' '}
