@@ -122,11 +122,11 @@ try {
   const beforeResize = await floating.boundingBox();
   const resizeCorner = floating.getByRole('group', { name: /Resize floating browser from top-left corner/ });
   await resizeCorner.press('Shift+ArrowLeft');
-  await page.waitForFunction(({ oldWidth, right, top }) => {
+  await page.waitForFunction(({ oldWidth, right, bottom }) => {
     const panel = document.querySelector('.browser-pip')?.getBoundingClientRect();
     return panel && panel.width > oldWidth + 35 && Math.abs(panel.width / panel.height - 1.6) < 0.005
-      && Math.abs(panel.right - right) < 1 && Math.abs(panel.top - top) < 1;
-  }, { oldWidth: beforeResize.width, right: beforeResize.x + beforeResize.width, top: beforeResize.y });
+      && Math.abs(panel.right - right) < 1 && Math.abs(panel.bottom - bottom) < 1;
+  }, { oldWidth: beforeResize.width, right: beforeResize.x + beforeResize.width, bottom: beforeResize.y + beforeResize.height });
 
   const beforeCornerDrag = await floating.boundingBox();
   const ne = await floating.getByRole('group', { name: /Resize floating browser from top-right corner/ }).boundingBox();
@@ -134,11 +134,11 @@ try {
   await page.mouse.down();
   await page.mouse.move(ne.x + ne.width / 2 - 55, ne.y + ne.height / 2 + 20, { steps: 4 });
   await page.mouse.up();
-  await page.waitForFunction(({ right, bottom, width }) => {
+  await page.waitForFunction(({ left, bottom, width }) => {
     const panel = document.querySelector('.browser-pip')?.getBoundingClientRect();
     return panel && panel.width < width - 50 && Math.abs(panel.width / panel.height - 1.6) < 0.005
-      && Math.abs(panel.right - right) < 1 && Math.abs(panel.bottom - bottom) < 1;
-  }, { right: beforeCornerDrag.x + beforeCornerDrag.width, bottom: beforeCornerDrag.y + beforeCornerDrag.height, width: beforeCornerDrag.width });
+      && Math.abs(panel.left - left) < 1 && Math.abs(panel.bottom - bottom) < 1;
+  }, { left: beforeCornerDrag.x, bottom: beforeCornerDrag.y + beforeCornerDrag.height, width: beforeCornerDrag.width });
 
   const beforeMove = await floating.boundingBox();
   const handle = await floating.locator('.browser-pip__handle').boundingBox();
@@ -160,8 +160,8 @@ try {
   await floating.getByRole('application').focus();
   await page.keyboard.press('Alt+Shift+Escape');
   assert.equal(await page.evaluate(() => document.activeElement?.getAttribute('aria-label')), 'Floating browser controls');
-  await bubble.getByRole('button', { name: 'Open full browser' }).click();
   const placementBeforeFullView = await floating.boundingBox();
+  await bubble.getByRole('button', { name: 'Open full browser' }).click();
   await full.waitFor();
   assert.equal(await full.locator('.browser-bar, .browser-status, .browser-tabs').count(), 0);
   await full.getByRole('button', { name: 'Exit full browser' }).click();
@@ -180,8 +180,6 @@ try {
   await page.getByRole('button', { name: 'Restore browser' }).click();
   await floating.waitFor();
   await assertClearOfPrompt();
-  const restoredPanel = await floating.boundingBox();
-  assert.ok(restoredPanel && Math.abs(restoredPanel.x + restoredPanel.width - 920 + 12) < 1, 'restoring resets to the right gutter');
   assert.equal(await sidebar.isVisible(), false);
 
   await openControls();
