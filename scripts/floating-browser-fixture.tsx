@@ -29,14 +29,19 @@ window.mingleBrowserDesktop = {
 
 function Example() {
   const open = useMingle((s) => s.contextOpen && s.contextTab === 'browser');
-  return <>
+  return <div className="workspace">
     <h1>Example browser workspace</h1>
     <button type="button" onClick={() => useBrowserStore.getState().requestOpen(session.id)}>Example agent opens browser</button>
     <button type="button" onClick={() => { popoutOpen = false; popoutClosed?.(session.id); }}>Example desktop window closes</button>
     <aside aria-label="Example browser sidebar" hidden={!open} style={{ width: 'min(420px, 100%)', height: 340 }}>
       <BrowserPane session={session} active={open} />
     </aside>
-  </>;
+    <div className="workspace__main" style={{ position: 'fixed', inset: 0, pointerEvents: 'none' }}>
+      <div data-floating-browser-clear style={{ position: 'absolute', bottom: 26, left: '50%', transform: 'translateX(-50%)', width: 'min(720px, 90vw)', pointerEvents: 'auto' }}>
+        <textarea aria-label="Example prompt" style={{ display: 'block', width: '100%', height: 100 }} />
+      </div>
+    </div>
+  </div>;
 }
 
 useMingle.setState({ contextOpen: false, contextTab: 'files' });

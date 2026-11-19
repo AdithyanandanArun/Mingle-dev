@@ -65,13 +65,36 @@ try {
   assert.equal(await page.locator('body').getAttribute('data-native-shown'), null, 'only the live stream participates in floating layout');
   assert.equal(await toggle.getAttribute('aria-expanded'), 'false');
   assert.equal(await bubble.count(), 0, 'the page starts with only the circular toggle');
+  const prompt = page.getByRole('textbox', { name: 'Example prompt' });
+  const assertClearOfPrompt = () => page.waitForFunction(() => {
+    const panel = document.querySelector('.browser-pip')?.getBoundingClientRect();
+    const prompt = document.querySelector('[data-floating-browser-clear]')?.getBoundingClientRect();
+    return panel && prompt && panel.bottom <= prompt.top - 11
+      && innerWidth - panel.right < 14 && Math.abs(panel.width / panel.height - 1.6) < 0.005;
+  });
+  await assertClearOfPrompt();
+  await prompt.click();
+  await prompt.fill('Example draft stays editable');
+  await prompt.evaluate(node => { node.style.height = '400px'; });
+  await assertClearOfPrompt();
+  await prompt.evaluate(node => { node.style.height = '100px'; });
+  await assertClearOfPrompt();
   const initialPanel = await floating.boundingBox();
   const initialToggle = await toggle.boundingBox();
-  assert.ok(initialToggle && initialPanel && initialToggle.x - initialPanel.x < 18 && initialToggle.y - initialPanel.y < 18);
-  assert.ok(initialToggle && initialToggle.width === initialToggle.height && initialToggle.width <= 32);
+  const pill = floating.locator('.browser-float-controls');
+  const initialPill = await pill.boundingBox();
+  assert.ok(initialToggle && initialPanel && initialPanel.x + initialPanel.width - initialToggle.x - initialToggle.width <= 35);
+  assert.ok(initialToggle && initialToggle.y - initialPanel.y < 18 && Math.abs(initialPill.width - initialPill.height) < 1, JSON.stringify({ initialPanel, initialToggle, initialPill }));
   await toggle.press('Enter');
   await bubble.waitFor();
-  assert.notEqual(await bubble.evaluate((node) => getComputedStyle(node).animationName), 'none');
+  assert.match(await bubble.evaluate(node => getComputedStyle(node).transitionProperty), /max-width/);
+  await page.waitForFunction(({ width, right }) => {
+    const pill = document.querySelector('.browser-float-controls');
+    const nav = pill?.querySelector('nav');
+    const rect = pill?.getBoundingClientRect();
+    return nav && rect && nav.clientWidth >= 130 && rect.width > width
+      && Math.abs(rect.right - right) < 1 && nav.getBoundingClientRect().left > rect.left;
+  }, { width: initialPill.width, right: initialPill.x + initialPill.width });
   for (const name of ['Open desktop window', 'Dock browser', 'Disconnect browser', 'Open full browser', 'Minimize floating browser']) {
     await bubble.getByRole('button', { name, exact: true }).waitFor();
   }
@@ -85,18 +108,15 @@ try {
   await bubble.waitFor({ state: 'hidden' });
 
   await page.setViewportSize({ width: 320, height: 480 });
+  await assertClearOfPrompt();
+  await page.setViewportSize({ width: 2200, height: 740 });
   await page.waitForFunction(() => {
     const panel = document.querySelector('.browser-pip')?.getBoundingClientRect();
-    return panel && panel.left >= 0 && panel.top >= 0
-      && panel.right <= innerWidth && panel.bottom <= innerHeight
-      && Math.abs(panel.width / panel.height - 1.6) < 0.005
-      && innerHeight - panel.bottom <= 13;
+    const prompt = document.querySelector('[data-floating-browser-clear]')?.getBoundingClientRect();
+    return panel && prompt && panel.left >= prompt.right && innerHeight - panel.bottom < 14;
   });
   await page.setViewportSize({ width: 920, height: 740 });
-  await page.waitForFunction(() => {
-    const panel = document.querySelector('.browser-pip')?.getBoundingClientRect();
-    return panel && innerWidth - panel.right < 14 && innerHeight - panel.bottom < 14;
-  });
+  await assertClearOfPrompt();
   const beforeResize = await floating.boundingBox();
   const resizeCorner = floating.getByRole('group', { name: /Resize floating browser from top-left corner/ });
   await resizeCorner.press('Shift+ArrowLeft');
@@ -133,7 +153,7 @@ try {
 
   await page.emulateMedia({ reducedMotion: 'reduce' });
   await openControls();
-  assert.equal(await bubble.evaluate((node) => getComputedStyle(node).animationName), 'none');
+  assert.ok(await bubble.evaluate(node => getComputedStyle(node).transitionDuration.split(',').every(value => Number.parseFloat(value) <= 0.00002)));
 
   await floating.getByRole('application').focus();
   await page.keyboard.press('Alt+Shift+Escape');
@@ -180,5 +200,5 @@ try {
   await floating.waitFor({ state: 'hidden' });
   assert.equal(disconnected, true);
   assert.deepEqual(errors, []);
-  console.log('Floating browser acceptance passed: collapsed controls, popup dismissal, ratio lock, keyboard, dock, minimize, full view, popout, disconnect, and reduced motion.');
+  console.log('Floating browser acceptance passed: composer clearance, expanding controls, dismissal, ratio lock, keyboard, dock, minimize, full view, popout, disconnect, and reduced motion.');
 } finally { await browser?.close(); await server?.close(); }
