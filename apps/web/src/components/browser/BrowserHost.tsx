@@ -93,8 +93,12 @@ export function BrowserHost({
     if (!target || host.parentNode === target) return;
     const focused = document.activeElement instanceof HTMLElement && host.contains(document.activeElement) ? document.activeElement : null;
     if (expanded && focused) returnFocus.current = focused;
+    const leavingFullView = host.parentNode === overlaySlot && !expanded;
     target.appendChild(host);
-    const next = focused ?? (!expanded ? returnFocus.current : null);
+    const floatingOpener = leavingFullView && floating
+      ? floatingPanel.current?.querySelector<HTMLElement>('[aria-label="Open full browser"]')
+      : null;
+    const next = focused ?? floatingOpener ?? (!expanded ? returnFocus.current : null);
     if (next?.isConnected) next.focus({ preventScroll: true });
     if (!expanded) returnFocus.current = null;
   }, [expanded, floating, overlaySlot, host]);
