@@ -251,9 +251,11 @@ export function App() {
       <main className="main" id="main" tabIndex={-1}>
         <Header />
         <ConnectionBanner />
-        <div className="update-notices">
-          <AppUpdateNotice info={appUpdate.info} active={view !== 'settings'} />
-          <ProviderUpdates noticeOnly showNotice={view !== 'settings'} />
+        <div className="update-notice-anchor">
+          <div className="update-notices">
+            <AppUpdateNotice info={appUpdate.info} active={view !== 'settings'} />
+            <ProviderUpdates noticeOnly showNotice={view !== 'settings'} />
+          </div>
         </div>
         <div className="main__body">
           <Boundary label="This view">
