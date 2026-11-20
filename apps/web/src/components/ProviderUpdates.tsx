@@ -61,11 +61,13 @@ export function ProviderUpdates({ noticeOnly = false }: { noticeOnly?: boolean }
   };
   const available = rows.filter((row) => row.status === 'available' && !row.dismissed);
   return <>
-    {available.map((row) => <aside className="provider-update-notice" role="status" key={row.provider}>
-      <div><strong>{names[row.provider] ?? row.provider} {row.latestVersion} is available</strong><p>{row.message}</p>{errors[row.provider] ? <p role="alert">{errors[row.provider]}</p> : null}</div>
-      <button type="button" className="provider-update-notice__link" onClick={() => window.dispatchEvent(new CustomEvent('mingle:open-provider-settings'))}>Settings <ArrowUpRight size={14} /></button>
-      <button type="button" className="provider-update-notice__dismiss" aria-label={`Dismiss ${row.provider} update`} onClick={() => void dismiss(row)}><X size={15} /></button>
-    </aside>)}
+    {noticeOnly && available.length ? <div className="provider-update-notices" aria-live="polite">
+      {available.map((row) => <aside className="provider-update-notice" role="status" key={row.provider}>
+        <div><strong>{names[row.provider] ?? row.provider} update</strong><span className="provider-update-notice__version">{row.latestVersion}</span>{errors[row.provider] ? <p role="alert">{errors[row.provider]}</p> : null}</div>
+        <button type="button" className="provider-update-notice__link" onClick={() => window.dispatchEvent(new CustomEvent('mingle:open-provider-settings'))}>Settings <ArrowUpRight size={14} /></button>
+        <button type="button" className="provider-update-notice__dismiss" aria-label={`Dismiss ${row.provider} update`} onClick={() => void dismiss(row)}><X size={15} /></button>
+      </aside>)}
+    </div> : null}
     {!noticeOnly ? <section className="provider-updates" aria-label="Provider CLI updates">
       <header><div><h2>Provider CLI updates</h2><p>Checks use public release metadata. Updates only run after you choose Update.</p></div><Button variant="secondary" disabled={busy !== null} onClick={() => void refresh()}><RefreshCw size={14} /> Check again</Button></header>
       {errors.load ? <p className="provider-updates__error" role="alert">{errors.load}</p> : null}
