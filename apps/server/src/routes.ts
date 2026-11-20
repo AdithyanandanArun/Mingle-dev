@@ -52,6 +52,7 @@ import type { ProjectMemoryTeamSync } from './project-memory/sync.ts';
 import { registerProjectMemoryRoutes } from './project-memory/routes.ts';
 import type { SessionWorkflowService } from './session-workflow/service.ts';
 import { buildSessionSnapshot } from './session-snapshot.ts';
+import { createAppUpdateCheck } from './app-update.ts';
 
 export interface Services {
   distributed: DistributedWorkspaceService;
@@ -160,6 +161,8 @@ function resolveSkillsFor(s: Services, session: Session, skillIds: string[]): ((
 export function buildRouter(s: Services) {
   const routes: Route[] = [];
   const add = (method: string, pattern: string, handler: Handler) => routes.push({ method, ...compile(pattern), handler });
+  const checkAppUpdate = createAppUpdateCheck(s.config.version);
+  add('GET', '/api/app-update', (ctx) => checkAppUpdate(ctx.url.searchParams.get('refresh') === '1'));
   registerDistributedRoutes(add, s.distributed);
   registerProjectCollaborationRoutes(add, s.projectCollaboration);
   registerTeamChatRoutes(add, s.teamChat);
