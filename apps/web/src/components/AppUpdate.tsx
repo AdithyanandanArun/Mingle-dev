@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { ArrowUpRight, Copy, RefreshCw, X } from 'lucide-react';
+import { ArrowUpRight, Check, Copy, Download, RefreshCw, X } from 'lucide-react';
 import type { AppUpdateInfo } from '@mingle/contracts';
 import { api } from '../lib/api';
 import { copyText } from '../lib/clipboard';
@@ -9,6 +9,23 @@ import { Button } from './ui';
 
 const installCommand = 'npx @mingledev/mingle install';
 const checkInterval = 15 * 60_000;
+const releaseUrl = (version: string) => `https://github.com/AdithyanandanArun/Mingle-dev/releases/tag/v${encodeURIComponent(version)}`;
+
+interface DesktopUpdateState {
+  canInstall: boolean;
+  phase: 'idle' | 'downloading' | 'installing';
+  restartVersion: string | null;
+}
+
+declare global {
+  interface Window {
+    mingleAppUpdate?: {
+      getState(): Promise<DesktopUpdateState | null>;
+      install(version: string): Promise<DesktopUpdateState | null>;
+      restart(): Promise<boolean>;
+    };
+  }
+}
 
 export function useAppUpdate(version: string | undefined) {
   const request = useRef<AbortController | null>(null);
@@ -52,13 +69,74 @@ export function useAppUpdate(version: string | undefined) {
 }
 
 export function AppUpdateNotice({ info, active }: { info: AppUpdateInfo | null; active: boolean }) {
+  const desktop = window.mingleAppUpdate;
   const [dismissed, setDismissed] = useState<string | null>(null);
-  if (!active || info?.status !== 'available' || !info.latestVersion || dismissed === info.latestVersion) return null;
+  const [dismissedRestart, setDismissedRestart] = useState<string | null>(null);
+  const [desktopState, setDesktopState] = useState<DesktopUpdateState | null>(null);
+  const [applying, setApplying] = useState(false);
+  const [failure, setFailure] = useState<string | null>(null);
+  const [manualOpen, setManualOpen] = useState(false);
+  const [copied, setCopied] = useState(false);
+  useEffect(() => {
+    if (!desktop) return;
+    let stopped = false;
+    const refresh = () => void desktop.getState().then(state => { if (!stopped) setDesktopState(state); }).catch(() => {});
+    refresh();
+    const timer = window.setInterval(refresh, applying ? 750 : 15_000);
+    return () => { stopped = true; window.clearInterval(timer); };
+  }, [desktop, applying]);
+
+  const install = async (version: string) => {
+    if (!desktopState?.canInstall || !desktop || applying) return;
+    setApplying(true);
+    setFailure(null);
+    try {
+      const result = await desktop.install(version);
+      if (!result?.restartVersion) throw new Error('Mingle could not verify the installation.');
+      setDesktopState(result);
+    } catch (error) {
+      setFailure(error instanceof Error ? error.message.replace(/^Error invoking remote method '[^']+': Error: /, '') : 'Could not install Mingle.');
+    } finally { setApplying(false); }
+  };
+  if (!active) return null;
+  if (desktopState?.restartVersion) {
+    const version = desktopState.restartVersion;
+    if (dismissedRestart === version) return null;
+    return <aside key={`installed-${version}`} className="update-notice app-update-complete update-notice--complete" role="status">
+      <span className="update-notice__icon"><Check size={15} aria-hidden="true" /></span>
+      <div className="update-notice__body">
+        <div className="update-notice__header"><strong>Mingle updated</strong><span className="update-notice__version">{version}</span></div>
+        <p>Restart Mingle to use the new version.</p>
+        {failure ? <p className="provider-updates__error" role="alert">{failure}</p> : null}
+      </div>
+      <div className="update-notice__actions">
+        <button type="button" className="update-notice__button" onClick={() => void desktop?.restart().then(ok => {
+          if (!ok) setFailure('Close and reopen Mingle to finish updating.');
+        }).catch(() => setFailure('Close and reopen Mingle to finish updating.'))}>Restart</button>
+        <button type="button" className="update-notice__dismiss" aria-label="Dismiss Mingle update complete" onClick={() => setDismissedRestart(version)}><X size={15} aria-hidden="true" /></button>
+      </div>
+    </aside>;
+  }
+  if (info?.status !== 'available' || !info.latestVersion || dismissed === info.latestVersion) return null;
   const version = info.latestVersion;
+  const busy = applying || Boolean(desktopState && desktopState.phase !== 'idle');
   return <aside className="update-notice app-update-notice" role="status">
-    <div><strong>Mingle update</strong><span className="update-notice__version">{version}</span></div>
-    <button type="button" className="update-notice__link" onClick={() => useMingle.getState().openSettings({ section: 'general' })}>Update <ArrowUpRight size={14} aria-hidden="true" /></button>
-    <button type="button" className="update-notice__dismiss" aria-label="Dismiss Mingle update" onClick={() => setDismissed(version)}><X size={15} aria-hidden="true" /></button>
+    <span className="update-notice__icon"><Download size={15} aria-hidden="true" /></span>
+    <div className="update-notice__body">
+      <div className="update-notice__header"><strong>Mingle update</strong><span className="update-notice__version">{version}</span></div>
+      {busy ? <p>{desktopState?.phase === 'installing' ? 'Installing. Approve the system prompt if asked.' : 'Downloading and verifying…'}</p> : null}
+      {manualOpen ? <div className="app-update-notice__manual">
+        <a className="update-notice__link" href={releaseUrl(version)} target="_blank" rel="noopener noreferrer">Download installer <ArrowUpRight size={13} aria-hidden="true" /></a>
+        <button type="button" className="update-notice__link" onClick={() => void copyText(installCommand).then(() => {
+          setCopied(true); setFailure(null);
+        }).catch(() => setFailure('Could not copy the install command.'))}>{copied ? 'Copied' : 'Copy npm command'}</button>
+      </div> : null}
+      {failure ? <p className="provider-updates__error" role="alert">{failure}</p> : null}
+    </div>
+    <div className="update-notice__actions">
+      <button type="button" className="update-notice__button" disabled={busy} onClick={() => desktopState?.canInstall ? void install(version) : setManualOpen(!manualOpen)}>{busy ? 'Updating…' : manualOpen ? 'Hide' : 'Update'}</button>
+      <button type="button" className="update-notice__dismiss" disabled={busy} aria-label="Dismiss Mingle update" onClick={() => setDismissed(version)}><X size={15} aria-hidden="true" /></button>
+    </div>
   </aside>;
 }
 
@@ -77,7 +155,7 @@ export function AppUpdateSetting({ version, update }: { version: string; update:
         () => useMingle.getState().toast('success', 'Install command copied.'),
         () => useMingle.getState().toast('error', 'Could not copy the install command.'),
       )}><Copy size={13} /> Copy command</Button>
-      <a href={`https://github.com/AdithyanandanArun/Mingle-dev/releases/tag/v${encodeURIComponent(latest)}`} target="_blank" rel="noopener noreferrer">Download installer <ArrowUpRight size={13} aria-hidden="true" /></a>
+      <a href={releaseUrl(latest)} target="_blank" rel="noopener noreferrer">Download installer <ArrowUpRight size={13} aria-hidden="true" /></a>
     </div> : null}
   </>;
 }

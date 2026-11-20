@@ -43,6 +43,7 @@ export function ProviderUpdates({ noticeOnly = false, showNotice = true }: { not
       const result = await api.applyProviderUpdate(row.provider, row.installedVersion);
       readGeneration.current++; setRows((current) => current.map((item) => item.provider === row.provider ? result : item));
       if (result.status === 'updated') setCompleted((current) => [result, ...current.filter((item) => item.provider !== row.provider)]);
+      if (result.status === 'failed') setErrors((old) => ({ ...old, [row.provider]: result.message }));
     } catch (error) { setErrors((old) => ({ ...old, [row.provider]: errorMessage(error) })); }
     finally { setBusy(null); await load(); await useMingle.getState().refreshNow(); }
   };
@@ -61,19 +62,21 @@ export function ProviderUpdates({ noticeOnly = false, showNotice = true }: { not
     } catch (error) { setErrors((old) => ({ ...old, [row.provider]: restored ? `Previous installation selected, but provider refresh failed: ${errorMessage(error)}` : errorMessage(error) })); }
     finally { setBusy(null); }
   };
-  const available = rows.filter((row) => row.status === 'available' && !row.dismissed);
+  const available = rows.filter((row) => !row.dismissed && (row.status === 'available' || row.status === 'updating'
+    || (row.status === 'failed' && Boolean(errors[row.provider]))));
   return <>
     {noticeOnly && showNotice && (available.length || completed.length) ? <div className="provider-update-notices">
       {available.map((row) => <aside className="update-notice provider-update-notice" role="status" key={row.provider}>
         <span className="update-notice__icon"><Download size={15} /></span>
         <div className="update-notice__body"><div className="update-notice__header"><strong>{names[row.provider] ?? row.provider} update</strong><span className="update-notice__version">{row.latestVersion}</span></div>
-          <p>{row.method === 'unsupported' ? (row.instructions || row.message) : row.message}</p>
-          {busy === row.provider ? <p aria-live="polite">{row.progress || 'Installing and verifying the provider…'}</p> : null}
+          {busy === row.provider || row.status === 'updating'
+            ? <p>{row.progress || 'Installing and verifying the provider…'}</p>
+            : !errors[row.provider] ? <p>{row.method === 'unsupported' ? (row.instructions || row.message) : row.message}</p> : null}
           {errors[row.provider] ? <p className="provider-updates__error" role="alert">{errors[row.provider]}</p> : null}
         </div>
         <div className="update-notice__actions">
-          {row.method === 'native' || row.method === 'managed' ? <button type="button" className="update-notice__button" disabled={busy !== null} onClick={() => void update(row)}>{busy === row.provider ? 'Updating…' : 'Update'}</button> : <button type="button" className="update-notice__button" onClick={() => void copyText(row.instructions ?? row.message).catch((error) => setErrors((old) => ({ ...old, [row.provider]: errorMessage(error) })))}><Copy size={13} /> Copy</button>}
-          <button type="button" className="update-notice__dismiss" aria-label={`Dismiss ${row.provider} update`} onClick={() => void dismiss(row)}><X size={15} /></button>
+          {row.method === 'native' || row.method === 'managed' ? <button type="button" className="update-notice__button" disabled={busy !== null || row.status === 'updating'} onClick={() => void update(row)}>{busy === row.provider || row.status === 'updating' ? 'Updating…' : 'Update'}</button> : <button type="button" className="update-notice__button" onClick={() => void copyText(row.instructions ?? row.message).then(() => useMingle.getState().toast('success', 'Update instructions copied.')).catch((error) => setErrors((old) => ({ ...old, [row.provider]: errorMessage(error) })))}><Copy size={13} /> Copy</button>}
+          <button type="button" className="update-notice__dismiss" disabled={busy === row.provider || row.status === 'updating'} aria-label={`Dismiss ${row.provider} update`} onClick={() => void dismiss(row)}><X size={15} /></button>
         </div>
       </aside>)}
       {completed.map((row) => <aside className="update-notice update-notice--complete" role="status" key={`done-${row.provider}`}>
