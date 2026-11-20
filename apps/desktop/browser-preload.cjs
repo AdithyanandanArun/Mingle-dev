@@ -16,6 +16,13 @@ contextBridge.exposeInMainWorld('mingleWindowDecoration', Object.freeze({
     : Promise.reject(new Error('Invalid title bar choice.')),
 }));
 
+contextBridge.exposeInMainWorld('mingleAppUpdate', Object.freeze({
+  getState: () => ipcRenderer.invoke('mingle.app-update.state'),
+  install: version => typeof version === 'string' && /^\d{1,9}\.\d{1,9}\.\d{1,9}$/.test(version)
+    ? ipcRenderer.invoke('mingle.app-update.install', version) : Promise.reject(new Error('Invalid Mingle release version.')),
+  restart: () => ipcRenderer.invoke('mingle.app-update.restart'),
+}));
+
 // The main process enforces canonical base64url bytes. Sandboxed Electron preload Buffer shims
 // do not necessarily implement Node's base64url encoding, so this boundary checks its safe shape.
 function isProjectInvitationToken(token) {

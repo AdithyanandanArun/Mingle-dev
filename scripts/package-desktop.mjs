@@ -78,6 +78,8 @@ await rm(join(stage, 'resources/default_app.asar'), { force: true });
 const appDir = join(stage, 'resources/app');
 await mkdir(appDir, { recursive: true });
 await copyFile(join(root, 'apps/desktop/main.mjs'), join(appDir, 'main.mjs'));
+await copyFile(join(root, 'apps/desktop/app-update.mjs'), join(appDir, 'app-update.mjs'));
+await copyFile(join(root, 'packaging/npm/native-installer.mjs'), join(appDir, 'native-installer.mjs'));
 await copyFile(join(root, 'apps/desktop/shell-environment.mjs'), join(appDir, 'shell-environment.mjs'));
 await copyFile(join(root, 'apps/desktop/window-decoration.mjs'), join(appDir, 'window-decoration.mjs'));
 await copyFile(join(root, 'apps/desktop/window-decoration-ipc.mjs'), join(appDir, 'window-decoration-ipc.mjs'));

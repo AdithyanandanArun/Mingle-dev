@@ -13,6 +13,7 @@ import { createEmbeddedBrowserHost, hideOwnedEmbeddedView } from './embedded-bro
 import { readLoginPath } from './shell-environment.mjs';
 import { createWindowDecorationPreference } from './window-decoration.mjs';
 import { registerWindowDecorationIpc } from './window-decoration-ipc.mjs';
+import { createDesktopAppUpdate } from './app-update.mjs';
 
 const root = app.isPackaged ? join(process.resourcesPath, 'workspace') : fileURLToPath(new URL('../../', import.meta.url));
 const serverRoot = join(root, 'apps/server');
@@ -104,6 +105,18 @@ function isWorkspaceFrame(event) {
 registerWindowDecorationIpc({
   ipcMain, preference: windowDecoration,
   isAllowed: event => isLiveWindow(mainWindow) && event.sender === uiContents(mainWindow) && isWorkspaceFrame(event),
+});
+
+const nativeInstaller = await import(new URL(app.isPackaged ? './native-installer.mjs' : '../../packaging/npm/native-installer.mjs', import.meta.url));
+const desktopUpdate = createDesktopAppUpdate({ app, installer: nativeInstaller, resourcesPath: process.resourcesPath, workspace: () => workspaceUrl });
+const updateAllowed = event => isLiveWindow(mainWindow) && event.sender === uiContents(mainWindow) && isWorkspaceFrame(event);
+ipcMain.handle('mingle.app-update.state', event => updateAllowed(event) ? desktopUpdate.state() : null);
+ipcMain.handle('mingle.app-update.install', (event, version) => !quitting && updateAllowed(event) ? desktopUpdate.install(version) : null);
+ipcMain.handle('mingle.app-update.restart', async event => {
+  if (!updateAllowed(event) || !(await desktopUpdate.state()).restartVersion || quitting) return false;
+  app.relaunch();
+  app.quit();
+  return true;
 });
 
 function openExternalWebTarget(target, origin) {
