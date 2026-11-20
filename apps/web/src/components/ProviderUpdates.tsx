@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { ArrowUpRight, Check, Copy, RefreshCw, X } from 'lucide-react';
+import { Check, Copy, Download, RefreshCw, X } from 'lucide-react';
 import type { ProviderUpdateInfo } from '@mingle/contracts';
 import { api, errorMessage } from '../lib/api';
 import { PROVIDER_NAMES } from '../lib/providers';
@@ -14,6 +14,7 @@ export function ProviderUpdates({ noticeOnly = false, showNotice = true }: { not
   const [rows, setRows] = useState<ProviderUpdateInfo[]>([]);
   const [busy, setBusy] = useState<string | null>(null);
   const [errors, setErrors] = useState<Record<string, string>>({});
+  const [completed, setCompleted] = useState<ProviderUpdateInfo[]>([]);
   const load = useCallback(async (signal?: AbortSignal) => {
     const generation = ++readGeneration.current;
     try { const result = await api.providerUpdates(signal); if (!Array.isArray(result.providers)) throw new Error('Provider update status is unavailable. Check again in Settings.'); if (!signal?.aborted && generation === readGeneration.current) { setRows(result.providers); setErrors((old) => ({ ...old, load: '' })); } }
@@ -41,6 +42,7 @@ export function ProviderUpdates({ noticeOnly = false, showNotice = true }: { not
     try {
       const result = await api.applyProviderUpdate(row.provider, row.installedVersion);
       readGeneration.current++; setRows((current) => current.map((item) => item.provider === row.provider ? result : item));
+      if (result.status === 'updated') setCompleted((current) => [result, ...current.filter((item) => item.provider !== row.provider)]);
     } catch (error) { setErrors((old) => ({ ...old, [row.provider]: errorMessage(error) })); }
     finally { setBusy(null); await load(); await useMingle.getState().refreshNow(); }
   };
@@ -61,11 +63,22 @@ export function ProviderUpdates({ noticeOnly = false, showNotice = true }: { not
   };
   const available = rows.filter((row) => row.status === 'available' && !row.dismissed);
   return <>
-    {noticeOnly && showNotice && available.length ? <div className="provider-update-notices">
+    {noticeOnly && showNotice && (available.length || completed.length) ? <div className="provider-update-notices">
       {available.map((row) => <aside className="update-notice provider-update-notice" role="status" key={row.provider}>
-        <div><strong>{names[row.provider] ?? row.provider} update</strong><span className="update-notice__version">{row.latestVersion}</span>{errors[row.provider] ? <p role="alert">{errors[row.provider]}</p> : null}</div>
-        <button type="button" className="update-notice__link" onClick={() => window.dispatchEvent(new CustomEvent('mingle:open-provider-settings'))}>Settings <ArrowUpRight size={14} /></button>
-        <button type="button" className="update-notice__dismiss" aria-label={`Dismiss ${row.provider} update`} onClick={() => void dismiss(row)}><X size={15} /></button>
+        <span className="update-notice__icon"><Download size={15} /></span>
+        <div className="update-notice__body"><div className="update-notice__header"><strong>{names[row.provider] ?? row.provider} update</strong><span className="update-notice__version">{row.latestVersion}</span></div>
+          <p>{row.method === 'unsupported' ? (row.instructions || row.message) : row.message}</p>
+          {busy === row.provider ? <p aria-live="polite">{row.progress || 'Installing and verifying the provider…'}</p> : null}
+          {errors[row.provider] ? <p className="provider-updates__error" role="alert">{errors[row.provider]}</p> : null}
+        </div>
+        <div className="update-notice__actions">
+          {row.method === 'native' || row.method === 'managed' ? <button type="button" className="update-notice__button" disabled={busy !== null} onClick={() => void update(row)}>{busy === row.provider ? 'Updating…' : 'Update'}</button> : <button type="button" className="update-notice__button" onClick={() => void copyText(row.instructions ?? row.message).catch((error) => setErrors((old) => ({ ...old, [row.provider]: errorMessage(error) })))}><Copy size={13} /> Copy</button>}
+          <button type="button" className="update-notice__dismiss" aria-label={`Dismiss ${row.provider} update`} onClick={() => void dismiss(row)}><X size={15} /></button>
+        </div>
+      </aside>)}
+      {completed.map((row) => <aside className="update-notice update-notice--complete" role="status" key={`done-${row.provider}`}>
+        <span className="update-notice__icon"><Check size={15} /></span><div className="update-notice__body"><div className="update-notice__header"><strong>{names[row.provider] ?? row.provider} updated</strong><span className="update-notice__version">{row.installedVersion}</span></div><p>{row.message}</p></div>
+        <button type="button" className="update-notice__dismiss" aria-label={`Dismiss ${row.provider} update complete`} onClick={() => setCompleted((current) => current.filter((item) => item.provider !== row.provider))}><X size={15} /></button>
       </aside>)}
     </div> : null}
     {!noticeOnly ? <section className="provider-updates" aria-label="Provider CLI updates">
