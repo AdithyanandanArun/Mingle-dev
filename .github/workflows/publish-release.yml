@@ -1,6 +1,6 @@
 name: Publish desktop release
 
-# Publishes a stable GitHub release from already-built, already-checked packaging runs.
+# Publishes a stable GitHub release and its matching npm installer.
 # The release tag must already exist and point at the commit both runs built.
 on:
   workflow_dispatch:
@@ -19,6 +19,10 @@ on:
         type: string
       include_arch:
         description: Include the verified Arch package (required for 0.0.8 and later)
+        type: boolean
+        default: true
+      publish_npm:
+        description: Publish the matching installer to npm after GitHub succeeds
         type: boolean
         default: true
 
@@ -130,6 +134,27 @@ jobs:
             tar --zstd -xOf "$arch_package" opt/mingle/resources/build-info.json | jq -e --arg v "$VERSION" '.version == $v and .target == "linux-x64"'
             printf '%s\n' "$arch_package" "$arch_package.sha256" >> assets.txt
           fi
+      - uses: actions/setup-node@v6
+        if: ${{ inputs.publish_npm && github.repository == 'AdithyanandanArun/Mingle-dev' && github.ref == 'refs/heads/main' }}
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Stage npm installer from verified packages
+        if: ${{ inputs.publish_npm && github.repository == 'AdithyanandanArun/Mingle-dev' && github.ref == 'refs/heads/main' }}
+        shell: bash
+        run: |
+          mkdir npm-assets npm-package
+          cp linux/*.deb linux/*.deb.sha256 windows/*.exe windows/*.exe.sha256 arch/*.pkg.tar.zst arch/*.pkg.tar.zst.sha256 npm-assets/
+          stage=$(node scripts/package-npm.mjs npm-assets)
+          test "$(node -p 'require(process.argv[1]).version' "$stage/package.json")" = "$VERSION"
+          npm pack "$stage" --pack-destination npm-package
+      - uses: actions/upload-artifact@v4
+        if: ${{ inputs.publish_npm && github.repository == 'AdithyanandanArun/Mingle-dev' && github.ref == 'refs/heads/main' }}
+        with:
+          name: mingle-npm-package
+          path: npm-package/*.tgz
+          if-no-files-found: error
+          overwrite: true
       - name: Publish or verify the release
         shell: bash
         run: |
@@ -166,3 +191,69 @@ jobs:
             gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false --prerelease=false --latest
           fi
           echo "Published: https://github.com/$GITHUB_REPOSITORY/releases/tag/$RELEASE_TAG" >> "$GITHUB_STEP_SUMMARY"
+
+  npm:
+    needs: publish
+    if: ${{ inputs.publish_npm && github.repository == 'AdithyanandanArun/Mingle-dev' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+    concurrency:
+      group: npm-mingle-stable
+      cancel-in-progress: false
+    env:
+      VERSION: ${{ inputs.version }}
+    steps:
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: mingle-npm-package
+          path: npm-package
+      - name: Publish and verify npm installer
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          stable='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
+          [[ "$VERSION" =~ $stable ]]
+          package="npm-package/mingledev-mingle-$VERSION.tgz"
+          test -s "$package"
+          tar -xOzf "$package" package/package.json | jq -e --arg v "$VERSION" \
+            '.name == "@mingledev/mingle" and .version == $v'
+          integrity="sha512-$(openssl dgst -sha512 -binary "$package" | openssl base64 -A)"
+          read_registry() {
+            curl --fail --silent --show-error --retry 2 --max-time 15 \
+              --header 'Accept: application/vnd.npm.install-v1+json' \
+              https://registry.npmjs.org/@mingledev%2fmingle -o registry.json
+          }
+          read_registry
+          latest=$(jq -er '."dist-tags".latest' registry.json)
+          [[ "$latest" =~ $stable ]]
+          if jq -e --arg v "$VERSION" '.versions | has($v)' registry.json >/dev/null; then
+            jq -e --arg v "$VERSION" --arg digest "$integrity" \
+              '.versions[$v].dist.integrity == $digest' registry.json
+            echo "Already published and verified: @mingledev/mingle@$VERSION" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          if test "$VERSION" = "$latest" || test "$(printf '%s\n' "$latest" "$VERSION" | sort -V | tail -1)" != "$VERSION"; then
+            echo "Refusing to move npm latest from $latest to $VERSION" >&2
+            exit 1
+          fi
+          test "$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName --jq .tagName)" = "v$VERSION"
+          npm publish "$package" --access public --tag latest
+          for attempt in {1..30}; do
+            if read_registry && jq -e --arg v "$VERSION" --arg digest "$integrity" \
+              '."dist-tags".latest == $v and .versions[$v].dist.integrity == $digest' registry.json >/dev/null; then
+              echo "Published and verified: https://www.npmjs.com/package/@mingledev/mingle/v/$VERSION" >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+            sleep 15
+          done
+          echo "npm accepted the publish, but the expected latest version and integrity are not visible yet" >&2
+          exit 1
