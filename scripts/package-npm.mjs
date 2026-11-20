@@ -34,7 +34,7 @@ for (const [target, name] of Object.entries(names)) {
 await mkdir(release, { recursive: true });
 const packageDir = await mkdtemp(join(release, 'npm-stage-'));
 const manifest = {
-  name: '@mingedevteam/mingle',
+  name: '@mingledev/mingle',
   version,
   description: 'Install the Mingle desktop app for your platform',
   license: 'MIT',

@@ -3,13 +3,13 @@
 Use npm to install the native Mingle desktop app. The installer fetches the exact desktop release that matches this package version from Mingle's GitHub releases and checks its size and SHA-256 before opening it. npm installation itself only installs the command.
 
 ```sh
-npx @mingedevteam/mingle install
+npx @mingledev/mingle install
 ```
 
 For a global command:
 
 ```sh
-npm install -g @mingedevteam/mingle
+npm install -g @mingledev/mingle
 mingle-install install
 ```
 
