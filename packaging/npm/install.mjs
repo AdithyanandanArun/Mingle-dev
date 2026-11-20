@@ -12,7 +12,6 @@ import { pathToFileURL } from 'node:url';
 const repository = 'https://github.com/AdithyanandanArun/Mingle-dev';
 
 export function installerTarget(platform, arch, osRelease = '') {
-  if (platform === 'darwin' && ['arm64', 'x64'].includes(arch)) return `darwin-${arch}`;
   if (platform === 'win32' && arch === 'x64') return 'win32-x64';
   if (platform === 'linux' && arch === 'x64') {
     const families = osRelease.split('\n').flatMap(line => {
@@ -26,7 +25,7 @@ export function installerTarget(platform, arch, osRelease = '') {
 }
 
 export async function downloadInstaller(version, asset, destination, request = fetch) {
-  if (!/^\d+\.\d+\.\d+$/.test(version) || !/^[A-Za-z0-9._-]+\.(?:deb|exe|pkg|pkg\.tar\.zst)$/.test(asset.name)
+  if (!/^\d+\.\d+\.\d+$/.test(version) || !/^[A-Za-z0-9._-]+\.(?:deb|exe|pkg\.tar\.zst)$/.test(asset.name)
     || !/^[a-f0-9]{64}$/.test(asset.sha256) || !Number.isSafeInteger(asset.size) || asset.size <= 0) {
     throw new Error('Invalid installer manifest.');
   }
@@ -79,8 +78,6 @@ async function main([command, ...args]) {
     if (args[0] === '--download-only') {
       keep = true;
       console.log(path);
-    } else if (target.startsWith('darwin-')) {
-      await run('open', ['-W', path]);
     } else if (target === 'win32-x64') {
       await run(path, []);
     } else {

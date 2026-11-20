@@ -12,8 +12,6 @@ const names = {
   'arch-x64': `mingle-bin-${version}-1-x86_64.pkg.tar.zst`,
   'deb-x64': `mingle_${version}_amd64.deb`,
   'win32-x64': `mingle-${version}-win32-x64-setup.exe`,
-  'darwin-arm64': `mingle-${version}-darwin-arm64.pkg`,
-  'darwin-x64': `mingle-${version}-darwin-x64.pkg`,
 };
 
 const assets = {};

@@ -7,8 +7,8 @@ import { test } from 'node:test';
 import { downloadInstaller, installerTarget } from './install.mjs';
 
 test('selects only supported native installers', () => {
-  assert.equal(installerTarget('darwin', 'arm64'), 'darwin-arm64');
-  assert.equal(installerTarget('darwin', 'x64'), 'darwin-x64');
+  assert.throws(() => installerTarget('darwin', 'arm64'), /No npm desktop installer/);
+  assert.throws(() => installerTarget('darwin', 'x64'), /No npm desktop installer/);
   assert.equal(installerTarget('win32', 'x64'), 'win32-x64');
   assert.equal(installerTarget('linux', 'x64', 'ID=ubuntu\nID_LIKE=debian'), 'deb-x64');
   assert.equal(installerTarget('linux', 'x64', 'ID=manjaro\nID_LIKE="arch manjaro"'), 'arch-x64');
