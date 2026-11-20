@@ -38,12 +38,13 @@ const manifest = {
   license: 'MIT',
   type: 'module',
   bin: { 'mingle-install': 'install.mjs' },
-  files: ['install.mjs', 'assets.json'],
+  files: ['install.mjs', 'native-installer.mjs', 'assets.json'],
   engines: { node: '>=22' },
   repository: { type: 'git', url: 'git+https://github.com/AdithyanandanArun/Mingle-dev.git' },
   publishConfig: { access: 'public', registry: 'https://registry.npmjs.org/' },
 };
 await copyFile(join(root, 'packaging/npm/install.mjs'), join(packageDir, 'install.mjs'));
+await copyFile(join(root, 'packaging/npm/native-installer.mjs'), join(packageDir, 'native-installer.mjs'));
 await copyFile(join(root, 'packaging/npm/README.md'), join(packageDir, 'README.md'));
 await copyFile(join(root, 'LICENSE'), join(packageDir, 'LICENSE'));
 await writeFile(join(packageDir, 'assets.json'), JSON.stringify({ version, assets }, null, 2) + '\n');

@@ -4,7 +4,7 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { downloadInstaller, installerTarget } from './install.mjs';
+import { downloadInstaller, installerTarget } from './native-installer.mjs';
 
 test('selects only supported native installers', () => {
   assert.throws(() => installerTarget('darwin', 'arm64'), /No npm desktop installer/);
