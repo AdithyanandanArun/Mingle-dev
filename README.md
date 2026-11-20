@@ -47,16 +47,24 @@ Mingle brings that work into a desktop workspace. Start with one agent, add othe
 
 ### Install the desktop app
 
-[**Download the latest release →**](https://github.com/AdithyanandanArun/Mingle-dev/releases/latest)
+Run the npm installer with Node.js 22 or later.
+
+```sh
+npx @mingledev/mingle install
+```
+
+The installer fetches the matching native package from GitHub, verifies its SHA-256 checksum, and starts installation. It supports Windows x64, Debian/Ubuntu amd64, and Arch Linux x86-64. Add `--download-only` to save the verified installer and print its path. [View the npm package](https://www.npmjs.com/package/@mingledev/mingle)
+
+Each installer and archive has a SHA-256 checksum file. [Download the latest release on GitHub](https://github.com/AdithyanandanArun/Mingle-dev/releases/latest)
 
 | Platform | Download |
 | --- | --- |
-| Windows x64 | Per-user `.exe` installer |
+| Windows x64 | Unsigned per-user `.exe` installer |
 | Ubuntu / Debian amd64 | `.deb` package |
 | Arch Linux x86-64 | `.pkg.tar.zst` package |
-| Other Linux x86-64 | `.tar.gz` archive; system dependencies are required |
+| Other Linux x86-64 | `.tar.gz` archive with system dependencies required |
 
-Packages include Electron, Node, the local server, and the built UI. **Provider tools and provider accounts are configured separately.** Windows installers are currently unsigned; macOS packages and automatic updates are not available yet. See [installation and distribution](docs/desktop-distribution.md) for details.
+Desktop packages bundle Electron, Node.js, the local server, and the web UI. Configure provider tools and accounts separately. There is currently no macOS package. For package formats and system dependencies, see [desktop distribution](docs/desktop-distribution.md).
 
 1. **Open Mingle.** The welcome screen walks you through setup. A Mingle account is optional for local work.
 2. **Connect a provider** in **Settings → Providers** and check its reported availability.
@@ -69,6 +77,12 @@ Packages include Electron, Node, the local server, and the built UI. **Provider 
 ![Mingle’s welcome screen with optional account sign-in and local setup guidance, shown in the Example workspace.](docs/images/welcome.png)
 
 </details>
+
+### Update Mingle
+
+Mingle 0.1.6 and later check npm for new versions and show an update notice. To check manually, open **Settings → General → Mingle updates** and select **Check for updates**.
+
+On supported Debian/Ubuntu and Arch desktop package installs, select **Update** and approve the system prompt if asked. Select **Restart** when the update is ready. You can also upgrade by running the npm installer again on a supported platform or by downloading the latest installer or archive. Upgrades retain your workspace data. [GitHub release downloads](https://github.com/AdithyanandanArun/Mingle-dev/releases/latest)
 
 ### Provider setup
 
