@@ -21,6 +21,7 @@ import { TeamStructureProvider } from './lib/team-structure-context';
 import { teamSessionsApi } from './lib/team-sessions';
 import { Onboarding } from './components/onboarding/Onboarding';
 import { ProviderUpdates } from './components/ProviderUpdates';
+import { AppUpdateNotice, useAppUpdate } from './components/AppUpdate';
 
 declare global {
   interface Window {
@@ -116,6 +117,7 @@ export function App() {
   const invitationSequence = useRef(0);
   const onboardingReturnFocus = useRef<HTMLElement | null>(null);
   const browserPopoutId = new URLSearchParams(window.location.search).get('browserPopout');
+  const appUpdate = useAppUpdate(browserPopoutId ? undefined : boot?.version);
   const onboardingVisible = onboardingOpen && !browserPopoutId && !activeInvitation && (!invitationHandledThisLaunch || onboardingReplayRequested);
   const onboardingVisibleRef = useRef(onboardingVisible);
   onboardingVisibleRef.current = onboardingVisible;
@@ -249,7 +251,10 @@ export function App() {
       <main className="main" id="main" tabIndex={-1}>
         <Header />
         <ConnectionBanner />
-        <ProviderUpdates noticeOnly />
+        <div className="update-notices">
+          <AppUpdateNotice info={appUpdate.info} active={view !== 'settings'} />
+          <ProviderUpdates noticeOnly showNotice={view !== 'settings'} />
+        </div>
         <div className="main__body">
           <Boundary label="This view">
             {view === 'workspace' ? <Workspace /> : null}
@@ -257,7 +262,7 @@ export function App() {
             {view === 'activity' ? <ActivityView /> : null}
             {view === 'map' ? <Suspense fallback={<div className="editor__state"><Spinner label="Loading map" /></div>}><AgentMap /></Suspense> : null}
             {view === 'team-structure' ? <Suspense fallback={<div className="editor__state"><Spinner label="Loading team structure" /></div>}><TeamStructure /></Suspense> : null}
-            {view === 'settings' ? <SettingsPage onReplayOnboarding={replayOnboarding} /> : null}
+            {view === 'settings' ? <SettingsPage onReplayOnboarding={replayOnboarding} appUpdate={appUpdate} /> : null}
           </Boundary>
         </div>
       </main>

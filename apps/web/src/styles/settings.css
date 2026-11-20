@@ -100,14 +100,15 @@
 .account-settings__connection form { display: grid; gap: 9px; margin-top: 18px; justify-items: start; }
 .account-settings__connection label { font-size: 12px; color: var(--fg-1); }
 .account-settings__connection input { width: 100%; margin-bottom: 9px; }
-.provider-update-notices { position: fixed; z-index: 80; top: calc(var(--header-h) + 12px); right: 14px; display: grid; gap: 8px; width: min(300px, calc(100vw - 28px)); pointer-events: none; }
-.provider-update-notice { display: flex; align-items: center; gap: 9px; padding: 9px 10px; border: 1px solid color-mix(in srgb, var(--accent) 38%, var(--line-soft)); border-radius: 9px; background: color-mix(in srgb, var(--bg-1) 96%, var(--accent)); box-shadow: 0 8px 24px #0003; pointer-events: auto; animation: provider-update-slide-in 220ms ease-out both; }
-.provider-update-notice > div { flex: 1; min-width: 0; }
-.provider-update-notice strong { font-size: 11px; color: var(--fg-0); }
-.provider-update-notice__version { margin-left: 6px; color: var(--fg-2); font: 10px var(--font-mono); }
-.provider-update-notice p { margin-top: 4px; font-size: 11px; line-height: 1.5; color: var(--fg-2); }
-.provider-update-notice__link, .provider-update-notice__dismiss { display: inline-flex; align-items: center; gap: 5px; border: 0; background: transparent; color: var(--accent); font-size: 11px; cursor: pointer; }
-.provider-update-notice__dismiss { color: var(--fg-3); padding: 5px; }
+.update-notices { position: fixed; z-index: 80; top: calc(var(--header-h) + 12px); right: 14px; display: grid; gap: 8px; width: min(300px, calc(100vw - 28px)); pointer-events: none; }
+.provider-update-notices { display: grid; gap: 8px; }
+.update-notice { display: flex; align-items: center; gap: 9px; padding: 9px 10px; border: 1px solid color-mix(in srgb, var(--accent) 38%, var(--line-soft)); border-radius: 9px; background: color-mix(in srgb, var(--bg-1) 96%, var(--accent)); box-shadow: 0 8px 24px #0003; pointer-events: auto; animation: provider-update-slide-in 220ms ease-out both; }
+.update-notice > div { flex: 1; min-width: 0; }
+.update-notice strong { font-size: 11px; color: var(--fg-0); }
+.update-notice__version { margin-left: 6px; color: var(--fg-2); font: 10px var(--font-mono); }
+.update-notice p { margin-top: 4px; font-size: 11px; line-height: 1.5; color: var(--fg-2); }
+.update-notice__link, .update-notice__dismiss { display: inline-flex; align-items: center; gap: 5px; border: 0; background: transparent; color: var(--accent); font-size: 11px; cursor: pointer; }
+.update-notice__dismiss { color: var(--fg-3); padding: 5px; }
 .provider-updates { margin: 2px 0 22px; border-bottom: 1px solid var(--line-soft); padding-bottom: 18px; }
 .provider-updates > header { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding-bottom: 10px; }
 .provider-updates h2 { font-size: 15px; color: var(--fg-0); }
@@ -122,6 +123,10 @@
 .provider-updates__error { color: var(--danger, #e07b71) !important; }
 .provider-updates__success { color: var(--ok) !important; }
 @keyframes provider-update-slide-in { from { opacity: 0; transform: translateX(18px); } to { opacity: 1; transform: translateX(0); } }
-@media (max-width: 620px) { .provider-update-notices { right: 10px; width: min(300px, calc(100vw - 20px)); } .provider-updates > header, .provider-updates__row { align-items: flex-start; flex-direction: column; } .provider-updates__actions { width: 100%; flex-wrap: wrap; } }
-@media (prefers-reduced-motion: reduce) { .provider-update-notice { animation: none; } }
+@media (max-width: 620px) { .update-notices { right: 10px; width: min(300px, calc(100vw - 20px)); } .provider-updates > header, .provider-updates__row { align-items: flex-start; flex-direction: column; } .provider-updates__actions { width: 100%; flex-wrap: wrap; } }
+@media (prefers-reduced-motion: reduce) { .update-notice { animation: none; } }
 @media (max-width: 620px) { .account-settings__identity { flex-wrap: wrap; } .account-settings__identity-copy { flex-basis: calc(100% - 54px); } .account-settings__identity > button { margin-left: 54px; } .account-settings__storage { flex-wrap: wrap; } .account-settings__storage > button { margin-left: 40px; } .settings-page__tabs { overflow-x: auto; gap: 20px; } .settings-page__tabs button { flex: none; } }
+
+.app-update-install { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding: 0 0 12px; }
+.app-update-install code { font: 11px var(--font-mono); color: var(--fg-1); overflow-wrap: anywhere; }
+.app-update-install a { display: inline-flex; align-items: center; gap: 4px; color: var(--fg-1); font-size: 11px; }

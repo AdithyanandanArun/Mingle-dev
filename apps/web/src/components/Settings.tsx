@@ -19,6 +19,7 @@ import { TeamWorkspace } from './distributed/TeamWorkspace';
 import { ProviderUpdates } from './ProviderUpdates';
 import { UsageSettings } from './UsageSettings';
 import { WindowDecorationSetting } from './WindowDecorationSetting';
+import { AppUpdateSetting, type useAppUpdate } from './AppUpdate';
 
 const CATEGORIES: { id: SettingsSection; name: string }[] = [
   { id: 'general', name: 'General' }, { id: 'account', name: 'Account' }, { id: 'team', name: 'Team workspace' }, { id: 'project', name: 'Project' }, { id: 'agents', name: 'Agents' }, { id: 'providers', name: 'Providers' }, { id: 'usage', name: 'Usage' }, { id: 'browser', name: 'Browser' }, { id: 'appearance', name: 'Appearance' },
@@ -38,7 +39,7 @@ function ProviderStatus({ provider, settings, disabled, onSavePath }: { provider
   </section>;
 }
 
-export function SettingsPage({ onReplayOnboarding }: { onReplayOnboarding: () => void }) {
+export function SettingsPage({ onReplayOnboarding, appUpdate }: { onReplayOnboarding: () => void; appUpdate?: ReturnType<typeof useAppUpdate> }) {
   const boot = useMingle((s) => s.boot);
   const settings = boot?.settings;
   const category = useMingle((s) => s.settingsSection);
@@ -139,6 +140,7 @@ export function SettingsPage({ onReplayOnboarding }: { onReplayOnboarding: () =>
       {category === 'usage' ? <UsageSettings /> : null}
       {category === 'team' ? <TeamWorkspace initialTab={teamTab} /> : null}
       {category === 'general' ? <div className="settings-page__section">
+        {appUpdate ? <AppUpdateSetting version={boot.version} update={appUpdate} /> : null}
         <div className="settings-page__section-head"><h2>New sessions</h2><p>Defaults for your next session. Existing conversations keep their own settings.</p></div>
         <SettingRow title="Provider" description="The agent used when you start a session." htmlFor="st-provider">
           <SelectMenu id="st-provider" label="Default provider" value={settings.defaultProvider} disabled={disabled} options={boot.providers.map((provider) => ({ value: provider.id, label: PROVIDER_NAMES[provider.id], description: provider.available ? 'Available' : provider.reason ?? 'Needs setup' }))} onChange={(value) => updateDefaultProvider(value as AppSettings['defaultProvider'])} />

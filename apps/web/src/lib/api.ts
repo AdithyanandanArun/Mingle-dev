@@ -6,7 +6,7 @@ import type { DelegatedSubagent, StartSubagent } from '@mingle/contracts';
 import type { AccountState, AccountConnection, AccountPreferences, SavedAccountPreferences, AttachmentRef, NativeActionCatalog } from '@mingle/contracts';
 import type { ProjectCollaborationSnapshot, SendTeamChatMessage, TeamChatSnapshot, TeamChatMessage } from '@mingle/contracts';
 import type { ProgressBoardResponse, RunReviewEvidence } from '@mingle/contracts';
-import type { SessionWorkflow, StartSessionWorkflowInput, ResumeSessionWorkflowInput, ProviderUpdateInfo, ProviderUpdatesSnapshot } from '@mingle/contracts';
+import type { AppUpdateInfo, SessionWorkflow, StartSessionWorkflowInput, ResumeSessionWorkflowInput, ProviderUpdateInfo, ProviderUpdatesSnapshot } from '@mingle/contracts';
 import type { AccountUsageProvider, ProviderAccountUsageSnapshot, ProviderResetResult, RedeemProviderResetInput } from '@mingle/contracts';
 import type {
   ContextCompactionResult as ContractContextCompactionResult,
@@ -285,6 +285,7 @@ export const api = {
   decideApproval: (id: string, decision: 'approved' | 'denied') => json<Approval>(`/api/approvals/${encodeURIComponent(id)}`, 'POST', { decision }),
   updateSettings: (patch: Partial<AppSettings>) => json<AppSettings>('/api/settings', 'PATCH', patch),
   refreshProviders: () => json<ProviderInfo[]>('/api/providers/refresh', 'POST'),
+  appUpdate: (refresh: boolean, signal: AbortSignal) => json<AppUpdateInfo>(`/api/app-update${refresh ? '?refresh=1' : ''}`, 'GET', undefined, signal),
   providerUpdates: (signal?: AbortSignal) => json<ProviderUpdatesSnapshot>('/api/providers/updates', 'GET', undefined, signal),
   checkProviderUpdates: (provider?: ProviderInfo['id']) => json<ProviderUpdateInfo | ProviderUpdatesSnapshot>('/api/providers/updates/check', 'POST', provider ? { provider } : {}),
   applyProviderUpdate: (provider: ProviderInfo['id'], expectedVersion: string | null) => json<ProviderUpdateInfo>('/api/providers/updates/apply', 'POST', { provider, expectedVersion }),

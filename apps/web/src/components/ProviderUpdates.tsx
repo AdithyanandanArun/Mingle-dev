@@ -9,7 +9,7 @@ import { executableSetting } from './ProviderExecutableSetting';
 import { useMingle } from '../store/store';
 
 const names = PROVIDER_NAMES as Record<string, string>;
-export function ProviderUpdates({ noticeOnly = false }: { noticeOnly?: boolean }) {
+export function ProviderUpdates({ noticeOnly = false, showNotice = true }: { noticeOnly?: boolean; showNotice?: boolean }) {
   const readGeneration = useRef(0);
   const [rows, setRows] = useState<ProviderUpdateInfo[]>([]);
   const [busy, setBusy] = useState<string | null>(null);
@@ -61,11 +61,11 @@ export function ProviderUpdates({ noticeOnly = false }: { noticeOnly?: boolean }
   };
   const available = rows.filter((row) => row.status === 'available' && !row.dismissed);
   return <>
-    {noticeOnly && available.length ? <div className="provider-update-notices" aria-live="polite">
-      {available.map((row) => <aside className="provider-update-notice" role="status" key={row.provider}>
-        <div><strong>{names[row.provider] ?? row.provider} update</strong><span className="provider-update-notice__version">{row.latestVersion}</span>{errors[row.provider] ? <p role="alert">{errors[row.provider]}</p> : null}</div>
-        <button type="button" className="provider-update-notice__link" onClick={() => window.dispatchEvent(new CustomEvent('mingle:open-provider-settings'))}>Settings <ArrowUpRight size={14} /></button>
-        <button type="button" className="provider-update-notice__dismiss" aria-label={`Dismiss ${row.provider} update`} onClick={() => void dismiss(row)}><X size={15} /></button>
+    {noticeOnly && showNotice && available.length ? <div className="provider-update-notices">
+      {available.map((row) => <aside className="update-notice provider-update-notice" role="status" key={row.provider}>
+        <div><strong>{names[row.provider] ?? row.provider} update</strong><span className="update-notice__version">{row.latestVersion}</span>{errors[row.provider] ? <p role="alert">{errors[row.provider]}</p> : null}</div>
+        <button type="button" className="update-notice__link" onClick={() => window.dispatchEvent(new CustomEvent('mingle:open-provider-settings'))}>Settings <ArrowUpRight size={14} /></button>
+        <button type="button" className="update-notice__dismiss" aria-label={`Dismiss ${row.provider} update`} onClick={() => void dismiss(row)}><X size={15} /></button>
       </aside>)}
     </div> : null}
     {!noticeOnly ? <section className="provider-updates" aria-label="Provider CLI updates">
