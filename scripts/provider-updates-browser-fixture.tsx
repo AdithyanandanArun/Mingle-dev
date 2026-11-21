@@ -14,11 +14,10 @@ Object.defineProperty(window, 'WebSocket', { configurable: true, value: ExampleI
 const { ProviderUpdates } = await import('../apps/web/src/components/ProviderUpdates');
 function Fixture() {
   const [showCompact, setShowCompact] = useState(false);
-  window.addEventListener('mingle:show-compact-updates', () => setShowCompact(true), { once: true });
   return <main style={{ maxWidth: 850, margin: '24px auto', padding: 16 }}>
-  <h1>Example provider updates</h1><p>Synthetic CLI versions; no installed provider is modified.</p>
-  {showCompact ? <ProviderUpdates noticeOnly /> : null}
-  <ProviderUpdates />
+    <h1>Example provider updates</h1><p>Synthetic CLI versions; no installed provider is modified.</p>
+    {showCompact ? <ProviderUpdates noticeOnly /> : <button type="button" onClick={() => setShowCompact(true)}>Show Example compact notices</button>}
+    <ProviderUpdates />
   </main>;
 }
 createRoot(document.getElementById('root')!).render(<Fixture />);

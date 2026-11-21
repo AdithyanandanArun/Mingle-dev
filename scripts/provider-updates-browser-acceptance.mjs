@@ -79,13 +79,17 @@ try {
   assert.equal(await page.getByRole('button', { name: 'Check again', exact: true }).isDisabled(), true);
   finishUpdate(); await page.getByText('Updated the Example configured CLI.', { exact: true }).waitFor();
   assert.equal(applies, 1);
-  await page.getByRole('button', { name: 'Dismiss claude update', exact: true }).click();
+  const claudeRow = page.locator('.provider-updates__row').filter({ hasText: 'Claude' });
+  const dismissClaude = claudeRow.getByRole('button', { name: 'Dismiss', exact: true });
+  await dismissClaude.click();
+  await dismissClaude.waitFor({ state: 'hidden' });
   await page.reload(); await page.getByRole('heading', { name: 'Provider CLI updates' }).waitFor();
-  assert.equal(await page.getByText('Claude 1.1.0 is available', { exact: true }).count(), 0);
+  await claudeRow.getByText('Installed: 1.0.0 · Latest stable: 1.1.0', { exact: true }).waitFor();
+  assert.equal(await dismissClaude.count(), 0);
   rows[1] = { ...rows[1], latestVersion: '1.2.0', dismissed: false };
   await page.evaluate(() => window.dispatchEvent(new Event('mingle:provider-updates-changed')));
-  const claudeRow = page.locator('.provider-updates__row').filter({ hasText: 'Claude' });
   await claudeRow.getByText('Installed: 1.0.0 · Latest stable: 1.2.0', { exact: true }).waitFor();
+  await dismissClaude.waitFor();
   assert.equal(await claudeRow.getByRole('button', { name: 'Update', exact: true }).count(), 0);
   await claudeRow.getByText('Use the original package manager to update Claude Code.', { exact: true }).waitFor();
   assert.equal(await claudeRow.getByText('A newer release is available.', { exact: true }).count(), 1);
@@ -135,8 +139,9 @@ try {
     assert.equal(await managedRow.getByRole('button', { name: 'Use previous installation', exact: true }).count(), 0);
   }
   assert.equal(applies, 7); assert.equal(settingWrites.length, 4);
+  managedProvider = null;
   rows = [{ ...row, provider: 'codex', method: 'native' }];
-  await page.evaluate(() => window.dispatchEvent(new Event('mingle:show-compact-updates')));
+  await page.getByRole('button', { name: 'Show Example compact notices' }).click();
   await page.evaluate(() => window.dispatchEvent(new Event('mingle:provider-updates-changed')));
   const compactNotice = page.locator('.provider-update-notice').filter({ hasText: 'Codex update' });
   await compactNotice.getByRole('button', { name: 'Update', exact: true }).click();
