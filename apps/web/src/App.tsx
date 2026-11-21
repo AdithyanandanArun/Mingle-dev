@@ -253,7 +253,7 @@ export function App() {
         <ConnectionBanner />
         <div className="update-notice-anchor">
           <div className="update-notices">
-            <AppUpdateNotice info={appUpdate.info} active={view !== 'settings'} />
+            <AppUpdateNotice update={appUpdate} active={view !== 'settings'} />
             <ProviderUpdates noticeOnly showNotice={view !== 'settings'} />
           </div>
         </div>

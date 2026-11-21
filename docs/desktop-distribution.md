@@ -58,7 +58,9 @@ Claude Code and Codex remain separately installed provider tools. The optional S
 
 The previous installed app may have created its database and browser profile under `appData/Relay`; the rebranded desktop selects this root in place when it contains initialized workspace data. It does not copy or rewrite it. Package upgrades replace application files while retaining user data; removing the package likewise leaves that user data for the owner to manage.
 
-There is no automatic updater. Until an AUR listing exists, install newer package files with `pacman -U`; after publication, an AUR helper can rebuild/install new versions. The package is currently unsigned; signing and a package repository are separate release work.
+Mingle checks the npm `latest` channel and requires you to start an update. The update notice and **Settings → General → Mingle updates** offer installation and restart controls for registered Debian/Ubuntu and Arch desktop packages under `/opt/mingle` with `pkexec` available. The updater verifies the matching stable GitHub asset before passing it to the system package manager. If you dismiss the restart notice, Settings still offers **Restart**.
+
+Windows and other Linux installs can use the matching release download. The [npm installer](https://www.npmjs.com/package/@mingledev/mingle) also supports Windows x64, Debian/Ubuntu amd64, and Arch Linux x86-64. It resolves the native installer for its package version and verifies the size and checksum. On Arch, the package manager can also install a verified local file with `pacman -U`.
 
 ## Publishing checklist
 
