@@ -1,4 +1,5 @@
 import { createRoot } from 'react-dom/client';
+import { useState } from 'react';
 import '../apps/web/src/styles/tokens.css';
 import '../apps/web/src/styles/base.css';
 import '../apps/web/src/styles/ui.css';
@@ -11,6 +12,13 @@ class ExampleIdleWebSocket {
 }
 Object.defineProperty(window, 'WebSocket', { configurable: true, value: ExampleIdleWebSocket });
 const { ProviderUpdates } = await import('../apps/web/src/components/ProviderUpdates');
-createRoot(document.getElementById('root')!).render(<main style={{ maxWidth: 850, margin: '24px auto', padding: 16 }}>
-  <h1>Example provider updates</h1><p>Synthetic CLI versions; no installed provider is modified.</p><ProviderUpdates />
-</main>);
+function Fixture() {
+  const [showCompact, setShowCompact] = useState(false);
+  window.addEventListener('mingle:show-compact-updates', () => setShowCompact(true), { once: true });
+  return <main style={{ maxWidth: 850, margin: '24px auto', padding: 16 }}>
+  <h1>Example provider updates</h1><p>Synthetic CLI versions; no installed provider is modified.</p>
+  {showCompact ? <ProviderUpdates noticeOnly /> : null}
+  <ProviderUpdates />
+  </main>;
+}
+createRoot(document.getElementById('root')!).render(<Fixture />);

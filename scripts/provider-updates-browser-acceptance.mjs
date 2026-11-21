@@ -63,7 +63,6 @@ try {
   });
   const url = `http://127.0.0.1:${server.httpServer.address().port}/scripts/provider-updates-browser-fixture.html`;
   await page.goto(url);
-  await page.getByText('Codex 1.1.0 is available', { exact: true }).waitFor();
   assert.equal(applies, 0); assert.equal(checks, 0);
   rows[0] = { ...row, status: 'error', latestVersion: null, method: 'unsupported', message: 'Could not check public version metadata: Public version source returned HTTP 406.' };
   await page.evaluate(() => window.dispatchEvent(new Event('mingle:provider-updates-changed')));
@@ -75,7 +74,7 @@ try {
   await codexRow.getByRole('button', { name: 'Update', exact: true }).waitFor();
   assert.equal(await codexRow.getByText(/HTTP 406/).count(), 0);
   assert.equal(checks, 1);
-  await page.getByRole('button', { name: 'Update', exact: true }).click();
+  await codexRow.getByRole('button', { name: 'Update', exact: true }).click();
   await page.getByRole('button', { name: 'Updating…', exact: true }).waitFor();
   assert.equal(await page.getByRole('button', { name: 'Check again', exact: true }).isDisabled(), true);
   finishUpdate(); await page.getByText('Updated the Example configured CLI.', { exact: true }).waitFor();
@@ -85,8 +84,8 @@ try {
   assert.equal(await page.getByText('Claude 1.1.0 is available', { exact: true }).count(), 0);
   rows[1] = { ...rows[1], latestVersion: '1.2.0', dismissed: false };
   await page.evaluate(() => window.dispatchEvent(new Event('mingle:provider-updates-changed')));
-  await page.getByText('Claude 1.2.0 is available', { exact: true }).waitFor();
   const claudeRow = page.locator('.provider-updates__row').filter({ hasText: 'Claude' });
+  await claudeRow.getByText('Installed: 1.0.0 · Latest stable: 1.2.0', { exact: true }).waitFor();
   assert.equal(await claudeRow.getByRole('button', { name: 'Update', exact: true }).count(), 0);
   await claudeRow.getByText('Use the original package manager to update Claude Code.', { exact: true }).waitFor();
   assert.equal(await claudeRow.getByText('A newer release is available.', { exact: true }).count(), 1);
@@ -136,6 +135,15 @@ try {
     assert.equal(await managedRow.getByRole('button', { name: 'Use previous installation', exact: true }).count(), 0);
   }
   assert.equal(applies, 7); assert.equal(settingWrites.length, 4);
+  rows = [{ ...row, provider: 'codex', method: 'native' }];
+  await page.evaluate(() => window.dispatchEvent(new Event('mingle:show-compact-updates')));
+  await page.evaluate(() => window.dispatchEvent(new Event('mingle:provider-updates-changed')));
+  const compactNotice = page.locator('.provider-update-notice').filter({ hasText: 'Codex update' });
+  await compactNotice.getByRole('button', { name: 'Update', exact: true }).click();
+  await compactNotice.getByRole('button', { name: 'Updating…', exact: true }).waitFor();
+  finishUpdate();
+  await page.locator('.update-notice--complete').filter({ hasText: 'Codex updated' }).waitFor();
+  assert.equal(applies, 8);
   malformed = true; await page.evaluate(() => window.dispatchEvent(new Event('mingle:provider-updates-changed')));
   await page.getByRole('alert').filter({ hasText: 'Provider update status is unavailable.' }).waitFor();
   await page.getByRole('heading', { name: 'Provider CLI updates' }).waitFor();
