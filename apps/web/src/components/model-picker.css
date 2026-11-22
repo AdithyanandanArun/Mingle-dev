@@ -47,6 +47,7 @@
   gap: 5px;
   min-height: 0;
   overflow: auto;
+  overscroll-behavior: contain;
   padding: 9px 6px;
   border-right: 1px solid var(--line-soft);
   background: color-mix(in srgb, var(--bg-inset) 55%, transparent);
@@ -99,7 +100,7 @@
 .model-picker__search button:hover { background: var(--bg-hover); color: var(--fg-0); }
 .model-picker__notice { margin: 0 2px 7px; padding: 6px 8px; border-radius: var(--radius-xs, 8px); background: var(--bg-hover); color: var(--fg-2); font-size: 10px; line-height: 1.4; }
 .model-picker__notice--warn { background: var(--warn-soft); color: var(--warn); }
-.model-picker__models { display: grid; align-content: start; gap: 3px; min-height: 0; max-height: 330px; overflow: auto; padding: 1px 3px 3px 1px; animation: model-picker-list-in var(--motion-ui, 180ms) var(--ease-out) both; }
+.model-picker__models { display: grid; align-content: start; gap: 3px; min-height: 0; max-height: 330px; overflow: auto; overscroll-behavior: contain; padding: 1px 3px 3px 1px; animation: model-picker-list-in var(--motion-ui, 180ms) var(--ease-out) both; }
 .model-picker__model {
   display: flex;
   align-items: center;
