@@ -38,21 +38,26 @@ export function SelectMenu({ id, label, value, onChange, options, disabled, read
 
   useLayoutEffect(() => {
     if (!effectiveOpen || !anchor.current || !popup.current) return;
+    const viewport = window.visualViewport;
     const measure = () => {
       if (!anchor.current || !popup.current) return;
       const rect = anchor.current.getBoundingClientRect();
-      const viewportWidth = Math.max(1, window.innerWidth - 24);
-      const width = Math.min(Math.max(1, Math.max(224, rect.width)), viewportWidth);
+      const viewportLeft = viewport?.offsetLeft ?? 0;
+      const viewportTop = viewport?.offsetTop ?? 0;
+      const viewportWidth = viewport?.width ?? window.innerWidth;
+      const viewportHeight = viewport?.height ?? window.innerHeight;
+      const width = Math.min(Math.max(224, rect.width), Math.max(1, viewportWidth - 24));
       popup.current.style.width = `${width}px`;
-      const above = Math.max(40, rect.top - 20);
-      const below = Math.max(40, window.innerHeight - rect.bottom - 20);
+      const above = Math.max(0, rect.top - viewportTop - 20);
+      const below = Math.max(0, viewportTop + viewportHeight - rect.bottom - 20);
       const preferTop = placement === 'top';
       const useTop = preferTop ? above >= Math.min(240, below) : below < Math.min(240, above);
-      const maxHeight = Math.min(340, useTop ? above : below);
+      const maxHeight = Math.min(340, Math.max(0, viewportHeight - 24), Math.max(40, useTop ? above : below));
       const height = Math.min(popup.current.scrollHeight + 2, maxHeight);
+      const top = useTop ? rect.top - height - 8 : rect.bottom + 8;
       const next = {
-        width, maxHeight, left: Math.max(12, Math.min(rect.left, window.innerWidth - width - 12)),
-        top: useTop ? Math.max(12, rect.top - height - 8) : Math.min(window.innerHeight - height - 12, rect.bottom + 8),
+        width, maxHeight, left: Math.max(viewportLeft + 12, Math.min(rect.left, viewportLeft + viewportWidth - width - 12)),
+        top: Math.max(viewportTop + 12, Math.min(top, viewportTop + viewportHeight - height - 12)),
       };
       setPosition((current) => current?.width === next.width && current.maxHeight === next.maxHeight
         && current.left === next.left && current.top === next.top ? current : next);
@@ -63,10 +68,14 @@ export function SelectMenu({ id, label, value, onChange, options, disabled, read
     observer.observe(popup.current);
     window.addEventListener('resize', measure);
     window.addEventListener('scroll', measure, true);
+    viewport?.addEventListener('resize', measure);
+    viewport?.addEventListener('scroll', measure);
     return () => {
       observer.disconnect();
       window.removeEventListener('resize', measure);
       window.removeEventListener('scroll', measure, true);
+      viewport?.removeEventListener('resize', measure);
+      viewport?.removeEventListener('scroll', measure);
     };
   }, [effectiveOpen, placement, options.length]);
 
