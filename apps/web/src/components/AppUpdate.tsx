@@ -200,8 +200,11 @@ export function AppUpdateSetting({ version, update }: { version: string; update:
   const status = restartVersion ? `Version ${restartVersion} is installed. Restart Mingle to use it.`
     : busy ? progress : failed || info?.status === 'unavailable' ? 'Could not check npm for updates.'
     : latest ? `Version ${latest} is available.` : info?.status === 'current' ? 'No newer npm release.' : 'Checking npm for updates…';
+  const checkedAt = info && !failed && !busy && !restartVersion ? new Date(info.checkedAt) : null;
   return <>
-    <SettingRow title="Mingle updates" htmlFor="st-app-update" description={<span role="status">Installed {version}. {status}</span>}>
+    <SettingRow title="Mingle updates" htmlFor="st-app-update" description={<span role="status">Running {version}. {status}
+      {checkedAt && Number.isFinite(checkedAt.getTime()) ? <> Last checked <time dateTime={info!.checkedAt}>{checkedAt.toLocaleString()}</time>.</> : null}
+    </span>}>
       {restartVersion ? <Button id="st-app-update" variant="primary" size="sm" disabled={restarting} onClick={() => void restart()}>{restarting ? 'Restarting…' : 'Restart'}</Button>
         : <Button id="st-app-update" variant="secondary" size="sm" disabled={checking || busy} onClick={() => void check(true)}><RefreshCw size={13} />{checking ? 'Checking…' : 'Check for updates'}</Button>}
     </SettingRow>
