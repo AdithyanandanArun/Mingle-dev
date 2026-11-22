@@ -137,6 +137,10 @@ export function useAppUpdate(version: string | undefined) {
 
 const restartHelp = 'Close and reopen Mingle to finish updating.';
 
+function UpdateVersion({ version }: { version: string }) {
+  return <a className="update-notice__version" href={releaseUrl(version)} target="_blank" rel="noopener noreferrer" aria-label={`Release notes for Mingle ${version}`}>{version}</a>;
+}
+
 export function AppUpdateNotice({ update, active }: { update: ReturnType<typeof useAppUpdate>; active: boolean }) {
   const { info, restartVersion, restarting, restartFailure, restart, installingVersion, busy, progress, canInstall, installFailure, install } = update;
   const [dismissed, setDismissed] = useState<string | null>(null);
@@ -150,7 +154,7 @@ export function AppUpdateNotice({ update, active }: { update: ReturnType<typeof 
     return <aside key={`installed-${version}`} className="update-notice app-update-complete update-notice--complete" role="status">
       <span className="update-notice__icon"><Check size={15} aria-hidden="true" /></span>
       <div className="update-notice__body">
-        <div className="update-notice__header"><strong>Mingle updated</strong><span className="update-notice__version">{version}</span></div>
+        <div className="update-notice__header"><strong>Mingle updated</strong><UpdateVersion version={version} /></div>
         <p>Restart Mingle to use the new version.</p>
         {restartFailure ? <p className="provider-updates__error" role="alert">{restartHelp}</p> : null}
       </div>
@@ -168,7 +172,7 @@ export function AppUpdateNotice({ update, active }: { update: ReturnType<typeof 
   return <aside className="update-notice app-update-notice" role="status">
     <span className="update-notice__icon"><Download size={15} aria-hidden="true" /></span>
     <div className="update-notice__body">
-      <div className="update-notice__header"><strong>Mingle update</strong><span className="update-notice__version">{version}</span></div>
+      <div className="update-notice__header"><strong>Mingle update</strong><UpdateVersion version={version} /></div>
       {busy ? <p>{progress}</p> : null}
       {manualOpen ? <div className="app-update-notice__manual">
         <a className="update-notice__link" href={releaseUrl(version)} target="_blank" rel="noopener noreferrer">Download installer <ArrowUpRight size={13} aria-hidden="true" /></a>
