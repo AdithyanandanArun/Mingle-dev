@@ -6,12 +6,19 @@
 .sidebar__toolbar { display: flex; align-items: center; gap: 3px; padding: 5px 10px 10px; }
 .sidebar__search { display: flex; align-items: center; gap: 9px; flex: 1; min-width: 0; height: 28px; padding: 0 5px; border: 0; border-radius: 6px; background: transparent; color: var(--fg-2); font-size: 13px; text-align: left; transition: color var(--motion-fast) var(--ease-standard), background var(--motion-fast) var(--ease-standard); }
 .sidebar__search:hover { color: var(--fg-0); }
+.sidebar__search:focus-visible, .sidebar__connection:focus-visible { outline: 2px solid var(--blue-strong); outline-offset: 1px; }
 .sidebar__toolbar .ibtn { width: 27px; height: 27px; }
 .sidebar__project { padding: 0 10px 9px; }
 .switcher { gap: 7px; padding: 5px 4px; border-radius: 5px; }
 .switcher:hover { background: var(--bg-hover); border-color: transparent; }
 .switcher__text strong { font-size: 12px; font-weight: 450; color: var(--fg-2); }
 .sidebar__sessions { border-top: 0; }
+.sidebar__empty { display: grid; gap: 7px; margin: 10px 8px; padding: 12px; border: 1px solid var(--line-soft); border-radius: 9px; color: var(--fg-2); font-size: 12px; line-height: 1.45; }
+.sidebar__empty strong { color: var(--fg-1); font-size: 12px; font-weight: 550; }
+.sidebar__empty button { justify-self: start; min-height: 28px; padding: 0 9px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg-panel); color: var(--fg-1); font: inherit; cursor: pointer; }
+.sidebar__empty button:hover:not(:disabled) { background: var(--bg-hover); color: var(--fg-0); }
+.sidebar__empty button:focus-visible { outline: 2px solid var(--blue-strong); outline-offset: 2px; }
+.sidebar__empty button:disabled { opacity: .55; cursor: not-allowed; }
 .session-scroll { padding: 0 6px 12px; }
 .sgroup { margin-bottom: 4px; }
 .sgroup__label { padding: 10px 9px 6px; font-size: 11px; }
@@ -30,6 +37,7 @@
 .sidebar__connection--online i { background: var(--ok); opacity: .7; }
 .sidebar__connection--offline i { background: var(--err); }
 .header { border-bottom: 0; padding-left: 20px; }
+.header :is(button, a):focus-visible { outline: 2px solid var(--blue-strong); outline-offset: 2px; }
 .crumbs { gap: 12px; font-size: 13px; }
 .crumbs__project { color: var(--fg-2); max-width: 220px; }
 .crumbs__current { font-weight: 450; letter-spacing: 0; color: var(--fg-0); }
