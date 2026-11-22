@@ -7,7 +7,9 @@ import { useMingle } from '../store/store';
 import { SettingRow } from './SettingRow';
 import { Button } from './ui';
 
-const installCommand = 'npx @mingledev/mingle install';
+const installCommand = (version: string) => /^\d+\.\d+\.\d+$/.test(version)
+  ? `npx @mingledev/mingle@${version} install`
+  : 'npx @mingledev/mingle install';
 const checkInterval = 15 * 60_000;
 const releaseUrl = (version: string) => `https://github.com/AdithyanandanArun/Mingle-dev/releases/tag/v${encodeURIComponent(version)}`;
 
@@ -170,7 +172,7 @@ export function AppUpdateNotice({ update, active }: { update: ReturnType<typeof 
       {busy ? <p>{progress}</p> : null}
       {manualOpen ? <div className="app-update-notice__manual">
         <a className="update-notice__link" href={releaseUrl(version)} target="_blank" rel="noopener noreferrer">Download installer <ArrowUpRight size={13} aria-hidden="true" /></a>
-        <button type="button" className="update-notice__link" onClick={() => void copyText(installCommand).then(() => {
+        <button type="button" className="update-notice__link" onClick={() => void copyText(installCommand(version)).then(() => {
           setCopyResult({ version, ok: true });
         }).catch(() => setCopyResult({ version, ok: false }))}>{copy?.ok ? 'Copied' : 'Copy npm command'}</button>
       </div> : null}
@@ -202,8 +204,8 @@ export function AppUpdateSetting({ version, update }: { version: string; update:
     {restartVersion && restartFailure ? <p className="provider-updates__error" role="alert">{restartHelp}</p> : null}
     {latest && !restartVersion ? <div className="app-update-install">
       {canInstall ? <Button variant="primary" size="sm" disabled={busy} onClick={() => void install(latest)}>{busy ? 'Updating…' : failure ? 'Retry update' : 'Install update'}</Button> : null}
-      <code>{installCommand}</code>
-      <Button variant="secondary" size="sm" onClick={() => void copyText(installCommand).then(
+      <code>{installCommand(latest)}</code>
+      <Button variant="secondary" size="sm" onClick={() => void copyText(installCommand(latest)).then(
         () => useMingle.getState().toast('success', 'Install command copied.'),
         () => useMingle.getState().toast('error', 'Could not copy the install command.'),
       )}><Copy size={13} /> Copy command</Button>
