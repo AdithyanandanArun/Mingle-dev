@@ -91,7 +91,12 @@ export function useAppUpdate(version: string | undefined) {
     };
     void refresh();
     const timer = window.setInterval(() => void refresh(), installingVersion ? 750 : 15_000);
-    return () => { stopped = true; window.clearInterval(timer); };
+    window.addEventListener('focus', refresh);
+    return () => {
+      stopped = true;
+      window.clearInterval(timer);
+      window.removeEventListener('focus', refresh);
+    };
   }, [desktop, installingVersion]);
 
   const busy = Boolean(installingVersion || (desktopState && desktopState.phase !== 'idle'));
