@@ -116,18 +116,18 @@ export function QueuedMessages({ sessionId, items: queuedItems, active = false }
 
   return (
     <section ref={section} aria-label="Queued messages" className="queued-messages">
-      <h3>Queued messages · always sent next</h3>
+      <h3>Queued messages · always sent next <span className="sr-only">({items.length} {items.length === 1 ? 'message' : 'messages'})</span></h3>
       <p className="queued-messages__note">These messages do not steer the current response. Edit or remove them before they are sent.</p>
       {items.map((item) => {
         const isEditing = editing === item.id;
         const isBusy = busy === item.id;
         return (
-          <article key={item.id} data-queue-id={item.id} aria-busy={isBusy || undefined} className={`queued-message${isEditing ? ' queued-message--editing' : ''}`}>
-            <span className="queued-message__state">
+        <article key={item.id} data-queue-id={item.id} aria-busy={isBusy || undefined} aria-label={`Queued message ${items.indexOf(item) + 1}`} className={`queued-message${isEditing ? ' queued-message--editing' : ''}`}>
+            <span className="queued-message__state" role="status">
               Queued · sends after the current run{item.memory === 'exclude' ? ' · Project memory excluded for this turn' : ''}
             </span>
             {isEditing ? (
-              <textarea ref={editor} aria-label="Edit queued message" aria-describedby={`queue-hint-${item.id}`} value={text} maxLength={100_000} disabled={isBusy} onChange={(event) => setText(event.target.value)} onKeyDown={(event) => {
+              <textarea ref={editor} aria-label={`Edit queued message ${items.indexOf(item) + 1}`} aria-describedby={`queue-hint-${item.id}`} value={text} maxLength={100_000} disabled={isBusy} onChange={(event) => setText(event.target.value)} onKeyDown={(event) => {
                 if (event.nativeEvent.isComposing || busy) return;
                 if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); cancelEdit(); }
                 else if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) { event.preventDefault(); saveEdit(item); }
@@ -145,7 +145,7 @@ export function QueuedMessages({ sessionId, items: queuedItems, active = false }
                 <Button
                   disabled={Boolean(busy) || !text.trim()}
                   onClick={() => saveEdit(item)}
-                >{isBusy ? 'Saving…' : 'Save'}</Button>
+                >{isBusy ? 'Saving…' : 'Save changes'}</Button>
                 <Button variant="secondary" disabled={Boolean(busy)} onClick={cancelEdit}>Cancel</Button>
                 <small id={`queue-hint-${item.id}`}>Ctrl/⌘+Enter to save · Escape to cancel</small>
                 {conflict?.id === item.id ? (

@@ -169,7 +169,7 @@ export function AttachmentTray({ attachments, disabled, busy, uploads = [], onRe
   const attachmentRows = usePresenceList(attachments);
   const uploadRows = usePresenceList(uploads);
   const showTray = attachmentRows.length > 0 || uploadRows.length > 0 || Boolean(loadError);
-  return showTray ? <div className="attachment-tray" aria-label="Message attachments">
+  return showTray ? <div className="attachment-tray" role="group" aria-label="Message attachments">
     {attachmentRows.map(({ item: file, closing }) => <div className={cx('attachment-drafts__item', file.kind === 'image' && 'is-image', closing && 'is-closing')} key={file.id} title={file.name} aria-hidden={closing || undefined} inert={closing}>
       {file.kind === 'image' ? <img src={api.attachmentUrl(file.id)} alt={file.name} /> : <span className="attachment-drafts__file">{file.name}</span>}
       <button type="button" aria-label={`Remove ${file.name}`} title="Remove attachment" disabled={closing || disabled || busy} onClick={() => onRemove(file.id)}><X size={12} aria-hidden="true" /></button>
