@@ -59,7 +59,7 @@ export const Markdown = memo(function Markdown({ text }: { text: string }) {
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         components={{
-          a: ({ href, children }) => <a href={href} target="_blank" rel="noopener noreferrer">{children}</a>,
+          a: ({ href, children }) => href ? <a href={href} target="_blank" rel="noopener noreferrer">{children}</a> : <>{children}</>,
           pre: ({ children }) => {
             if (!isValidElement<ComponentProps<'code'>>(children)) return <pre>{children}</pre>;
             const language = children.props.className?.match(/\blanguage-([^\s]+)/)?.[1];
