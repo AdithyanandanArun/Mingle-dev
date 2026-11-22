@@ -68,6 +68,7 @@ function Fixture() {
       {modal ? <Modal title="Example dialog" onClose={() => setModal(false)} footer={<><Button>Cancel example</Button><Button variant="primary">Continue example</Button></>}><input data-autofocus aria-label="Example hidden field" hidden /><input data-autofocus aria-label="Example visible field" /></Modal> : null}
     </section> : null}
     {scene === 'markdown'  ? <Markdown text={'Example answer\n\n```typescript\n' + 'const example = "' + 'a'.repeat(180) + '";\nconsole.log(example);\n```'} /> : null}
+    {scene === 'empty-code' ? <Markdown text={'Example empty snippet\n\n```\n```'} /> : null}
     {scene === 'files' ? <div style={{ width: 360, maxWidth: '100%', height: 480 }}><Files active /></div> : null}
     {scene === 'find' ? <><ConversationNavigation projectId="example-project" sessionId="example-session" messages={messages} runs={[]} calls={[]} hasOlder={false} onLoadOlder={() => {}} /><div>{messages.map((message) => <p key={message.id} data-message-id={message.id} tabIndex={-1}>{message.content}</p>)}</div></> : null}
     {scene === 'queue' ? <><QueuedMessages sessionId={session.id} items={queued} /><button onClick={() => { setQueued([{ ...queue[0]!, content: 'Example newer queued task' }]); useMingle.setState({ boot: { ...boot, queuedMessages: [{ ...queue[0]!, content: 'Example newer queued task' }] } }); }}>Example remote edit</button></> : null}

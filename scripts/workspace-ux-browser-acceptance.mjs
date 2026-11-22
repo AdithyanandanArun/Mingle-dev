@@ -72,6 +72,10 @@ try {
   check(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), 'wrapped code and its toolbar fit a narrow viewport');
   await page.evaluate(() => window.exampleUX.setTheme('light')); await page.screenshot({ path: join(output, 'code-light.png') });
 
+  await scene('empty-code');
+  await page.locator('.codeblock pre').waitFor();
+  check(await page.getByRole('button', { name: 'Copy code', exact: true }).isDisabled(), 'an empty fence stays a code block and cannot copy blank content');
+
   await page.setViewportSize({ width: 1000, height: 760 }); await scene('files');
   const folder = page.getByRole('treeitem', { name: 'src', exact: true }); await folder.waitFor();
   check(await page.locator('[role=treeitem][tabindex="0"]').count() === 1, 'file tree has one keyboard entry point');
