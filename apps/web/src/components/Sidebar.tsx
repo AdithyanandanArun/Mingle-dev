@@ -125,7 +125,13 @@ export function Sidebar() {
     </div>
     <div className="sidebar__sessions">
       <div className="session-scroll" role="list" aria-label="Sessions">
-        {!sessions.length && !remoteTeamSession ? <p className="sidebar__empty">No sessions yet.</p> : null}
+        {!sessions.length && !remoteTeamSession ? <div className="sidebar__empty" role="status">
+          <strong>{project ? 'Start a workspace session' : 'Open a project to begin'}</strong>
+          <span>{project ? 'Your sessions will appear here.' : 'Choose a local project to see its sessions and files.'}</span>
+          <button type="button" onClick={() => project ? void createSession() : openDialog({ kind: 'project' })} disabled={project ? creatingSession || connection !== 'online' : false}>
+            {project ? 'New session' : 'Open project'}
+          </button>
+        </div> : null}
         {remoteTeamSession ? <div className="sgroup sgroup--team-session" role="group" aria-label="Shared project group conversation">
           <div className="sgroup__label">Shared project conversation</div>
           <div role="listitem" className="sitem-row" data-session-id={remoteTeamSession.sessionId}>
