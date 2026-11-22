@@ -64,7 +64,12 @@ export function useAppUpdate(version: string | undefined) {
     if (!version) return;
     void check();
     const timer = window.setInterval(() => void check(), checkInterval);
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'visible') void check();
+    };
+    document.addEventListener('visibilitychange', onVisibilityChange);
     return () => {
+      document.removeEventListener('visibilitychange', onVisibilityChange);
       window.clearInterval(timer);
       request.current?.abort();
       request.current = null;
