@@ -251,6 +251,7 @@
 .md hr { border: 0; border-top: 1px solid var(--line); margin: 1.4em 0; }
 .md__inline { padding: 1px 6px; border-radius: 5px; background: var(--bg-hover); font-size: 0.88em; color: var(--accent-strong); }
 .md__table { overflow-x: auto; margin: 0 0 0.85em; }
+.md__image { max-width: 100%; height: auto; }
 .md table { border-collapse: collapse; font-size: 0.93em; } .md th, .md td { padding: 6px 12px; border: 1px solid var(--line); text-align: left; } .md th { background: var(--bg-surface); }
 .codeblock { position: relative; margin: 0 0 1em; border-radius: var(--radius-md); border: 1px solid var(--line); background: var(--bg-inset); overflow: hidden; }
 .codeblock pre { margin: 0; padding: 14px 16px; overflow-x: auto; font-size: 12.5px; line-height: 1.65; }

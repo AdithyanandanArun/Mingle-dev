@@ -60,6 +60,9 @@ export const Markdown = memo(function Markdown({ text }: { text: string }) {
         remarkPlugins={[remarkGfm]}
         components={{
           a: ({ href, children }) => href ? <a href={href} target="_blank" rel="noopener noreferrer">{children}</a> : <>{children}</>,
+          img: ({ src, alt, title }) => src
+            ? <img className="md__image" src={src} alt={alt ?? ''} title={title} loading="lazy" decoding="async" referrerPolicy="no-referrer" />
+            : <>{alt}</>,
           pre: ({ children }) => {
             if (!isValidElement<ComponentProps<'code'>>(children)) return <pre>{children}</pre>;
             const language = children.props.className?.match(/\blanguage-([^\s]+)/)?.[1];
