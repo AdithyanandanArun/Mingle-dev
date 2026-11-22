@@ -11,22 +11,30 @@ function CodeBlock({ children, language }: { children: ReactNode; language?: str
   const [copyError, setCopyError] = useState('');
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const alive = useRef(true);
+  const text = typeof children === 'string' ? children : '';
+  const currentText = useRef(text);
   useEffect(() => {
     alive.current = true;
     return () => { alive.current = false; if (timer.current) clearTimeout(timer.current); };
   }, []);
-  const text = typeof children === 'string' ? children : '';
+  useEffect(() => {
+    currentText.current = text;
+    setCopied(false);
+    setCopyError('');
+    if (timer.current) clearTimeout(timer.current);
+    timer.current = null;
+  }, [text]);
   const copy = async () => {
-    if (copying) return;
+    if (copying || !text) return;
     setCopying(true); setCopyError(''); setCopied(false);
     if (timer.current) clearTimeout(timer.current);
     try {
       await copyText(text.replace(/\n$/, ''));
-      if (!alive.current) return;
+      if (!alive.current || currentText.current !== text) return;
       setCopied(true);
       timer.current = setTimeout(() => { setCopied(false); timer.current = null; }, 1800);
     } catch {
-      if (alive.current) setCopyError('Could not copy. Select the code and copy it manually.');
+      if (alive.current && currentText.current === text) setCopyError('Could not copy. Select the code and copy it manually.');
     } finally { if (alive.current) setCopying(false); }
   };
   return (
@@ -34,7 +42,7 @@ function CodeBlock({ children, language }: { children: ReactNode; language?: str
       <div className="codeblock__toolbar">
         <span>{language || 'Code'}</span>
         <button type="button" className="codeblock__wrap" aria-label="Wrap code lines" aria-pressed={wrapped} onClick={() => setWrapped(!wrapped)}><WrapText size={12} aria-hidden="true" /> Wrap</button>
-      <button type="button" className="codeblock__copy" aria-label="Copy code" aria-busy={copying || undefined} disabled={copying} onClick={() => void copy()}>
+      <button type="button" className="codeblock__copy" aria-label="Copy code" aria-busy={copying || undefined} disabled={copying || !text} onClick={() => void copy()}>
         {copied ? <Check size={12} aria-hidden="true" /> : <Copy size={12} aria-hidden="true" />} {copied ? 'Copied' : copying ? 'Copying…' : 'Copy'}
       </button>
       </div>
