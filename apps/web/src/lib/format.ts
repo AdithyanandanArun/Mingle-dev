@@ -23,7 +23,8 @@ export const dayLabel = (iso: string): string => {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return 'Unknown date';
   const today = new Date();
-  const yesterday = new Date(Date.now() - 86400000);
+  const yesterday = new Date(today);
+  yesterday.setDate(today.getDate() - 1);
   if (d.toDateString() === today.toDateString()) return 'Today';
   if (d.toDateString() === yesterday.toDateString()) return 'Yesterday';
   return d.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' });
