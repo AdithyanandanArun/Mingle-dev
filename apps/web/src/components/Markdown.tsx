@@ -66,7 +66,7 @@ export const Markdown = memo(function Markdown({ text }: { text: string }) {
             return <CodeBlock language={language}>{children.props.children}</CodeBlock>;
           },
           code: ({ children }) => <code className="md__inline">{children}</code>,
-          table: ({ children }) => <div className="md__table"><table>{children}</table></div>,
+          table: ({ children }) => <MarkdownTable>{children}</MarkdownTable>,
         }}
       >
         {text}
@@ -74,3 +74,22 @@ export const Markdown = memo(function Markdown({ text }: { text: string }) {
     </div>
   );
 });
+
+function MarkdownTable({ children }: { children: ReactNode }) {
+  const scroll = useRef<HTMLDivElement>(null);
+  const table = useRef<HTMLTableElement>(null);
+  const [overflow, setOverflow] = useState(false);
+  useEffect(() => {
+    const region = scroll.current;
+    if (!region || !table.current) return;
+    const measure = () => setOverflow(region.scrollWidth > region.clientWidth);
+    const observer = new ResizeObserver(measure);
+    observer.observe(region);
+    observer.observe(table.current);
+    measure();
+    return () => observer.disconnect();
+  }, []);
+  return <div ref={scroll} className="md__table" tabIndex={overflow ? 0 : undefined} role={overflow ? 'region' : undefined} aria-label={overflow ? 'Scrollable table' : undefined}>
+    <table ref={table}>{children}</table>
+  </div>;
+}
