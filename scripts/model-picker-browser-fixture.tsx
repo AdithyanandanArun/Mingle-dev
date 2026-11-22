@@ -15,6 +15,7 @@ const fixtureProviders: ProviderInfo[] = [
     models: Array.from({ length: 12 }, (_, index) => ({
       id: `fixture-codex-search-${String(index + 1).padStart(2, '0')}`,
       name: `Fixture Codex Search Model ${String(index + 1).padStart(2, '0')}`,
+      aliases: index === 10 ? ['fixture-reasoning-alias'] : undefined,
       reasoningEfforts: [{ id: 'balanced', label: 'Balanced' }, { id: 'deep', label: 'Deep' }],
       defaultReasoningEffort: 'balanced', policies: fixturePolicies, inputModalities: ['text'],
     })),

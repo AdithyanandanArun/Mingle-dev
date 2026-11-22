@@ -75,6 +75,10 @@ try {
 
   await modelTrigger.click();
   const search = page.getByRole('searchbox', { name: 'Search models' });
+  await search.fill('fixture-reasoning-alias');
+  await picker.getByRole('option', { name: /Fixture Codex Search Model 11/ }).waitFor();
+  assert.equal(await picker.getByRole('option').count(), 1, 'a reported alias matches its catalog model');
+  assert.equal(await picker.getByText('1 of 12 models', { exact: true }).count(), 1, 'the model header reports the filtered count');
   await search.fill('Search Model 11');
   const searchLength = (await search.inputValue()).length;
   await page.keyboard.press('ArrowLeft');
