@@ -43,7 +43,10 @@ export function createAppUpdateCheck(installedVersion: string, request: typeof f
   return (refresh = false): Promise<AppUpdateInfo> => {
     if (inflight) return inflight;
     const cacheMs = refresh ? 30_000 : cached?.status === 'unavailable' ? 60_000 : 10 * 60_000;
-    if (cached && now() - Date.parse(cached.checkedAt) < cacheMs) return Promise.resolve(cached);
+    if (cached) {
+      const age = now() - Date.parse(cached.checkedAt);
+      if (age >= 0 && age < cacheMs) return Promise.resolve(cached);
+    }
     inflight = (async () => {
       const latestVersion = await fetchLatestVersion(request).catch(() => null);
       const status = !latestVersion || !release.test(installedVersion) ? 'unavailable'

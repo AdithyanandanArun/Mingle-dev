@@ -44,4 +44,16 @@ describe('Mingle npm updates', () => {
     now = 122_000;
     expect(await check()).toMatchObject({ status: 'available', latestVersion: '0.1.6' });
   });
+
+  it('rechecks after the wall clock moves backward', async () => {
+    let now = 120_000;
+    const request = vi.fn<() => Promise<Response>>()
+      .mockResolvedValueOnce(metadata('0.1.5'))
+      .mockResolvedValueOnce(metadata('0.1.6'));
+    const check = createAppUpdateCheck('0.1.5', request, () => now);
+    await expect(check()).resolves.toMatchObject({ status: 'current' });
+    now = 60_000;
+    await expect(check()).resolves.toMatchObject({ status: 'available' });
+    expect(request).toHaveBeenCalledTimes(2);
+  });
 });
