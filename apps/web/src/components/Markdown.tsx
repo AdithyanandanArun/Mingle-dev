@@ -1,4 +1,4 @@
-import { memo, useEffect, useRef, useState, type ComponentProps, type ReactNode } from 'react';
+import { isValidElement, memo, useEffect, useRef, useState, type ComponentProps, type ReactNode } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { Check, Copy, WrapText } from 'lucide-react';
@@ -52,11 +52,12 @@ export const Markdown = memo(function Markdown({ text }: { text: string }) {
         remarkPlugins={[remarkGfm]}
         components={{
           a: ({ href, children }) => <a href={href} target="_blank" rel="noopener noreferrer">{children}</a>,
-          pre: ({ children }) => <>{children}</>,
-          code: ({ className, children, ...rest }: ComponentProps<'code'>) => {
-            const isBlock = /language-/.test(className ?? '') || (typeof children === 'string' && children.includes('\n'));
-            return isBlock ? <CodeBlock language={className?.match(/language-([^\s]+)/)?.[1]}>{children}</CodeBlock> : <code className="md__inline" {...rest}>{children}</code>;
+          pre: ({ children }) => {
+            if (!isValidElement<ComponentProps<'code'>>(children)) return <pre>{children}</pre>;
+            const language = children.props.className?.match(/\blanguage-([^\s]+)/)?.[1];
+            return <CodeBlock language={language}>{children.props.children}</CodeBlock>;
           },
+          code: ({ children }) => <code className="md__inline">{children}</code>,
           table: ({ children }) => <div className="md__table"><table>{children}</table></div>,
         }}
       >
