@@ -377,7 +377,7 @@ export function ModelPicker({
         </div>
         <section className="model-picker__content" aria-label={`${activeProvider?.name ?? 'Provider'} models`}>
           <div className="model-picker__head">
-            <div className="model-picker__heading"><strong>{activeProvider?.name ?? 'Models'}</strong><span>{modelOptions.length ? `${modelOptions.length} model${modelOptions.length === 1 ? '' : 's'}` : 'No reported models'}</span></div>
+            <div className="model-picker__heading"><strong>{activeProvider?.name ?? 'Models'}</strong><span>{query.trim() ? `${matchingModels.length} of ${modelOptions.length} models` : modelOptions.length ? `${modelOptions.length} model${modelOptions.length === 1 ? '' : 's'}` : 'No reported models'}</span></div>
             {searchable ? <label className="model-picker__search">
               <Search size={14} aria-hidden="true" />
               <input ref={searchInput} type="search" aria-label="Search models" placeholder="Search models" value={query}
