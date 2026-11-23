@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import type { Bootstrap, QueuedMessage, Session } from '@mingle/contracts';
 import '../apps/web/src/styles/tokens.css';
@@ -45,6 +45,19 @@ globals.exampleUX = { stats, terminalText: terminalBus.snapshot, setTheme: (them
 function Fixture() {
   const [queued, setQueued] = useState(queue);
   const [choice, setChoice] = useState('disabled');
+  const [selectRequest, setSelectRequest] = useState(0);
+  const [reverseOptions, setReverseOptions] = useState(false);
+  useEffect(() => {
+    const openSelect = () => setSelectRequest(value => value + 1);
+    const reverseSelect = () => setReverseOptions(value => !value);
+    window.addEventListener('example:open-select', openSelect);
+    window.addEventListener('example:reverse-select', reverseSelect);
+    return () => {
+      window.removeEventListener('example:open-select', openSelect);
+      window.removeEventListener('example:reverse-select', reverseSelect);
+    };
+  }, []);
+  const selectOptions = [{ value: 'apple', label: 'Apple' }, { value: 'apricot', label: 'Apricot' }, { value: 'disabled', label: 'Disabled choice', disabled: true }];
   const [checked, setChecked] = useState(false);
   const [context, setContext] = useState(false);
   const [modal, setModal] = useState(false);
@@ -61,7 +74,7 @@ function Fixture() {
       <IconButton label="Example refresh" busy why="Example work in progress" aria-describedby="example-description">↻</IconButton>
       <Segmented label="Example choices" value={choice} onChange={setChoice} options={[{ value: 'disabled', label: 'Disabled', disabled: true }, { value: 'alpha', label: 'Alpha' }, { value: 'beta', label: 'Beta' }, { value: 'gamma', label: 'Gamma' }]} />
       <Switch label="Example switch" description="Example switch explanation" checked={checked} onChange={setChecked} />
-      <SelectMenu label="Example read only" value="apple" readOnly onChange={() => { throw new Error('Read-only selection changed'); }} options={[{ value: 'apple', label: 'Apple' }, { value: 'apricot', label: 'Apricot' }, { value: 'disabled', label: 'Disabled choice', disabled: true }]} />
+      <SelectMenu label="Example read only" value="apple" openRequest={selectRequest} readOnly onChange={() => { throw new Error('Read-only selection changed'); }} options={reverseOptions ? [...selectOptions.slice(1), selectOptions[0]!] : selectOptions} />
       <button ref={opener} onClick={() => setContext(true)}>Example context menu</button>
       <button onClick={() => setModal(true)}>Example dialog</button>
       {context ? <ContextMenu x={40} y={50} returnFocus={opener.current} items={[{ id: 'first', label: 'Alpha one' }, { id: 'second', label: 'Alpha two' }]} onClose={() => setContext(false)} /> : null}

@@ -133,6 +133,16 @@ try {
   check((await select.getAttribute('aria-activedescendant')).endsWith('-1'), 'select typeahead advances to the next matching option');
   await select.press('a'); check((await select.getAttribute('aria-activedescendant')).endsWith('-0'), 'repeated select typeahead cycles matching options');
   await page.getByRole('option', { name: 'Apricot', exact: true }).click(); check(await select.getAttribute('aria-valuetext') === 'Apple', 'read-only select cannot change the chosen value');
+  await page.evaluate(() => window.dispatchEvent(new Event('example:open-select')));
+  await page.getByRole('listbox', { name: 'Example read only' }).waitFor();
+  await page.evaluate(() => window.dispatchEvent(new Event('example:open-select')));
+  await select.press('ArrowDown');
+  const activeOption = () => select.evaluate(el => document.getElementById(el.getAttribute('aria-activedescendant'))?.textContent?.trim());
+  check(await activeOption() === 'Apricot', 'a repeated open request keeps the picker usable');
+  await page.evaluate(() => window.dispatchEvent(new Event('example:reverse-select')));
+  await page.waitForFunction(() => document.querySelector('[role="listbox"] [role="option"]')?.textContent?.trim() === 'Apricot');
+  check(await activeOption() === 'Apricot', 'reordering an open picker preserves its active choice');
+  await select.press('Escape');
   await page.getByRole('button', { name: 'Example context menu', exact: true }).click();
   await page.waitForFunction(() => document.activeElement?.getAttribute('role') === 'menuitem');
   check(await page.evaluate(() => document.activeElement?.textContent?.includes('Alpha one')), 'context menu takes keyboard focus when it opens');
