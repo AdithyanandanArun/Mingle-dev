@@ -37,7 +37,7 @@ export function ContextMenu({ x, y, items, onClose, returnFocus, open = true, cl
 
   const close = (restoreFocus: boolean): void => {
     onClose();
-    if (restoreFocus && returnFocus?.isConnected) returnFocus.focus();
+    if (restoreFocus && returnFocus?.isConnected) returnFocus.focus({ preventScroll: true });
   };
 
   const openSubmenu = (index: number, focusFirst: boolean): void => {
@@ -47,7 +47,10 @@ export function ContextMenu({ x, y, items, onClose, returnFocus, open = true, cl
     setSubmenuIndex(index);
     const first = enabledIndices(children)[0] ?? -1;
     setActiveChildIndex(first);
-    if (focusFirst && first >= 0) requestAnimationFrame(() => childButtons.current[first]?.focus());
+    if (focusFirst && first >= 0) requestAnimationFrame(() => {
+      if (submenu.current?.dataset.parent !== items[index]?.id) return;
+      childButtons.current[first]?.focus();
+    });
   };
 
   const runItem = (item: ContextMenuEntry): void => {
@@ -267,7 +270,7 @@ export function ContextMenu({ x, y, items, onClose, returnFocus, open = true, cl
         {items.map((item, index) => renderEntry(item, index, false))}
       </div>
       {submenuItems.length > 0 ? (
-        <div ref={submenu} role="menu" aria-label={`${submenuLabel} options`} aria-hidden={closing || undefined} inert={closing} className={cx('menu context-menu context-menu--submenu', closing && 'is-closing')} style={submenuStyle}
+        <div ref={submenu} role="menu" data-parent={submenuIndex === null ? undefined : items[submenuIndex]?.id} aria-label={`${submenuLabel} options`} aria-hidden={closing || undefined} inert={closing} className={cx('menu context-menu context-menu--submenu', closing && 'is-closing')} style={submenuStyle}
           onKeyDown={(event) => { event.stopPropagation(); onKeyDown(event); }}>
           {submenuItems.map((item, index) => renderEntry(item, index, true))}
         </div>
