@@ -171,7 +171,7 @@ export function ModelPicker({
       const preferred = matchingModels.find((model) => model.id === activeModelId && !modelSelectionDisabled(model))
         ?? matchingModels.find((model) => !modelSelectionDisabled(model));
       const item = preferred ? popup.current?.querySelector<HTMLElement>(`[data-model-id="${CSS.escape(preferred.id)}"]`) : null;
-      item?.focus({ preventScroll: true });
+      (item ?? popup.current)?.focus({ preventScroll: true });
     });
     return () => cancelAnimationFrame(frame);
   }, [effectiveOpen, position, searchable, activeProviderId]);
@@ -344,8 +344,8 @@ export function ModelPicker({
       anchor.current = element;
       if (typeof triggerRef === 'function') triggerRef(element);
       else if (triggerRef) triggerRef.current = element;
-    }} type="button" role="combobox" aria-label={label} aria-haspopup="listbox" aria-expanded={effectiveOpen}
-      aria-controls={effectiveOpen ? listId : undefined} className={cx('model-picker__trigger', className)} disabled={disabled || catalogProviders.length === 0}
+    }} type="button" role="combobox" aria-label={label} aria-haspopup="dialog" aria-expanded={effectiveOpen}
+      aria-controls={effectiveOpen ? popupId : undefined} className={cx('model-picker__trigger', className)} disabled={disabled || catalogProviders.length === 0}
       title={triggerTitle ?? `${selectedModelName} · ${providerName(currentProvider, value.provider)}`} onClick={() => effectiveOpen ? close(false) : show()}
       onKeyDown={(event) => {
         if (event.key === 'ArrowDown' || event.key === 'ArrowUp' || event.key === 'Enter' || event.key === ' ') {
@@ -359,7 +359,7 @@ export function ModelPicker({
       <ChevronDown size={13} aria-hidden="true" />
     </button>
     {present ? createPortal(
-      <div ref={popup} role="dialog" aria-label="Choose a model" aria-hidden={closing || !position || undefined} inert={closing || !position}
+      <div ref={popup} id={popupId} role="dialog" aria-label="Choose a model" tabIndex={-1} aria-hidden={closing || !position || undefined} inert={closing || !position}
         className={cx('model-picker__popup', closing && 'is-closing')} style={position ? {
           ...position,
           '--model-picker-origin': `${position.top < (anchor.current?.getBoundingClientRect().top ?? 0) ? 'bottom' : 'top'} ${position.left > (anchor.current?.getBoundingClientRect().left ?? 0) + 20 ? 'right' : 'left'}`,
