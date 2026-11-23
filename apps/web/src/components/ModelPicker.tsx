@@ -179,12 +179,17 @@ export function ModelPicker({
 
   useEffect(() => {
     if (!effectiveOpen) return;
+    let repositionFrame = 0;
     const outside = (event: PointerEvent) => {
       if (!anchor.current?.contains(event.target as Node) && !popup.current?.contains(event.target as Node)) setOpen(false);
     };
     const reposition = (event: Event) => {
       if (event.target instanceof Node && popup.current?.contains(event.target)) return;
-      setLayoutRevision((revision) => revision + 1);
+      if (repositionFrame) return;
+      repositionFrame = requestAnimationFrame(() => {
+        repositionFrame = 0;
+        setLayoutRevision((revision) => revision + 1);
+      });
     };
     document.addEventListener('pointerdown', outside);
     window.addEventListener('resize', reposition);
@@ -192,6 +197,7 @@ export function ModelPicker({
     window.visualViewport?.addEventListener('resize', reposition);
     window.visualViewport?.addEventListener('scroll', reposition);
     return () => {
+      cancelAnimationFrame(repositionFrame);
       document.removeEventListener('pointerdown', outside);
       window.removeEventListener('resize', reposition);
       window.removeEventListener('scroll', reposition, true);
