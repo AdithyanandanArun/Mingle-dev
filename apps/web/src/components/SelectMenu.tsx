@@ -89,7 +89,13 @@ export function SelectMenu({ id, label, value, onChange, options, disabled, read
     show();
   }, [openRequest, disabled, enabled.length]);
   useLayoutEffect(() => {
-    if (effectiveOpen && position) popup.current?.querySelector<HTMLElement>(`[data-option-index="${active}"]`)?.scrollIntoView({ block: 'nearest' });
+    const list = popup.current;
+    const option = list?.querySelector<HTMLElement>(`[data-option-index="${active}"]`);
+    if (!effectiveOpen || !position || !list || !option) return;
+    const bounds = list.getBoundingClientRect();
+    const row = option.getBoundingClientRect();
+    if (row.top < bounds.top) list.scrollTop += row.top - bounds.top;
+    else if (row.bottom > bounds.bottom) list.scrollTop += row.bottom - bounds.bottom;
   }, [active, effectiveOpen, position]);
 
   const choose = (index: number) => {
