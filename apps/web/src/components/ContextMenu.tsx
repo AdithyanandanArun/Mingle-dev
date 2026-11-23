@@ -82,11 +82,11 @@ export function ContextMenu({ x, y, items, onClose, returnFocus, open = true, cl
 
   // Hidden controls cannot receive focus until their measured position has rendered.
   useLayoutEffect(() => {
-    if (!open || closing || !rootPoint || activeIndex < 0) return;
+    if (!open || closing || !rootPoint) return;
     let frame = 0;
     let attempts = 0;
     const focusVisible = () => {
-      const item = mainButtons.current[activeIndex];
+      const item = mainButtons.current[activeIndex] ?? root.current;
       if (!item?.isConnected) return;
       // Chromium can retain inherited visibility for a frame after the portal is positioned.
       if (getComputedStyle(item).visibility !== 'visible' && ++attempts < 4) { frame = requestAnimationFrame(focusVisible); return; }
@@ -263,7 +263,7 @@ export function ContextMenu({ x, y, items, onClose, returnFocus, open = true, cl
 
   return createPortal(
     <>
-      <div ref={root} role="menu" aria-label="Session actions" aria-hidden={closing || undefined} inert={closing} className={cx('menu context-menu', closing && 'is-closing')} style={rootStyle} onKeyDown={onKeyDown}>
+      <div ref={root} role="menu" aria-label="Session actions" tabIndex={-1} aria-hidden={closing || undefined} inert={closing} className={cx('menu context-menu', closing && 'is-closing')} style={rootStyle} onKeyDown={onKeyDown}>
         {items.map((item, index) => renderEntry(item, index, false))}
       </div>
       {submenuItems.length > 0 ? (
