@@ -256,6 +256,7 @@ export function ModelPicker({
   };
 
   const keyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (event.nativeEvent.isComposing) return;
     if (event.key === 'Escape') {
       event.preventDefault();
       event.stopPropagation();
@@ -348,6 +349,7 @@ export function ModelPicker({
       aria-controls={effectiveOpen ? popupId : undefined} className={cx('model-picker__trigger', className)} disabled={disabled || catalogProviders.length === 0}
       title={triggerTitle ?? `${selectedModelName} · ${providerName(currentProvider, value.provider)}`} onClick={() => effectiveOpen ? close(false) : show()}
       onKeyDown={(event) => {
+        if (event.nativeEvent.isComposing) return;
         if (event.key === 'ArrowDown' || event.key === 'ArrowUp' || event.key === 'Enter' || event.key === ' ') {
           event.preventDefault();
           if (!effectiveOpen) show();
