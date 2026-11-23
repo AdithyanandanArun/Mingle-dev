@@ -144,17 +144,18 @@ export function ModelPicker({
     popup.current.style.maxHeight = 'none';
     const contentHeight = popup.current.scrollHeight;
     popup.current.style.maxHeight = previousMaxHeight;
-    const availableAbove = Math.max(0, rect.top - viewportTop - 12);
-    const availableBelow = Math.max(0, viewportTop + viewportHeight - rect.bottom - 12);
+    const availableAbove = Math.max(0, rect.top - viewportTop - 18);
+    const availableBelow = Math.max(0, viewportTop + viewportHeight - rect.bottom - 18);
     const useTop = placement === 'top'
-      ? availableAbove >= Math.min(300, availableBelow) || availableBelow < 280
+      ? availableAbove >= Math.min(300, availableBelow)
       : availableBelow < Math.min(300, availableAbove);
     const available = useTop ? availableAbove : availableBelow;
-    const maxHeight = Math.max(160, Math.min(440, available));
+    const viewportLimit = Math.max(0, viewportHeight - 20);
+    const maxHeight = Math.min(440, viewportLimit, Math.max(160, available));
     const height = Math.min(contentHeight, maxHeight);
     setPosition({
       left: Math.max(viewportLeft + 10, Math.min(rect.left, viewportLeft + viewportWidth - width - 10)),
-      top: useTop ? Math.max(viewportTop + 10, rect.top - height - 8) : Math.min(viewportTop + viewportHeight - height - 10, rect.bottom + 8),
+      top: Math.max(viewportTop + 10, Math.min(useTop ? rect.top - height - 8 : rect.bottom + 8, viewportTop + viewportHeight - height - 10)),
       width,
       maxHeight,
     });
