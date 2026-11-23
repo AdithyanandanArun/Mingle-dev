@@ -237,7 +237,14 @@ export function ModelPicker({
 
   const focusModel = (id: string) => {
     setActiveModelId(id);
-    popup.current?.querySelector<HTMLElement>(`[data-model-id="${CSS.escape(id)}"]`)?.focus({ preventScroll: true });
+    const row = popup.current?.querySelector<HTMLElement>(`[data-model-id="${CSS.escape(id)}"]`);
+    const list = row?.parentElement;
+    if (!row || !list) return;
+    row.focus({ preventScroll: true });
+    const bounds = list.getBoundingClientRect();
+    const rect = row.getBoundingClientRect();
+    if (rect.top < bounds.top) list.scrollTop += rect.top - bounds.top;
+    else if (rect.bottom > bounds.bottom) list.scrollTop += rect.bottom - bounds.bottom;
   };
 
   const switchProvider = (provider: ProviderInfo) => {
@@ -292,7 +299,7 @@ export function ModelPicker({
       }
       return;
     }
-    const current = activeModels.findIndex((model) => model.id === activeModelId);
+    const current = activeModels.findIndex((model) => model.id === target.dataset.modelId);
     if (target.matches('[data-model-id]')) {
       if (event.key === 'ArrowRight' || event.key === 'ArrowLeft') {
         const eligible = allowedProviders.filter((provider) => provider.available || provider.id === value.provider);
