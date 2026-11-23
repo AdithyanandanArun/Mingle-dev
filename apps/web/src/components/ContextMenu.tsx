@@ -14,7 +14,7 @@ interface Point { left: number; top: number }
 
 const isSeparator = (item: ContextMenuEntry): item is Extract<ContextMenuEntry, { type: 'separator' }> => 'type' in item && item.type === 'separator';
 const enabledIndices = (items: ContextMenuEntry[]): number[] => items.flatMap((item, index) => !isSeparator(item) && !item.disabled ? [index] : []);
-const childrenOf = (item: ContextMenuEntry): ContextMenuEntry[] => !isSeparator(item) ? item.children ?? [] : [];
+const childrenOf = (item: ContextMenuEntry | undefined): ContextMenuEntry[] => item && !isSeparator(item) && !item.disabled ? item.children ?? [] : [];
 
 export function ContextMenu({ x, y, items, onClose, returnFocus, open = true, closing = false }: {
   x: number; y: number; items: ContextMenuEntry[]; onClose: () => void; returnFocus?: HTMLElement | null; open?: boolean; closing?: boolean;
@@ -29,6 +29,11 @@ export function ContextMenu({ x, y, items, onClose, returnFocus, open = true, cl
   const [activeIndex, setActiveIndex] = useState(() => enabledIndices(items)[0] ?? -1);
   const [activeChildIndex, setActiveChildIndex] = useState(-1);
   const typeahead = useRef({ text: '', at: 0 });
+  const submenuItems = submenuIndex === null ? [] : childrenOf(items[submenuIndex]);
+
+  useLayoutEffect(() => {
+    if (submenuIndex !== null && submenuItems.length === 0) setSubmenuIndex(null);
+  }, [submenuIndex, submenuItems.length]);
 
   const close = (restoreFocus: boolean): void => {
     onClose();
@@ -36,7 +41,7 @@ export function ContextMenu({ x, y, items, onClose, returnFocus, open = true, cl
   };
 
   const openSubmenu = (index: number, focusFirst: boolean): void => {
-    const children = childrenOf(items[index]!);
+    const children = childrenOf(items[index]);
     if (!children.length) return;
     setActiveIndex(index);
     setSubmenuIndex(index);
@@ -59,7 +64,7 @@ export function ContextMenu({ x, y, items, onClose, returnFocus, open = true, cl
   };
 
   const activateChild = (parentIndex: number, index: number): void => {
-    const item = childrenOf(items[parentIndex]!)[index];
+    const item = childrenOf(items[parentIndex])[index];
     if (!item || isSeparator(item) || item.disabled) return;
     if (childrenOf(item).length) { setActiveChildIndex(index); return; }
     runItem(item);
@@ -134,7 +139,7 @@ export function ContextMenu({ x, y, items, onClose, returnFocus, open = true, cl
 
   const onKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>): void => {
     const inSubmenu = Boolean(submenu.current?.contains(event.target as Node));
-    const currentItems = inSubmenu && submenuIndex !== null ? childrenOf(items[submenuIndex]!) : items;
+    const currentItems = inSubmenu ? submenuItems : items;
     const enabled = enabledIndices(currentItems);
     const currentIndex = inSubmenu ? activeChildIndex : activeIndex;
     const focusAt = (index: number): void => {
@@ -166,7 +171,7 @@ export function ContextMenu({ x, y, items, onClose, returnFocus, open = true, cl
       mainButtons.current[submenuIndex]?.focus();
       return;
     }
-    if (event.key === 'ArrowRight' && !inSubmenu && activeIndex >= 0 && childrenOf(items[activeIndex]!).length) {
+    if (event.key === 'ArrowRight' && !inSubmenu && childrenOf(items[activeIndex]).length) {
       event.preventDefault();
       openSubmenu(activeIndex, true);
       return;
@@ -261,10 +266,10 @@ export function ContextMenu({ x, y, items, onClose, returnFocus, open = true, cl
       <div ref={root} role="menu" aria-label="Session actions" aria-hidden={closing || undefined} inert={closing} className={cx('menu context-menu', closing && 'is-closing')} style={rootStyle} onKeyDown={onKeyDown}>
         {items.map((item, index) => renderEntry(item, index, false))}
       </div>
-      {submenuIndex !== null ? (
+      {submenuItems.length > 0 ? (
         <div ref={submenu} role="menu" aria-label={`${submenuLabel} options`} aria-hidden={closing || undefined} inert={closing} className={cx('menu context-menu context-menu--submenu', closing && 'is-closing')} style={submenuStyle}
           onKeyDown={(event) => { event.stopPropagation(); onKeyDown(event); }}>
-          {childrenOf(items[submenuIndex]!).map((item, index) => renderEntry(item, index, true))}
+          {submenuItems.map((item, index) => renderEntry(item, index, true))}
         </div>
       ) : null}
     </>,
