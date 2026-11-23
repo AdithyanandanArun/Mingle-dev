@@ -11,6 +11,9 @@ export function parseDiff(diff: string): DiffFile[] {
   let inHunk = false;
   for (const raw of diff.split('\n')) {
     if (raw.startsWith('diff --git ')) {
+      // Git quotes paths containing whitespace, tabs or control characters. The file
+      // summary is authoritative for the displayed path; this parser still needs a
+      // useful fallback when handed a standalone patch.
       const m = /^diff --git a\/(.+?) b\/(.+)$/.exec(raw);
       cur = { path: m?.[2] ?? raw.slice(11), lines: [], adds: 0, dels: 0, binary: false };
       files.push(cur);
@@ -19,9 +22,9 @@ export function parseDiff(diff: string): DiffFile[] {
     }
     if (!cur) continue;
     if (raw.startsWith('@@')) {
-      const m = /^@@ -(\d+)(?:,\d+)? \+(\d+)/.exec(raw);
+      const m = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/.exec(raw);
       oldNo = m ? Number(m[1]) : 0;
-      newNo = m ? Number(m[2]) : 0;
+      newNo = m ? Number(m[3]) : 0;
       inHunk = true;
       cur.lines.push({ kind: 'hunk', text: raw });
       continue;
@@ -34,7 +37,8 @@ export function parseDiff(diff: string): DiffFile[] {
     if (raw.startsWith('+')) { cur.adds++; cur.lines.push({ kind: 'add', text: raw.slice(1), newNo: newNo++ }); }
     else if (raw.startsWith('-')) { cur.dels++; cur.lines.push({ kind: 'del', text: raw.slice(1), oldNo: oldNo++ }); }
     else if (raw.startsWith('\\')) cur.lines.push({ kind: 'meta', text: raw });
-    else cur.lines.push({ kind: 'ctx', text: raw.slice(1), oldNo: oldNo++, newNo: newNo++ });
+    else if (raw.startsWith(' ')) cur.lines.push({ kind: 'ctx', text: raw.slice(1), oldNo: oldNo++, newNo: newNo++ });
+    else { inHunk = false; }
   }
   return files;
 }
