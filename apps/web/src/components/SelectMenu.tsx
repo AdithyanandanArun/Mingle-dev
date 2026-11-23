@@ -83,6 +83,9 @@ export function SelectMenu({ id, label, value, onChange, options, disabled, read
     if (disabled || enabled.length === 0) setOpen(false);
   }, [disabled, enabled.length]);
   useEffect(() => {
+    if (!effectiveOpen) typeahead.current = { text: '', at: 0 };
+  }, [effectiveOpen]);
+  useEffect(() => {
     if (!openRequest || openRequest === handledOpenRequest.current || disabled || enabled.length === 0) return;
     handledOpenRequest.current = openRequest;
     anchor.current?.focus();
@@ -106,6 +109,7 @@ export function SelectMenu({ id, label, value, onChange, options, disabled, read
     if (!readOnly && option.value !== value) onChange(option.value);
   };
   const keyDown = (event: KeyboardEvent<HTMLButtonElement>) => {
+    if (event.nativeEvent.isComposing) return;
     if (event.key === 'Tab') { setOpen(false); return; }
     if (event.key === 'Escape' && effectiveOpen) { event.preventDefault(); event.stopPropagation(); setOpen(false); return; }
     if (['ArrowDown', 'ArrowUp', 'Home', 'End', 'PageDown', 'PageUp', 'Enter', ' '].includes(event.key)) {
