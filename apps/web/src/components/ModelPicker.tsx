@@ -103,7 +103,7 @@ export function ModelPicker({
   const matchingModels = useMemo(() => {
     const text = query.trim().toLocaleLowerCase();
     if (!text) return modelOptions;
-    return modelOptions.filter((model) => `${model.name} ${model.id} ${activeProvider?.name ?? ''}`.toLocaleLowerCase().includes(text));
+    return modelOptions.filter((model) => [model.name, model.id, activeProvider?.name ?? '', ...(model.aliases ?? [])].some((term) => term.toLocaleLowerCase().includes(text)));
   }, [activeProvider?.name, modelOptions, query]);
   const searchable = modelOptions.length > SEARCH_LIMIT;
   const allowedProviders = catalogProviders.filter((provider) => !lockProvider || provider.id === value.provider);
