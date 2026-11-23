@@ -50,10 +50,12 @@ export function SelectMenu({ id, label, value, onChange, options, disabled, read
       const useTop = preferTop ? above >= Math.min(240, below) : below < Math.min(240, above);
       const maxHeight = Math.min(340, useTop ? above : below);
       const height = Math.min(popup.current.scrollHeight + 2, maxHeight);
-      setPosition({
+      const next = {
         width, maxHeight, left: Math.max(12, Math.min(rect.left, window.innerWidth - width - 12)),
         top: useTop ? Math.max(12, rect.top - height - 8) : Math.min(window.innerHeight - height - 12, rect.bottom + 8),
-      });
+      };
+      setPosition((current) => current?.width === next.width && current.maxHeight === next.maxHeight
+        && current.left === next.left && current.top === next.top ? current : next);
     };
     measure();
     const observer = new ResizeObserver(measure);
