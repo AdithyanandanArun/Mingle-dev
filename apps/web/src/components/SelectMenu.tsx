@@ -25,7 +25,7 @@ export function SelectMenu({ id, label, value, onChange, options, disabled, read
   const previousActive = options.findIndex((option) => option.value === activeValue && !option.disabled);
   const active = previousActive >= 0 ? previousActive : enabled[0] ?? -1;
   const setActive = (index: number) => setActiveValue(options[index]?.value);
-  const effectiveOpen = open && !disabled;
+  const effectiveOpen = open && !disabled && enabled.length > 0;
   const { present, closing } = usePresence(effectiveOpen);
 
   const show = (fromEnd = false) => {
@@ -80,8 +80,8 @@ export function SelectMenu({ id, label, value, onChange, options, disabled, read
   }, [effectiveOpen]);
 
   useEffect(() => {
-    if (disabled) setOpen(false);
-  }, [disabled]);
+    if (disabled || enabled.length === 0) setOpen(false);
+  }, [disabled, enabled.length]);
   useEffect(() => {
     if (!openRequest || openRequest === handledOpenRequest.current || disabled || enabled.length === 0) return;
     handledOpenRequest.current = openRequest;
