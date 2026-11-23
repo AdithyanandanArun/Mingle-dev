@@ -108,7 +108,14 @@ export function runActivitySummary(run: SessionRun, calls: readonly ToolCall[]):
   const categorised = commands + searches + files + browsers + agents + others;
   if (run.toolCount > categorised) parts.push(`${plural(run.toolCount - categorised, 'tool call')}`);
 
-  const own = calls.filter((call) => call.runId === run.id);
+  // A bootstrap snapshot and a detail refresh can briefly contain the same call
+  // twice. Count durable IDs once so outcome totals cannot exceed toolCount.
+  const seen = new Set<string>();
+  const own = calls.filter((call) => {
+    if (call.runId !== run.id || seen.has(call.id)) return false;
+    seen.add(call.id);
+    return true;
+  });
   if (run.toolCount > 0 && own.length >= run.toolCount) {
     const failed = own.filter((call) => call.status === 'failed').length;
     const interrupted = own.filter((call) => call.status === 'interrupted').length;

@@ -156,4 +156,9 @@ describe('factual summaries', () => {
   it('accounts for uncategorised tool calls instead of dropping them', () => {
     expect(runActivitySummary(run({ toolCount: 4, toolCounts: { command: 1 } }), [])).toEqual(['Ran 1 command', '3 tool calls']);
   });
+
+  it('counts duplicate durable call IDs only once in outcome totals', () => {
+    const failed = call({ id: 'same', status: 'failed', exitCode: 2 });
+    expect(runActivitySummary(run({ toolCount: 1, toolCounts: { command: 1 } }), [failed, { ...failed, status: 'completed', exitCode: 0 }])).toEqual(['Ran 1 command', '1 failed', '1 call exited non-zero']);
+  });
 });
