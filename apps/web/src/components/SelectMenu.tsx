@@ -32,7 +32,7 @@ export function SelectMenu({ id, label, value, onChange, options, disabled, read
     if (disabled || enabled.length === 0) return;
     const selectedIndex = options.findIndex((option) => option.value === value && !option.disabled);
     setActive(selectedIndex >= 0 ? selectedIndex : enabled[fromEnd ? enabled.length - 1 : 0]!);
-    setPosition(null);
+    if (!effectiveOpen) setPosition(null);
     setOpen(true);
   };
 
