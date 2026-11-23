@@ -18,16 +18,15 @@ export function SelectMenu({ id, label, value, onChange, options, disabled, read
   const typeahead = useRef({ text: '', at: 0 });
   const handledOpenRequest = useRef(0);
   const [open, setOpen] = useState(false);
-  const [active, setActive] = useState(0);
+  const [activeValue, setActiveValue] = useState<string>();
   const [position, setPosition] = useState<{ left: number; top: number; width: number; maxHeight: number } | null>(null);
   const selected = options.find((option) => option.value === value);
   const enabled = options.map((option, index) => option.disabled ? -1 : index).filter((index) => index >= 0);
+  const previousActive = options.findIndex((option) => option.value === activeValue && !option.disabled);
+  const active = previousActive >= 0 ? previousActive : enabled[0] ?? -1;
+  const setActive = (index: number) => setActiveValue(options[index]?.value);
   const effectiveOpen = open && !disabled;
   const { present, closing } = usePresence(effectiveOpen);
-
-  useEffect(() => {
-    if (enabled.length > 0 && !enabled.includes(active)) setActive(enabled[0]!);
-  }, [active, enabled.join(',')]);
 
   const show = (fromEnd = false) => {
     if (disabled || enabled.length === 0) return;
