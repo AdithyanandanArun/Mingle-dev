@@ -172,14 +172,14 @@ export function createRelay({ createView, closeView, listViews, version, userAge
           return respond(await handleScreencast(view, sessionId, method, params));
         }
         if (method === 'Runtime.runIfWaitingForDebugger' && !child) return respond({});
-        let forwardedParams = params;
-        if (method === 'Input.dispatchMouseEvent' || method === 'Input.dispatchKeyEvent' || method === 'Input.dispatchTouchEvent') {
-          // Chromium exposes this CDP timestamp as the trusted DOM event's timeStamp.
-          // Zero distinguishes Mingle's dispatched input from physical input without a time window.
-          forwardedParams = { ...params, timestamp: 0 };
+        // Chromium's soft-navigation metrics require real, ordered event
+        // timestamps. Attribute synthetic input in the host without stamping it.
+        const release = view.beginSyntheticInput?.(method, params);
+        try {
+          return respond(await view.debugger.sendCommand(method, params, child ? sessionId : undefined));
+        } finally {
+          release?.();
         }
-        if (/^(Input\.|Page\.navigate$|Runtime\.(evaluate|callFunctionOn)$)/.test(method)) view.markAgentInput();
-        return respond(await view.debugger.sendCommand(method, forwardedParams, child ? sessionId : undefined));
       }
       switch (method) {
         case 'Browser.getVersion': return respond({ protocolVersion: '1.3', product: `Chrome/${version}`, revision: '', userAgent, jsVersion: '' });

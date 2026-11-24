@@ -9,7 +9,7 @@ function fixture() {
   function makeView(url = 'about:blank') {
     const debuggerApi = new EventEmitter(); debuggerApi.calls = [];
     debuggerApi.sendCommand = async (...args) => { debuggerApi.calls.push(args); return { ok: true }; };
-    const view = { targetId: `target${views.length}`, url: () => url, title: () => 'title', debugger: debuggerApi, marks: 0, markAgentInput() { this.marks++; } };
+    const view = { targetId: `target${views.length}`, url: () => url, title: () => 'title', debugger: debuggerApi };
     views.push(view); return view;
   }
   const socket = Object.assign(new EventEmitter(), {
@@ -142,21 +142,27 @@ test('auto attach announces targets created later', async () => {
   const created = await f.call('Target.createTarget', { url: 'https://example.com' });
   assert.equal(created.result.targetId, 'target0'); assert.ok(f.sent.some(item => item.method === 'Target.attachedToTarget'));
 });
-test('unknown method returns supported error; agent input is marked', async () => {
-  const f = fixture(); const view = f.makeView();
+test('unknown method returns supported error', async () => {
+  const f = fixture();
   const err = await f.call('Target.createBrowserContext'); assert.match(err.error.message, /Not supported/);
-  await f.call('Target.attachToTarget', { targetId: view.targetId }); const sid = f.sent.at(-1).result.sessionId;
-  await f.call('Input.dispatchMouseEvent', {}, sid); assert.equal(view.marks, 1);
 });
-test('CDP timestamp-bearing input dispatches are tagged at the event source', async () => {
+test('CDP input timestamps are left to Chromium and attribution is scoped to dispatch', async () => {
   const f = fixture(); const view = f.makeView();
   await f.call('Target.attachToTarget', { targetId: view.targetId }); const sid = f.sent.at(-1).result.sessionId;
+  const trace = [];
+  view.beginSyntheticInput = (method, params) => {
+    trace.push(['begin', method, params]);
+    return () => trace.push(['end', method]);
+  };
+  view.debugger.sendCommand = async (method, params) => {
+    trace.push(['dispatch', method, params]);
+    if (method === 'Input.dispatchTouchEvent') throw new Error('target closed during input');
+  };
   for (const method of ['Input.dispatchMouseEvent', 'Input.dispatchKeyEvent', 'Input.dispatchTouchEvent']) {
-    await f.call(method, { type: 'fixture', timestamp: 9 }, sid);
-    assert.equal(view.debugger.calls.at(-1)[1].timestamp, 0, `${method} timestamp`);
+    const params = { type: 'fixture' };
+    await f.call(method, params, sid);
+    assert.deepEqual(trace.splice(0), [['begin', method, params], ['dispatch', method, params], ['end', method]]);
   }
-  await f.call('Input.insertText', { text: 'fixture' }, sid);
-  assert.equal('timestamp' in view.debugger.calls.at(-1)[1], false, 'insertText has no timestamp field');
 });
 test('detach event is forwarded', async () => {
   const f = fixture(); const view = f.makeView(); await f.call('Target.setDiscoverTargets', { discover: true });

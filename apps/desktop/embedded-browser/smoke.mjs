@@ -1,6 +1,7 @@
 import { app, BrowserWindow, WebContentsView, ipcMain, nativeImage, session } from 'electron';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
+import { createServer } from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 import { createEmbeddedBrowserHost } from './host.mjs';
@@ -12,6 +13,47 @@ const requireServer = createRequire(serverPackage);
 let host;
 let browser;
 let inputAbort;
+
+async function verifySoftNavigation(page) {
+  const site = createServer((_request, response) => {
+    response.setHeader('Content-Type', 'text/html');
+    response.end(`<!doctype html><title>Example browser navigation</title>
+      <button>Next view</button><main style="font-size:54px">Example start view</main>
+      <script>
+        let view = 0;
+        window.navigationTimes = [];
+        new PerformanceObserver(list => {
+          navigationTimes.push(...list.getEntries().map(entry => entry.startTime));
+        }).observe({type: 'soft-navigation', buffered: true});
+        document.querySelector('button').onclick = () => {
+          history.pushState({}, '', '/view-' + (++view));
+          document.querySelector('main').outerHTML =
+            '<main style="font-size:54px">Example new contents for view ' + view + '</main>';
+        };
+      </script>`);
+  });
+  await new Promise(resolve => site.listen(0, '127.0.0.1', resolve));
+  try {
+    await page.goto(`http://127.0.0.1:${site.address().port}/`);
+    const cdp = await page.context().newCDPSession(page);
+    try {
+      cdp.on('Page.screencastFrame', frame => { void cdp.send('Page.screencastFrameAck', { sessionId: frame.sessionId }).catch(() => {}); });
+      await cdp.send('Page.startScreencast', { format: 'jpeg', maxFramesInFlight: 1, maxWidth: 960, maxHeight: 600 });
+      for (let turn = 1; turn <= 2; turn++) {
+        await page.locator('button').click({ timeout: 5000 });
+        await page.waitForURL(`**/view-${turn}`, { timeout: 5000 });
+        await page.waitForFunction(count => navigationTimes.length >= count, turn, { timeout: 5000 });
+      }
+      const [first, second] = await page.evaluate(() => navigationTimes);
+      assert.ok(first > 0 && second > first, 'Soft-navigation timing increases across interactions');
+      await cdp.send('Page.stopScreencast');
+    } finally {
+      await cdp.detach();
+    }
+  } finally {
+    site.close();
+  }
+}
 
 async function run() {
   await app.whenReady();
@@ -67,6 +109,7 @@ async function run() {
     assert.equal(item.webContentsView.parentWindow, appWindow, `${label}: parked in the workspace window`);
     assert.ok(stackIndex(item.webContentsView) >= 0, `${label}: is a child of the workspace window`);
     assert.ok(stackIndex(item.webContentsView) < stackIndex(uiView), `${label}: sits beneath the UI view, so it cannot cover the interface`);
+    assert.equal(item.webContentsView.getVisible(), false, `${label}: excluded from workspace hit testing`);
     assert.deepEqual(item.webContentsView.getBounds(), { x: 0, y: 0, width: 1920, height: 1200 });
   };
   assertParked(native, 'new agent tab');
@@ -124,25 +167,45 @@ async function run() {
   assert.ok(retainedConsoleBytes < 8 * 1024 * 1024, `Chromium retained ${retainedConsoleBytes} bytes from the example console burst`);
   await cdp.detach();
   process.stdout.write(`Parked screencast: ${screencastSize.width} × ${screencastSize.height}\n`);
-  const markup = '<input id="input"><button id="button" onclick="document.querySelector(\'#out\').textContent=document.querySelector(\'#input\').value">Write</button><div id="out"></div>';
+  const markup = '<input id="input"><button id="button" onclick="window.lastClickTime=event.timeStamp;document.querySelector(\'#out\').textContent=document.querySelector(\'#input\').value">Write</button><div id="out"></div>';
   await page.goto(`data:text/html,${encodeURIComponent(markup)}`);
   await page.fill('#input', 'mingle-smoke');
   await page.click('#button');
   const value = await page.locator('#out').textContent();
   if (value !== 'mingle-smoke') throw new Error(`Unexpected page value: ${value}`);
+  assert.ok(await page.evaluate(() => window.lastClickTime > 0), 'Browser control preserves a valid event timestamp');
   await new Promise(resolve => setTimeout(resolve, 50));
   if (humanInputs.length) throw new Error('Agent-generated page input claimed human control');
   assert.equal(host.setPresented('smoke', native.targetId, appWindow, native.webContentsView, { x: 100, y: 120, width: 700, height: 450 }), true);
   assert.deepEqual(native.webContentsView.getBounds(), { x: 100, y: 120, width: 700, height: 450 });
+  assert.equal(native.webContentsView.getVisible(), true);
   assert.ok(stackIndex(native.webContentsView) > stackIndex(uiView), 'The presented tab is drawn above the UI, inside its pane');
   assertParked(other, 'background tab while another is presented');
+  await page.click('#button');
+  await page.press('#input', 'End');
+  await page.mouse.wheel(0, 30);
+  await new Promise(resolve => setTimeout(resolve, 80));
+  assert.deepEqual(humanInputs, [], 'Debugger input never claims native control even when the page is presented');
   appWindow.focus();
   native.webContentsView.webContents.focus();
+  native.webContentsView.webContents.sendInputEvent({ type: 'mouseWheel', x: 20, y: 20, deltaY: 30 });
+  native.webContentsView.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'End' });
   native.webContentsView.webContents.sendInputEvent({ type: 'mouseDown', x: 20, y: 20, button: 'left', clickCount: 1 });
+  const waitForNativePointer = async phase => {
+    const deadline = Date.now() + 3000;
+    while (!humanInputs.some(event => event.kind === 'pointer' && event.phase === phase) && Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+    assert.ok(humanInputs.some(event => event.kind === 'pointer' && event.phase === phase), `Native pointer ${phase} reached the authenticated event stream`);
+  };
+  await waitForNativePointer('down');
+  await new Promise(resolve => setTimeout(resolve, 80));
+  assert.ok(humanInputs.some(event => event.kind === 'wheel'), 'Native scroll reaches the input stream');
+  assert.ok(humanInputs.some(event => event.kind === 'key'), 'Native keyboard input reaches the input stream');
+  host.park(native.webContentsView);
+  await waitForNativePointer('up');
+  assert.equal(host.setPresented('smoke', native.targetId, appWindow, native.webContentsView, { x: 100, y: 120, width: 700, height: 450 }), true);
   native.webContentsView.webContents.sendInputEvent({ type: 'mouseUp', x: 20, y: 20, button: 'left', clickCount: 1 });
-  const inputDeadline = Date.now() + 3000;
-  while (!humanInputs.length && Date.now() < inputDeadline) await new Promise(resolve => setTimeout(resolve, 20));
-  if (!humanInputs.some(event => event.kind === 'pointer')) throw new Error('Native input did not reach the authenticated event stream');
   for (let index = 0; index < 3; index++) {
     host.park(native.webContentsView);
     assertParked(native, `repeated hide ${index}`);
@@ -153,6 +216,7 @@ async function run() {
   const screenshot = await page.screenshot();
   if (!screenshot.length) throw new Error('Screenshot was empty');
   const aria = await page.locator('body').ariaSnapshot();
+  await verifySoftNavigation(page);
   host.park(native.webContentsView);
   await background.close();
   await page.close();

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { createEmbeddedBrowserHost, cdpCookieToElectron, electronCookieToCdp } from './host.mjs';
+import { createEmbeddedBrowserHost, createSyntheticInputTracker, cdpCookieToElectron, electronCookieToCdp } from './host.mjs';
 
 function fakeElectron() {
   const ipcMain = new EventEmitter();
@@ -32,13 +32,15 @@ test('authenticated presentation route tracks exact presented target and fails c
     const state = host.getSession('present_1');
     const contents = { isDestroyed: () => false };
     const window = { isDestroyed: () => false, contentView: { addChildView() {}, removeChildView() {} } };
-    const view = { webContents: contents, parentWindow: null, setBounds() {} };
+    const view = { webContents: contents, parentWindow: null, visible: false, setBounds() {}, setVisible(visible) { this.visible = visible; } };
     state.views.set('target_1', { targetId: 'target_1', webContentsView: view });
     assert.deepEqual(await (await get('present_1', 'missing')).json(), { visible: false });
     assert.deepEqual(await (await get('present_1', 'target_1')).json(), { visible: false });
     assert.equal(host.setPresented('present_1', 'target_1', window, view, { x: 0, y: 0, width: 10, height: 10 }), true);
+    assert.equal(view.visible, true);
     assert.deepEqual(await (await get('present_1', 'target_1')).json(), { visible: true });
     host.park(view);
+    assert.equal(view.visible, false);
     assert.deepEqual(await (await get('present_1', 'target_1')).json(), { visible: false });
     assert.equal(host.setPresented('present_1', 'target_1', window, view, { x: 0, y: 0, width: 10, height: 10 }), true);
     contents.isDestroyed = () => true;
@@ -71,4 +73,17 @@ test('native trusted input timestamps remain eligible immediately after an agent
     assert.equal(host.isHumanInputEvent({ isTrusted: false, timeStamp: 42 }), false);
     assert.equal(host.isHumanInputEvent({ isTrusted: true, timeStamp: Number.NaN }), false);
   } finally { void host.dispose(); }
+});
+
+test('synthetic input tracking only covers matching input while dispatch is active', () => {
+  const input = createSyntheticInputTracker();
+  const first = input.begin('Input.dispatchMouseEvent', { type: 'mousePressed' });
+  const second = input.begin('Input.dispatchTouchEvent', { type: 'touchStart' });
+  assert.equal(input.matches('pointer', 'down'), true);
+  assert.equal(input.matches('pointer', 'up'), false);
+  assert.equal(input.matches('key'), false);
+  first();
+  assert.equal(input.matches('pointer', 'down'), true);
+  second();
+  assert.equal(input.matches('pointer', 'down'), false);
 });

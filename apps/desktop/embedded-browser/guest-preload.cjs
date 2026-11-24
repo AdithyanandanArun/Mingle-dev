@@ -1,19 +1,13 @@
 const { ipcRenderer } = require('electron');
-let pointerHeld = false;
-function report(event, kind, phase) {
-  // The relay stamps its synthetic input with zero. It must never affect native drag state.
-  if (!event.isTrusted || !(event.timeStamp > 0)) return;
-  if (phase === 'down') pointerHeld = true;
-  if (phase === 'up') pointerHeld = false;
-  ipcRenderer.send('mingle.embedded.human-input', { kind, timeStamp: event.timeStamp, ...(phase ? { phase } : {}) });
+// Mouse and keyboard are attributed in the browser process before dispatch.
+// Electron does not expose a corresponding native event for touch pointers.
+function reportTouch(event, phase) {
+  if (!event.isTrusted || event.pointerType !== 'touch' || !event.isPrimary || !(event.timeStamp > 0)) return;
+  ipcRenderer.send('mingle.embedded.human-input', { kind: 'pointer', timeStamp: event.timeStamp, phase });
 }
-for (const kind of ['key', 'wheel']) {
-  const type = kind === 'key' ? 'keydown' : 'wheel';
-  addEventListener(type, event => {
-    report(event, kind);
-  }, true);
-}
-addEventListener('pointerdown', event => report(event, 'pointer', 'down'), true);
-addEventListener('pointerup', event => report(event, 'pointer', 'up'), true);
-addEventListener('pointercancel', event => report(event, 'pointer', 'up'), true);
-addEventListener('blur', event => { if (pointerHeld) report(event, 'pointer', 'up'); }, true);
+addEventListener('wheel', event => {
+  if (event.isTrusted) ipcRenderer.send('mingle.embedded.human-input', { kind: 'wheel', timeStamp: event.timeStamp });
+}, { capture: true, passive: true });
+addEventListener('pointerdown', event => reportTouch(event, 'down'), true);
+addEventListener('pointerup', event => reportTouch(event, 'up'), true);
+addEventListener('pointercancel', event => reportTouch(event, 'up'), true);

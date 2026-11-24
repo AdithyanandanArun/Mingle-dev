@@ -28,6 +28,45 @@ const wsPathPattern = /^\/devtools\/browser\/[A-Za-z0-9-]{8,80}$/;
 /** Size background tabs render at while nobody is looking at them. */
 const PARKED_BOUNDS = { x: 0, y: 0, width: 1920, height: 1200 };
 
+function inputSignature(kind, phase) {
+  return kind === 'pointer' ? `pointer:${phase}` : kind;
+}
+
+/** Scope attribution to matching input while the debugger dispatch is outstanding. */
+export function createSyntheticInputTracker() {
+  const active = new Map();
+  let syntheticWheelUntil = 0;
+  return {
+    begin(method, params) {
+      const type = params?.type;
+      let signature;
+      if (method === 'Input.dispatchMouseEvent') {
+        if (type === 'mousePressed') signature = 'pointer:down';
+        else if (type === 'mouseReleased') signature = 'pointer:up';
+        else if (type === 'mouseWheel') signature = 'wheel';
+      } else if (method === 'Input.dispatchKeyEvent' && (type === 'keyDown' || type === 'rawKeyDown')) {
+        signature = 'key';
+      } else if (method === 'Input.dispatchTouchEvent') {
+        if (type === 'touchStart') signature = 'pointer:down';
+        else if (type === 'touchEnd' || type === 'touchCancel') signature = 'pointer:up';
+      }
+      if (!signature) return;
+      active.set(signature, (active.get(signature) ?? 0) + 1);
+      return () => {
+        const remaining = active.get(signature) - 1;
+        if (remaining) active.set(signature, remaining);
+        else active.delete(signature);
+        // Wheel is reported by the guest over IPC. Its event can reach the host
+        // just after Chromium acknowledges the dispatch.
+        if (signature === 'wheel') syntheticWheelUntil = performance.now() + 50;
+      };
+    },
+    matches(kind, phase) {
+      return active.has(inputSignature(kind, phase)) || (kind === 'wheel' && performance.now() < syntheticWheelUntil);
+    },
+  };
+}
+
 /** Apply a hide only while the hiding window still owns the native view. */
 export function hideOwnedEmbeddedView(window, view, park) {
   if (view.parentWindow !== window) return false;
@@ -39,8 +78,8 @@ export function hideOwnedEmbeddedView(window, view, park) {
  * Background tabs are parked at the bottom of the app window's view stack, beneath the workspace UI view (main.mjs runs
  * the UI in a child view for this reason). Child views always draw above a window's own page, so they must never be
  * parked on a window whose UI is its own page: that showed them as a block over the interface. Beneath an opaque UI
- * view they stay hidden yet keep rendering, which Playwright needs (a never-shown window paints no frames, and views
- * outside the window bounds stop rendering). A hidden fallback window is used only when no app window exists (tests).
+ * view they stay attached and can be hidden from native hit testing while captures still render. A never-shown window may paint no frames, and views
+ * outside the window bounds stop rendering. A hidden fallback window is used only when no app window exists.
  */
 export function createEmbeddedBrowserHost({ electron, ws, log = () => undefined, getHostWindow = () => null }) {
   const token = randomBytes(32).toString('hex');
@@ -109,14 +148,19 @@ export function createEmbeddedBrowserHost({ electron, ws, log = () => undefined,
   }
   /** Moves a view to the bottom of the parking window's stack (beneath its UI view), at the background size. */
   function park(view) {
-    const owner = view.parentWindow;
     const ownerState = [...sessions.values()].find(state => state.presentedView === view);
-    if (ownerState) { ownerState.presentedView = null; ownerState.presentedTargetId = null; ownerState.presentedWindow = null; }
+    if (ownerState) {
+      releaseNativePointer(ownerState);
+      ownerState.presentedView = null;
+      ownerState.presentedTargetId = null;
+      ownerState.presentedWindow = null;
+    }
     const target = parkingWindow();
     view.parentWindow = target;
     for (const window of electron.BrowserWindow.getAllWindows()) if (window !== target && !window.isDestroyed()) { try { window.contentView.removeChildView(view); } catch {} }
     target.contentView.addChildView(view, 0);
     view.setBounds(PARKED_BOUNDS);
+    view.setVisible(false);
   }
   /** Shows a view on top of `window`'s content at `rect` (CSS px of that window). */
   function present(window, view, rect, state, targetId) {
@@ -124,6 +168,7 @@ export function createEmbeddedBrowserHost({ electron, ws, log = () => undefined,
     window.contentView.addChildView(view);
     view.parentWindow = window;
     view.setBounds(rect);
+    view.setVisible(true);
     state.presentedView = view;
     state.presentedTargetId = targetId;
     state.presentedWindow = window;
@@ -136,19 +181,31 @@ export function createEmbeddedBrowserHost({ electron, ws, log = () => undefined,
     ses.setPermissionCheckHandler((_wc, permission) => allowed(permission));
     ses.on('will-download', (_event, item) => item.cancel());
     ses.setUserAgent(stripUserAgent(ses.getUserAgent()));
-    const state = { id, partition, ses, views: new Map(), events: new Set(), relay: null, ws: null, path, wsUrl: `ws://127.0.0.1:${port}${path}`, presentedView: null, presentedTargetId: null, presentedWindow: null };
+    const state = { id, partition, ses, views: new Map(), events: new Set(), relay: null, ws: null, path, wsUrl: `ws://127.0.0.1:${port}${path}`, presentedView: null, presentedTargetId: null, presentedWindow: null, nativePointerHeld: false };
     const createView = async url => {
       const view = new electron.WebContentsView({ webPreferences: { partition, sandbox: true, contextIsolation: true, nodeIntegration: false, webSecurity: true, backgroundThrottling: false, preload: fileURLToPath(new URL('./guest-preload.cjs', import.meta.url)) } });
       view.webContents.setBackgroundThrottling(false);
       park(view);
       view.webContents.debugger.attach('1.3');
       const info = await view.webContents.debugger.sendCommand('Target.getTargetInfo');
-      const item = { targetId: info.targetInfo.targetId, url: () => view.webContents.getURL(), title: () => view.webContents.getTitle(), debugger: view.webContents.debugger, webContentsView: view, markAgentInput() {} };
+      const syntheticInput = createSyntheticInputTracker();
+      const item = { targetId: info.targetInfo.targetId, url: () => view.webContents.getURL(), title: () => view.webContents.getTitle(), debugger: view.webContents.debugger, webContentsView: view,
+        beginSyntheticInput: syntheticInput.begin, isSyntheticInput: syntheticInput.matches };
       view.webContents.on('before-input-event', (event, input) => {
-        if (input.type === 'keyDown' && input.key === 'Escape' && input.alt && input.shift) {
+        if (input.type !== 'keyDown' || state.presentedView !== view || syntheticInput.matches('key')) return;
+        if (input.key === 'Escape' && input.alt && input.shift) {
           event.preventDefault();
           { const window = view.parentWindow ?? getHostWindow(); (window?.mingleUi?.webContents ?? window?.webContents)?.focus?.(); }
+          return;
         }
+        reportHumanInput(state, item.targetId, 'key');
+      });
+      view.webContents.on('before-mouse-event', (_event, input) => {
+        if (input.type === 'mouseDown') nativeInput(state, item, 'pointer', 'down');
+        else if (input.type === 'mouseUp') nativeInput(state, item, 'pointer', 'up');
+      });
+      view.webContents.on('blur', () => {
+        if (state.presentedView === view) releaseNativePointer(state);
       });
       state.views.set(item.targetId, item);
       view.webContents.setWindowOpenHandler(({ url: target, features }) => {
@@ -185,13 +242,26 @@ export function createEmbeddedBrowserHost({ electron, ws, log = () => undefined,
     wss.handleUpgrade(req, socket, head, client => { state.ws?.close(); state.ws = client; state.relay.attachSocket(client); });
   });
   function humanInput(event, detail) {
-    if (!detail || !['pointer', 'key', 'wheel'].includes(detail.kind) || !isHumanInputEvent({ isTrusted: true, timeStamp: detail.timeStamp })) return;
+    if (!detail || !isHumanInputEvent({ isTrusted: true, timeStamp: detail.timeStamp })) return;
+    if (detail.kind !== 'wheel' && (detail.kind !== 'pointer' || !['down', 'up'].includes(detail.phase))) return;
     const state = [...sessions.values()].find(candidate => [...candidate.views.values()].some(item => item.webContentsView.webContents === event.sender));
     const item = [...(state?.views.values() ?? [])].find(entry => entry.webContentsView.webContents === event.sender);
-    if (!state || !item) return;
-    const phase = detail.kind === 'pointer' && ['down', 'up'].includes(detail.phase) ? detail.phase : undefined;
-    const data = `data: ${JSON.stringify({ type: 'human-input', targetId: item.targetId, kind: detail.kind, ...(phase ? { phase } : {}) })}\n\n`;
+    if (state && item) nativeInput(state, item, detail.kind, detail.kind === 'pointer' ? detail.phase : undefined);
+  }
+  function nativeInput(state, item, kind, phase) {
+    if (state.presentedView !== item.webContentsView || item.isSyntheticInput(kind, phase)) return;
+    if (phase === 'up' && !state.nativePointerHeld) return;
+    if (phase) state.nativePointerHeld = phase === 'down';
+    reportHumanInput(state, item.targetId, kind, phase);
+  }
+  function reportHumanInput(state, targetId, kind, phase) {
+    const data = `data: ${JSON.stringify({ type: 'human-input', targetId, kind, ...(phase ? { phase } : {}) })}\n\n`;
     for (const client of state.events) client.write(data);
+  }
+  function releaseNativePointer(state) {
+    if (!state.nativePointerHeld) return;
+    state.nativePointerHeld = false;
+    reportHumanInput(state, state.presentedTargetId, 'pointer', 'up');
   }
   function isHumanInputEvent(event) { return event?.isTrusted === true && Number.isFinite(event.timeStamp) && event.timeStamp > 0; }
   electron.ipcMain.on('mingle.embedded.human-input', humanInput);
