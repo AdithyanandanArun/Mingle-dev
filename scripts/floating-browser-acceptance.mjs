@@ -65,6 +65,8 @@ try {
   assert.equal(await page.locator('body').getAttribute('data-native-shown'), null, 'only the live stream participates in floating layout');
   assert.equal(await toggle.getAttribute('aria-expanded'), 'false');
   assert.equal(await bubble.count(), 0, 'the page starts with only the circular toggle');
+  await page.getByRole('button', { name: 'Example top bar action' }).click();
+  assert.equal(await page.getByLabel('Example top bar clicks').textContent(), '1');
   const prompt = page.getByRole('textbox', { name: 'Example prompt' });
   const assertClearOfPrompt = () => page.waitForFunction(() => {
     const panel = document.querySelector('.browser-pip')?.getBoundingClientRect();

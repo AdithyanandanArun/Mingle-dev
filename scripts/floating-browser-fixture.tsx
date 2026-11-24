@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import type { Session } from '@mingle/contracts';
 import { BrowserPane } from '../apps/web/src/components/browser/BrowserPane';
@@ -29,8 +30,13 @@ window.mingleBrowserDesktop = {
 
 function Example() {
   const open = useMingle((s) => s.contextOpen && s.contextTab === 'browser');
+  const [headerClicks, setHeaderClicks] = useState(0);
   return <div className="workspace">
-    <h1>Example browser workspace</h1>
+    <header>
+      <h1>Example browser workspace</h1>
+      <button type="button" onClick={() => setHeaderClicks(count => count + 1)}>Example top bar action</button>
+      <output aria-label="Example top bar clicks">{headerClicks}</output>
+    </header>
     <button type="button" onClick={() => useBrowserStore.getState().requestOpen(session.id)}>Example agent opens browser</button>
     <button type="button" onClick={() => { popoutOpen = false; popoutClosed?.(session.id); }}>Example desktop window closes</button>
     <aside aria-label="Example browser sidebar" hidden={!open} style={{ width: 'min(420px, 100%)', height: 340 }}>
