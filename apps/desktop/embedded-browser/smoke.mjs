@@ -79,20 +79,50 @@ async function run() {
   assert.ok(backgroundScreenshot.length, 'Parked tabs still produce screenshots');
   // Floating presentation streams the parked page from beneath the workspace UI.
   const cdp = await context.newCDPSession(page);
+  await page.setContent('<title>Example screencast pressure</title><div style="position:fixed;inset:0;animation:pulse 0.2s alternate infinite"></div><style>@keyframes pulse{from{background:red}to{background:blue}}</style>');
   let frames = 0;
+  let firstFrame;
   const framePromise = new Promise((resolveFrame, reject) => {
     const timer = setTimeout(() => reject(new Error('No screencast frame within 5 seconds')), 5000);
-    cdp.on('Page.screencastFrame', async event => {
+    cdp.on('Page.screencastFrame', event => {
       frames++;
-      await cdp.send('Page.screencastFrameAck', { sessionId: event.sessionId });
+      if (frames !== 1) return;
+      firstFrame = event.sessionId;
       clearTimeout(timer);
       resolveFrame(nativeImage.createFromBuffer(Buffer.from(event.data, 'base64')).getSize());
     });
   });
-  await cdp.send('Page.startScreencast', { format: 'jpeg', quality: 90, maxWidth: 1920, maxHeight: 1200, everyNthFrame: 1 });
+  await cdp.send('Page.startScreencast', { format: 'jpeg', quality: 90, maxWidth: 1920, maxHeight: 1200, everyNthFrame: 1, maxFramesInFlight: 1 });
   const screencastSize = await framePromise;
   assert.deepEqual(screencastSize, { width: 1920, height: 1200 }, 'Parked page streams at the higher floating resolution');
+  await new Promise(resolve => setTimeout(resolve, 350));
+  assert.equal(frames, 1, 'An animating page waits for the real viewer to acknowledge the frame');
+  const resumed = new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('Screencast did not resume after the viewer acknowledged')), 5000);
+    cdp.once('Page.screencastFrame', () => { clearTimeout(timer); resolve(); });
+  });
+  await cdp.send('Page.screencastFrameAck', { sessionId: firstFrame });
+  await resumed;
   await cdp.send('Page.stopScreencast');
+  const backingStorage = async () => {
+    await cdp.send('HeapProfiler.collectGarbage');
+    return (await cdp.send('Runtime.getHeapUsage')).backingStorageSize;
+  };
+  const beforeConsole = await backingStorage();
+  await page.evaluate(() => {
+    for (let index = 0; index < 96; index++) {
+      console.log('Example console payload', new Uint8Array(128 * 1024).fill(index));
+    }
+  });
+  const consoleDeadline = Date.now() + 2000;
+  let retainedConsoleBytes;
+  do {
+    retainedConsoleBytes = await backingStorage() - beforeConsole;
+    if (retainedConsoleBytes < 8 * 1024 * 1024) break;
+    await new Promise(resolve => setTimeout(resolve, 50));
+  } while (Date.now() < consoleDeadline);
+  assert.ok(retainedConsoleBytes < 8 * 1024 * 1024, `Chromium retained ${retainedConsoleBytes} bytes from the example console burst`);
+  await cdp.detach();
   process.stdout.write(`Parked screencast: ${screencastSize.width} × ${screencastSize.height}\n`);
   const markup = '<input id="input"><button id="button" onclick="document.querySelector(\'#out\').textContent=document.querySelector(\'#input\').value">Write</button><div id="out"></div>';
   await page.goto(`data:text/html,${encodeURIComponent(markup)}`);
