@@ -40,6 +40,8 @@ Both Codex and Claude Code receive a local HTTP MCP connection on each enabled r
 
 Connections use ephemeral random bearer capabilities stored hashed in memory, bound to a run and session, and revoked when the run ends. They are not exposed through bootstrap or settings, and are scrubbed from provider events before persistence. Tabs are scoped to a Mingle session. Streaming has bounded viewers, input queues, buffers and acknowledgement pacing. Human/agent handoffs invalidate queued writes from the old owner.
 
+The built-in browser uses a single capture per page. Only active screencast viewers receive frames, and Chromium waits for that frame's viewers before producing another. The desktop relay disconnects if its outgoing queue backs up. Bursts of console logs containing objects can pin large object graphs in Chromium, so the built-in browser skips their previews and periodically clears that debugger's console history during a burst.
+
 ## Context compaction
 
 **Settings → General → Context** selects a native default or an integer threshold from 1–95%. It applies to subsequent runs, including resumed conversations, through native provider controls. Claude receives its documented percentage environment override. Codex receives an absolute token limit calculated from its reported/configured model capacity. Unknown capacity leaves native compaction enabled and produces a notice; Mingle never guesses a model's window. Providers may compact earlier because of their own limits and reserved context. See [the provider mapping and observed limits](provider-compaction-research.md).

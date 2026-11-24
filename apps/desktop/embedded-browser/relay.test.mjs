@@ -12,9 +12,14 @@ function fixture() {
     const view = { targetId: `target${views.length}`, url: () => url, title: () => 'title', debugger: debuggerApi, marks: 0, markAgentInput() { this.marks++; } };
     views.push(view); return view;
   }
-  relay.attachSocket({ readyState: 1, send: value => sent.push(JSON.parse(value)), on() {}, close() {} });
+  const socket = Object.assign(new EventEmitter(), {
+    readyState: 1, bufferedAmount: 0, send: value => sent.push(JSON.parse(value)),
+    close() { this.readyState = 3; this.emit('close'); },
+    terminate() { this.close(); },
+  });
+  relay.attachSocket(socket);
   const call = async (method, params = {}, sessionId) => { await relay.handle(JSON.stringify({ id: sent.filter(x => x.id).length + 1, method, params, ...(sessionId ? { sessionId } : {}) })); return sent.at(-1); };
-  return { relay, views, sent, call, makeView };
+  return { relay, views, sent, call, makeView, socket };
 }
 
 test('routes browser, page and child session messages', async () => {
@@ -33,6 +38,80 @@ test('browser target session can attach a page session', async () => {
   const pageSession = f.sent.at(-1).result.sessionId;
   await f.call('Page.startScreencast', {}, pageSession);
   assert.equal(view.debugger.calls.at(-1)[0], 'Page.startScreencast');
+});
+
+test('only screencast viewers receive frames and Chromium gets one ack per frame', async () => {
+  const f = fixture();
+  const view = f.makeView();
+  await f.call('Target.setAutoAttach', { autoAttach: true });
+  const page = f.sent.find(item => item.method === 'Target.attachedToTarget').params.sessionId;
+  const first = (await f.call('Target.attachToTarget', { targetId: view.targetId })).result.sessionId;
+  const second = (await f.call('Target.attachToTarget', { targetId: view.targetId })).result.sessionId;
+  const commands = method => view.debugger.calls.filter(call => call[0] === method);
+  await f.call('Page.startScreencast', {}, first);
+  await f.call('Page.startScreencast', {}, second);
+  assert.equal(commands('Page.startScreencast').length, 1);
+  assert.equal(commands('Page.startScreencast')[0][1].maxFramesInFlight, 1);
+  const frame = () => {
+    const start = f.sent.length;
+    view.debugger.emit('message', {}, 'Page.screencastFrame', { sessionId: 9, data: 'a' });
+    return f.sent.slice(start);
+  };
+  const delivered = frame();
+  assert.deepEqual(delivered.map(message => message.sessionId), [first, second]);
+  const ack = delivered[0].params.sessionId;
+  await f.call('Page.screencastFrameAck', { sessionId: ack }, page);
+  await f.call('Page.screencastFrameAck', { sessionId: ack }, first);
+  await f.call('Page.screencastFrameAck', { sessionId: ack }, first);
+  assert.equal(commands('Page.screencastFrameAck').length, 0);
+  await f.call('Page.screencastFrameAck', { sessionId: ack }, second);
+  assert.deepEqual(commands('Page.screencastFrameAck'), [['Page.screencastFrameAck', { sessionId: 9 }]]);
+  const newer = frame()[0].params.sessionId;
+  assert.notEqual(newer, ack);
+  await f.call('Page.screencastFrameAck', { sessionId: ack }, first);
+  await f.call('Target.detachFromTarget', { sessionId: second });
+  assert.equal(commands('Page.screencastFrameAck').length, 1);
+  await f.call('Page.screencastFrameAck', { sessionId: newer }, first);
+  assert.equal(commands('Page.screencastFrameAck').length, 2);
+  await f.call('Page.stopScreencast', {}, first);
+  assert.equal(commands('Page.stopScreencast').length, 1);
+  assert.deepEqual(frame(), []);
+});
+
+test('a backed-up relay disconnects and stops its screencasts', async () => {
+  const f = fixture();
+  const view = f.makeView();
+  const viewer = (await f.call('Target.attachToTarget', { targetId: view.targetId })).result.sessionId;
+  await f.call('Page.startScreencast', {}, viewer);
+  f.socket.bufferedAmount = 5 * 1024 * 1024;
+  const before = f.sent.length;
+  view.debugger.emit('message', {}, 'Page.screencastFrame', { sessionId: 9, data: 'a' });
+  assert.equal(f.sent.length, before);
+  assert.equal(f.socket.readyState, 3);
+  assert.equal(view.debugger.calls.at(-1)[0], 'Page.stopScreencast');
+});
+
+test('console object bursts are cleared per debugger target', async () => {
+  const f = fixture();
+  const view = f.makeView();
+  await f.call('Target.attachToTarget', { targetId: view.targetId });
+  const emit = (value, target = '') => view.debugger.emit('message', {}, 'Runtime.consoleAPICalled', { args: [value] }, target);
+  const object = { objectId: 'example' };
+  for (let i = 0; i < 40; i++) emit({ value: 'Example console text' });
+  for (let i = 0; i < 31; i++) emit(object);
+  emit(object, 'child-1');
+  assert.deepEqual(view.debugger.calls, []);
+  for (let i = 0; i < 95; i++) emit(object);
+  assert.deepEqual(view.debugger.calls, [['Runtime.releaseObjectGroup', { objectGroup: 'console' }]]);
+  for (let i = 0; i < 31; i++) emit(object, 'child-1');
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.sent.filter(item => item.method === 'Runtime.consoleAPICalled').length, 40);
+  const cleared = view.debugger.calls.filter(([method]) => method === 'Runtime.discardConsoleEntries');
+  assert.deepEqual(cleared, [
+    ['Runtime.discardConsoleEntries', {}],
+    ['Runtime.discardConsoleEntries', {}, 'child-1'],
+    ['Runtime.discardConsoleEntries', {}],
+  ]);
 });
 test('multiple explicit page sessions are independent when one detaches', async () => {
   const f = fixture(); const view = f.makeView();
@@ -84,6 +163,10 @@ test('detach event is forwarded', async () => {
   await f.call('Target.attachToTarget', { targetId: view.targetId }); view.debugger.emit('detach');
   assert.ok(f.sent.some(item => item.method === 'Target.targetDestroyed'));
   assert.ok(f.sent.some(item => item.method === 'Target.detachedFromTarget'));
+  assert.equal(view.debugger.listenerCount('message'), 0);
+  assert.equal(view.debugger.listenerCount('detach'), 0);
+  f.relay.onViewClosed(view);
+  assert.equal(f.sent.filter(item => item.method === 'Target.targetDestroyed').length, 1);
 });
 
 test('delegates browser cookie storage calls', async () => {
