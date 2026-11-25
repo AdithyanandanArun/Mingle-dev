@@ -118,12 +118,13 @@ export class BrowserStreamServer {
       const json = JSON.stringify(message);
       if (canSend(Buffer.byteLength(json))) ws.send(json);
     };
+    const encodeState = (tab: BrowserTab) => JSON.stringify({ type: 'state', tab } satisfies BrowserServerMessage);
     let lastState = '';
     const pushState = (tab: BrowserTab) => {
-      const encoded = JSON.stringify(tab);
+      const encoded = encodeState(tab);
       if (encoded === lastState) return;
       lastState = encoded;
-      send({ type: 'state', tab });
+      if (canSend(Buffer.byteLength(encoded))) ws.send(encoded);
     };
 
     const viewer = new ScreencastViewer(entry, {
@@ -189,8 +190,9 @@ export class BrowserStreamServer {
       void this.host.dropClient(sessionId, tabId, clientId).catch(() => undefined);
     });
 
-    send({ type: 'hello', clientId, tab: entry.describe() });
-    lastState = JSON.stringify(entry.describe());
+    const initialTab = entry.describe();
+    send({ type: 'hello', clientId, tab: initialTab });
+    lastState = encodeState(initialTab);
     viewer.start().catch((error: unknown) => {
       this.log('warn', 'Could not start the browser screencast', error);
       send({ type: 'error', message: 'The live view could not start for this tab.' });
