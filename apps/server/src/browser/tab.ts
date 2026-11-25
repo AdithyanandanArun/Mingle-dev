@@ -137,9 +137,15 @@ export class TabEntry {
     this.subscribers.clear();
     const handles = [...this.viewers];
     this.viewers.clear();
-    await Promise.race([
-      Promise.allSettled(handles.map((handle) => handle.close(reason))),
-      new Promise((resolve) => setTimeout(resolve, DETACH_TIMEOUT_MS).unref()),
-    ]);
+    if (handles.length === 0) return;
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      await Promise.race([
+        Promise.allSettled(handles.map((handle) => handle.close(reason))),
+        new Promise((resolve) => { timer = setTimeout(resolve, DETACH_TIMEOUT_MS).unref(); }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
   }
 }
