@@ -189,7 +189,7 @@ export function createApplication(options: ApplicationOptions): MingleApplicatio
   const hub = new Hub(security, log);
   const tasks = new TaskService(store);
   const providers = new ProviderService(options.providers, () => store.getSettings(), log, () => store.touch());
-  const browser = new BrowserService({ dataDir: config.dataDir, getSettings: () => store.getSettings(), onChange: () => store.touch(), log, sessionExists: (id) => Boolean(store.getSession(id)) });
+  const browser = new BrowserService({ dataDir: config.dataDir, getSettings: () => store.getSettings(), onChange: (sessionId) => hub.broadcast({ type: 'browser.changed', sessionId }), log, sessionExists: (id) => Boolean(store.getSession(id)) });
   const browserMcp = new BrowserMcpBridge(browser, store, () => boundPort, (sessionId, tabId) => hub.broadcast({ type: 'browser.opened', sessionId, tabId }), () => config.host);
   const progressMcp = new ProgressMcpBridge(store, () => boundPort, () => config.host);
   const localUser = () => {

@@ -38,9 +38,11 @@ export function useBrowserState(sessionId: string | undefined, active: boolean):
     let stopped = false;
     let timer = 0;
     let controller: AbortController | null = null;
+    let refreshQueued = false;
     const tick = async () => {
       window.clearTimeout(timer);
       controller?.abort();
+      refreshQueued = false;
       const mine = new AbortController();
       controller = mine;
       const started = epoch.current;
@@ -53,15 +55,25 @@ export function useBrowserState(sessionId: string | undefined, active: boolean):
         if (stopped || mine.signal.aborted) return;
         setError(errorMessage(cause));
       } finally {
-        if (!stopped && controller === mine) timer = window.setTimeout(() => void tick(), POLL_MS);
+        if (!stopped && controller === mine) {
+          controller = null;
+          timer = window.setTimeout(() => void tick(), refreshQueued ? 0 : POLL_MS);
+        }
       }
     };
+    const browserChanged = (event: Event) => {
+      if ((event as CustomEvent<unknown>).detail !== sessionId) return;
+      if (controller) refreshQueued = true;
+      else void tick();
+    };
+    window.addEventListener('mingle:browser-changed', browserChanged);
     kick.current = () => void tick();
     void tick();
     return () => {
       stopped = true;
       window.clearTimeout(timer);
       controller?.abort();
+      window.removeEventListener('mingle:browser-changed', browserChanged);
       kick.current = () => undefined;
     };
   }, [poll, sessionId]);

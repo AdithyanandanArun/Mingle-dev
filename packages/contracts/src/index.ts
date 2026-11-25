@@ -214,6 +214,7 @@ export const CloneProjectSchema = z.object({
 export type ServerEvent =
   | { type: 'state.changed'; event?: WorkspaceEvent; scope?: import('./session-snapshot').StateChangeScope }
   | { type: 'browser.opened'; sessionId: string; tabId: string }
+  | { type: 'browser.changed'; sessionId?: string }
   | { type: 'session.delta'; sessionId: string; messageId: string; delta: string; offset?: number }
   | { type: 'terminal.ready'; terminalId: string }
   | { type: 'terminal.error'; message: string }

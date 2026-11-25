@@ -438,6 +438,10 @@ export const useMingle = create<MingleState>((set, get) => {
 
   const handleServerEvent = (ev: ServerEvent): void => {
     switch (ev.type) {
+      case 'browser.changed': {
+        window.dispatchEvent(new CustomEvent('mingle:browser-changed', { detail: ev.sessionId }));
+        break;
+      }
       case 'browser.opened': {
         // Surface the run's actual tab without stealing focus or changing a human's current tab.
         const { activeProjectId, sessionByProject, view } = get();

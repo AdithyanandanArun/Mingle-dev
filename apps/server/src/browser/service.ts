@@ -27,8 +27,8 @@ import { EmbeddedBrowserClient, NATIVE_HOLDER } from './embedded.ts';
 export interface BrowserServiceOptions {
   dataDir: string;
   getSettings: () => AppSettings;
-  /** Called (coalesced) whenever browser state changed; wire it to state.changed. */
-  onChange: () => void;
+  /** Called once per changed session in a batch. An absent ID signals browser discovery changes. */
+  onChange: (sessionId?: string) => void;
   /** Lets the stream endpoint reject unknown or archived sessions. */
   sessionExists?: (sessionId: string) => boolean;
   log?: Logger;
@@ -53,6 +53,7 @@ export class BrowserService {
   private readonly stream: BrowserStreamServer;
   private readonly log: Logger;
   private notifyTimer: NodeJS.Timeout | null = null;
+  private readonly pendingChanges = new Set<string | undefined>();
   private closing: Promise<void> | null = null;
   private readonly embedded = EmbeddedBrowserClient.fromEnv();
 
@@ -260,6 +261,7 @@ export class BrowserService {
   close(): Promise<void> {
     this.closing ??= (async () => {
       if (this.notifyTimer) clearTimeout(this.notifyTimer);
+      this.pendingChanges.clear();
       this.installer.abort();
       await this.stream.close();
       await Promise.allSettled([...this.runtimes.values()].map((runtime) => runtime.disconnect()));
@@ -281,7 +283,7 @@ export class BrowserService {
         sessionId,
         dataDir: this.options.dataDir,
         getSettings: this.options.getSettings,
-        notify: () => this.notify(),
+        notify: () => this.notify(sessionId),
         targets: this.targets,
         totalTabs: () => [...this.runtimes.values()].reduce((sum, item) => sum + item.tabCount, 0),
         log: this.log,
@@ -323,11 +325,17 @@ export class BrowserService {
     return { wsUrl: resolved.wsUrl, kind: 'source', label: source.name };
   }
 
-  private notify(): void {
-    if (this.notifyTimer || this.closing) return;
+  private notify(sessionId?: string): void {
+    if (this.closing) return;
+    this.pendingChanges.add(sessionId);
+    if (this.notifyTimer) return;
     this.notifyTimer = setTimeout(() => {
       this.notifyTimer = null;
-      try { this.options.onChange(); } catch (error) { this.log('warn', 'Browser change listener failed', error); }
+      const changes = [...this.pendingChanges];
+      this.pendingChanges.clear();
+      for (const changed of changes) {
+        try { this.options.onChange(changed); } catch (error) { this.log('warn', 'Browser change listener failed', error); }
+      }
     }, NOTIFY_DELAY_MS);
     this.notifyTimer.unref();
   }

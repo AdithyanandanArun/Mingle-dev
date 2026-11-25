@@ -96,6 +96,19 @@ afterEach(() => {
 });
 
 describe('scoped session refresh', () => {
+  it('delivers browser state changes without requesting a workspace snapshot', async () => {
+    const { emit, settle, win } = await startStore(workspace());
+    const changed = vi.fn();
+    win.addEventListener('mingle:browser-changed', changed);
+    emit({ type: 'browser.changed', sessionId: 'b' });
+    emit({ type: 'browser.changed' });
+    await settle();
+
+    expect(changed.mock.calls.map(([event]) => event.detail)).toEqual(['b', null]);
+    expect(bootstrap).toHaveBeenCalledTimes(1);
+    expect(sessionSnapshot).not.toHaveBeenCalled();
+  });
+
   it('opens the active browser surface without opening or changing the context sidebar', async () => {
     const { useMingle: store, emit } = await startStore(workspace());
     const { useBrowserStore } = await import('./browser');
