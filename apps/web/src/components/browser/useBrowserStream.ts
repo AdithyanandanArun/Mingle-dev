@@ -61,7 +61,11 @@ export function useBrowserStream(sessionId: string | undefined, tabId: string | 
     setFrameSize(null);
     setError(null);
     const canvas = canvasRef.current;
-    canvas?.getContext('2d')?.clearRect(0, 0, canvas.width, canvas.height);
+    // Release the previous page's backing store while the stream is inactive or switching tabs.
+    if (canvas && (canvas.width !== 1 || canvas.height !== 1)) {
+      canvas.width = 1;
+      canvas.height = 1;
+    }
     if (!enabled || !sessionId || !tabId) { setStatus('idle'); return; }
 
     let disposed = false;
