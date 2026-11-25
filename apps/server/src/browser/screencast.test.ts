@@ -53,13 +53,14 @@ describe('ScreencastViewer fallback lifecycle', () => {
 
   it('skips the still capture if a live frame arrives during viewport refresh', async () => {
     vi.useFakeTimers();
-    const refresh = Promise.withResolvers<void>();
-    vi.mocked(refreshViewport).mockResolvedValue(undefined).mockImplementationOnce(() => refresh.promise);
+    let finishRefresh!: () => void;
+    const refresh = new Promise<void>(resolve => { finishRefresh = resolve; });
+    vi.mocked(refreshViewport).mockImplementationOnce(() => refresh);
     const { cdp, send, viewer } = fixture();
     await viewer.start();
     await vi.advanceTimersByTimeAsync(700);
     cdp.emit('Page.screencastFrame', { data: Buffer.from('live').toString('base64'), sessionId: 1, metadata: { deviceWidth: 800, deviceHeight: 600 } });
-    refresh.resolve();
+    finishRefresh();
     await vi.advanceTimersByTimeAsync(0);
     expect(cdp.commands).not.toContain('Page.captureScreenshot');
     expect(send).toHaveBeenCalledOnce();
