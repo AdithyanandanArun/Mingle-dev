@@ -54,6 +54,7 @@ export class BrowserService {
   private readonly log: Logger;
   private notifyTimer: NodeJS.Timeout | null = null;
   private readonly pendingChanges = new Set<string | undefined>();
+  private discoveryPending: Promise<BrowserDiscovery> | null = null;
   private closing: Promise<void> | null = null;
   private readonly embedded = EmbeddedBrowserClient.fromEnv();
 
@@ -70,7 +71,12 @@ export class BrowserService {
   }
 
   /** What can be used right now. Never downloads or launches anything and never opens profile data. */
-  async discovery(): Promise<BrowserDiscovery> {
+  discovery(): Promise<BrowserDiscovery> {
+    this.discoveryPending ??= this.scanDiscovery().finally(() => { this.discoveryPending = null; });
+    return this.discoveryPending;
+  }
+
+  private async scanDiscovery(): Promise<BrowserDiscovery> {
     const [sources, executable, systemBrowsers] = await Promise.all([discoverSources(), resolveManagedExecutable(this.options.getSettings().browserExecutable), discoverSystemBrowsers({ restricted: process.platform === 'linux' })]);
     const sandbox = await detectSandbox({ managedExecutable: executable.path, configured: executable.configured, systemSandboxReady: systemBrowsers.some(b => b.executable === executable.path && b.sandboxReady) });
     const notices: string[] = [];
@@ -90,7 +96,7 @@ export class BrowserService {
     const sandbox=await detectSandbox({ managedExecutable: exe.path, configured: exe.configured });
     if (!sandbox?.canInstallProfile) throw new BrowserError(409,'This computer cannot install an AppArmor profile from Mingle. Use the manual steps or an installed browser instead.');
     try { await installSandboxProfile(exe.path,exe.configured); } catch(e) { throw new BrowserError(403,e instanceof Error?e.message:'Could not install the Chromium AppArmor profile.'); }
-    return this.discovery();
+    return this.scanDiscovery();
   }
 
   async signIn(sessionId:string,input:unknown):Promise<BrowserSessionState> {
@@ -128,7 +134,7 @@ export class BrowserService {
   async install(): Promise<BrowserDiscovery> {
     this.assertOpen();
     await this.installer.start().catch(() => undefined);
-    return this.discovery();
+    return this.scanDiscovery();
   }
 
   status(sessionId: string): BrowserSessionState {
