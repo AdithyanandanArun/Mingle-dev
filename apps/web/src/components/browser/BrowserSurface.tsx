@@ -1,11 +1,11 @@
 import { useEffect, useRef, type ClipboardEvent, type KeyboardEvent, type PointerEvent, type RefObject } from 'react';
 import type { BrowserAction, BrowserTab } from '@mingle/contracts';
 import { chunkText, keyToAction } from '../../lib/browserKeys';
+import { createPointerMoveQueue } from './pointerMoveQueue';
 import { cx } from '../../lib/format';
 import { Spinner } from '../ui';
 import type { BrowserStream } from './useBrowserStream';
 
-const MOVE_INTERVAL_MS = 50;
 const WHEEL_INTERVAL_MS = 40;
 const WHEEL_LIMIT = 4000;
 const BUTTONS = ['left', 'middle', 'right'] as const;
@@ -30,7 +30,8 @@ export function BrowserSurface({ stream, tab, canvasRef, canInput }: { stream: B
   const stageRef = useRef<HTMLDivElement>(null);
   const live = useRef({ canInput, send: stream.sendInput, frame: stream.frameSize, viewport: tab.viewport });
   live.current = { canInput, send: stream.sendInput, frame: stream.frameSize, viewport: tab.viewport };
-  const move = useRef<{ last: number; timer: number; pending: BrowserAction | null }>({ last: 0, timer: 0, pending: null });
+  const move = useRef<ReturnType<typeof createPointerMoveQueue> | null>(null);
+  if (!move.current) move.current = createPointerMoveQueue((action) => live.current.send(action));
   const pressed = useRef<{ button: (typeof BUTTONS)[number]; x: number; y: number } | null>(null);
   const wheel = useRef<{ timer: number; dx: number; dy: number; x: number; y: number }>({ timer: 0, dx: 0, dy: 0, x: 0, y: 0 });
   const pointer = tab.agentPointer;
@@ -47,14 +48,10 @@ export function BrowserSurface({ stream, tab, canvasRef, canInput }: { stream: B
   }
 
   const flushMove = () => {
-    const m = move.current;
-    window.clearTimeout(m.timer);
-    m.timer = 0;
-    if (m.pending) { live.current.send(m.pending); m.pending = null; m.last = performance.now(); }
+    move.current?.flush();
   };
   const releaseAll = () => {
-    const m = move.current;
-    window.clearTimeout(m.timer); m.timer = 0; m.pending = null;
+    move.current?.clear();
     window.clearTimeout(wheel.current.timer); wheel.current.timer = 0; wheel.current.dx = 0; wheel.current.dy = 0;
     const down = pressed.current;
     pressed.current = null;
@@ -94,10 +91,7 @@ export function BrowserSurface({ stream, tab, canvasRef, canInput }: { stream: B
     if (!canInput || tab.control.holderId === null) return;
     const p = mapPoint(e.currentTarget, e.clientX, e.clientY, stream.frameSize, tab.viewport);
     if (!p.inside && !pressed.current) return;
-    const m = move.current;
-    m.pending = { type: 'pointer', phase: 'move', x: p.x, y: p.y };
-    if (performance.now() - m.last >= MOVE_INTERVAL_MS) flushMove();
-    else if (!m.timer) m.timer = window.setTimeout(flushMove, MOVE_INTERVAL_MS);
+    move.current?.queue({ type: 'pointer', phase: 'move', x: p.x, y: p.y });
   };
   const onPointerDown = (e: PointerEvent<HTMLDivElement>) => {
     e.currentTarget.focus({ preventScroll: true });
@@ -108,7 +102,6 @@ export function BrowserSurface({ stream, tab, canvasRef, canInput }: { stream: B
     if (!button) return;
     e.preventDefault();
     e.currentTarget.setPointerCapture(e.pointerId);
-    move.current.pending = null;
     flushMove();
     pressed.current = { button, x: p.x, y: p.y };
     stream.sendInput({ type: 'pointer', phase: 'down', x: p.x, y: p.y, button });
