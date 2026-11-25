@@ -77,6 +77,7 @@ export function useBrowserStream(sessionId: string | undefined, tabId: string | 
     let retryTimer = 0;
     let ws: WebSocket | null = null;
     let lastFrameSize: FrameSize | null = null;
+    let context: ImageBitmapRenderingContext | CanvasRenderingContext2D | null = null;
     // Per-connection frame pipeline.
     let header: { sequence: number; width: number; height: number } | null = null;
     let decoding: { sequence: number } | null = null;
@@ -102,10 +103,15 @@ export function useBrowserStream(sessionId: string | undefined, tabId: string | 
         retries = 0;
         const { width, height } = bitmap;
         const target = canvasRef.current;
-        if (target !== canvas) { releaseCanvas(canvas); canvas = target; }
+        if (target !== canvas) { releaseCanvas(canvas); canvas = target; context = null; }
         if (target) {
-          if (target.width !== width || target.height !== height) { target.width = width; target.height = height; }
-          target.getContext('2d')?.drawImage(bitmap, 0, 0);
+          if (target.width !== width) target.width = width;
+          if (target.height !== height) target.height = height;
+          context ??= target.getContext('bitmaprenderer') ?? target.getContext('2d');
+          if (context && 'transferFromImageBitmap' in context) {
+            context.transferFromImageBitmap(bitmap);
+            bitmap = null; // The canvas owns the transferred bitmap.
+          } else context?.drawImage(bitmap, 0, 0);
         }
         if (lastFrameSize?.width !== width || lastFrameSize.height !== height) {
           lastFrameSize = { width, height };
