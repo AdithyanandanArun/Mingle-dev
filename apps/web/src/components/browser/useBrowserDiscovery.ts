@@ -57,10 +57,17 @@ export function useBrowserDiscovery(): BrowserDiscoveryHandle {
   const installing = starting || Boolean(discovery?.installing);
   useEffect(() => {
     if (!installing) return;
+    const controller = new AbortController();
+    let polling = false;
     const id = window.setInterval(() => {
-      api.browserDiscovery().then((next) => { if (alive.current) setDiscovery(next); }).catch(() => undefined);
+      if (polling) return;
+      polling = true;
+      api.browserDiscovery(controller.signal)
+        .then((next) => { if (!controller.signal.aborted) setDiscovery(next); })
+        .catch(() => undefined)
+        .finally(() => { polling = false; });
     }, INSTALL_POLL_MS);
-    return () => window.clearInterval(id);
+    return () => { window.clearInterval(id); controller.abort(); };
   }, [installing]);
 
   return { discovery, loading, error, installing, refresh, install };
