@@ -15,6 +15,31 @@ describe('TabControl', () => {
     await vi.advanceTimersByTimeAsync(BROWSER_TOUCH_IDLE_MS);
     expect(control.ownerId).toBeNull();
   });
+  it('checks the latest touch deadline when the original lease timer wakes', async () => {
+    vi.useFakeTimers(); const changed = vi.fn(); const control = new TabControl(async () => undefined, changed);
+    control.claimTouch('a');
+    await vi.advanceTimersByTimeAsync(BROWSER_TOUCH_IDLE_MS - 300);
+    control.claimTouch('a');
+    await vi.advanceTimersByTimeAsync(300);
+    expect(control.ownerId).toBe('a');
+    expect(control.lease).toBe('touch');
+    await vi.advanceTimersByTimeAsync(BROWSER_TOUCH_IDLE_MS - 301);
+    expect(control.ownerId).toBe('a');
+    await vi.advanceTimersByTimeAsync(1);
+    expect(control.ownerId).toBeNull();
+  });
+  it('does not hand control back from a stale timer while a pointer remains pressed', async () => {
+    vi.useFakeTimers(); const control = new TabControl();
+    control.claimTouch('a');
+    control.pointer('down');
+    await vi.advanceTimersByTimeAsync(BROWSER_TOUCH_IDLE_MS * 2);
+    expect(control.ownerId).toBe('a');
+    control.pointer('up');
+    await vi.advanceTimersByTimeAsync(BROWSER_TOUCH_IDLE_MS - 1);
+    expect(control.ownerId).toBe('a');
+    await vi.advanceTimersByTimeAsync(1);
+    expect(control.ownerId).toBeNull();
+  });
   it('does not expire while a pointer button is pressed', async () => {
     vi.useFakeTimers(); const control = new TabControl();
     await control.run({ kind: 'human', id: 'a' }, async () => undefined);
