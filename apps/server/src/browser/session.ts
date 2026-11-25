@@ -60,7 +60,7 @@ export class BrowserSessionRuntime {
   private readonly tabs = new Map<string, TabEntry>();
   private readonly pages = new Map<Page, TabEntry>();
   private readonly adopting = new Map<Page, Promise<TabEntry | null>>();
-  private readonly watched = new Map<Page, (frame?: unknown) => void>();
+  private readonly watched = new Map<Page, { navigated: () => void; closed: () => void }>();
   private readonly titleReads = new WeakMap<TabEntry, Promise<void>>();
   private context: BrowserContext | null = null;
   private browser: Browser | null = null;
@@ -405,8 +405,7 @@ export class BrowserSessionRuntime {
     const entries = [...this.tabs.values()];
     const { context, browser, mode } = this;
     this.embeddedAbort?.abort(); this.embeddedAbort = null;
-    for (const [page, handler] of this.watched) page.off('framenavigated', handler);
-    this.watched.clear();
+    for (const page of this.watched.keys()) this.unwatchForEligibility(page);
     this.tabs.clear();
     this.pages.clear();
     this.activeTabId = null;
@@ -545,20 +544,23 @@ export class BrowserSessionRuntime {
   /** A tab that is not http(s) yet (a new-tab page, for instance) is adopted once it navigates somewhere eligible. */
   private watchForEligibility(page: Page, generation: number): void {
     if (this.watched.has(page)) return;
-    const handler = () => {
+    const navigated = () => {
       if (generation !== this.generation) return this.unwatchForEligibility(page);
       if (!isEligibleTabUrl(page.url())) return;
       this.unwatchForEligibility(page);
       void this.adopt(page, { activate: false });
     };
-    this.watched.set(page, handler);
-    page.on('framenavigated', handler);
+    const closed = () => this.unwatchForEligibility(page);
+    this.watched.set(page, { navigated, closed });
+    page.on('framenavigated', navigated);
+    page.on('close', closed);
   }
 
   private unwatchForEligibility(page: Page): void {
-    const handler = this.watched.get(page);
-    if (!handler) return;
-    page.off('framenavigated', handler);
+    const listeners = this.watched.get(page);
+    if (!listeners) return;
+    page.off('framenavigated', listeners.navigated);
+    page.off('close', listeners.closed);
     this.watched.delete(page);
   }
 
