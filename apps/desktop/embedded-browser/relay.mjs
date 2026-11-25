@@ -6,6 +6,9 @@ const MAX_OBJECT_CONSOLE_EVENTS = 32;
 
 export function createRelay({ createView, closeView, listViews, version, userAgent, getCookies, setCookies, clearCookies }) {
   const pageSessions = new Map();
+  // Event routing is per view. Keep its aliases indexed so a busy page does
+  // not scan every session attached to unrelated pages for each CDP event.
+  const pageSessionsByView = new Map();
   const childSessions = new Map();
   const autoAttachSessions = new Map();
   const browserSessions = new Set();
@@ -33,8 +36,19 @@ export function createRelay({ createView, closeView, listViews, version, userAge
   function attach(view, emitEvent = true) {
     const sessionId = randomUUID();
     pageSessions.set(sessionId, view);
+    let aliases = pageSessionsByView.get(view);
+    if (!aliases) pageSessionsByView.set(view, aliases = new Set());
+    aliases.add(sessionId);
     if (emitEvent) send({ method: 'Target.attachedToTarget', params: { sessionId, targetInfo: targetInfo(view), waitingForDebugger: false } });
     return sessionId;
+  }
+  function detachPageSession(sessionId) {
+    const view = pageSessions.get(sessionId);
+    if (!view) return;
+    pageSessions.delete(sessionId);
+    const aliases = pageSessionsByView.get(view);
+    aliases?.delete(sessionId);
+    if (!aliases?.size) pageSessionsByView.delete(view);
   }
   function unbindView(view) {
     const handlers = listeners.get(view);
@@ -44,7 +58,7 @@ export function createRelay({ createView, closeView, listViews, version, userAge
     view.debugger.removeListener('detach', handlers.detach);
     screencasts.delete(view);
     consoleBuffers.delete(view);
-    for (const [sid, item] of pageSessions) if (item === view) { send({ method: 'Target.detachedFromTarget', params: { sessionId: sid, targetId: view.targetId } }); pageSessions.delete(sid); }
+    for (const sid of [...(pageSessionsByView.get(view) ?? [])]) { send({ method: 'Target.detachedFromTarget', params: { sessionId: sid, targetId: view.targetId } }); detachPageSession(sid); }
     for (const [sid, item] of childSessions) if (item === view) childSessions.delete(sid);
     autoAttachSessions.delete(view);
     if (discover) send({ method: 'Target.targetDestroyed', params: { targetId: view.targetId } });
@@ -139,7 +153,7 @@ export function createRelay({ createView, closeView, listViews, version, userAge
     }
     // Iframe/worker events already belong to a real child CDP session. Only the
     // page's root events fan out to the outer aliases attached to that page.
-    const pageIds = sessionId ? [] : [...pageSessions].filter(([, item]) => item === view).map(([sid]) => sid);
+    const pageIds = sessionId ? [] : [...(pageSessionsByView.get(view) ?? [])];
     const routedIds = sessionId ? [sessionId] : pageIds.length ? pageIds : [undefined];
     for (const pageId of routedIds) {
       send({ method: eventName, params: eventParams, ...(pageId ? { sessionId: pageId } : {}) });
@@ -195,7 +209,7 @@ export function createRelay({ createView, closeView, listViews, version, userAge
             if (!autoAttachSessions.has(view)) autoAttachSessions.set(view, attach(view));
           });
           else for (const [view, sessionId] of autoAttachSessions) {
-            pageSessions.delete(sessionId);
+            detachPageSession(sessionId);
             void removeViewer(view, sessionId).catch(() => undefined);
             send({ method: 'Target.detachedFromTarget', params: { sessionId, targetId: view.targetId } });
           }
@@ -206,7 +220,7 @@ export function createRelay({ createView, closeView, listViews, version, userAge
         case 'Target.attachToBrowserTarget': { const browserSession = randomUUID(); browserSessions.add(browserSession); return respond({ sessionId: browserSession }); }
         case 'Target.detachFromTarget': {
           const view = pageSessions.get(params.sessionId);
-          pageSessions.delete(params.sessionId);
+          detachPageSession(params.sessionId);
           if (autoAttachSessions.get(view) === params.sessionId) autoAttachSessions.delete(view);
           if (view) await removeViewer(view, params.sessionId).catch(() => undefined);
           send({ method: 'Target.detachedFromTarget', params: { sessionId: params.sessionId, ...(view ? { targetId: view.targetId } : {}) }, ...(sessionId ? { sessionId } : {}) });
@@ -232,7 +246,7 @@ export function createRelay({ createView, closeView, listViews, version, userAge
     closed = true;
     stopScreencasts();
     for (const view of listeners.keys()) unbindView(view);
-    pageSessions.clear(); childSessions.clear(); browserSessions.clear();
+    pageSessions.clear(); pageSessionsByView.clear(); childSessions.clear(); browserSessions.clear();
     socket?.close(); socket = undefined;
     consoleBuffers.clear();
   }
