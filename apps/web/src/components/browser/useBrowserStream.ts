@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type RefObject } from 'react';
-import type { BrowserAction, BrowserServerMessage, BrowserTab } from '@mingle/contracts';
+import { BROWSER_STREAM_TAB_GONE, type BrowserAction, type BrowserServerMessage, type BrowserTab } from '@mingle/contracts';
 
 export type StreamStatus = 'idle' | 'connecting' | 'live' | 'closed';
 export interface FrameSize { width: number; height: number }
@@ -153,12 +153,16 @@ export function useBrowserStream(sessionId: string | undefined, tabId: string | 
           void show(socket, event.data, current.sequence);
         }
       };
-      socket.onclose = () => {
+      socket.onclose = (event) => {
         if (disposed || socketRef.current !== socket) return;
         socketRef.current = null;
         header = null;
         waiting = null;
         decoding = null;
+        if (event.code === BROWSER_STREAM_TAB_GONE) {
+          setStatus('closed');
+          return;
+        }
         const delay = RETRY_DELAYS_MS[retries];
         if (delay === undefined) {
           setStatus('closed');

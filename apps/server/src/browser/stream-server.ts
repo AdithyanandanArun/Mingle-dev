@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import type { IncomingMessage } from 'node:http';
 import type { Duplex } from 'node:stream';
-import { BrowserClientMessageSchema, type BrowserAction, type BrowserServerMessage, type BrowserTab } from '@mingle/contracts';
+import { BROWSER_STREAM_TAB_GONE, BrowserClientMessageSchema, type BrowserAction, type BrowserServerMessage, type BrowserTab } from '@mingle/contracts';
 import { WebSocketServer, type RawData, type WebSocket } from 'ws';
 import type { Security } from '../security.ts';
 import type { Logger } from '../types.ts';
@@ -25,7 +25,6 @@ export interface StreamHost {
 
 const MAX_INVALID_MESSAGES = 20;
 const HEARTBEAT_MS = 30_000;
-const CLOSE_TAB_GONE = 4404;
 
 function rawToString(data: RawData): string {
   if (Array.isArray(data)) return Buffer.concat(data).toString('utf8');
@@ -138,11 +137,11 @@ export class BrowserStreamServer {
 
     const unsubscribe = entry.subscribe({
       state: pushState,
-      closed: (reason) => { if (ws.readyState === ws.OPEN) ws.close(CLOSE_TAB_GONE, reason.slice(0, 100)); },
+      closed: (reason) => { if (ws.readyState === ws.OPEN) ws.close(BROWSER_STREAM_TAB_GONE, reason.slice(0, 100)); },
     });
     const detach = entry.attachViewer({
       close: async (reason) => {
-        if (ws.readyState === ws.OPEN) ws.close(CLOSE_TAB_GONE, reason.slice(0, 100));
+        if (ws.readyState === ws.OPEN) ws.close(BROWSER_STREAM_TAB_GONE, reason.slice(0, 100));
         await viewer.stop();
       },
     });

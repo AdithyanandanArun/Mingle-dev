@@ -29,6 +29,8 @@ export interface BrowserDiscovery {
 }
 /** Idle time after a person's last input before a touch claim hands the tab back to the agent. */
 export const BROWSER_TOUCH_IDLE_MS = 2500;
+/** A stream whose tab has been removed cannot recover by reconnecting to that tab ID. */
+export const BROWSER_STREAM_TAB_GONE = 4404;
 /**
  * Who drives a tab. The agent drives by default. Any input from a person claims the tab at once with a `touch`
  * lease that returns to the agent after BROWSER_TOUCH_IDLE_MS without input; `hold` keeps it until released.
