@@ -31,6 +31,7 @@ export function NativeBrowserView({ sessionId, targetId, active, stream, tab, ca
       return;
     }
     let frame = 0;
+    let overlays: Element[] | null = null;
     let disposed = false;
     let bridgeFailed = false;
     // The body observer fires on most UI updates; only tell the desktop app when what it shows actually changes.
@@ -60,7 +61,8 @@ export function NativeBrowserView({ sessionId, targetId, active, stream, tab, ca
         const element = placeholder.current;
         if (document.hidden || !element) { hide(); return; }
         const rect = element.getBoundingClientRect();
-        const overlay = [...document.querySelectorAll<HTMLElement>(OVERLAYS)].some((item) => {
+        overlays ??= [...document.querySelectorAll(OVERLAYS)];
+        const overlay = overlays.some((item) => {
           // Full-view/float browser containers can themselves be dialogs. They host this
           // native page; only a separate overlay covering the page needs a stream fallback.
           if (item.contains(element)) return false;
@@ -83,8 +85,18 @@ export function NativeBrowserView({ sessionId, targetId, active, stream, tab, ca
     };
     const observer = new ResizeObserver(measure);
     if (placeholder.current) observer.observe(placeholder.current);
-    // One geometry check per frame, even when React changes several overlays or their ancestors.
-    const mutation = new MutationObserver(measure);
+    // Layout still needs checking when text or ancestor styles change, but those updates
+    // don't change which elements can overlap the browser.
+    const mutation = new MutationObserver((records) => {
+      if (overlays && records.some(record => {
+        if (record.type === 'childList') {
+          return [...record.addedNodes, ...record.removedNodes].some(node => node.nodeType === Node.ELEMENT_NODE);
+        }
+        const element = record.target as Element;
+        return element.matches(OVERLAYS) !== overlays?.includes(element);
+      })) overlays = null;
+      measure();
+    });
     mutation.observe(document.body, {
       childList: true, subtree: true, attributes: true,
       attributeFilter: ['class', 'style', 'aria-hidden', 'inert', 'hidden', 'role', 'data-overlay', 'data-radix-popper-content-wrapper'],
