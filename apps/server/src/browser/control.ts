@@ -34,11 +34,7 @@ export class TabControl {
   run<T>(actor: Actor, task: () => Promise<T>): Promise<T> {
     try {
       this.authorize(actor);
-      if (actor.kind === 'human' && this.holder === null) {
-        this.holder = actor.id; this.leaseValue = 'touch'; this.expiry = Date.now() + BROWSER_TOUCH_IDLE_MS; this.epoch++;
-        this.arm(); this.onChange();
-      }
-      if (actor.kind === 'human' && this.leaseValue === 'touch') this.extend();
+      if (actor.kind === 'human') this.claimTouch(actor.id);
     } catch (error) { return Promise.reject(error); }
     const admittedIn = this.epoch;
     const result = this.tail.then(() => {
