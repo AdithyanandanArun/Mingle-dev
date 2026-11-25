@@ -60,7 +60,8 @@ export class BrowserSessionRuntime {
   private readonly tabs = new Map<string, TabEntry>();
   private readonly pages = new Map<Page, TabEntry>();
   private readonly adopting = new Map<Page, Promise<TabEntry | null>>();
-  private readonly watched = new WeakSet<Page>();
+  private readonly watched = new Map<Page, (frame?: unknown) => void>();
+  private readonly titleReads = new WeakMap<TabEntry, Promise<void>>();
   private context: BrowserContext | null = null;
   private browser: Browser | null = null;
   private endpoint: string | null = null;
@@ -404,6 +405,8 @@ export class BrowserSessionRuntime {
     const entries = [...this.tabs.values()];
     const { context, browser, mode } = this;
     this.embeddedAbort?.abort(); this.embeddedAbort = null;
+    for (const [page, handler] of this.watched) page.off('framenavigated', handler);
+    this.watched.clear();
     this.tabs.clear();
     this.pages.clear();
     this.activeTabId = null;
@@ -542,15 +545,21 @@ export class BrowserSessionRuntime {
   /** A tab that is not http(s) yet (a new-tab page, for instance) is adopted once it navigates somewhere eligible. */
   private watchForEligibility(page: Page, generation: number): void {
     if (this.watched.has(page)) return;
-    this.watched.add(page);
     const handler = () => {
-      if (generation !== this.generation) return void page.off('framenavigated', handler);
+      if (generation !== this.generation) return this.unwatchForEligibility(page);
       if (!isEligibleTabUrl(page.url())) return;
-      page.off('framenavigated', handler);
-      this.watched.delete(page);
+      this.unwatchForEligibility(page);
       void this.adopt(page, { activate: false });
     };
+    this.watched.set(page, handler);
     page.on('framenavigated', handler);
+  }
+
+  private unwatchForEligibility(page: Page): void {
+    const handler = this.watched.get(page);
+    if (!handler) return;
+    page.off('framenavigated', handler);
+    this.watched.delete(page);
   }
 
   private wire(entry: TabEntry, generation: number): void {
@@ -634,11 +643,18 @@ export class BrowserSessionRuntime {
 
   private async refreshTitle(entry: TabEntry): Promise<void> {
     if (entry.dialog) return;
-    const title = await withTimeout(entry.page.title(), 2000, 'Reading the title timed out.').catch(() => null);
-    if (title === null || title === entry.title) return;
-    entry.title = title;
-    entry.touch();
-    this.deps.notify();
+    const pending = this.titleReads.get(entry);
+    if (pending) return pending;
+    const navigationVersion = entry.navigationVersion;
+    const read = (async () => {
+      const title = await withTimeout(entry.page.title(), 2000, 'Reading the title timed out.').catch(() => null);
+      if (title === null || title === entry.title || this.tabs.get(entry.id) !== entry || entry.navigationVersion !== navigationVersion) return;
+      entry.title = title;
+      entry.touch();
+      this.deps.notify();
+    })();
+    this.titleReads.set(entry, read);
+    try { await read; } finally { this.titleReads.delete(entry); }
   }
 
   private addNotice(text: string): void {
