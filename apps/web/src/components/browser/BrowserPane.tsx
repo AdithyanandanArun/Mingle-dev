@@ -91,11 +91,11 @@ export function BrowserPane({ session, active, popout = false }: { session: Sess
   const ownership = !pageOnly && tab ? controlLabel(tab, inputId) : { label: 'Watching', description: 'You are watching this tab.' };
   const [leaseNow, setLeaseNow] = useState(Date.now());
   useEffect(() => {
-    if (!visible || pageOnly || tab?.control.lease !== 'touch') return;
+    if (!visible || !pageVisible || pageOnly || tab?.control.lease !== 'touch') return;
     setLeaseNow(Date.now());
     const timer = window.setInterval(() => setLeaseNow(Date.now()), 250);
     return () => window.clearInterval(timer);
-  }, [visible, pageOnly, tab?.control.lease]);
+  }, [visible, pageVisible, pageOnly, tab?.control.lease]);
   const ownsLease = Boolean(tab && inputId && tab.control.holderId === inputId);
   const leaseSeconds = tab?.control.expiresAt ? Math.max(0, Math.ceil((tab.control.expiresAt - leaseNow) / 1000)) : 0;
 
