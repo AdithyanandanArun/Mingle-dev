@@ -28,6 +28,7 @@ export class ScreencastViewer {
   private flushTimer: NodeJS.Timeout | null = null;
   private fallbackTimer: NodeJS.Timeout | null = null;
   private stopped = false;
+  private stopping: Promise<void> | null = null;
 
   constructor(
     private readonly entry: TabEntry,
@@ -62,8 +63,7 @@ export class ScreencastViewer {
       throw error;
     }
     if (this.stopped) {
-      // stop() ran during startScreencast and already sent stopScreencast and detach; repeat the detach in case it was cut short.
-      await cdp.detach().catch(() => undefined);
+      await this.stop();
       return;
     }
     // An idle page may never produce a frame. Avoid fallback work if one arrived during startup.
@@ -78,17 +78,20 @@ export class ScreencastViewer {
     if (this.inflight?.sequence === sequence) this.settle();
   }
 
-  async stop(): Promise<void> {
-    if (this.stopped) return;
+  stop(): Promise<void> {
+    if (this.stopping) return this.stopping;
     this.stopped = true;
     for (const timer of [this.flushTimer, this.fallbackTimer, this.inflight?.timer]) if (timer) clearTimeout(timer);
     this.inflight = null;
     this.pending = null;
     const cdp = this.cdp;
     this.cdp = null;
-    if (!cdp) return;
-    await withTimeout(cdp.send('Page.stopScreencast'), 2000, 'stop timed out').catch(() => undefined);
-    await withTimeout(cdp.detach(), 2000, 'detach timed out').catch(() => undefined);
+    this.stopping = (async () => {
+      if (!cdp) return;
+      await withTimeout(cdp.send('Page.stopScreencast'), 2000, 'stop timed out').catch(() => undefined);
+      await withTimeout(cdp.detach(), 2000, 'detach timed out').catch(() => undefined);
+    })();
+    return this.stopping;
   }
 
   private ackChrome(chromeSession: number | null): void {

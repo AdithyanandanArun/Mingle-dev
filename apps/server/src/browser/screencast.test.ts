@@ -65,4 +65,15 @@ describe('ScreencastViewer fallback lifecycle', () => {
     expect(send).toHaveBeenCalledOnce();
     await viewer.stop();
   });
+
+  it('shares completion when the socket and tab both stop a viewer', async () => {
+    const { cdp, viewer } = fixture();
+    const detach = vi.spyOn(cdp, 'detach');
+    await viewer.start();
+    const closing = viewer.stop();
+    expect(viewer.stop()).toBe(closing);
+    await closing;
+    expect(detach).toHaveBeenCalledOnce();
+    expect(cdp.commands.filter(method => method === 'Page.stopScreencast')).toHaveLength(1);
+  });
 });
