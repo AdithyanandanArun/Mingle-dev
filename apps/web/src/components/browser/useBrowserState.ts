@@ -4,6 +4,7 @@ import { api, errorMessage } from '../../lib/api';
 import { useBrowserStore } from '../../store/browser';
 
 const POLL_MS = 1500;
+const MIN_CHANGE_REFRESH_MS = 150;
 
 /** True while the tab is in the foreground; hidden tabs neither poll nor stream. */
 export function usePageVisible(): boolean {
@@ -37,12 +38,17 @@ export function useBrowserState(sessionId: string | undefined, active: boolean):
     if (!poll || !sessionId) return;
     let stopped = false;
     let timer = 0;
+    let changeTimer = 0;
     let controller: AbortController | null = null;
     let refreshQueued = false;
+    let lastStartedAt = -Infinity;
     const tick = async () => {
       window.clearTimeout(timer);
+      window.clearTimeout(changeTimer);
+      changeTimer = 0;
       controller?.abort();
       refreshQueued = false;
+      lastStartedAt = performance.now();
       const mine = new AbortController();
       controller = mine;
       const started = epoch.current;
@@ -57,14 +63,19 @@ export function useBrowserState(sessionId: string | undefined, active: boolean):
       } finally {
         if (!stopped && controller === mine) {
           controller = null;
-          timer = window.setTimeout(() => void tick(), refreshQueued ? 0 : POLL_MS);
+          timer = window.setTimeout(() => void tick(), POLL_MS);
+          if (refreshQueued) requestRefresh();
         }
       }
     };
+    const requestRefresh = () => {
+      if (controller) { refreshQueued = true; return; }
+      if (changeTimer) return;
+      const wait = Math.max(0, lastStartedAt + MIN_CHANGE_REFRESH_MS - performance.now());
+      changeTimer = window.setTimeout(() => void tick(), wait);
+    };
     const browserChanged = (event: Event) => {
-      if ((event as CustomEvent<unknown>).detail !== sessionId) return;
-      if (controller) refreshQueued = true;
-      else void tick();
+      if ((event as CustomEvent<unknown>).detail === sessionId) requestRefresh();
     };
     window.addEventListener('mingle:browser-changed', browserChanged);
     kick.current = () => void tick();
@@ -72,6 +83,7 @@ export function useBrowserState(sessionId: string | undefined, active: boolean):
     return () => {
       stopped = true;
       window.clearTimeout(timer);
+      window.clearTimeout(changeTimer);
       controller?.abort();
       window.removeEventListener('mingle:browser-changed', browserChanged);
       kick.current = () => undefined;
