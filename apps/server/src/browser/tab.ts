@@ -95,7 +95,7 @@ export class TabEntry {
 
   /** Pushes the current tab state to stream subscribers. */
   touch(): void {
-    if (this.ended) return;
+    if (this.ended || this.subscribers.size === 0) return;
     const tab = this.describe();
     for (const subscriber of this.subscribers) subscriber.state(tab);
   }
