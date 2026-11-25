@@ -80,7 +80,9 @@ export class TabControl {
   private extend(): void {
     const previous = this.expiry ?? 0;
     this.expiry = Date.now() + BROWSER_TOUCH_IDLE_MS;
-    this.arm();
+    // A pending timer checks the latest deadline when it wakes. Keep it during ordinary input.
+    if (this.pressedValue) this.clearTimer();
+    else if (!this.timer) this.arm();
     if (this.expiry - previous >= 250) this.onChange();
   }
   private arm(): void {
