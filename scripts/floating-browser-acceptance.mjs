@@ -41,8 +41,23 @@ try {
     if (path.endsWith('/browser')) return route.fulfill({ json: disconnected ? empty : state });
     return route.fulfill({ status: 404, json: { error: 'Example route not implemented' } });
   });
+  const jpeg = Buffer.from(await page.evaluate(() => {
+    const canvas = document.createElement('canvas');
+    canvas.width = 1920;
+    canvas.height = 1200;
+    const context = canvas.getContext('2d');
+    context.fillStyle = '#287aa1';
+    context.fillRect(0, 0, canvas.width, canvas.height);
+    return canvas.toDataURL('image/jpeg').split(',')[1];
+  }), 'base64');
+  let frameAcks = 0;
   await page.routeWebSocket(/\/ws\/browser\?/, (socket) => {
+    socket.onMessage(message => {
+      if (typeof message === 'string' && JSON.parse(message).type === 'ack') frameAcks++;
+    });
     socket.send(JSON.stringify({ type: 'hello', clientId: 'example-viewer', tab }));
+    socket.send(JSON.stringify({ type: 'frame', sequence: 1, width: 1920, height: 1200 }));
+    socket.send(jpeg);
   });
   await page.routeWebSocket(/\/ws$/, () => {});
   await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/scripts/floating-browser-fixture.html`);
@@ -58,6 +73,9 @@ try {
   const full = page.getByRole('dialog', { name: 'Shared browser', exact: true });
   await floating.waitFor();
   await floating.getByRole('application').waitFor();
+  const firstCanvas = await floating.locator('canvas').elementHandle();
+  await page.waitForFunction(canvas => canvas.width === 1920 && canvas.height === 1200, firstCanvas);
+  assert.ok(await firstCanvas.evaluate(canvas => canvas.toDataURL().length > 1000), 'the browser paints the decoded frame');
   assert.equal(await sidebar.isVisible(), false);
   for (const removed of ['.browser-tabs', '.browser-bar', '.browser-status', '.browser-hint']) {
     assert.equal(await floating.locator(removed).count(), 0, `page-only layout hides ${removed}`);
@@ -179,6 +197,9 @@ try {
   await openControls();
   await control('Minimize floating browser').click();
   await floating.waitFor({ state: 'hidden' });
+  await page.waitForFunction(canvas => canvas.width === 1 && canvas.height === 1, firstCanvas);
+  await firstCanvas.dispose();
+  assert.ok(frameAcks > 0, 'the browser acknowledges decoded frames');
   await page.getByRole('button', { name: 'Restore browser' }).click();
   await floating.waitFor();
   await assertClearOfPrompt();
@@ -211,5 +232,5 @@ try {
   await floating.waitFor({ state: 'hidden' });
   assert.equal(disconnected, true);
   assert.deepEqual(errors, []);
-  console.log('Floating browser acceptance passed: composer clearance, expanding controls, dismissal, ratio lock, keyboard, dock, minimize, full view, popout, disconnect, and reduced motion.');
+  console.log('Floating browser acceptance passed: frame painting and release, composer clearance, controls, drag, keyboard, docking, minimize, full view, popout, disconnect, and reduced motion.');
 } finally { await browser?.close(); await server?.close(); }
