@@ -27,7 +27,7 @@ function fixture() {
   return { cdp, entry, send, viewer };
 }
 
-afterEach(() => vi.useRealTimers());
+afterEach(() => { vi.useRealTimers(); vi.clearAllMocks(); });
 
 describe('ScreencastViewer fallback lifecycle', () => {
   it('cancels the still-frame fallback as soon as a live frame arrives', async () => {
@@ -48,6 +48,21 @@ describe('ScreencastViewer fallback lifecycle', () => {
     await vi.advanceTimersByTimeAsync(700);
     expect(refreshViewport).toHaveBeenCalledTimes(1);
     expect(send).toHaveBeenCalledTimes(1);
+    await viewer.stop();
+  });
+
+  it('skips the still capture if a live frame arrives during viewport refresh', async () => {
+    vi.useFakeTimers();
+    const refresh = Promise.withResolvers<void>();
+    vi.mocked(refreshViewport).mockResolvedValue(undefined).mockImplementationOnce(() => refresh.promise);
+    const { cdp, send, viewer } = fixture();
+    await viewer.start();
+    await vi.advanceTimersByTimeAsync(700);
+    cdp.emit('Page.screencastFrame', { data: Buffer.from('live').toString('base64'), sessionId: 1, metadata: { deviceWidth: 800, deviceHeight: 600 } });
+    refresh.resolve();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(cdp.commands).not.toContain('Page.captureScreenshot');
+    expect(send).toHaveBeenCalledOnce();
     await viewer.stop();
   });
 });

@@ -66,9 +66,11 @@ export class ScreencastViewer {
       await cdp.detach().catch(() => undefined);
       return;
     }
-    // An idle page may never produce a frame; push one still so the viewer is not blank.
-    this.fallbackTimer = setTimeout(() => void this.stillFrame(), FALLBACK_FRAME_DELAY_MS);
-    this.fallbackTimer.unref();
+    // An idle page may never produce a frame. Avoid fallback work if one arrived during startup.
+    if (!this.sequence && !this.pending) {
+      this.fallbackTimer = setTimeout(() => { this.fallbackTimer = null; void this.stillFrame(); }, FALLBACK_FRAME_DELAY_MS);
+      this.fallbackTimer.unref();
+    }
   }
 
   /** Viewer acknowledged a frame it has decoded and painted. */
@@ -141,14 +143,14 @@ export class ScreencastViewer {
   private async stillFrame(): Promise<void> {
     if (this.stopped || this.sequence > 0 || this.pending || !this.cdp) return;
     await refreshViewport(this.entry);
-    if (this.stopped || !this.cdp) return;
+    if (this.stopped || this.sequence > 0 || this.pending || !this.cdp) return;
     const { width, height } = this.entry.viewport;
     const scale = Math.min(1, STREAM_SETTINGS.maxWidth / width, STREAM_SETTINGS.maxHeight / height);
     const shot = await withTimeout(this.cdp.send('Page.captureScreenshot', {
       format: 'jpeg', quality: STREAM_SETTINGS.jpegQuality, clip: { x: 0, y: 0, width, height, scale }, captureBeyondViewport: false,
       optimizeForSpeed: true,
     }), 5000, 'screenshot timed out').catch(() => null);
-    if (!shot || this.stopped || this.sequence > 0) return;
+    if (!shot || this.stopped || this.sequence > 0 || this.pending) return;
     this.onFrame({ data: shot.data, chromeSession: null, width: this.entry.viewport.width, height: this.entry.viewport.height });
   }
 }
