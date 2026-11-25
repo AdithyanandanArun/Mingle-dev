@@ -23,7 +23,12 @@ export const useBrowserStore = create<BrowserUiState>((set) => ({
   selected: {},
   openRequests: {},
   viewerSessions: {},
-  publish: (sessionId, state) => set((s) => ({ states: { ...s.states, [sessionId]: state } })),
+  publish: (sessionId, state) => set((s) => {
+    const current = s.states[sessionId];
+    // Polling returns fresh JSON objects even when the browser has not changed.
+    if (current === state || (current && JSON.stringify(current) === JSON.stringify(state))) return s;
+    return { states: { ...s.states, [sessionId]: state } };
+  }),
   requestOpen: (sessionId, conversationId = sessionId) => set((s) => {
     const viewerSessions = { ...s.viewerSessions };
     if (conversationId === sessionId) delete viewerSessions[conversationId];
@@ -41,6 +46,7 @@ export const useBrowserStore = create<BrowserUiState>((set) => ({
   }),
   select: (sessionId, tabId, broadcast = true) => {
     set((s) => {
+      if (s.selected[sessionId] === (tabId ?? undefined)) return s;
       const selected = { ...s.selected };
       if (tabId) selected[sessionId] = tabId; else delete selected[sessionId];
       return { selected };
