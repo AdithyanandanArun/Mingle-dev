@@ -2,6 +2,7 @@
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { join } from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 const root = fileURLToPath(new URL('../', import.meta.url));
 const web = createRequire(join(root, 'apps/web/package.json'));
@@ -51,9 +52,13 @@ try {
     return canvas.toDataURL('image/jpeg').split(',')[1];
   }), 'base64');
   let frameAcks = 0;
+  const viewerScroll = Promise.withResolvers();
   await page.routeWebSocket(/\/ws\/browser\?/, (socket) => {
     socket.onMessage(message => {
-      if (typeof message === 'string' && JSON.parse(message).type === 'ack') frameAcks++;
+      if (typeof message !== 'string') return;
+      const value = JSON.parse(message);
+      if (value.type === 'ack') frameAcks++;
+      if (value.type === 'input' && value.action.type === 'scroll') viewerScroll.resolve(value.action);
     });
     socket.send(JSON.stringify({ type: 'hello', clientId: 'example-viewer', tab }));
     socket.send(JSON.stringify({ type: 'frame', sequence: 1, width: 1920, height: 1200 }));
@@ -76,6 +81,11 @@ try {
   const firstCanvas = await floating.locator('canvas').elementHandle();
   await page.waitForFunction(canvas => canvas.width === 1920 && canvas.height === 1200, firstCanvas);
   assert.ok(await firstCanvas.evaluate(canvas => canvas.toDataURL().length > 1000), 'the browser paints the decoded frame');
+  const stageBounds = await floating.getByRole('application').boundingBox();
+  await page.mouse.move(stageBounds.x + stageBounds.width / 2, stageBounds.y + stageBounds.height / 2);
+  await page.mouse.wheel(0, 100);
+  const scroll = await Promise.race([viewerScroll.promise, delay(2500, null, { ref: false })]);
+  assert.ok(scroll?.deltaY > 0, 'wheel input reaches the stream after it connects');
   assert.equal(await sidebar.isVisible(), false);
   for (const removed of ['.browser-tabs', '.browser-bar', '.browser-status', '.browser-hint']) {
     assert.equal(await floating.locator(removed).count(), 0, `page-only layout hides ${removed}`);

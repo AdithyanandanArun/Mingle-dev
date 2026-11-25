@@ -12,7 +12,7 @@ const BUTTONS = ['left', 'middle', 'right'] as const;
 /** Moves keyboard focus out of the page (which captures Tab) to the toolbar. */
 const isFocusExit = (e: { key: string; altKey: boolean; shiftKey: boolean }) => e.key === 'Escape' && e.altKey && e.shiftKey;
 
-interface Mapped { x: number; y: number; inside: boolean }
+interface Mapped { x: number; y: number; inside: boolean; stageWidth: number }
 /** Maps a screen point to server viewport coordinates, accounting for the letterboxing of a contained image. */
 function mapPoint(stage: HTMLElement, clientX: number, clientY: number, frame: { width: number; height: number } | null, viewport: BrowserTab['viewport']): Mapped {
   const rect = stage.getBoundingClientRect();
@@ -23,13 +23,13 @@ function mapPoint(stage: HTMLElement, clientX: number, clientY: number, frame: {
   const nx = (clientX - (rect.left + (rect.width - width) / 2)) / width;
   const ny = (clientY - (rect.top + (rect.height - height) / 2)) / height;
   const clamp = (v: number, max: number) => Math.min(max, Math.max(0, v));
-  return { x: clamp(nx * viewport.width, viewport.width), y: clamp(ny * viewport.height, viewport.height), inside: nx >= 0 && nx <= 1 && ny >= 0 && ny <= 1 };
+  return { x: clamp(nx * viewport.width, viewport.width), y: clamp(ny * viewport.height, viewport.height), inside: nx >= 0 && nx <= 1 && ny >= 0 && ny <= 1, stageWidth: rect.width };
 }
 
 export function BrowserSurface({ stream, tab, canvasRef, canInput }: { stream: BrowserStream; tab: BrowserTab; canvasRef: RefObject<HTMLCanvasElement | null>; canInput: boolean }) {
   const stageRef = useRef<HTMLDivElement>(null);
-  const live = useRef({ canInput, send: stream.sendInput, frame: stream.frameSize, viewport: tab.viewport });
-  live.current = { canInput, send: stream.sendInput, frame: stream.frameSize, viewport: tab.viewport };
+  const live = useRef({ canInput, status: stream.status, send: stream.sendInput, frame: stream.frameSize, viewport: tab.viewport });
+  live.current = { canInput, status: stream.status, send: stream.sendInput, frame: stream.frameSize, viewport: tab.viewport };
   const move = useRef<ReturnType<typeof createPointerMoveQueue> | null>(null);
   if (!move.current) move.current = createPointerMoveQueue((action) => live.current.send(action));
   const pressed = useRef<{ button: (typeof BUTTONS)[number]; x: number; y: number } | null>(null);
@@ -66,13 +66,13 @@ export function BrowserSurface({ stream, tab, canvasRef, canInput }: { stream: B
     const stage = stageRef.current;
     if (!stage) return;
     const onWheel = (e: WheelEvent) => {
-      const { canInput: ok, frame, viewport } = live.current;
-      if (!ok || stream.status !== 'live') return;
+      const { canInput: ok, status, frame, viewport } = live.current;
+      if (!ok || status !== 'live') return;
       e.preventDefault();
       const point = mapPoint(stage, e.clientX, e.clientY, frame, viewport);
       if (!point.inside) return;
       const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? viewport.height : 1;
-      const scale = viewport.width / Math.max(1, stage.getBoundingClientRect().width);
+      const scale = viewport.width / Math.max(1, point.stageWidth);
       const w = wheel.current;
       w.dx += e.deltaX * unit * scale; w.dy += e.deltaY * unit * scale; w.x = point.x; w.y = point.y;
       if (w.timer) return;
