@@ -96,6 +96,12 @@ export class ScreencastViewer {
 
   private onFrame(frame: Pending): void {
     if (this.stopped) return void this.ackChrome(frame.chromeSession);
+    // The fallback exists only for pages that produce no screencast frame. Once a real
+    // frame arrives, cancel it instead of waking up later to perform a no-op check.
+    if (this.fallbackTimer) {
+      clearTimeout(this.fallbackTimer);
+      this.fallbackTimer = null;
+    }
     if (frame.width > 0 && frame.height > 0 && this.entry.setViewport(Math.round(frame.width), Math.round(frame.height))) this.onViewport();
     if (this.pending) this.ackChrome(this.pending.chromeSession);
     this.pending = frame;
