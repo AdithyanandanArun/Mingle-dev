@@ -18,6 +18,13 @@ const streamUrl = (sessionId: string, tabId: string): string => {
   return `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/ws/browser?${params}`;
 };
 
+function releaseCanvas(canvas: HTMLCanvasElement | null): void {
+  if (canvas && (canvas.width !== 1 || canvas.height !== 1)) {
+    canvas.width = 1;
+    canvas.height = 1;
+  }
+}
+
 export interface BrowserStream {
   status: StreamStatus;
   clientId: string | null;
@@ -60,12 +67,9 @@ export function useBrowserStream(sessionId: string | undefined, tabId: string | 
     setTab(null);
     setFrameSize(null);
     setError(null);
-    const canvas = canvasRef.current;
+    let canvas = canvasRef.current;
     // Release the previous page's backing store while the stream is inactive or switching tabs.
-    if (canvas && (canvas.width !== 1 || canvas.height !== 1)) {
-      canvas.width = 1;
-      canvas.height = 1;
-    }
+    releaseCanvas(canvas);
     if (!enabled || !sessionId || !tabId) { setStatus('idle'); return; }
 
     let disposed = false;
@@ -97,6 +101,7 @@ export function useBrowserStream(sessionId: string | undefined, tabId: string | 
         retries = 0;
         const { width, height } = bitmap;
         const target = canvasRef.current;
+        if (target !== canvas) { releaseCanvas(canvas); canvas = target; }
         if (target) {
           if (target.width !== width || target.height !== height) { target.width = width; target.height = height; }
           target.getContext('2d')?.drawImage(bitmap, 0, 0);
@@ -159,6 +164,7 @@ export function useBrowserStream(sessionId: string | undefined, tabId: string | 
 
     return () => {
       disposed = true;
+      releaseCanvas(canvas);
       window.clearTimeout(retryTimer);
       decoding = null;
       waiting = null;
