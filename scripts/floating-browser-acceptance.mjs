@@ -231,6 +231,22 @@ try {
   await sidebar.getByRole('tablist', { name: 'Browser tabs' }).waitFor();
   await sidebar.getByRole('textbox', { name: 'Address' }).waitFor();
   await sidebar.getByText('Agent is driving · click or type to step in', { exact: true }).waitFor();
+  await page.waitForFunction(() => document.body.dataset.nativeShown === 'true');
+  await page.evaluate(() => {
+    const view = document.querySelector('.browser-native-placeholder').getBoundingClientRect();
+    const wrapper = document.createElement('div');
+    wrapper.id = 'example-overlay-wrapper';
+    const overlay = document.createElement('div');
+    overlay.id = 'example-overlay';
+    Object.assign(overlay.style, { position: 'fixed', left: `${view.left}px`, top: `${view.top}px`, width: '60px', height: '60px' });
+    wrapper.append(overlay);
+    document.body.append(wrapper);
+  });
+  await page.locator('#example-overlay').evaluate(node => node.setAttribute('role', 'dialog'));
+  await page.waitForFunction(() => document.body.dataset.nativeShown === undefined);
+  await page.locator('#example-overlay-wrapper').evaluate(node => node.setAttribute('aria-hidden', 'true'));
+  await page.waitForFunction(() => document.body.dataset.nativeShown === 'true');
+  await page.locator('#example-overlay-wrapper').evaluate(node => node.remove());
   await page.getByRole('button', { name: 'Example agent opens browser' }).click();
   assert.equal(await floating.isVisible(), false, 'explicit docking stays in effect');
 
