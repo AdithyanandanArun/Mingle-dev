@@ -31,8 +31,7 @@ export function useBrowserState(sessionId: string | undefined, active: boolean):
   const [error, setError] = useState<string | null>(null);
   const epoch = useRef(0);
   const kick = useRef<() => void>(() => undefined);
-  const pageVisible = usePageVisible();
-  const poll = active && pageVisible && Boolean(sessionId);
+  const poll = active && Boolean(sessionId);
 
   useEffect(() => {
     if (!poll || !sessionId) return;

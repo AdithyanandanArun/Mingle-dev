@@ -66,7 +66,8 @@ export function BrowserPane({ session, active, popout = false }: { session: Sess
   const docked = useRef(false);
   const visible = (active && !minimized) || expanded || (floating && !detached);
   const pageOnly = floating && !detached;
-  const { state, error: stateError, apply, refresh } = useBrowserState(session.id, visible);
+  const pageVisible = usePageVisible();
+  const { state, error: stateError, apply, refresh } = useBrowserState(session.id, visible && pageVisible);
   const openRequest = useBrowserStore((s) => s.openRequests[session.id]);
   useEffect(() => {
     if (!openRequest || popout) return;
@@ -76,7 +77,6 @@ export function BrowserPane({ session, active, popout = false }: { session: Sess
   }, [session.id, openRequest, popout, visible, minimized, refresh]);
   const selectedId = useBrowserStore((s) => s.selected[session.id]);
   const current = resolveTab(state, selectedId);
-  const pageVisible = usePageVisible();
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [nativeFallback, setNativeFallback] = useState(false);
   // Electron views sit above DOM controls. The floating and expanded page-first layouts use
