@@ -6,7 +6,7 @@
 <h1 align="center">Mingle</h1>
 <p align="center">
   A shared workspace for your coding agents and your team.<br>
-  Bring conversations, tasks, code, and handoffs together—on your computer and across your teammates’ devices.
+  Keep conversations, tasks, code, and handoffs together on your computer and across your teammates’ devices.
 </p>
 <p align="center">
   <a href="https://github.com/AdithyanandanArun/Mingle-dev/releases/latest"><img src="https://img.shields.io/github/v/release/AdithyanandanArun/Mingle-dev?style=flat&color=e5e5e5&labelColor=242424" alt="Latest release"></a>
@@ -14,16 +14,26 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-e5e5e5?style=flat&labelColor=242424" alt="MIT license"></a>
 </p>
 <p align="center">
-  <a href="https://github.com/AdithyanandanArun/Mingle-dev/releases/latest">Download</a> ·
-  <a href="#get-started">Get started</a> ·
+  <a href="#install-mingle">Install</a> ·
+  <a href="#watch-the-demo">Watch the demo</a> ·
   <a href="#work-as-a-team">Team workflow</a> ·
   <a href="ONBOARDING.md">Documentation</a> ·
   <a href="#contributing">Contribute</a>
 </p>
 
-![Mingle’s shared group conversation with an agent roster, assignment progress, and a team composer. Shown with Example data.](docs/images/shared-workspace.png)
+## Install Mingle
 
-<p align="center"><sub>The actual Mingle interface, shown with clearly labeled Example data. No live provider runs or cloud deliveries are depicted.</sub></p>
+Run this with Node.js 22 or later.
+
+```sh
+npx @mingledev/mingle install
+```
+
+The [npm installer](https://www.npmjs.com/package/@mingledev/mingle) downloads and verifies the native desktop package for Windows x64, Debian/Ubuntu amd64, or Arch Linux x86-64. Follow the installer prompts, then open **Mingle** from your app menu. See [manual installation](#manual-installation) for direct downloads.
+
+## Watch the demo
+
+https://github.com/user-attachments/assets/a11b3f42-ab19-40ef-a927-6175d7a6a2e8
 
 ## One place to move the work forward
 
@@ -44,27 +54,6 @@ Mingle brings that work into a desktop workspace. Start with one agent, add othe
 | Know where things stand | See real tool activity, task progress, approvals, failures, and results. Finished work enters review rather than silently becoming accepted. |
 
 ## Get started
-
-### Install the desktop app
-
-Run the npm installer with Node.js 22 or later.
-
-```sh
-npx @mingledev/mingle install
-```
-
-The installer fetches the matching native package from GitHub, verifies its SHA-256 checksum, and starts installation. It supports Windows x64, Debian/Ubuntu amd64, and Arch Linux x86-64. Add `--download-only` to save the verified installer and print its path. [View the npm package](https://www.npmjs.com/package/@mingledev/mingle)
-
-Each installer and archive has a SHA-256 checksum file. [Download the latest release on GitHub](https://github.com/AdithyanandanArun/Mingle-dev/releases/latest)
-
-| Platform | Download |
-| --- | --- |
-| Windows x64 | Unsigned per-user `.exe` installer |
-| Ubuntu / Debian amd64 | `.deb` package |
-| Arch Linux x86-64 | `.pkg.tar.zst` package |
-| Other Linux x86-64 | `.tar.gz` archive with system dependencies required |
-
-Desktop packages bundle Electron, Node.js, the local server, and the web UI. Configure provider tools and accounts separately. There is currently no macOS package. For package formats and system dependencies, see [desktop distribution](docs/desktop-distribution.md).
 
 1. **Open Mingle.** The welcome screen walks you through setup. A Mingle account is optional for local work.
 2. **Connect a provider** in **Settings → Providers** and check its reported availability.
@@ -122,6 +111,19 @@ Learn more about [project invitations](docs/project-teammates.md), [group conver
 - **Visible state.** Availability, failures, and quota errors are surfaced. Worktrees separate edits; they are not operating-system sandboxes.
 
 Mingle is under active development. Provider support differs, distributed features need the configured collaboration services, and cross-device responsiveness depends on connectivity. Current behavior and validation limits are documented in the linked guides and [acceptance records](docs/validation.md).
+
+## Manual installation
+
+Download the package and its `.sha256` file from the [latest GitHub release](https://github.com/AdithyanandanArun/Mingle-dev/releases/latest). Compare the package’s SHA-256 with the published checksum before installing.
+
+| Platform | Package and installation |
+| --- | --- |
+| Windows x64 | Run the per-user `.exe` installer. Windows may show an unknown-publisher warning because it is unsigned. |
+| Debian / Ubuntu amd64 | Install the downloaded `.deb` with `sudo apt install`, passing the local path (for example, `./` followed by the filename). |
+| Arch Linux x86-64 | Install the downloaded `.pkg.tar.zst` with `sudo pacman -U`, passing the local path. |
+| Other Linux x86-64 | Extract the `.tar.gz` bundle and follow the [runtime requirements](docs/desktop-distribution.md#runtime-requirements). |
+
+Desktop packages include Electron, Node.js, the local server, and the UI. Set up your coding providers and accounts separately. See [desktop distribution](docs/desktop-distribution.md) for package details.
 
 ## Run from source
 
