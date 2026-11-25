@@ -26,6 +26,10 @@ export function NativeBrowserView({ sessionId, targetId, active, stream, tab, ca
   useEffect(() => () => fallbackListener.current?.(false), []);
 
   useEffect(() => {
+    if (!active) {
+      void hideEmbedded(sessionId);
+      return;
+    }
     let frame = 0;
     let disposed = false;
     let bridgeFailed = false;
@@ -54,7 +58,7 @@ export function NativeBrowserView({ sessionId, targetId, active, stream, tab, ca
       frame = requestAnimationFrame(() => {
         frame = 0;
         const element = placeholder.current;
-        if (!active || document.hidden || !element) { hide(); return; }
+        if (document.hidden || !element) { hide(); return; }
         const rect = element.getBoundingClientRect();
         const overlay = [...document.querySelectorAll<HTMLElement>(OVERLAYS)].some((item) => {
           // Full-view/float browser containers can themselves be dialogs. They host this
