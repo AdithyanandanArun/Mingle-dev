@@ -108,7 +108,16 @@ export class BrowserStreamServer {
     ws.on('pong', () => this.alive.add(ws));
     ws.on('error', (error) => this.log('warn', 'Browser stream socket error', error));
 
-    const send = (message: BrowserServerMessage) => { if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(message)); };
+    const canSend = (bytes: number) => {
+      if (ws.readyState !== ws.OPEN) return false;
+      if (ws.bufferedAmount + bytes <= STREAM_MAX_BUFFERED) return true;
+      ws.close(1013, 'viewer too slow');
+      return false;
+    };
+    const send = (message: BrowserServerMessage) => {
+      const json = JSON.stringify(message);
+      if (canSend(Buffer.byteLength(json))) ws.send(json);
+    };
     let lastState = '';
     const pushState = (tab: BrowserTab) => {
       const encoded = JSON.stringify(tab);
@@ -119,9 +128,9 @@ export class BrowserStreamServer {
 
     const viewer = new ScreencastViewer(entry, {
       send: (header, jpeg) => {
-        if (ws.readyState !== ws.OPEN) throw new BrowserError(409, 'closed');
-        if (ws.bufferedAmount > STREAM_MAX_BUFFERED) { ws.close(1013, 'viewer too slow'); throw new BrowserError(409, 'slow viewer'); }
-        ws.send(JSON.stringify({ type: 'frame', ...header } satisfies BrowserServerMessage));
+        const json = JSON.stringify({ type: 'frame', ...header } satisfies BrowserServerMessage);
+        if (!canSend(Buffer.byteLength(json) + jpeg.byteLength)) throw new BrowserError(409, 'viewer unavailable for a frame');
+        ws.send(json);
         ws.send(jpeg, { binary: true });
       },
     }, () => entry.touch());
