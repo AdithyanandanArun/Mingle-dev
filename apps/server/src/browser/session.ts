@@ -61,7 +61,7 @@ export class BrowserSessionRuntime {
   private readonly pages = new Map<Page, TabEntry>();
   private readonly adopting = new Map<Page, Promise<TabEntry | null>>();
   private readonly watched = new Map<Page, { navigated: () => void; closed: () => void }>();
-  private readonly titleReads = new WeakMap<TabEntry, Promise<void>>();
+  private readonly titleReads = new WeakMap<TabEntry, { navigationVersion: number; result: Promise<void> }>();
   private context: BrowserContext | null = null;
   private browser: Browser | null = null;
   private endpoint: string | null = null;
@@ -645,9 +645,9 @@ export class BrowserSessionRuntime {
 
   private async refreshTitle(entry: TabEntry): Promise<void> {
     if (entry.dialog) return;
-    const pending = this.titleReads.get(entry);
-    if (pending) return pending;
     const navigationVersion = entry.navigationVersion;
+    const pending = this.titleReads.get(entry);
+    if (pending?.navigationVersion === navigationVersion) return pending.result;
     const read = (async () => {
       const title = await withTimeout(entry.page.title(), 2000, 'Reading the title timed out.').catch(() => null);
       if (title === null || title === entry.title || this.tabs.get(entry.id) !== entry || entry.navigationVersion !== navigationVersion) return;
@@ -655,8 +655,11 @@ export class BrowserSessionRuntime {
       entry.touch();
       this.deps.notify();
     })();
-    this.titleReads.set(entry, read);
-    try { await read; } finally { this.titleReads.delete(entry); }
+    const request = { navigationVersion, result: read };
+    this.titleReads.set(entry, request);
+    try { await read; } finally {
+      if (this.titleReads.get(entry) === request) this.titleReads.delete(entry);
+    }
   }
 
   private addNotice(text: string): void {
