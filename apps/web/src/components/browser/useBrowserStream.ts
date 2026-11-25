@@ -94,6 +94,7 @@ export function useBrowserStream(sessionId: string | undefined, tabId: string | 
       try {
         bitmap = await createImageBitmap(blob);
         if (disposed || socketRef.current !== socket) return;
+        retries = 0;
         const { width, height } = bitmap;
         const target = canvasRef.current;
         if (target) {
@@ -121,7 +122,7 @@ export function useBrowserStream(sessionId: string | undefined, tabId: string | 
           let message: unknown;
           try { message = JSON.parse(event.data); } catch { return; }
           if (!isServerMessage(message)) return;
-          if (message.type === 'hello') { retries = 0; setClientId(message.clientId); setTab(message.tab); setStatus('live'); }
+          if (message.type === 'hello') { setClientId(message.clientId); setTab(message.tab); setStatus('live'); }
           else if (message.type === 'state') setTab(message.tab);
           else if (message.type === 'frame') header = { sequence: message.sequence, width: message.width, height: message.height };
           else showError(message.message || 'The browser reported an error.');
