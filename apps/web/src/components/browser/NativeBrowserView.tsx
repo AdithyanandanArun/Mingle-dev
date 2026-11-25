@@ -50,8 +50,9 @@ export function NativeBrowserView({ sessionId, targetId, active, stream, tab, ca
       });
     };
     const measure = () => {
-      cancelAnimationFrame(frame);
+      if (frame) return;
       frame = requestAnimationFrame(() => {
+        frame = 0;
         const element = placeholder.current;
         if (!active || document.hidden || !element) { hide(); return; }
         const rect = element.getBoundingClientRect();
@@ -78,36 +79,19 @@ export function NativeBrowserView({ sessionId, targetId, active, stream, tab, ca
     };
     const observer = new ResizeObserver(measure);
     if (placeholder.current) observer.observe(placeholder.current);
-    // Watch structure globally, but watch visibility attributes only on overlay candidates.
-    // The previous body-wide attribute observer was notified for routine React class/style
-    // updates throughout the application, even when no browser-covering overlay could change.
-    const mutation = new MutationObserver(() => {
-      observeOverlayAttributes();
-      measure();
+    // One geometry check per frame, even when React changes several overlays or their ancestors.
+    const mutation = new MutationObserver(measure);
+    mutation.observe(document.body, {
+      childList: true, subtree: true, attributes: true,
+      attributeFilter: ['class', 'style', 'aria-hidden', 'inert', 'hidden', 'role', 'data-overlay', 'data-radix-popper-content-wrapper'],
     });
-    const overlayAttributes = new MutationObserver(measure);
-    const observedOverlays = new Set<Element>();
-    const observeOverlayAttributes = () => {
-      const current = new Set(document.querySelectorAll(OVERLAYS));
-      for (const item of observedOverlays) {
-        if (!current.has(item)) { overlayAttributes.unobserve(item); observedOverlays.delete(item); }
-      }
-      for (const item of current) {
-        if (!observedOverlays.has(item)) {
-          observedOverlays.add(item);
-          overlayAttributes.observe(item, { attributes: true, attributeFilter: ['class', 'style', 'aria-hidden', 'inert'] });
-        }
-      }
-    };
-    mutation.observe(document.body, { childList: true, subtree: true });
-    observeOverlayAttributes();
     window.addEventListener('resize', measure);
     window.addEventListener('scroll', measure, true);
     document.addEventListener('visibilitychange', measure);
     measure();
     return () => {
       disposed = true;
-      cancelAnimationFrame(frame); observer.disconnect(); mutation.disconnect(); overlayAttributes.disconnect();
+      cancelAnimationFrame(frame); observer.disconnect(); mutation.disconnect();
       window.removeEventListener('resize', measure); window.removeEventListener('scroll', measure, true);
       document.removeEventListener('visibilitychange', measure);
       hidden = false;
