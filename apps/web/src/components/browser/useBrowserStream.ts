@@ -76,6 +76,7 @@ export function useBrowserStream(sessionId: string | undefined, tabId: string | 
     let retries = 0;
     let retryTimer = 0;
     let ws: WebSocket | null = null;
+    let lastFrameSize: FrameSize | null = null;
     // Per-connection frame pipeline.
     let header: { sequence: number; width: number; height: number } | null = null;
     let decoding: { sequence: number } | null = null;
@@ -106,7 +107,10 @@ export function useBrowserStream(sessionId: string | undefined, tabId: string | 
           if (target.width !== width || target.height !== height) { target.width = width; target.height = height; }
           target.getContext('2d')?.drawImage(bitmap, 0, 0);
         }
-        setFrameSize((previous) => (previous && previous.width === width && previous.height === height ? previous : { width, height }));
+        if (lastFrameSize?.width !== width || lastFrameSize.height !== height) {
+          lastFrameSize = { width, height };
+          setFrameSize(lastFrameSize);
+        }
       } catch {
         if (!disposed && socketRef.current === socket) showError('A browser frame could not be decoded.');
       } finally {
