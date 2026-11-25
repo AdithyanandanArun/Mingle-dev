@@ -198,9 +198,12 @@ export function BrowserHost({
     const origin = clampGeometry({ left: originRect.left, top: originRect.top, width: originRect.width, height: originRect.height });
     const startX = event.clientX, startY = event.clientY;
     let active = true;
+    let frame = 0;
+    let dx = 0, dy = 0;
     const cleanup = () => {
       if (!active) return;
       active = false;
+      window.cancelAnimationFrame(frame);
       window.removeEventListener('pointermove', move);
       window.removeEventListener('pointerup', end);
       window.removeEventListener('pointercancel', finish);
@@ -210,14 +213,19 @@ export function BrowserHost({
       try { if (target.hasPointerCapture(pointerId)) target.releasePointerCapture(pointerId); }
       catch { /* The target may have been detached during a mode change. */ }
     };
-    const move = (next: PointerEvent) => {
-      if (next.pointerId !== pointerId) return;
-      next.preventDefault();
-      const dx = next.clientX - startX, dy = next.clientY - startY;
+    const apply = () => {
+      frame = 0;
       if (dx || dy) geometryCustomized.current = true;
       setGeometry(interaction.kind === 'move'
         ? clampGeometry({ ...origin, left: origin.left + dx, top: origin.top + dy })
         : resizeFromCorner(origin, interaction.corner, dx, dy));
+    };
+    const move = (next: PointerEvent) => {
+      if (next.pointerId !== pointerId) return;
+      next.preventDefault();
+      dx = next.clientX - startX;
+      dy = next.clientY - startY;
+      if (!frame) frame = window.requestAnimationFrame(apply);
     };
     const finish = (next: PointerEvent) => {
       if (next.pointerId === pointerId) cleanup();
@@ -225,6 +233,8 @@ export function BrowserHost({
     const end = (next: PointerEvent) => {
       if (next.pointerId !== pointerId) return;
       move(next);
+      window.cancelAnimationFrame(frame);
+      apply();
       cleanup();
     };
     target.addEventListener('lostpointercapture', cleanup);
